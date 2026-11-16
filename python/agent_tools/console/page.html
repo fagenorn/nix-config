@@ -547,7 +547,7 @@ function runSummary(run) {
   const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
   return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
 }
-// The spend figure: tokens and estimated dollars summed over every day of the view's window (ADR-console-055).
+// The spend figure: tokens and estimated dollars summed over every day of the view's window (ADR-console-056).
 let spendNow = { sprint: new Map(), run: new Map() };
 function spendIndex(spend) {
   const index = { sprint: new Map(), run: new Map() };

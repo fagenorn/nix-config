@@ -1,4 +1,4 @@
-# ADR-console-055 — A sprint block, a delivery run line and a finished sprint line show their spend
+# ADR-console-056 — A sprint block, a delivery run line and a finished sprint line show their spend
 
 - **Status:** accepted
 - **Decided in:** #1136
