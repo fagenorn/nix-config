@@ -38,6 +38,9 @@ PRODUCTION = {
 }
 PROD_ROW = {"default_branch": "main", "integration_branch": "main", "required_checks": [],
             "evidence": {}, "production": PRODUCTION}
+TOOL_PRODUCTION = {**PRODUCTION, "key_files": ["deploy/*.yaml", "ops/runbook.ipynb"],
+                   "mcp_tools": ["mcp__deployer__apply"]}
+TOOL_ROW = {**PROD_ROW, "production": TOOL_PRODUCTION}
 ABSENT = object()
 EXPECTED_ALLOW = [
     "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
@@ -4457,7 +4460,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         "production lacks release_profile": {"derived_repositories": {
             NODO: {**NODO_ROW, "production": {"changes": [], "read_only": []}}}},
         "production has an extra member": {"derived_repositories": {
-            NODO: {**NODO_ROW, "production": {**PRODUCTION, "key_files": []}}}},
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "owner": []}}}},
+        "production key_files is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**TOOL_PRODUCTION, "key_files": "deploy/*.yaml"}}}},
+        "a key file glob is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**TOOL_PRODUCTION, "key_files": [""]}}}},
+        "a key file glob is not a string": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**TOOL_PRODUCTION, "key_files": [7]}}}},
+        "production mcp_tools is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **TOOL_PRODUCTION, "mcp_tools": "mcp__deployer__apply"}}}},
+        "an MCP tool is not an mcp__ name": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**TOOL_PRODUCTION, "mcp_tools": ["deploy"]}}}},
+        "an MCP tool names a server only": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**TOOL_PRODUCTION, "mcp_tools": ["mcp__deployer"]}}}},
         "production changes is not a list": {"derived_repositories": {
             NODO: {**NODO_ROW, "production": {**PRODUCTION, "changes": {}}}}},
         "production read_only is not a list": {"derived_repositories": {
@@ -4602,6 +4618,17 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         branches and required checks only, so a row check answering without it still agrees."""
         policy = self.write_policy(
             derived_repositories={NODO: {**NODO_ROW, "production": PRODUCTION}}, derivation={})
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        result = self.run_guard("git push -u origin topic", cwd=nodo, guard_args=(
+            "--gh-bin", str(self.fake_gh), "--policy", str(policy)))
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_row_carrying_key_files_and_mcp_tools_loads(self):
+        """Issue 1150 D1: a derived row's `production` may also carry `key_files` and
+        `mcp_tools`; the file still loads, so a Nodo push passes."""
+        policy = self.write_policy(
+            derived_repositories={NODO: {**NODO_ROW, "production": TOOL_PRODUCTION}},
+            derivation={})
         nodo = self.make_repo(f"git@github.com:{NODO}.git")
         result = self.run_guard("git push -u origin topic", cwd=nodo, guard_args=(
             "--gh-bin", str(self.fake_gh), "--policy", str(policy)))

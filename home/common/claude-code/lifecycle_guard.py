@@ -780,7 +780,8 @@ the user state file `~/.agents/state/guard/policy.json`: an object with exactly
 compiled policy's `derived_repositories`, keyed by the exact repository slug,
 `{default_branch, integration_branch, required_checks, evidence}` with an
 optional `production` member (issue 1149: `{changes, read_only, release_profile}`,
-the project's declared production rules as command `{id, argv}` lists), where
+the project's declared production rules as command `{id, argv}` lists, plus, from
+issue 1150, the changing `key_files` globs and `mcp_tools` names), where
 `required_checks` is the sorted list of check names the project's contract
 declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
 The row check is the store script `claude-guard-row-check`, which the wrapper
@@ -799,9 +800,10 @@ other, and each member has one trust rule:
     derived_repositories       compiled policy  A candidate row per slug, used
                                                 only after the row check
                                                 confirms it in this invocation.
-    production                 compiled policy  A row's declared production rules,
+    production                 compiled policy  A row's declared production rules
+                                                (commands, key_files, mcp_tools),
                                                 read unconfirmed: they only
-                                                refuse (issue 1149).
+                                                refuse (issues 1149, 1150).
     derivation                 compiled policy  Recorded for the reader; null or
                                                 an object; the guard does not
                                                 interpret it.
@@ -913,12 +915,16 @@ that a row's `required_checks` be a list of distinct non-empty strings, the
 resolver's own rule for the contract member, so a contract that resolves always
 yields a row the guard loads; any other value is a malformed row, and the whole
 compiled policy contributes no row. The same holds for the optional
-`production` member: an object with exactly `changes`, `read_only` and
-`release_profile`, the two lists holding `{id, argv}` objects with a non-empty
+`production` member: an object with `changes`, `read_only` and
+`release_profile` and optionally `key_files` (a list of non-empty strings) and
+`mcp_tools` (a list of `mcp__<server>__<tool>` names), the two lists holding `{id, argv}` objects with a non-empty
 `id` and a non-empty `argv` of non-empty strings, and a non-empty
 `release_profile`; any other value drops the whole file. The compiler writes
-`derivation.schema_version` 4, whose rows may carry `production` (issue 1149);
-this guard reads a schema-3 file as before (`production` is optional). A guard
+`derivation.schema_version` 5, whose `production` also carries `key_files` and
+`mcp_tools` (issue 1150); this guard reads schema 3 and 4 rows as before
+(`production`, `key_files` and `mcp_tools` are each optional). A guard
+from before issue 1150 reads a schema-5 row as malformed and drops the file until
+its session restarts. A guard
 from before issue 1149, in a session started before the switch, reads a row
 carrying `production` as malformed and drops the whole file, so a repository
 that relies on a derived row is refused until that session restarts; a
@@ -974,6 +980,9 @@ DERIVED_ROW_KEYS = frozenset(
 # A row may also carry the project's declared production rules (issue 1149).
 DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
 PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
+# Schema 5 rows also carry the changing key-file globs and MCP tool names (issue 1150).
+PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools"})
+MCP_TOOL_NAME = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+")
 PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
@@ -3561,14 +3570,31 @@ def load_base_policy(path):
 def production_problem(production):
     """Why a row's `production` value is malformed, else None.
 
-    An object with exactly PRODUCTION_KEYS: `changes` and `read_only` are lists
+    An object with PRODUCTION_KEYS and optionally PRODUCTION_OPTIONAL_KEYS:
+    `key_files` is a list of non-empty strings and `mcp_tools` a list of
+    `mcp__<server>__<tool>` names; `changes` and `read_only` are lists
     (possibly empty) of objects with exactly PRODUCTION_COMMAND_KEYS, each a
     non-empty `id` and a non-empty `argv` list of non-empty strings, and
     `release_profile` is a non-empty string.
     """
-    if not isinstance(production, dict) or set(production) != PRODUCTION_KEYS:
+    if not isinstance(production, dict) or not (
+        PRODUCTION_KEYS <= set(production) <= PRODUCTION_KEYS | PRODUCTION_OPTIONAL_KEYS
+    ):
         keys = ", ".join(sorted(PRODUCTION_KEYS))
-        return f"must be an object with exactly the keys {keys}"
+        optional = ", ".join(sorted(PRODUCTION_OPTIONAL_KEYS))
+        return f"must be an object with exactly the keys {keys} and optionally {optional}"
+    if "key_files" in production:
+        globs = production["key_files"]
+        if not isinstance(globs, list) or not all(
+            isinstance(glob, str) and glob for glob in globs
+        ):
+            return "key_files must be a list of non-empty strings"
+    if "mcp_tools" in production:
+        names = production["mcp_tools"]
+        if not isinstance(names, list) or not all(
+            isinstance(name, str) and MCP_TOOL_NAME.fullmatch(name) for name in names
+        ):
+            return "mcp_tools must be a list of mcp__<server>__<tool> names"
     for member in ("changes", "read_only"):
         commands = production[member]
         if not isinstance(commands, list):
