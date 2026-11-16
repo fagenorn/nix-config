@@ -883,6 +883,18 @@ it reads as no movement), `console: movement_release_invalid <project_id> <trans
 release store holds a transaction that is not readable; one line until a good read, and it moves
 nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
 loop goes on). The cost is one forge call per project with a running sprint per `MOVEMENT_SECONDS`.
+The sessions half (#1185): under the same lock the poll computes, per running project,
+`view.sprint_sessions_of` (the live sessions that carry a running sprint's manager name, are its
+`manager_session` or run a delivery of one of its issues); only for a project with at least one
+such session, outside the lock, it reads the session registry once per poll for the pids, takes
+`at = clock()` in milliseconds and calls `session_reader(projects_dirs, targets)` (default
+`movement.read_sessions`: the newest transcript write and the CPU of the session's descendants),
+and merges the readings with `sessions_ms=at`, so a write after the read began is never counted as
+seen. A project with no such session calls neither the registry nor the reader. A reader that
+raises prints `console: movement_sessions_failed <project_id> <Type>: <message>` and the project
+merges with no session reading (the kept associations are not refreshed and age out; the forge
+and local halves are unaffected). The sessions half is memory only. Its cost is one
+transcript-tree walk per sprint session and one `/proc` scan per project per `MOVEMENT_SECONDS`.
 
 Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
 question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
@@ -1295,7 +1307,7 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, project_for, project_states, read_states, registry_changes, sprint_waiting)
+    is_waiting, project_for, project_states, read_states, registry_changes, sprint_sessions_of, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -2817,6 +2829,8 @@ class ConsoleService:
                  adoption_seconds: float = ADOPTION_SECONDS,
                  pull_reader: Callable[..., tuple[movement.PullRequest, ...]] | None = None,
                  local_reader: Callable[[str, str | None], movement.LocalReading] = movement.read_local,
+                 session_reader: Callable[[Sequence[Path], Sequence[movement.SessionTarget]],
+                                          tuple[movement.SessionReading, ...]] = movement.read_sessions,
                  movement_seconds: float = MOVEMENT_SECONDS,
                  activation_reader: Callable[[Iterable[str]], activation.Activation | None] | None = None,
                  activation_seconds: float = ACTIVATION_SECONDS,
@@ -2962,6 +2976,7 @@ class ConsoleService:
         self._adoption_thread: threading.Thread | None = None
         self._pull_reader = pull_reader
         self._local_reader = local_reader
+        self._session_reader = session_reader
         self._movement_seconds = movement_seconds
         self._movement: dict[str, movement.ProjectMovement] = {}
         self._movement_thread: threading.Thread | None = None
@@ -5935,16 +5950,21 @@ class ConsoleService:
         self._unreadable.discard(f"pattern {repo}")
         return pattern
 
+    def _projects_dirs(self) -> list[Path]:
+        """The transcript trees beside the registry directories, in order and without repeats."""
+        found: list[Path] = []
+        for directory in self._session_dirs():
+            projects = Path(directory).parent / "projects"
+            if projects not in found:
+                found.append(projects)
+        return found
+
     def poll_deliveries(self) -> list[Event]:
         """Append what the run journals of the live sessions show that the log does not, and publish."""
         folded = self._deliveries
         scanned = {sid: s for sid, s in self._sessions.items()
                    if s.state != sessions.ENDED and s.repo is not None}
-        projects_dirs: list[Path] = []
-        for directory in self._session_dirs():
-            projects = Path(directory).parent / "projects"
-            if projects not in projects_dirs:
-                projects_dirs.append(projects)
+        projects_dirs = self._projects_dirs()
         readings: dict[tuple[str, str], deliveries.DeliveryState] = {}
         runs: dict[Path, deliveries.RunFold] = {}
         run_moves: dict[tuple[str, str], int] = {}
@@ -6431,11 +6451,15 @@ class ConsoleService:
                        if sprints.ended_at(sprint) is None}
             roots = {project_id: state.root for project_id, state in self._states.items()
                      if project_id in running}
+            belonging = {project_id: sprint_sessions_of(
+                project_id, self._sprints.values(), self._sessions.values(), self._deliveries,
+                self._states) for project_id in roots}
             dropped = [project_id for project_id in self._movement if project_id not in roots]
             for project_id in dropped:
                 del self._movement[project_id]
             if dropped and not self._closed:
                 self._publish()
+        registry = None
         for project_id, root in sorted(roots.items()):
             if self._stop.is_set():
                 return
@@ -6446,6 +6470,21 @@ class ConsoleService:
                 print(f"console: movement_local_failed {project_id} {type(error).__name__}: {error}",
                       file=sys.stderr)
                 local = movement.LocalReading((), False)
+            belong = belonging[project_id]
+            if belong:
+                try:
+                    if registry is None:
+                        registry = sessions.read_session_registry(self._session_dirs())
+                    targets = tuple(
+                        movement.SessionTarget(
+                            sid, registry[sid].pid if sid in registry else None, belong[sid])
+                        for sid in sorted(belong))
+                    at = int(self._clock() * 1000)
+                    readings = self._session_reader(self._projects_dirs(), targets)
+                    local = dataclasses.replace(local, sessions=tuple(readings), sessions_ms=at)
+                except Exception as error:
+                    print(f"console: movement_sessions_failed {project_id} "
+                          f"{type(error).__name__}: {error}", file=sys.stderr)
             pulls = None
             slug = self._slug_of(root) if self._pull_reader is not None else None
             if slug is not None:

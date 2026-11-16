@@ -2147,6 +2147,88 @@ class MovementTest(Case):
             self.assertEqual((shown["ball"], shown["state"]), ("nobody", "quiet"))
         self.assertEqual(errors.count(line), 2)
 
+    def session_reader(self, step=()):
+        """A session reader recording (projects_dirs, targets); `step` is a reading tuple or an
+        exception, and `advance` seconds pass on the test clock during the call."""
+        test = self
+
+        class Reader:
+            def __init__(self):
+                self.calls = []
+                self.advance = 0
+                self.step = step
+
+            def __call__(self, projects_dirs, targets):
+                self.calls.append((list(projects_dirs), tuple(targets)))
+                test.now += self.advance
+                if isinstance(self.step, Exception):
+                    raise self.step
+                return self.step
+
+        return Reader()
+
+    def test_a_sprint_sessions_transcript_moves_it_through_the_poll(self):
+        reader = self.session_reader()
+        reader.advance = 30
+        svc = self.open(Script(()), session_reader=reader)
+        t = self.running_sprint(svc)
+        sid = next(iter(svc._sprints))
+        support.write_session(self.sessions, pid=os.getpid(), session_id="mgr-1", cwd="/srv/p00",
+                              status="idle", name=f"owner/p00 sprint {sid}")
+        svc.poll_sessions()
+        self.now = t + 20 * 60
+        written = int((t + 15 * 60) * 1000)
+        reader.step = (movement.SessionReading("mgr-1", frozenset({sid}), written, None),)
+        self.poll(svc)
+        self.assertEqual(reader.calls, [([self.sessions.parent / "projects"], (
+            movement.SessionTarget("mgr-1", os.getpid(), frozenset({sid})),))])
+        self.assertEqual(svc._movement["owner/p00"].sessions, (
+            movement.SessionMovement("mgr-1", sid, written, None, None,
+                                     int((t + 20 * 60) * 1000)),))
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+        self.assertNotIn("may be stuck", json.dumps(shown))
+
+    def test_a_session_read_that_fails_is_reported_and_moves_nothing(self):
+        reader = self.session_reader(OSError("gone"))
+        svc = self.open(Script(()), session_reader=reader)
+        t = self.running_sprint(svc)
+        sid = next(iter(svc._sprints))
+        support.write_session(self.sessions, pid=os.getpid(), session_id="mgr-1", cwd="/srv/p00",
+                              status="idle", name=f"owner/p00 sprint {sid}")
+        svc.poll_sessions()
+        self.now = t + 20 * 60
+        errors = self.poll(svc)
+        self.assertIn("console: movement_sessions_failed owner/p00 OSError: gone", errors)
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["ball"], shown["state"]), ("nobody", "quiet"))
+
+    def test_a_sprint_with_no_session_of_its_own_reads_no_sessions(self):
+        reader = self.session_reader()
+        svc = self.open(Script(()), session_reader=reader)
+        t = self.running_sprint(svc)
+        self.now = t + 20 * 60
+        self.poll(svc)
+        self.assertEqual(reader.calls, [])
+
+    def test_a_delivery_session_on_a_reported_issue_is_read(self):
+        reader = self.session_reader()
+        svc = self.open(Script(()), session_reader=reader)
+        t = self.running_sprint(svc)
+        sid = next(iter(svc._sprints))
+        support.write_session(self.sessions, pid=os.getpid(), session_id="dlv-1", cwd="/srv/p00",
+                              status="idle")
+        svc.poll_sessions()
+        journal = self.sessions.parent / "projects/-srv-p00/dlv-1/subagents/workflows/wf_t1/journal.jsonl"
+        journal.parent.mkdir(parents=True)
+        journal.write_text(DeliveryTest.SINGLE.read_text())
+        os.utime(journal, ns=(int(self.now * 1e9),) * 2)
+        svc.poll_deliveries()
+        self.now = t + 20 * 60
+        self.poll(svc)
+        self.assertIn(movement.SessionTarget("dlv-1", os.getpid(), frozenset({sid})),
+                      reader.calls[0][1])
+
 
 class SpendServiceTest(Case):
     NOW = 1_800_000_000.0
