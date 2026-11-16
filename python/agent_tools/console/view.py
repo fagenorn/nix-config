@@ -400,7 +400,10 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                          "landed": [<int>], "held": [<int>], "dropped": [<int>],
                                          "counts_text": "<text>"},
                       "state_until": "<time>" | null,
-                      "pictures": [{"id", "line", "pair"}, ...]}
+                      "pictures": [{"id", "line", "pair"}, ...],
+                      "movement": {"sessions": [{"session_id", "manager": <bool>,
+                                                 "read_at": "<ISO time>" | null}, ...],
+                                   "nudged_at": "<time>" | null, "base_at": "<ISO time>"}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
@@ -479,7 +482,14 @@ request (`ci_ms`), the last time a commit landed on a pull request or a delivery
 project's `ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
 pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
 numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
-signal moves the sprint for `QUIET_AFTER_MS` after its time. The state's `quiet`,
+signal moves the sprint for `QUIET_AFTER_MS` after its time. Two session signals (#1185) join the
+reading the same way: the last time one of the sprint's sessions wrote its transcript (`output_ms`),
+and the last time a process under one of them used CPU (`check_ms`), each read from the project's
+`ProjectMovement.sessions` associations of this sprint (`sprint_sessions_of`: the session carries the
+sprint's manager name, is its `manager_session`, or runs a delivery of one of its issues). A time of
+a manager session inside `NUDGE_REPLY_MS` (five minutes) after the sprint's `idle_nudged_at` is its
+reply to the nudge and moves nothing; a delivery session's time always does. The two signals add no
+sentence: they are part of the base reading, so they never name or replace a wait. The state's `quiet`,
 the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and none
 decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
@@ -606,7 +616,7 @@ from agent_tools.console.deliveries import (
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, quota_wait, session_name
-from agent_tools.console.movement import ProjectMovement
+from agent_tools.console.movement import ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
     ENDED,
     IDLE,
@@ -1088,16 +1098,56 @@ class WaitSignals:
     ci_ms: int | None = None
     commit_ms: int | None = None
     release_ms: int | None = None
+    output_ms: int | None = None
+    check_ms: int | None = None
 
 
 NO_WAITS = WaitSignals()
 
+# A manager that was nudged for being idle answers it; the answer is not the sprint moving. Equal
+# to `idle.IDLE_AFTER_MS`, defined here because `idle` imports this module (#1185).
+NUDGE_REPLY_MS = 300_000
 
-def wait_signals(state: SprintState, movement: ProjectMovement | None) -> WaitSignals:
+
+def sprint_sessions_of(project_id: str, sprints: Iterable[SprintState],
+                       sessions: Iterable[SessionState],
+                       deliveries: Mapping[tuple[str, str], DeliveryState],
+                       states: Mapping[str, ProjectState]) -> dict[str, frozenset[str]]:
+    """The running sprints of `project_id` each live session belongs to (#1185). A session of the
+    project's repository belongs to a sprint when it carries the sprint's manager name, is its
+    `manager_session`, or runs a delivery of one of its issues (report issues united with `inbox`).
+    A session that belongs to no sprint is absent."""
+    running = [s for s in sprints if s.project_id == project_id and ended_at(s) is None]
+    delivering: dict[str, set[int]] = {}
+    for (session_id, _), delivery in deliveries.items():
+        delivering.setdefault(session_id, set()).update(stage.issue for stage in delivery.issues)
+    found: dict[str, frozenset[str]] = {}
+    for session in sessions:
+        if (session.state == ENDED or session.repo is None
+                or project_for(session.repo, states) != project_id):
+            continue
+        mine = set()
+        for sprint in running:
+            report = sprint.report
+            issues = (set() if report is None
+                      else {issue for issue, _ in report.issues} | set(report.inbox))
+            if (session.name == session_name(project_id, sprint.sprint_id)
+                    or session.session_id == sprint.manager_session
+                    or delivering.get(session.session_id, set()) & issues):
+                mine.add(sprint.sprint_id)
+        if mine:
+            found[session.session_id] = frozenset(mine)
+    return found
+
+
+def wait_signals(state: SprintState, movement: ProjectMovement | None,
+                 manager_ids: Collection[str] = ()) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
     belongs when its issues meet them, a branch when its issue is one of them, and the release
-    whatever the issues."""
+    whatever the issues. The session signals are the newest transcript write and the newest
+    running check among the associations of this sprint; a manager session's time inside the reply
+    window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out."""
     if movement is None:
         return NO_WAITS
     report = state.report
@@ -1107,8 +1157,42 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None) -> WaitSi
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
     commits += [moved for issue, moved in movement.branches if issue in issues]
+    nudged = None if state.idle_nudged_at is None else _millis(state.idle_nudged_at)
+
+    def counted(own: SessionMovement, ms: int | None) -> int | None:
+        if (ms is not None and nudged is not None and own.session_id in manager_ids
+                and nudged <= ms < nudged + NUDGE_REPLY_MS):
+            return None
+        return ms
+
+    mine = [own for own in movement.sessions if own.sprint_id == state.sprint_id]
+    outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
+    checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
-                       movement.release_ms)
+                       movement.release_ms, max(outputs, default=None), max(checks, default=None))
+
+
+def _utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+
+
+def _base_ms(state: SprintState) -> int:
+    """The newest of the sprint's own signals: the approved brief, the report, the fold's
+    `moved_ms` and the goal's stated time. A time that does not read as one is left out, so a
+    shown entry never fails on it."""
+    brief, report = state.brief, state.report
+    texts = [state.stated_at]
+    if brief is not None and brief.decision == APPROVED:
+        texts.append(brief.decided_at or brief.sent_at)
+    if report is not None:
+        texts.append(report.at)
+    times = [] if state.moved_ms is None else [state.moved_ms]
+    for text in texts:
+        try:
+            times.append(_millis(text))
+        except (TypeError, ValueError):
+            continue
+    return max(times, default=0)
 
 
 def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str],
@@ -1119,7 +1203,7 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
     clock and while one of the sprint's own listed sessions works. Else the signals are the
     approved brief's time (`decided_at`, else the sent time), the report's time, the fold's
     `moved_ms` (the latest movement of any run of the sprint, kept across reports) and the goal's
-    stated time, and each wait signal of `waits` (#1110) that is set. A `failed` manager with no
+    stated time, and each wait signal of `waits` (#1110) and session signal (#1185) that is set. A `failed` manager with no
     listed session drops only the stated time (its launch is known to have failed, so a fresh goal
     is no sign of life); a run, a report, an approval or a wait signal inside the window still
     moves the sprint whatever its order against the failure. With no signal left, the sprint reads
@@ -1134,7 +1218,8 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
         signals.append(_millis(report.at))
     if state.moved_ms is not None:
         signals.append(state.moved_ms)
-    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms) if ms is not None]
+    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms, waits.output_ms,
+                              waits.check_ms) if ms is not None]
     failed = state.manager is not None and state.manager.state == FAILED and not listed
     if not failed:
         signals.append(_millis(state.stated_at))
@@ -1147,10 +1232,12 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
 def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
                 waits: WaitSignals) -> str | None:
     """The wait sentence of #1110, or None. It names the wait only when the wait signals alone
-    move the sprint: with no clock, or when something else moves it, or when it is quiet whatever
+    move the sprint (the session signals are part of the base reading and never name a wait): with
+    no clock, or when something else moves it, or when it is quiet whatever
     the waits say, it is None. Else the first of CI, a committing delivery and a release step whose
     signal is inside `QUIET_AFTER_MS`."""
-    if (now_ms is None or sprint_quiet_for(state, now_ms, listed) is None
+    base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms)
+    if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
@@ -1360,11 +1447,16 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     quota = (quota_wait(capacity, state.manager.profile)
              if state.manager is not None and state.manager.state == STARTED else None)
     listed = [s.state for s in sessions]
-    waits = wait_signals(state, movement)
+    manager_ids = {s.session_id for s in sessions}
+    if state.manager_session is not None:
+        manager_ids.add(state.manager_session)
+    waits = wait_signals(state, movement, manager_ids)
     name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
     ball = sprint_ball(state, now_ms, waiting, listed, waits)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
+    own = sorted((m for m in (() if movement is None else movement.sessions)
+                  if m.sprint_id == state.sprint_id), key=lambda m: m.session_id)
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,
@@ -1415,6 +1507,13 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "closing": None if state.closing is None else _closing_entry(state.closing),
         "state_until": quota.until if name == QUOTA else None,
         "pictures": _picture_entries(report.pictures) if progressing else [],
+        "movement": {
+            "sessions": [{"session_id": m.session_id, "manager": m.session_id in manager_ids,
+                          "read_at": None if m.read_ms is None else _utc(m.read_ms)}
+                         for m in own],
+            "nudged_at": state.idle_nudged_at,
+            "base_at": _utc(_base_ms(state)),
+        },
     }
 
 

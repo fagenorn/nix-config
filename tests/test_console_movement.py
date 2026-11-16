@@ -13,12 +13,13 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import movement
+from agent_tools.console import movement, view
 from agent_tools.console.movement import (
     LocalReading, ProcessStat, ProjectMovement, PullMovement, PullRequest, SessionMovement,
     SessionReading, SessionTarget, descendant_cpu, process_table, read_sessions, session_output_ms)
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_view import A, MIN, R, entry, line, idle_session, reported, started, with_manager
 
 PATTERN = "issue-<num>-<slug>"
 FIXTURE = Path(__file__).parent / "fixtures" / "console" / "forge-pulls.json"
@@ -413,6 +414,116 @@ class SessionFoldTest(unittest.TestCase):
         self.assertEqual(prev.sessions, (
             SessionMovement("s1", "a", 2000, 2000, (((200, "2000"), 5000),), 2000),
             SessionMovement("s1", "b", 4000, 4000, (((200, "2000"), 15000),), 4000)))
+
+class SessionSignalReadingTest(unittest.TestCase):
+    """Session output and a running check are part of the one movement reading (#1185)."""
+
+    base = reported(with_manager(started(A)), R)
+    t0 = R + 40 * MIN
+
+    def shown(self, now, pm):
+        return entry(line(self.base, now, sessions=[idle_session], movement={"p00": pm}))
+
+    def test_a_transcript_written_ten_minutes_ago_moves_the_sprint_and_sixteen_minutes_ago_does_not(self):
+        t0 = self.t0
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            noproc = Path(tmp) / "noproc"
+            transcript = projects / "-srv-p00" / "s1.jsonl"
+            targets = (SessionTarget("s1", None, frozenset({A})),)
+            write_at(transcript, (t0 - 10 * MIN) / 1000)
+            pm = movement.merged(None, None, t0, LocalReading(
+                (), False, (), read_sessions([projects], targets, proc=noproc)))
+            self.assertIsNone(view.sprint_quiet_for(
+                self.base, t0, ["idle"], view.wait_signals(self.base, pm)))
+            shown = self.shown(t0, pm)
+            self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+            self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+            write_at(transcript, (t0 - 16 * MIN) / 1000)
+            pm = movement.merged(None, None, t0, LocalReading(
+                (), False, (), read_sessions([projects], targets, proc=noproc)))
+            self.assertEqual(view.sprint_quiet_for(
+                self.base, t0, ["idle"], view.wait_signals(self.base, pm)), 16 * MIN)
+            shown = self.shown(t0, pm)
+            self.assertEqual((shown["state"], shown["state_text"]),
+                             ("quiet", "quiet for 16 min \u2014 may be stuck"))
+            self.assertEqual(shown["ball"], "nobody")
+
+    def test_a_child_whose_cpu_grew_moves_the_sprint_and_a_frozen_one_lets_it_read_may_be_stuck(self):
+        t0 = self.t0
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            projects.mkdir()
+            proc = Path(tmp) / "proc"
+            (proc / "self").mkdir(parents=True)
+            (proc / "self" / "stat").write_text("1 (x) S 0", encoding="utf-8")
+            stat(proc, 100, "claude", 1, 90000, "1000")
+            targets = (SessionTarget("s1", 100, frozenset({A})),)
+
+            def read(at, ticks, previous):
+                stat(proc, 200, "zsh", 100, ticks, "2000")
+                local = LocalReading((), False, (), read_sessions(
+                    [projects], targets, proc=proc, clock_ticks=100), at)
+                return movement.merged(previous, None, at, local)
+
+            pm = read(t0, 100, None)
+            pm = read(t0 + 2 * MIN, 400, pm)
+            shown = self.shown(t0 + 12 * MIN, pm)
+            self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+            for at in range(t0 + 4 * MIN, t0 + 18 * MIN + 1, 2 * MIN):
+                pm = read(at, 400, pm)
+            shown = self.shown(t0 + 18 * MIN, pm)
+            self.assertEqual((shown["state"], shown["state_text"]),
+                             ("quiet", "quiet for 16 min \u2014 may be stuck"))
+            self.assertEqual(shown["ball"], "nobody")
+            self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+
+    def test_with_no_process_table_the_reading_equals_todays(self):
+        t0 = self.t0
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            projects.mkdir()
+            proc = Path(tmp) / "proc"
+            proc.mkdir()
+            targets = (SessionTarget("s1", 100, frozenset({A})),)
+            stat(proc, 100, "claude", 1, 90000, "1000")
+            stat(proc, 200, "zsh", 100, 100, "2000")
+            self.assertIsNone(process_table(proc))
+
+            def fold(with_sessions):
+                first = LocalReading(((5, t0 - 30 * MIN),), False, (), read_sessions(
+                    [projects], targets, proc=proc, clock_ticks=100) if with_sessions else ())
+                pm = movement.merged(None, None, t0, first)
+                stat(proc, 200, "zsh", 100, 400, "2000")
+                second = LocalReading((), False, (), read_sessions(
+                    [projects], targets, proc=proc, clock_ticks=100) if with_sessions else ())
+                return movement.merged(pm, None, t0 + 2 * MIN, second)
+
+            today, with_sessions = fold(False), fold(True)
+            self.assertTrue(with_sessions.sessions)
+            self.assertFalse(today.sessions)
+
+            def strip(shown):
+                return {k: v for k, v in shown.items() if k != "movement"}
+
+            for now in (t0 + 3 * MIN, t0 + 10 * MIN, t0 + 16 * MIN, t0 + 30 * MIN):
+                self.assertEqual(strip(self.shown(now, with_sessions)), strip(self.shown(now, today)))
+
+    def test_a_session_that_left_a_sprint_lets_it_age_while_it_moves_its_new_one(self):
+        t0 = self.t0
+        B = "b" * 16
+        a_state, b_state = self.base, reported(started(B), R)
+        pm = None
+        for at, sprint, output in ((t0, A, t0 - MIN), (t0 + 2 * MIN, B, t0 + 2 * MIN),
+                                   (t0 + 20 * MIN, B, t0 + 19 * MIN)):
+            reading = SessionReading("s1", frozenset({sprint}), output, None)
+            pm = movement.merged(pm, None, at, LocalReading((), False, (), (reading,), at))
+        now = t0 + 20 * MIN
+        self.assertEqual(view.wait_signals(a_state, pm).output_ms, t0 - MIN)
+        self.assertEqual(view.sprint_quiet_for(
+            a_state, now, ["idle"], view.wait_signals(a_state, pm)), 21 * MIN)
+        self.assertIsNone(view.sprint_quiet_for(
+            b_state, now, ["idle"], view.wait_signals(b_state, pm)))
 
 
 if __name__ == "__main__":

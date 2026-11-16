@@ -16,7 +16,7 @@ from agent_tools.console import digest
 from agent_tools.console import contract_draft
 from agent_tools.console import approve, folder_trust, inbox, register
 from agent_tools.console import spend
-from agent_tools.console import view
+from agent_tools.console import idle, view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
     DELIVERY_SEEN,
@@ -36,6 +36,7 @@ from agent_tools.console.movement import (
     ProjectMovement,
     PullMovement,
     PullRequest,
+    SessionMovement,
     merged,
     pulls_from_answer,
 )
@@ -1954,6 +1955,97 @@ class SprintWaitViewTest(unittest.TestCase):
                 self.assertEqual(later["ball"], "nobody")
 
 
+class SessionSignalViewTest(unittest.TestCase):
+    """Session output and a running check move a sprint without naming a wait (#1185)."""
+
+    base = reported(with_manager(started(A)), R)
+    now = R + 20 * MIN
+
+    def shown(self, movement, sessions=None, sprint_state=None):
+        return entry(line(sprint_state or self.base, self.now,
+                          sessions=[idle_session] if sessions is None else sessions,
+                          movement=movement))
+
+    def test_session_output_moves_the_sprint_and_names_no_wait(self):
+        now = self.now
+        shown = self.shown(moving(sessions=(SessionMovement("s1", A, now - 5 * MIN, None, None),)))
+        self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        shown = self.shown(moving(sessions=(SessionMovement("s1", A, now - 5 * MIN, None, None),),
+                                  release_ms=now - MIN))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+
+    def test_a_running_check_moves_a_sprint_whose_manager_failed(self):
+        now = self.now
+        shown = self.shown(moving(sessions=(SessionMovement("s1", A, None, now - MIN, None),)),
+                           sessions=[], sprint_state=failed_at(self.base, R + 5 * MIN))
+        self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+
+    def test_another_sprints_session_moves_nothing(self):
+        now = self.now
+        shown = self.shown(moving(sessions=(SessionMovement("s1", "b" * 16, now - MIN, None, None),)))
+        self.assertEqual((shown["state"], shown["ball"]), ("quiet", "nobody"))
+
+    def test_a_nudged_idle_managers_reply_does_not_move_the_sprint(self):
+        now = self.now
+        self.assertEqual(view.NUDGE_REPLY_MS, idle.IDLE_AFTER_MS)
+
+        def nudged_at(ago, **kw):
+            return dataclasses.replace(self.base, idle_nudges=1, idle_nudged_at=iso(now - ago), **kw)
+
+        reply = moving(sessions=(SessionMovement("s1", A, now - 3 * MIN, now - 3 * MIN, None),))
+        shown = self.shown(reply, sprint_state=nudged_at(4 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 20 min \u2014 may be stuck"))
+        self.assertEqual(shown["ball"], "nobody")
+        self.assertEqual(self.shown(reply)["state"], "on_track")
+        self.assertEqual(self.shown(reply, sprint_state=nudged_at(9 * MIN))["state"], "on_track")
+        delivery = moving(sessions=(SessionMovement("d1", A, now - 3 * MIN, None, None),))
+        self.assertEqual(self.shown(delivery, sprint_state=nudged_at(4 * MIN))["state"], "on_track")
+        known = moving(sessions=(SessionMovement("m2", A, now - 3 * MIN, None, None),))
+        self.assertEqual(
+            self.shown(known, sprint_state=nudged_at(4 * MIN, manager_session="m2"))["state"],
+            "quiet")
+
+    def test_the_sprint_entry_carries_its_movement_sessions_nudge_and_base_time(self):
+        now = self.now
+
+        def utc(ms):
+            return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+
+        s = dataclasses.replace(self.base, manager_session="m2", idle_nudged_at=iso(now - 30 * MIN))
+        shown = self.shown(moving(sessions=(
+            SessionMovement("d1", A, None, None, None, now - MIN),
+            SessionMovement("m2", A, None, None, None, now - MIN),
+            SessionMovement("s1", A, None, None, None),
+            SessionMovement("x1", "b" * 16, None, None, None, now - MIN))), sprint_state=s)
+        self.assertEqual(shown["movement"], {
+            "sessions": [{"session_id": "d1", "manager": False, "read_at": utc(now - MIN)},
+                         {"session_id": "m2", "manager": True, "read_at": utc(now - MIN)},
+                         {"session_id": "s1", "manager": True, "read_at": None}],
+            "nudged_at": iso(now - 30 * MIN),
+            "base_at": utc(R)})
+        self.assertEqual(self.shown(None, sprint_state=s)["movement"]["sessions"], [])
+
+    def test_sprint_sessions_of_names_the_manager_and_the_sessions_delivering_its_issues(self):
+        sprint_a = dataclasses.replace(
+            reported(started(A), R, issues=((4, "building"),), inbox=(9,)), manager_session="m2")
+        B = "b" * 16
+        sprint_b = dataclasses.replace(started(B), stopped_at=iso(R))
+        sessions = [session("m1", "idle", name=NAME), session("m2", "idle"),
+                    session("d1", "idle"), session("d2", "idle"), session("x1", "idle"),
+                    session("e1", ENDED, name=NAME),
+                    session("o1", "idle", repo="/srv/other", name=NAME),
+                    session("y1", "idle", name=session_name("p00", B))]
+        deliveries = {("d1", "wf_1"): DeliveryState("d1", "wf_1", 1, (IssueStage(4, "building"),)),
+                      ("d2", "wf_2"): DeliveryState("d2", "wf_2", 1, (IssueStage(9, "building"),)),
+                      ("x1", "wf_3"): DeliveryState("x1", "wf_3", 1, (IssueStage(99, "building"),))}
+        found = view.sprint_sessions_of("p00", [sprint_a, sprint_b], sessions, deliveries,
+                                        {"p00": state("p00", 1)})
+        self.assertEqual(found, {"m1": frozenset({A}), "m2": frozenset({A}),
+                                 "d1": frozenset({A}), "d2": frozenset({A})})
+
+
 class SprintEndViewTest(unittest.TestCase):
     def test_a_closed_sprint_reads_done_with_what_landed(self):
         it = reported(started(A), R, issues=((12, "building"), (13, "queued"), (14, "held")))
@@ -2113,7 +2205,9 @@ class SprintViewTest(unittest.TestCase):
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
-            "state_until": None, "pictures": []}])
+            "state_until": None, "pictures": [],
+        "movement": {"sessions": [], "nudged_at": None,
+                     "base_at": "2026-11-12T10:00:00+00:00"}}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),
