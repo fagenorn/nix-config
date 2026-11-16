@@ -13,6 +13,7 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
 from agent_tools.console import approve, folder_trust, inbox, register
+from agent_tools.console import spend
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
@@ -392,6 +393,26 @@ class DigestViewTest(unittest.TestCase):
         given = {"since": None, "first_visit": True, "recent": [], "earlier": [], "omitted": 0}
         self.assertEqual(derive_view([], digest=given)["digest"], given)
         self.assertIsNone(derive_view([])["digest"])
+
+
+class SpendViewWireTest(unittest.TestCase):
+    def test_view_carries_thirty_daily_totals_by_each_dimension(self):
+        today = "2026-11-16"
+        snap = spend.Snapshot(
+            {spend.Key(today, "s1", None, None, spend.SESSION):
+                spend.priced("claude-sonnet-4-6", {"input_tokens": 1330})},
+            {}, {}, {}, {"s1": "/srv/p00"})
+        v = spend.spend_view(snap, today=today, project_of={"/srv/p00": "p00"}.get,
+                             profiles={"s1": "p1"})
+        shown = json.loads(view.encode_view(derive_view([state("p00", 1)], spend=v)))
+        self.assertEqual(len(shown["spend"]["days"]), 30)
+        for day in shown["spend"]["days"]:
+            self.assertEqual(set(day), {"day", "total", "session", "project", "sprint", "run",
+                                        "phase", "account", "aspect"})
+        self.assertEqual(shown["spend"]["days"][-1]["project"]["p00"]["input"], 1330)
+
+    def test_view_without_spend_is_null(self):
+        self.assertIsNone(derive_view([state("p00", 1)])["spend"])
 
 
 def run(sid, run_id, moved_ms, *issues):
@@ -2088,16 +2109,16 @@ class NoticeViewTest(unittest.TestCase):
 
         self.assertEqual(by_id["p00"]["notices"], [
             {"id": 8, "sprint_id": B, "poster": "Keep the importer fast", "kind": "hand-off",
-             "kind_text": "hand-off", "text": "take the reader", "what": None,
+             "kind_text": "Hand-off", "text": "take the reader", "what": None,
              "until_text": None, "to_text": "for Fix the settings page", "at": at_min(8)},
             {"id": 7, "sprint_id": A, "poster": "Fix the settings page", "kind": "hand-off",
-             "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+             "kind_text": "Hand-off", "text": "the importer needs a retry", "what": None,
              "until_text": None, "to_text": "for you", "at": at_min(7)},
             {"id": 5, "sprint_id": B, "poster": "Keep the importer fast", "kind": "heads-up",
-             "kind_text": "heads-up", "text": "sprint ask gains a dry run", "what": None,
+             "kind_text": "Heads-up", "text": "sprint ask gains a dry run", "what": None,
              "until_text": None, "to_text": None, "at": at_min(5)},
             {"id": 3, "sprint_id": A, "poster": "Fix the settings page", "kind": "claim",
-             "kind_text": "claims", "text": "the page fold",
+             "kind_text": "Claim", "text": "the page fold",
              "what": "python/agent_tools/console/page.html",
              "until_text": "until the board fold lands", "to_text": None, "at": at_min(3)}])
         self.assertEqual(by_id["p01"]["notices"], [])

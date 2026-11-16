@@ -451,6 +451,13 @@ class DocsTreeTest(unittest.TestCase):
             self.doc("docs/areas/console/adr/045-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"),
         )
 
+    def test_the_spend_decision_is_recorded_under_its_own_number(self):
+        path = "docs/areas/console/adr/049-spend-is-read-from-transcripts-into-memory-and-never-logged.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-049 — Spend is read from transcripts into memory and never logged")
+        self.assertIn("ADR-console-049", self.doc("docs/areas/console/CONTEXT.md"))
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
@@ -1338,7 +1345,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1119"))
+        self.assertTrue(decided.endswith(", #1133"))
+        self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
+        self.assertIn('"Hand-off for you, from <title>"', adr)
+        self.assertIn("its paths in the code style", adr)
+        self.assertIn("cut with an ellipsis, its whole text in its title (#1133)", adr)
+        self.assertNotIn("each open notice is one plain Overlay 2 line", adr)
         context = self.doc("docs/areas/console/CONTEXT.md")
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn('"Notices (n)" fold', notice)
