@@ -395,7 +395,8 @@ def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], 
         for wait in waits:
             if wait.prompted:
                 for marker, item in prompts:
-                    if marker.fields.get("block") == held.key and marker.fields.get("check") == str(wait.check):
+                    if (marker.fields.get("reason") in verify_wait.ASKING and marker.fields.get("block") == held.key
+                            and marker.fields.get("check") == str(wait.check)):
                         item["wait"] = _wait_member(wait)
             else:
                 items.append(_waiting_item(project_id, slug, number, held_work, held, wait))

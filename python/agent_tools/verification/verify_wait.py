@@ -10,9 +10,14 @@ Which checks wait. Only an owner check: `verify_exec.gate(check, ()).reason` is 
 `verify_run.OWNER_GATES`. A check the runner may run unattended, or one stopped at
 `command_not_verification`, never yields a `Wait`: the unattended rule of
 ADR-verification-003 is reused, not restated. A check with a live result yields nothing.
+A live or paid check with a `command` run is assumed approvable: whether the command is a verification
+command is a fact of the project contract, which the console never reads, so the line may name a
+prompt the runner will refuse (`command_not_verification`).
 
-The prompted rule (P1). The runner prompts a check only once `evaluate_when` reads it due, and a
-met `not_before` or a dated window stays met (both date from fixed times), so a prompt means
+The prompted rule (P1). A check is prompted when it has a live `ask`, `act` or `approve` prompt
+(`ASKING`); a `stale` or `decision` prompt is a card of its own that asks the owner something else
+and never makes the check prompted. The runner prompts a check only once `evaluate_when` reads it due,
+and a met `not_before` or a dated window stays met (both date from fixed times), so a prompt means
 due. A prompted check is never evaluated: no clock read, no forge read. It goes straight to the
 wording rule.
 
@@ -26,8 +31,10 @@ dated reasons (`DATED`).
 
 The wording rule (P2). When the check's text (its `run.ask`, else `run.act`) states a wait
 (`states_wait`) and its `when` has neither `not_before` nor `days_after`, the wait lives only in
-the wording and the reason is `no_when`, prompted or not. Otherwise a prompted check yields
-nothing and an unprompted one that is due yields `due` (P3: the runner has not prompted it yet).
+the wording and the reason is `no_when`, prompted or not, and before any reading: no member of
+`when` is evaluated, so a release that does not exist yet does not hide the missing field.
+Otherwise a prompted check yields nothing and an unprompted one that is due yields `due` (P3: the
+runner has not prompted it yet).
 
 A `forge_api.ForgeError` from one check's evaluation yields `unknown` for that check and
 evaluation goes on; one with code `cancelled` propagates. A check whose shape makes evaluation
@@ -55,6 +62,7 @@ HELD_LABEL = verify_run.NEEDS
 WAIT_REASONS = ("not_before", "window", "window_opening", "not_released", "not_deployed", "ci_not_passed",
                 "unknown", "no_when", "due")
 DATED = ("not_before", "window")
+ASKING = (verify_owner.ASK, verify_owner.ACT, verify_owner.APPROVE)
 
 NUMBER = r"(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fourteen|thirty)"
 UNIT = r"(?:hours?|days?|weeks?|months?)"
@@ -108,22 +116,22 @@ def _reason(due: verify_facts.Due, when: dict) -> str:
 def _wait(index: int, check: dict, held: verify_issues.Held, ctx: verify_facts.Context) -> Wait | None:
     run = check.get("run") or {}
     text = run.get("ask") or run.get("act") or ""
-    prompted = bool(verify_owner.live_prompts(held.markers, verify_owner.REASONS, held.key, index))
+    prompted = bool(verify_owner.live_prompts(held.markers, ASKING, held.key, index))
     when = check["when"]
-    reason, until = "due", None
-    if not prompted:
-        try:
-            due = verify_facts.evaluate_wait(when, held.block["merge"], ctx)
-        except forge_api.ForgeError as error:
-            if error.code == "cancelled":
-                raise
-            return Wait(index, check["ac"], "unknown", None, prompted, text)
-        if not due.due:
-            reason = _reason(due, when)
-            return Wait(index, check["ac"], reason, due.until if reason in DATED else None, prompted, text)
     if states_wait(text) and "not_before" not in when and "days_after" not in when:
         return Wait(index, check["ac"], "no_when", None, prompted, text)
-    return None if prompted else Wait(index, check["ac"], reason, until, prompted, text)
+    if prompted:
+        return None
+    try:
+        due = verify_facts.evaluate_wait(when, held.block["merge"], ctx)
+    except forge_api.ForgeError as error:
+        if error.code == "cancelled":
+            raise
+        return Wait(index, check["ac"], "unknown", None, prompted, text)
+    if due.due:
+        return Wait(index, check["ac"], "due", None, prompted, text)
+    reason = _reason(due, when)
+    return Wait(index, check["ac"], reason, due.until if reason in DATED else None, prompted, text)
 
 
 def owner_waits(held: verify_issues.Held, ctx: verify_facts.Context) -> list[Wait]:

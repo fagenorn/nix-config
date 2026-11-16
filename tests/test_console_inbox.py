@@ -617,6 +617,29 @@ class WaitingCheckTest(unittest.TestCase):
         self.assertEqual(items[0]["answers"], list(verify_answer.ANSWERS["verify-ask"]))
         self.assertEqual(items[0]["wait"], {"reason": "no_when", "until": None, "what": HOURLY})
 
+    def test_a_stale_check_card_stays_a_counted_card(self):
+        check = human({"released_includes": MERGE}, HOURLY)
+        key = verify_issues.block_key(10, block_of(check))
+        stale = dated_comment(11, verify_body(
+            "verify-stale-check", {"host": "mbp", "block": key, "check": "0", "cause": "silent"},
+            "AC1 waits on mbp, which last reported 2026-11-01.", "- [ ] Accept without mbp"), CREATED)
+        items = self.read_held(check, extra=[stale])
+        by_reason = {item["reason"]: item for item in items}
+        self.assertNotIn("wait", by_reason["verify-stale-check"])
+        self.assertEqual(by_reason["verify-wait"]["wait"]["reason"], "no_when")
+        self.assertEqual(len(items), 2)
+
+    def test_an_expiry_decision_stays_a_card_beside_the_asked_line(self):
+        check = human({"released_includes": MERGE}, HOURLY)
+        key = verify_issues.block_key(10, block_of(check))
+        decision = dated_comment(12, verify_body(
+            "verify-decision", {"block": key, "check": "0", "on": "expire"},
+            "AC1 expired: the owner decides.", "- [ ] Accept as passed\n- [ ] Close as not verified"), CREATED)
+        items = self.read_held(check, extra=[dated_comment(11, prompt_body(key, 0), CREATED), decision])
+        by_reason = {item["reason"]: item for item in items}
+        self.assertNotIn("wait", by_reason["verify-decision"])
+        self.assertEqual(by_reason["verify-ask"]["wait"]["reason"], "no_when")
+
     def test_a_due_prompted_check_is_a_plain_card(self):
         check = human({"not_before": "2026-11-15T10:00:00+00:00"}, "Read the hourly rows.")
         key = verify_issues.block_key(10, block_of(check))

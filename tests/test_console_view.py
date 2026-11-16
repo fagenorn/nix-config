@@ -2745,6 +2745,16 @@ class WaitingLineTest(unittest.TestCase):
         self.assertIs(project["quiet"], False)
         self.assertEqual(shown["statement"]["inbox_items"], 0)
 
+    def test_a_wait_is_under_its_project_once_the_sprint_naming_it_has_ended(self):
+        ended = {"stopped": stopped(self.NAMING, T0_MS + 2 * MIN, T0_MS + 2 * MIN),
+                 "closing": closed(self.NAMING, T0_MS + 2 * MIN, ((619, "held"),))}
+        for how, sprint in ended.items():
+            with self.subTest(how):
+                shown = derive_view([state("p00", 1)], {("p00", "k-wait"): self.waiting()},
+                                    now_ms=T0_MS + 3 * MIN, sprints={A: sprint})
+                self.assertEqual(entry(shown)["waits"], [])
+                self.assertEqual([w["key"] for w in shown["entries"][0]["waits"]], ["k-wait"])
+
     def test_a_wait_under_a_sprint_that_does_not_name_its_issue_is_under_its_project(self):
         shown = self.view_of(self.waiting(issue=7))
         self.assertEqual(entry(shown)["waits"], [])

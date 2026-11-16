@@ -755,7 +755,8 @@ Tracker (#859): when the service is given a `tracker`, a thread, `TRACKER_THREAD
 `start()`, calls `poll_tracker()` at once and then every `tracker_seconds` (`TRACKER_SECONDS`,
 two minutes). One poll reads the tracker, through `tracker(project_id, slug, cancelled=...)`, for
 each registered project that is active (`inbox.is_active`: a log event or a git write within a
-day) and has a GitHub checkout (`slug_of`), one project after another and never inside the ingest
+day, or a waiting line still shown, which only a read can replace by its card) and has a GitHub
+checkout (`slug_of`), one project after another and never inside the ingest
 lock; a project costs at most `inbox.MAX_CALLS` calls. The stop flag is checked between projects
 and, through `cancelled`, before every page, so `close()` waits for at most the one `gh` call
 already running and a read cancelled or finished after the stop appends and publishes nothing.
@@ -5797,10 +5798,12 @@ class ConsoleService:
         if self._tracker is None:
             return
         now = self._clock()
+        with self._ingest:
+            waiting = {project_id for (project_id, _), record in self._inbox.items() if is_waiting(record.item)}
         for project_id, state in sorted(dict(self._states).items()):
             if self._stop.is_set():
                 return
-            if not inbox.is_active(state.last_at, self._activity(state.root), now):
+            if project_id not in waiting and not inbox.is_active(state.last_at, self._activity(state.root), now):
                 continue
             slug = self._slug_of(state.root)
             if slug is None:

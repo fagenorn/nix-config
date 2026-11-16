@@ -512,9 +512,9 @@ class OwnerWaitTest(unittest.TestCase):
         return {"ac": "AC4", "kind": "human", "host": "mbp", "reason": "senses", "when": when,
                 "run": {"ask": ask}, **over}
 
-    def nodes(self, *checks, prompted=(), window_at=None, window_event="released", results=()):
+    def nodes(self, *checks, prompted=(), window_at=None, window_event="released", results=(), others=()):
         """The comment nodes of a held block: the block, then prompts of the listed checks, a
-        window marker and results."""
+        window marker and results; `others` are (reason, index) prompts of another reason."""
         blk = block(*checks)
         key = vi.block_key(10, blk)
         found = [gnode(10, hold(blk))]
@@ -522,6 +522,9 @@ class OwnerWaitTest(unittest.TestCase):
             body = marker(verify_owner.KIND, {"reason": verify_owner.ASK, "block": key,
                                               "check": str(index), "host": "mbp"})
             found.append(gnode(20 + offset, body))
+        for offset, (reason, index) in enumerate(others):
+            body = marker(verify_owner.KIND, {"reason": reason, "block": key, "check": str(index), "host": "mbp"})
+            found.append(gnode(50 + offset, body))
         if window_at:
             body = marker(vi.WINDOW, {"event": window_event, "merge": MERGE, "host": "mbp"})
             found.append(gnode(30, body, at=window_at))
@@ -605,6 +608,22 @@ class OwnerWaitTest(unittest.TestCase):
         ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
         waits = self.waits(world, ask)
         self.assertEqual([(w.reason, w.until, w.prompted) for w in waits], [("due", None, False)])
+
+    def test_a_stale_or_decision_prompt_does_not_make_a_check_prompted(self):
+        world = world_with(self)
+        ask = self.asking({"released_includes": MERGE}, ask=JARBIRD_ASK)
+        for reason in (verify_owner.STALE, verify_owner.DECISION):
+            with self.subTest(reason):
+                waits = self.waits(world, ask, others=[(reason, 0)])
+                self.assertEqual([(w.reason, w.prompted) for w in waits], [("no_when", False)])
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_worded_wait_names_the_missing_field_while_the_release_does_not_exist(self):
+        world = world_with(self)
+        world.not_found("gh", ["api", f"repos/{SLUG}/releases/latest"])
+        ask = self.asking({"released_includes": MERGE}, ask=JARBIRD_ASK)
+        self.assertEqual([w.reason for w in self.waits(world, ask)], ["no_when"])
+        self.assertEqual(world.argvs("gh"), [])
 
     def test_a_worded_wait_that_is_unprompted_and_due_names_no_when(self):
         world = world_with(self)

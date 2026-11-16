@@ -118,8 +118,9 @@ item's `key`, `issue` and `url`; a dated wait (`reason` `not_before` or `window`
 has that `until` and its `what` as `text`, every other wait has `until` null and the `WAIT_TEXT` of its
 reason (`unknown` for any other): `window_opening`, `not_released`, `not_deployed`, `ci_not_passed`,
 `unknown`, `no_when` and `due`. The line sits in the `waits` of the first shown sprint of its project,
-newest `stated_seq` first, whose report names its issue (its `issues` or `inbox`, as `waiting` reads
-them), else in its project entry's `waits`; a finished sprint's `waits` is `[]`, and every list is
+newest `stated_seq` first, that has not ended (no `ended_at`) and whose report names its issue (its
+`issues` or `inbox`, as `waiting` reads them), else in its project entry's `waits`: the page draws an
+ended sprint as a finished line that reads no `waits`. A finished sprint's `waits` is `[]`, and every list is
 sorted by `key`. No clock ends a wait here: `now_ms` is the host's, and a wait changes only when a
 tracker read, which evaluates with the forge's clock (`inbox.read_items`), changes or drops the item's
 `wait`, so a dated line whose day has passed stays until that read. A project with a `waits` line is
@@ -1637,7 +1638,7 @@ def derive_view(
     project_waits: dict[str, list[dict]] = {}
     for record in sorted(waiting_items, key=lambda r: r.item["key"]):
         owner = next((s for s in drafted.get(record.item["project_id"], ())
-                      if record.item.get("issue") in _named_issues(s)), None)
+                      if ended_at(s) is None and record.item.get("issue") in _named_issues(s)), None)
         into = (project_waits.setdefault(record.item["project_id"], []) if owner is None
                 else sprint_waits.setdefault(owner.sprint_id, []))
         into.append(_wait_entry(record))
