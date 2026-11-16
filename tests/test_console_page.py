@@ -1,5 +1,6 @@
 """The desk page's static invariants: one self-contained file, no other origin."""
 
+import dataclasses
 import gzip
 import json
 import os
@@ -17,8 +18,13 @@ from agent_tools.console import capacity as console_capacity
 from agent_tools.console import digest as console_digest
 from agent_tools.console import signin as console_signin
 from agent_tools.console.event_log import Event
-from agent_tools.console.sprints import MAX_REPORT_ISSUES
+from agent_tools.console import event_log
+from agent_tools.console.sprints import MAX_REPORT_ISSUES, Question, sprint_states
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_messages import ANSWER as MESSAGE_ANSWER, AT, PARTS, approval, life, view_with
+from .test_console_view import (
+    A, MIN, T0_MS, entry as view_entry, iso, line as view_line, message_at, message_row,
+    message_rows, reported, started)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -702,11 +708,11 @@ class PageRenderTest(unittest.TestCase):
             self.assertIn(wanted, shown)
 
     def test_a_project_without_sessions_still_opens_to_its_root(self) -> None:
-        closed, opened = render([{"frame": view([project(0, [])])}, {"snapshot": True},
+        closed, opened = render([{"frame": view([project(0, [], quiet=True)])}, {"snapshot": True},
                                  {"open": "line:owner/p00"}, {"snapshot": True}])
         (fold,) = [n for n in nodes(closed["projects"]) if n["key"] == "line:owner/p00"]
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
-        self.assertEqual([n["text"] for n in visible(summary) if n["text"]], ["owner/p00"])
+        self.assertEqual([n["text"] for n in visible(summary) if n["text"]], ["owner/p00", "quiet"])
         self.assertNotIn("/srv/p00", visible_text(closed["projects"]))
         self.assertIn("/srv/p00", visible_text(opened["projects"]))
         self.assertEqual(closed["unmanaged"]["children"], [])
@@ -2849,7 +2855,7 @@ class PageMessageTest(unittest.TestCase):
     def messages(self) -> list:
         return [
             message_entry(3, "text", "sent"),
-            message_entry(4, "approved", "picked_up"),
+            message_entry(4, "approved", "sent"),
             message_entry(5, "text", "replied", text="a third note", reply=REPLY_TEXT,
                           reply_at="2026-11-12T10:07:00+00:00"),
         ]
@@ -2862,11 +2868,11 @@ class PageMessageTest(unittest.TestCase):
         ])
         (line,) = sprint_lines(snap)
         shown = full(line)
-        for expected in (TELL_TEXT, "Approved version 2", "a third note", "sent", "picked_up",
+        for expected in (TELL_TEXT, "Approved version 2", "a third note", "sent",
                          "replied", "Manager: " + REPLY_TEXT):
             self.assertIn(expected, shown)
         states = [n for n in nodes(line) if has_class(n, "message-state")]
-        self.assertEqual(sorted(full(n) for n in states), ["picked_up", "replied", "sent"])
+        self.assertEqual(sorted(full(n) for n in states), ["replied", "sent", "sent"])
         (reply,) = [n for n in nodes(line) if has_class(n, "message-reply")]
         self.assertEqual(full(reply), "Manager: " + REPLY_TEXT)
         third = [n for n in nodes(line) if n["tag"] == "li" and "a third note" in full(n)][-1]
@@ -3015,6 +3021,31 @@ class PageMessageLifeTest(unittest.TestCase):
             self.assertIn(expected, visible_text(line))
         detail = [n for n in nodes(line) if n["tag"] == "details" and n["key"] == DETAIL_KEY]
         self.assertEqual([n for d in detail for n in nodes(d) if has_class(n, "message")], [])
+
+    def test_an_approval_from_the_view_draws_no_approval_line_once_picked_up(self) -> None:
+        read = message_row(5, event_log.SPRINT_READ, {"through": 4})
+        (picked,) = render([
+            START, {"frame": with_sprints([life(approval(read), AT + 60_000)])},
+            {"snapshot": True},
+        ])
+        shown = text(picked["projects"])
+        self.assertNotIn("Approved version", shown)
+        self.assertNotIn("picked up", shown)
+        rows = approval(read, message_row(6, event_log.SPRINT_ANSWERED,
+                                          {"message": 4, "reply": MESSAGE_ANSWER}))
+        replied = view_with(sprint_states(rows), message_at(5), AT + 60_000)
+        (snap,) = render([
+            START, {"frame": with_sprints([replied["entries"][0]["sprints"][0]])},
+            {"snapshot": True},
+        ])
+        (message,) = of_class(snap["projects"], "li", "message")
+        self.assertTrue(has_class(message, "manager-line"))
+        (reply,) = of_class(message, "span", "message-reply")
+        self.assertEqual(full(reply), "Manager: " + MESSAGE_ANSWER)
+        self.assertEqual([full(n) for n in of_class(message, "span", "message-new")], ["new"])
+        self.assertEqual(of_class(message, "span", "message-text"), [])
+        self.assertEqual(of_class(message, "span", "message-state"), [])
+        self.assertNotIn("Approved version", text(snap["projects"]))
 
     def test_a_single_message_has_no_earlier_fold(self) -> None:
         (snap,) = render([
@@ -3210,7 +3241,7 @@ class PageSprintControlsTest(unittest.TestCase):
         fold = more_fold(line)
         self.assertFalse(fold["open"])
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
-        self.assertEqual(full(summary), "More")
+        self.assertEqual(full(summary), "Withdraw")
         self.assertEqual(telling["active"], "tell")
         (line,) = sprint_lines(telling)
         (field,) = in_line(line, "textarea", "tell")
@@ -3221,6 +3252,41 @@ class PageSprintControlsTest(unittest.TestCase):
         (line,) = sprint_lines(more)
         (withdraw,) = in_line(line, "button", "withdraw")
         self.assertEqual(full(withdraw), "Withdraw")
+
+    def test_the_work_column_names_its_folds_by_what_they_hold(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([
+                {**LIFE_SPRINT, "messages": [], "reach_text": None},
+                {**running_sprint("b"), "stoppable": False}])},
+            {"snapshot": True},
+        ])
+        words = []
+        for block in sprint_lines(snap):
+            words.append([full(n["children"][0]) for n in nodes(block)
+                          if n["tag"] == "details" and (has_class(n, "sprint-detail")
+                                                         or has_class(n, "sprint-more"))])
+        self.assertEqual(words, [["Show the report", "Stop or withdraw"],
+                                 ["Show the goal", "Withdraw"]])
+        summaries = {full(n) for n in nodes(snap["projects"]) if n["tag"] == "summary"}
+        self.assertEqual(summaries & {"Detail", "More"}, set())
+
+    def test_the_report_fold_holds_the_managers_status_line(self) -> None:
+        reported_now = {**REPORTED, "now_text": "building 1 of 2: Importer resumes"}
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([reported_now, {**SPRINT, "sprint_id": "c" * 16}])},
+            {"snapshot": True},
+        ])
+        first, second = sprint_lines(snap)
+        (fold,) = detail_nodes(first)
+        status = fold["children"][1]
+        self.assertEqual((status["tag"], status["cls"], full(status)),
+                         ("p", "report-status", REPORTED["status"]))
+        outside = [n for n in nodes(first) if full(n) == REPORTED["status"]
+                   and n["tag"] == "p" and not has_class(n, "report-status")]
+        self.assertEqual(outside, [])
+        self.assertEqual(of_class(second, "p", "report-status"), [])
 
     def test_escape_or_leaving_an_empty_field_closes_it(self) -> None:
         escaped, left, within = render([
@@ -3614,7 +3680,7 @@ class PageSprintReportTest(unittest.TestCase):
             last = fold["children"][-1]
             self.assertEqual((last["tag"], last["cls"], full(last)),
                              ("a", "tracker", "Open on the tracker"))
-            self.assertEqual(full(fold["children"][0]), "Detail")
+            self.assertEqual(full(fold["children"][0]), "Show the report")
 
     def test_a_reported_sprint_line_reads_state_progress_status_and_age(self) -> None:
         quiet = {**REPORTED, "state": "quiet", "state_text": "quiet for 16 min — may be stuck",
@@ -3657,7 +3723,8 @@ class PageSprintReportTest(unittest.TestCase):
         (line,) = sprint_lines(snap)
         (fold,) = detail_nodes(line)
         self.assertEqual([c["cls"] for c in fold["children"]], ["", "sprint-goal-full"])
-        for cls in ("progress", "status"):
+        self.assertEqual(full(fold["children"][0]), "Show the goal")
+        for cls in ("progress", "status", "report-status"):
             self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
 
 
@@ -3737,7 +3804,10 @@ class PageSprintBlockTest(unittest.TestCase):
     def test_running_sprints_render_before_the_finished_list(self) -> None:
         done = ended_sprint("c", HOUR_MS, CLOSING)
         (snap,) = render([
-            START, {"frame": two_projects([done, running_sprint("a")], [])}, {"snapshot": True},
+            START,
+            {"frame": view([{**project(0, [session("s1", "working", "working")]),
+                             "sprints": [done, running_sprint("a")]}])},
+            {"snapshot": True},
         ])
         flat = nodes(snap["projects"])
         first = next(i for i, n in enumerate(flat) if n["tag"] == "li" and has_class(n, "sprint"))
@@ -3829,6 +3899,98 @@ class PageSprintBlockTest(unittest.TestCase):
             counts.append([full(c) for c in h2["children"]])
         self.assertEqual(counts, [["1 sprint across 1 project"], [],
                                   ["2 sprints across 2 projects"]])
+
+    def test_the_now_sentence_is_clamped_to_two_lines(self) -> None:
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        merged = {k: v for s, d in style_rules(style) if s == ".sp-now" for k, v in d.items()}
+        for name, value in (("grid-column", "2 / -1"), ("display", "-webkit-box"),
+                            ("-webkit-box-orient", "vertical"), ("-webkit-line-clamp", "2"),
+                            ("line-clamp", "2"), ("overflow", "hidden")):
+            self.assertEqual(merged.get(name), value, name)
+        (snap,) = render([START, {"frame": with_sprints([REPORTED])}, {"snapshot": True}])
+        (now,) = of_class(snap["projects"], "p", "sp-now")
+        self.assertEqual(now["title"], full(now))
+        self.assertEqual(now["title"], REPORTED["now_text"])
+
+    def test_the_now_sentence_is_a_full_width_line_of_at_most_two_lines(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+
+        def with_milestone(state, text):
+            return dataclasses.replace(state, report=dataclasses.replace(state.report, milestone=text))
+
+        def sentence(state):
+            return view_entry(view_line(state, T0_MS + MIN))["now_text"]
+
+        five = ((1, "building"), (2, "building"), (3, "queued"), (4, "queued"), (5, "queued"))
+        fit_stage = sentence(with_milestone(
+            reported(started(A), T0_MS, issues=five), "the upload form"))
+        self.assertEqual(fit_stage, "building 2 of 5: the upload form")
+        asked = dataclasses.replace(reported(started(A), T0_MS), questions=(Question(
+            1, 0, iso(T0_MS), False, "Which store should the checkpoint use?",
+            "the first slice", ("the database", "a file"), "the database"),))
+        fit_question = sentence(asked)
+        self.assertEqual(fit_question,
+                         "waiting for your answer: Which store should the checkpoint use?")
+        fit_long = sentence(with_milestone(
+            reported(started(A), T0_MS, issues=five),
+            "the importer that resumes a broken transfer from its last good part"))
+        self.assertEqual(fit_long, "building 2 of 5: the importer that resumes a broken "
+                                   "transfer from its last good part")
+        clamped_words = " ".join(["word"] * 80)
+        clamped = sentence(with_milestone(reported(started(A), T0_MS), clamped_words))
+        self.assertEqual(clamped, "building 1 of 7: " + clamped_words)
+        texts = (fit_stage, fit_question, fit_long, clamped)
+        frame = with_sprints([
+            {**LIFE_SPRINT, "sprint_id": c * 16, "now_text": text, "messages": [],
+             "reach_text": None} for c, text in zip("abcd", texts)])
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => [...document.querySelectorAll('#projects li.sprint')].map((li) => {
+          const now = li.querySelector('.sp-now');
+          const box = (e) => e.getBoundingClientRect().toJSON();
+          return {now: box(now), title: box(li.querySelector('.title-line')),
+                  head: box(li.querySelector('.sp-head')),
+                  lineHeight: parseFloat(getComputedStyle(now).lineHeight),
+                  scrollHeight: now.scrollHeight, clientHeight: now.clientHeight,
+                  tip: now.title};
+        })"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                for width in (480, 1440):
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    page.add_init_script(fakes)
+                    page.route("http://console.test/", lambda route: route.fulfill(
+                        body=html, content_type="text/html"))
+                    page.goto("http://console.test/")
+                    page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", frame)
+                    got = page.evaluate(measure)
+                    self.assertEqual(len(got), 4, width)
+                    for text, row in zip(texts, got):
+                        now, title, head = row["now"], row["title"], row["head"]
+                        at = (width, text)
+                        self.assertGreaterEqual(now["top"], title["bottom"] - 1, at)
+                        self.assertLessEqual(abs(now["left"] - title["left"]), 1, at)
+                        self.assertGreaterEqual(now["width"], title["width"] - 1, at)
+                        self.assertGreaterEqual(now["width"], head["right"] - title["left"] - 1, at)
+                        self.assertLessEqual(now["height"], 2 * row["lineHeight"] + 1, at)
+                        self.assertEqual(row["tip"], text, at)
+                        if text is clamped:
+                            self.assertGreater(row["scrollHeight"], row["clientHeight"] + 1, at)
+                        else:
+                            self.assertLessEqual(row["scrollHeight"], row["clientHeight"] + 1, at)
+                    page.close()
+            finally:
+                browser.close()
 
 
 class PageSprintEndTest(unittest.TestCase):
@@ -4413,7 +4575,8 @@ class PageSideColumnTest(unittest.TestCase):
     def test_every_quiet_project_offers_a_goal_even_when_folded(self) -> None:
         group = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
                  "projects": [project(n, [], quiet=True) for n in range(2, 6)]}
-        frame = view([{**project(0, []), "sprints": [SPRINT]}, group], count=5)
+        frame = view([{**project(0, [session("s1", "working", "working")]), "sprints": [SPRINT]},
+                      group], count=5)
         (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
         buttons = [n for n in nodes(snap["projects"]) if has_class(n, "give-goal")]
         self.assertEqual(len(buttons), 4)
@@ -4423,8 +4586,27 @@ class PageSideColumnTest(unittest.TestCase):
                    if n["tag"] == "li" and any(m["key"] == "line:owner/p00" for m in nodes(n))]
         self.assertEqual([n for n in nodes(busy) if has_class(n, "give-goal")], [])
 
+    def test_a_project_with_nothing_under_it_draws_no_heading(self) -> None:
+        frame = view([
+            {**project(0, []), "sprints": [running_sprint("a")]},
+            project(1, [session("s1", "working", "working")]),
+            project(2, []),
+            project(3, [], quiet=True, ago=timedelta(days=3)),
+        ])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        projects = snap["projects"]
+        keys = {n["key"] for n in nodes(projects)
+                if n["tag"] == "details" and (n["key"] or "").startswith("line:")}
+        self.assertEqual(keys, {"line:owner/p01", "line:owner/p03"})
+        self.assertEqual([full(n) for n in nodes(projects) if has_class(n, "sp-project")],
+                         ["owner/p00"])
+        self.assertEqual([full(n) for n in nodes(projects) if has_class(n, "pname")],
+                         ["owner/p01", "owner/p03"])
+
     def test_a_project_is_a_block_headed_by_its_name(self) -> None:
-        (snap,) = render([START, {"frame": view([project(0, []), project(1, [])])},
+        (snap,) = render([START, {"frame": view([
+            project(0, [session("s1", "working", "working")]),
+            project(1, [session("s2", "working", "working")])])},
                           {"snapshot": True}])
         (fold,) = [n for n in nodes(snap["projects"]) if n["key"] == "line:owner/p00"]
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
