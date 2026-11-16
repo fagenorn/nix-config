@@ -154,8 +154,8 @@ answer; it reads only that endpoint.
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object
 is `unreachable`, exit 75) and applies `failed_start_state` to it: with no open failed-start inbox card it is
 `not_yet` (75); otherwise each card must have a running sprint entry whose `now_text` reads the failed start,
-whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` is a plain, non-empty reason
-without a path. It is `met` (0) when every card does and `not_met` (1) with the sorted failed members
+whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` is one of the console's plain reasons
+(`FAILED_START_REASONS`). It is `met` (0) when every card does and `not_met` (1) with the sorted failed members
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
 
@@ -1455,6 +1455,16 @@ def first_screen_state(view: object) -> tuple[int, dict]:
 
 FAILED_START_REASON = "failed_start"
 FAILED_START_NOW = "waiting for you: the manager failed to start"
+# The console's `manager.PLAIN_TEXTS`, copied because this area may not import the console's.
+FAILED_START_REASONS = (
+    "this account does not trust the project's folder",
+    "a program the manager needs is missing on this host",
+    "the launch did not answer in time",
+    "the project's folder is missing",
+    "the console could not write the manager's settings",
+    "the sprint's secret is missing",
+    "the client refused to start the manager",
+    "managers are not available on this host yet")
 
 
 def failed_start_state(view: object) -> tuple[int, dict]:
@@ -1476,8 +1486,7 @@ def failed_start_state(view: object) -> tuple[int, dict]:
                 problems.add("ball")
             if sprint.get("retry") is not True:
                 problems.add("retry")
-        reason = card.get("last_reason")
-        if not isinstance(reason, str) or not reason or "/" in reason:
+        if card.get("last_reason") not in FAILED_START_REASONS:
             problems.add("reason")
     if not problems:
         return 0, {"verdict": "met", "cards": len(cards)}

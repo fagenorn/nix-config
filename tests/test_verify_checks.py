@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import manager as console_manager
 from agent_tools.console import sprints as console_sprints
 from agent_tools.console import view as console_view
 from agent_tools.console.sprints import Manager, SprintState
@@ -1844,6 +1845,10 @@ class ConsoleFailedStartTest(unittest.TestCase):
             ("ball", lambda v: sprint_of(v).update(ball="nobody")),
             ("retry", lambda v: sprint_of(v).update(retry=False)),
             ("reason", lambda v: card_of(v).update(last_reason="Run claude in /home/x/p")),
+            ("reason", lambda v: card_of(v).update(last_reason="Workspace not trusted")),
+            ("reason", lambda v: card_of(v).update(last_reason="   ")),
+            ("reason", lambda v: card_of(v).update(last_reason="")),
+            ("reason", lambda v: card_of(v).update(last_reason=None)),
             ("line", drop))
         for index, (problem, mutate) in enumerate(cases):
             with self.subTest(index=index, problem=problem):
@@ -1855,6 +1860,7 @@ class ConsoleFailedStartTest(unittest.TestCase):
     def test_the_wire_names_match_the_console(self):
         self.assertEqual(verify_checks.FAILED_START_REASON, "failed_start")
         self.assertEqual(verify_checks.FAILED_START_NOW, console_sprints.NOW_FAILED_START_TEXT)
+        self.assertEqual(verify_checks.FAILED_START_REASONS, console_manager.PLAIN_TEXTS)
 
     def test_an_unreachable_console_is_not_yet(self):
         unreachable = (75, {"verdict": "unreachable", "cards": 0})
