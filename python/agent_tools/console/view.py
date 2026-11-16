@@ -58,7 +58,17 @@ Wire format, one object:
      "pin": <pin note> | null,
      "pin_launches": ["<profile>", ...],
      "profile_sessions": {"<profile>": <int>, ...},
-     "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...]}
+     "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
+     "activation": <activation line> | null}
+
+`activation` is the one line the page shows when a console change has merged and this host is not
+yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": "<root>"}`; the text is
+ACTIVATION_BEHIND_TEXT instead when the reading's `local_behind` is set, because that checkout must be
+updated to origin before `just switch` there builds the change. The
+member is on every view and is null when `derive_view` is given no `activation` reading (the
+`activation.py` `Activation`) or one whose `changed` is empty. It is a line beside the statement,
+not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
+or `stale` (#1114, ADR-console-043).
 
 `digest` is what changed since the owner last looked (see `digest.py`):
 `{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
@@ -523,6 +533,7 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from agent_tools.console import contract_draft
+from agent_tools.console.activation import Activation
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import (
     DONE as RUN_DONE,
@@ -689,6 +700,10 @@ INBOX_SEEN = "inbox.seen"
 INBOX_CHANGED = "inbox.changed"
 INBOX_GONE = "inbox.gone"
 INBOX_HEALTH = "inbox.health"
+ACTIVATE_COMMAND = "just switch"
+ACTIVATION_TEXT = "A console change merged and is not active on this host: run {command} in {root}."
+ACTIVATION_BEHIND_TEXT = ("A console change merged and is not active on this host: run {command} in {root} "
+                          "once it is updated to origin's integration branch.")
 
 
 @dataclass(frozen=True)
@@ -1436,6 +1451,7 @@ def derive_view(
     failure_items: Iterable[Mapping] = (),
     nudges: bool = True,
     looked: str | None = None,
+    activation: Activation | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1631,6 +1647,11 @@ def derive_view(
                 (p for p in (pending or {}).values()
                  if p.reason is not None and p.project_id in registered),
                 key=lambda p: (p.failed_at, p.sprint_id))],
+        "activation": (
+            None if activation is None or not activation.changed else
+            {"text": (ACTIVATION_BEHIND_TEXT if activation.local_behind else ACTIVATION_TEXT).format(
+                command=ACTIVATE_COMMAND, root=activation.root),
+             "command": ACTIVATE_COMMAND, "root": activation.root}),
     }
 
 
