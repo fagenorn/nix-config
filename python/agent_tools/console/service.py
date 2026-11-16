@@ -10,6 +10,7 @@ carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and eve
 stream `Content-Length`):
 
     GET /           200 text/html; charset=utf-8, the page, with `Content-Security-Policy: CSP`
+    GET /spend      200 text/html; charset=utf-8, the Spend page, with `Content-Security-Policy: CSP`
     GET /api/state  200 application/json, the encoded view (see `view.py`)
     GET /api/stream 200 text/event-stream; charset=utf-8, the update stream (below)
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
@@ -705,6 +706,8 @@ registry read, no derivation, no file, no filesystem metadata call, no
 subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
 the page itself is read once, at import and given its token at construction.
+`GET /spend` serves the Spend page (`spend.html`) from memory with the page's CSP and no token;
+it writes nothing and reads its data from `/api/stream` (#1135, ADR-console-052).
 
 The stream carries `Connection: close` and no `Content-Length`. Its first frame is
 the current view (the page takes its view from the stream alone, never from a
@@ -1271,10 +1274,12 @@ CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
 PAGE: bytes = Path(__file__).with_name("page.html").read_bytes()
+SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
+SPEND_PAGE_PATH = "/spend"
 HOOK_PATH = "/api/hooks"
 LOOKED_PATH = "/api/looked"
 ANSWER_PATH = "/api/answer"
@@ -2602,6 +2607,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0]
         if route == "/":
             self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
+                       ("Content-Security-Policy", CSP))
+        elif route == SPEND_PAGE_PATH:
+            self._send(200, "text/html; charset=utf-8", SPEND_PAGE,
                        ("Content-Security-Policy", CSP))
         elif route == "/api/state":
             self._send(200, "application/json", self.server.console.view_bytes)

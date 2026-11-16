@@ -19,7 +19,7 @@ Work from the conversation. Given an issue reference, read its full body, and it
 
 ### 2. Explore the codebase
 
-Explore if you haven't. Titles and descriptions use the terms of the retained `bindings.paths.context` and the knowledge capability's passed records (an authored unsupported knowledge capability takes its no-knowledge route). A title states the outcome in plain words, never plan shorthand. Look for prefactoring that makes the change easy.
+Titles and descriptions use the terms of the retained `bindings.paths.context` and the knowledge capability's passed records (an authored unsupported knowledge capability takes its no-knowledge route). A title states the outcome in plain words, never plan shorthand. Look for prefactoring that makes the change easy.
 
 ### 3. Draft vertical slices
 
@@ -39,7 +39,7 @@ A wide refactor (one mechanical change with codebase-wide blast radius) cannot l
 
 ### 4. Quiz the user
 
-Present the breakdown as a numbered list with each slice's **title**, **type** (human-required / autonomous), **blocked by**, and **user stories covered** when the source has them. Iterate on granularity, dependencies, merges, splits and marks until the user approves.
+Present the breakdown as a numbered list with each slice's **title**, **type** (human-required / autonomous), **blocked by**, and **user stories covered** when the source has them. Iterate on granularity, dependencies and marks until the user approves.
 
 When the user rules a direction out (not merely defers it), write one short file per rejection to an authored `bindings.paths.rejections` location (the idea in a line, why, the date, any link) and commit it with the breakdown. An empty or unsupported list has no write route.
 
@@ -50,9 +50,9 @@ Publish each approved slice with the template below, blockers first so "Blocked 
 Record blocking edges natively where the tracker supports it:
 
 - **GitHub**: `forge-issue create --repo <slug> --title <t> --body-file <f> [--label <l>] --blocked-by <n>...` files the slice and links its blockers by database id, read back. On exit 1 with an `issue`, repair it with `forge-issue link`; on `create_unconfirmed`, search for its title before filing again.
-- **GitLab**: `glab issue note <child> --message "/blocked_by #<blocker>"`; the free tier lacks native links.
+- **GitLab**: `glab issue note <child> --message "/blocked_by #<blocker>"`.
 
-Without native links, "Blocked by" is the record. A slice is unblocked when all its blockers are closed.
+Without native links, "Blocked by" is the record.
 
 <issue-template>
 ## Parent
@@ -65,7 +65,7 @@ What happens today, who it affects and why it matters now.
 
 ## What to build
 
-The slice's end-to-end behavior, not layer-by-layer steps. No code, except a prototype snippet that pins a decision better than prose (state machine, reducer, schema), trimmed to its decision and marked as from a prototype.
+The slice's end-to-end behavior, not layer-by-layer steps. No code, except a prototype snippet that pins a decision (state machine, reducer, schema), marked as such.
 
 **Demo:** one line: what a reviewer can run, see, or click when this slice lands.
 
@@ -78,6 +78,7 @@ One line per decision this slice depends on (ADR, wayfind ticket, spec section) 
 - [ ] [code] <observable outcome> — measured: <the test, check or CI job that observes it>
 - [ ] [evidence] <observable outcome> — measured: <trigger>, <command>, <threshold>, <expiry>
 - [ ] [human] <observable outcome> — measured: <who judges, in what environment>
+- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>
 
 ## Blocked by
 
@@ -91,12 +92,12 @@ Write each criterion as `- [ ] [code|evidence|human] <observable outcome> — me
 
 - `code`: a test, the build or a CI job any reviewer reruns at the head.
 - `evidence`: what only a deploy, an activation or time shows: a verify block's trigger, command, threshold and expiry, never "faster".
-- `human`: who judges, where, and why no agent can.
+- `human`: who judges, where, and why no agent can. A slice changing how something looks has one `before merge:` line exactly as templated.
 
 Prefer `code`, then `evidence`, per `~/.agents/standards/acceptance-planning.md`. The `measured:` clause is the only place the body names a test, file or command.
 
-The body is the contract, read weeks later by a stranger holding only that page: behavior and outcomes, no line numbers, nothing an implementer needs left only to a comment. Explain each glossary term, decision ID or slice label in a few words, or link it, at first use. Before publishing, reread each body as that stranger and rewrite or link any sentence that needs the spec, the plan or the conversation.
+The body is the contract, read weeks later by a stranger holding only that page: behavior and outcomes, no line numbers, nothing an implementer needs left only to a comment. Explain each glossary term, decision ID or slice label in a few words, or link it, at first use. Before publishing, reread each body as that stranger and rewrite or link any sentence that needs the spec, the plan or the conversation; then run `look-lint --body-file <f>` on it and fix each refusal.
 
-Every criterion must be falsifiable: name the `measured:` observation that would show it false, and confirm by hand that it fails at the commit the implementer starts from; a criterion already true there lets the issue be "completed" as a no-op. Also reject a criterion only another slice's work can satisfy, and one that restates the request instead of deriving from the artifact.
+Every criterion must be falsifiable: name the `measured:` observation that would show it false, and confirm by hand that it fails at the commit the implementer starts from. Also reject a criterion only another slice's work can satisfy, and one that restates the request instead of deriving from the artifact.
 
 Do NOT close or modify any parent issue.

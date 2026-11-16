@@ -144,6 +144,7 @@ agent-workflow-tests *args:
     tests/test_forge_markers.py \
     tests/test_look_marker.py \
     tests/test_look_approval.py \
+    tests/test_look_lint.py \
     tests/test_forge_claim.py \
     tests/test_forge_issue.py \
     tests/test_forge_owner_action.py \
@@ -254,6 +255,7 @@ agent-workflow-tests *args:
     tests/test_console_deliveries.py \
     tests/test_console_movement.py \
     tests/test_console_spend.py \
+    tests/test_console_spend_page.py \
     tests/test_console_units.py \
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
