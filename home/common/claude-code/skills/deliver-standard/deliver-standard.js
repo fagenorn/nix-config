@@ -730,6 +730,12 @@ const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, mes
 const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved } : {}) } : null)
 let lookAt = lookOf(CONT && CONT.look)
 let approvedHead = lookAt && lookAt.approved ? lookAt.approved : null
+// The owner's changes answer rejects the approved head: the approval is revoked here, at once, so every stop of this resume (dirty, plan,
+// owner-answer, claim-lost, the fix itself) carries a cont with no approval and a resume with no look cannot land the head they rejected.
+if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
+  approvedHead = null
+  if (lookAt) lookAt = { pr: lookAt.pr, head: lookAt.head }
+}
 let LOOK_STOP = MARKED && approvedHead === null
 // #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
 // own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
@@ -1959,10 +1965,7 @@ const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_di
 // #1139: the owner looked and asked for changes: one fix round on their words, then a fresh verify; a review that finds a defect stops.
 if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
   const asked = [{ severity: 'important', source: 'owner', summary: LOOK_ANSWER.words, failing_input: `the owner's look at head ${lookAt ? lookAt.head : setup.head}` }]
-  // The owner rejected the approved head: the approval is revoked before the fix is tried and stays revoked on every stop below, so a resume
-  // with no look cannot land the head the owner asked to change.
-  approvedHead = null
-  if (lookAt) lookAt = { pr: lookAt.pr, head: lookAt.head }
+  // The approval was revoked at the top of the program (see lookAt); the fix is tried with the delivery stopped at the look.
   LOOK_STOP = MARKED
   // The fix edits and commits on the branch, so the claim is renewed first: a holder that lost it stops before any edit.
   const lostClaim = await renew('look-fix', 'Verify')
