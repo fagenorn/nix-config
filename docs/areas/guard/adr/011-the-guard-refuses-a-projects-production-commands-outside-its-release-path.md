@@ -1,6 +1,6 @@
 # ADR-guard-011 — The guard refuses a project's production commands outside its release path
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-guard-012
 - **Decided in:** #1149
 
 ## Context

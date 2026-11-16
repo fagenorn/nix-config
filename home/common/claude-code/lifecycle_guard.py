@@ -1,4 +1,4 @@
-"""Claude Code's PreToolUse Bash lifecycle guard.
+"""Claude Code's PreToolUse lifecycle guard for Bash, file edits and MCP tools.
 
 The claude-code module's store wrapper clears NIX_PYTHON* and runs this file
 under `python3 -I` with `--base-policy` naming the store base policy, the only
@@ -12,7 +12,7 @@ Standard library only: it imports nothing from the repository's helper package,
 `agent_tools`.
 
 The decisions behind the rules below are the records in `docs/areas/guard/adr/`
-(ADR-guard-001 to ADR-guard-011), and the compiler that writes the compiled
+(ADR-guard-001 to ADR-guard-012), and the compiler that writes the compiled
 policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
@@ -764,6 +764,46 @@ file arguments included. A command that mentions a directory-changing word
 anywhere is judged against every declaring project. Rewriting the compiled policy
 can remove a project's production refusals, though it still gains no authorization.
 
+Key files and MCP tools
+-----------------------
+
+The guard also serves the PreToolUse matchers `Edit|Write|MultiEdit|NotebookEdit`
+and `^mcp__` (issue 1150). A file tool names its file in `tool_input.file_path`
+(`tool_input.notebook_path` for NotebookEdit), a non-empty string, else the call is
+refused as invalid hook input. An MCP call's input is not read. The base and the
+detaching checks of the Bash path do not run for these tools.
+
+An MCP call is refused by exact tool name, in any cwd and with none, when a
+project's `production.mcp_tools` lists it: the first declaring project by sorted
+slug names the refusal, and no child process runs. The sentence is
+
+    `<tool>` changes the production of <slug> (production MCP tool), so it runs
+    only through the release profile <release_profile> with release transaction
+    preview and release transaction run.
+
+A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is
+not judged). Three spellings are checked, each in
+the file system's own case: the path as named with `..` collapsed, the path with
+its directories resolved and the final component kept as named, and its full
+realpath (the file the write reaches). Each spelling is judged in its own checkout,
+the git toplevel of its nearest existing ancestor directory, and that checkout's
+`origin` slug names the project; the spelling is taken relative to the deepest
+ancestor that is that checkout's directory. A write is refused when any spelling
+matches. Globs are matched with `fnmatchcase` on the strings unchanged, as the
+contract matches them (`*` crosses `/`, no casefolding), the first glob in declared
+order naming the refusal. Git runs only after a glob matches a component suffix of
+a spelling, and the base policy is read only then, so an ordinary edit starts no
+child process and a bad base policy refuses only a key-file candidate. A repository
+lookup that fails (times out or cannot start) for a candidate refuses; a compiled
+policy that does not load refuses nothing. The sentence is
+
+    `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only
+    through the release profile <release_profile> with release transaction preview
+    and release transaction run.
+
+Known limits: a key file written by a Bash command, a hard link to a key file under
+another name, and an MCP tool reached under another name are not seen.
+
 Guard policy
 ------------
 
@@ -780,7 +820,8 @@ the user state file `~/.agents/state/guard/policy.json`: an object with exactly
 compiled policy's `derived_repositories`, keyed by the exact repository slug,
 `{default_branch, integration_branch, required_checks, evidence}` with an
 optional `production` member (issue 1149: `{changes, read_only, release_profile}`,
-the project's declared production rules as command `{id, argv}` lists), where
+the project's declared production rules as command `{id, argv}` lists, plus, from
+issue 1150, the changing `key_files` globs and `mcp_tools` names), where
 `required_checks` is the sorted list of check names the project's contract
 declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
 The row check is the store script `claude-guard-row-check`, which the wrapper
@@ -799,9 +840,10 @@ other, and each member has one trust rule:
     derived_repositories       compiled policy  A candidate row per slug, used
                                                 only after the row check
                                                 confirms it in this invocation.
-    production                 compiled policy  A row's declared production rules,
+    production                 compiled policy  A row's declared production rules
+                                                (commands, key_files, mcp_tools),
                                                 read unconfirmed: they only
-                                                refuse (issue 1149).
+                                                refuse (issues 1149, 1150).
     derivation                 compiled policy  Recorded for the reader; null or
                                                 an object; the guard does not
                                                 interpret it.
@@ -913,12 +955,16 @@ that a row's `required_checks` be a list of distinct non-empty strings, the
 resolver's own rule for the contract member, so a contract that resolves always
 yields a row the guard loads; any other value is a malformed row, and the whole
 compiled policy contributes no row. The same holds for the optional
-`production` member: an object with exactly `changes`, `read_only` and
-`release_profile`, the two lists holding `{id, argv}` objects with a non-empty
+`production` member: an object with `changes`, `read_only` and
+`release_profile` and optionally `key_files` (a list of non-empty strings) and
+`mcp_tools` (a list of `mcp__<server>__<tool>` names), the two lists holding `{id, argv}` objects with a non-empty
 `id` and a non-empty `argv` of non-empty strings, and a non-empty
 `release_profile`; any other value drops the whole file. The compiler writes
-`derivation.schema_version` 4, whose rows may carry `production` (issue 1149);
-this guard reads a schema-3 file as before (`production` is optional). A guard
+`derivation.schema_version` 5, whose `production` also carries `key_files` and
+`mcp_tools` (issue 1150); this guard reads schema 3 and 4 rows as before
+(`production`, `key_files` and `mcp_tools` are each optional). A guard
+from before issue 1150 reads a schema-5 row as malformed and drops the file until
+its session restarts. A guard
 from before issue 1149, in a session started before the switch, reads a row
 carrying `production` as malformed and drops the whole file, so a repository
 that relies on a derived row is refused until that session restarts; a
@@ -953,6 +999,7 @@ registry, and a look check fixture that runs `look-approval judge` from source a
 import argparse
 from collections import namedtuple
 import errno
+import fnmatch
 import json
 import os
 import re
@@ -974,6 +1021,9 @@ DERIVED_ROW_KEYS = frozenset(
 # A row may also carry the project's declared production rules (issue 1149).
 DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
 PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
+# Schema 5 rows also carry the changing key-file globs and MCP tool names (issue 1150).
+PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools"})
+MCP_TOOL_NAME = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+")
 PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
@@ -3561,14 +3611,31 @@ def load_base_policy(path):
 def production_problem(production):
     """Why a row's `production` value is malformed, else None.
 
-    An object with exactly PRODUCTION_KEYS: `changes` and `read_only` are lists
+    An object with PRODUCTION_KEYS and optionally PRODUCTION_OPTIONAL_KEYS:
+    `key_files` is a list of non-empty strings and `mcp_tools` a list of
+    `mcp__<server>__<tool>` names; `changes` and `read_only` are lists
     (possibly empty) of objects with exactly PRODUCTION_COMMAND_KEYS, each a
     non-empty `id` and a non-empty `argv` list of non-empty strings, and
     `release_profile` is a non-empty string.
     """
-    if not isinstance(production, dict) or set(production) != PRODUCTION_KEYS:
+    if not isinstance(production, dict) or not (
+        PRODUCTION_KEYS <= set(production) <= PRODUCTION_KEYS | PRODUCTION_OPTIONAL_KEYS
+    ):
         keys = ", ".join(sorted(PRODUCTION_KEYS))
-        return f"must be an object with exactly the keys {keys}"
+        optional = ", ".join(sorted(PRODUCTION_OPTIONAL_KEYS))
+        return f"must be an object with exactly the keys {keys} and optionally {optional}"
+    if "key_files" in production:
+        globs = production["key_files"]
+        if not isinstance(globs, list) or not all(
+            isinstance(glob, str) and glob for glob in globs
+        ):
+            return "key_files must be a list of non-empty strings"
+    if "mcp_tools" in production:
+        names = production["mcp_tools"]
+        if not isinstance(names, list) or not all(
+            isinstance(name, str) and MCP_TOOL_NAME.fullmatch(name) for name in names
+        ):
+            return "mcp_tools must be a list of mcp__<server>__<tool> names"
     for member in ("changes", "read_only"):
         commands = production[member]
         if not isinstance(commands, list):
@@ -4061,6 +4128,237 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
             if (slug, index) in hits:
                 return production_refusal_text(slug, change, rules[slug]["release_profile"])
     return None
+
+
+FILE_EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
+                   "NotebookEdit": "notebook_path"}
+MCP_TOOL_PREFIX = "mcp__"
+
+
+def mcp_refusal_text(tool, slug, release_profile):
+    """The one sentence that refuses a declared production MCP tool (issue 1150)."""
+    return (
+        f"`{shown_value(tool)}` changes the production of {slug} (production MCP tool), so it "
+        f"runs only through the release profile {shown_value(release_profile)} with "
+        f"{PRODUCTION_ROUTE}."
+    )
+
+
+def key_file_refusal_text(relative, slug, glob, release_profile):
+    """The one sentence that refuses a write to a declared key file (issue 1150)."""
+    return (
+        f"`{shown_value(relative)}` is a key file of {slug} (key file glob {shown_value(glob)}), "
+        f"so it changes only through the release profile {shown_value(release_profile)} with "
+        f"{PRODUCTION_ROUTE}."
+    )
+
+
+def mcp_tool_problem(tool_name, rows):
+    """The reason to refuse the MCP tool `tool_name`, or None: the first project, by sorted
+    slug, whose `production.mcp_tools` names it exactly. No child process runs."""
+    for slug in sorted(rows):
+        production = rows[slug].get("production")
+        if production and tool_name in production.get("mcp_tools", []):
+            return mcp_refusal_text(tool_name, slug, production["release_profile"])
+    return None
+
+
+def disk_spelling(path):
+    """`path` with every existing component spelled as the file system spells it, so a case
+    alias on a case-insensitive file system reads as the file it reaches. The glob match
+    itself stays exact. Starts no child process."""
+    parts = [part for part in path.split("/") if part]
+    spelled = "/"
+    for index, name in enumerate(parts):
+        try:
+            found = os.lstat(os.path.join(spelled, name))
+        except OSError:
+            return os.path.join(spelled, *parts[index:])
+        kept = name
+        try:
+            other = name.swapcase()
+            if other != name:
+                alias = os.lstat(os.path.join(spelled, other))
+                identity = (found.st_dev, found.st_ino)
+                if (alias.st_dev, alias.st_ino) == identity:
+                    entries = os.listdir(spelled)
+                    if name not in entries:
+                        for entry in entries:
+                            listed = os.lstat(os.path.join(spelled, entry))
+                            if (listed.st_dev, listed.st_ino) == identity:
+                                kept = entry
+                                break
+        except OSError:
+            kept = name
+        spelled = os.path.join(spelled, kept)
+    return spelled
+
+
+def key_file_spellings(path, cwd):
+    """The spellings of `path` a key-file write is judged by, or None when `path` is relative
+    and `cwd` is not a non-empty absolute string: the path as named, its directories resolved
+    with the final component kept as named, and the file the write reaches."""
+    if not path.startswith("/") and not (
+            isinstance(cwd, str) and cwd.startswith("/")):
+        return None
+    lexical = os.path.normpath(os.path.join(cwd if isinstance(cwd, str) and cwd else "/", path))
+    named = os.path.join(os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical))
+    target = os.path.realpath(lexical)
+    spellings = []
+    for spelling in (named, target, lexical):
+        spelling = disk_spelling(spelling)
+        if spelling not in spellings:
+            spellings.append(spelling)
+    return spellings
+
+
+def key_file_candidate(spellings, rows):
+    """Whether some declared key file glob matches a component suffix of some spelling."""
+    globs = [glob for row in rows.values() for glob in
+             (row.get("production") or {}).get("key_files", [])]
+    if not globs:
+        return False
+    for spelling in spellings:
+        parts = [part for part in spelling.split("/") if part]
+        for index in range(len(parts)):
+            suffix = "/".join(parts[index:])
+            if any(fnmatch.fnmatchcase(suffix, glob) for glob in globs):
+                return True
+    return False
+
+
+def checkout_of(git_bin, directory, timeout):
+    """The realpath of the checkout `directory` is in, or None when git confirms it is in
+    none. Any other failure of the lookup (a timeout, a git that cannot start, or a nonzero
+    exit that is not git's "not a git repository", as dubious ownership or a malformed
+    config is) raises `RepositoryLookupFailed`: it is no answer, so it is never "outside"."""
+    try:
+        child = subprocess.run(
+            [git_bin, "-C", directory, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+            env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise RepositoryLookupFailed(
+            "timed out" if isinstance(error, subprocess.TimeoutExpired) else "could not start"
+        ) from error
+    top = child.stdout.strip()
+    if child.returncode == 0 and top:
+        return os.path.realpath(top)
+    if child.returncode != 0 and "not a git repository" in child.stderr:
+        return None
+    raise RepositoryLookupFailed(f"failed (exit {child.returncode})")
+
+
+def lookup_directories(spelling):
+    """The directories git is asked about for `spelling`: the nearest existing directory
+    (git follows a symlinked directory to its target), then each lexical ancestor holding a
+    `.git`, so a checkout reached through a symlinked directory inside it is still found."""
+    directory = os.path.dirname(spelling)
+    while not os.path.isdir(directory):
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    found = [directory]
+    ancestor = os.path.dirname(spelling)
+    while True:
+        if os.path.isdir(ancestor) and os.path.lexists(os.path.join(ancestor, ".git")):
+            found.append(ancestor)
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            return found
+        ancestor = parent
+
+
+def checkout_anchor(spelling, top):
+    """The deepest ancestor of `spelling` that is the directory `top`, whatever route names
+    it (a symlinked or case-variant route into the checkout), or None."""
+    try:
+        wanted = os.stat(top)
+    except OSError:
+        return None
+    ancestor = os.path.dirname(spelling)
+    while True:
+        try:
+            found = os.stat(ancestor)
+        except OSError:
+            found = None
+        if found is not None and (found.st_dev, found.st_ino) == (wanted.st_dev, wanted.st_ino):
+            return ancestor
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            return None
+        ancestor = parent
+
+
+def key_file_problem(spellings, rows, git_bin, deadline, child_timeout):
+    """The reason to refuse a write that reaches `spellings`, or None: the first spelling
+    that, relative to its own checkout, matches a declared key file glob of that checkout's
+    origin project. Each child starts only within the deadline."""
+    checkouts = {}
+    slugs = {}
+    for spelling in spellings:
+        for directory in lookup_directories(spelling):
+            try:
+                resolved = os.path.realpath(directory)
+                if resolved not in checkouts:
+                    checkouts[resolved] = checkout_of(
+                        git_bin, directory, bounded_timeout(deadline, child_timeout))
+                top = checkouts[resolved]
+                if top is None:
+                    continue
+                anchor = checkout_anchor(spelling, top)
+                if anchor is None:
+                    continue
+                if top not in slugs:
+                    slugs[top] = detect_repository(
+                        git_bin, top, bounded_timeout(deadline, child_timeout), strict=True)
+            except RepositoryLookupFailed as error:
+                return (f"the repository lookup {error} for a write to "
+                        f"`{shown_value(spelling)}`, which may be a key file of a declared "
+                        "project, so the guard cannot judge it")
+            slug = slugs[top]
+            production = (rows.get(slug) or {}).get("production")
+            if not production:
+                continue
+            relative = spelling[len(anchor):].lstrip("/")
+            for glob in production.get("key_files", []):
+                if fnmatch.fnmatchcase(relative, glob):
+                    return key_file_refusal_text(
+                        relative, slug, glob, production["release_profile"])
+    return None
+
+
+def judge_tool_call(payload, args, started):
+    """The verdict for a file-edit or MCP tool call (issue 1150): an exit status."""
+    tool_name = payload["tool_name"]
+    field = FILE_EDIT_TOOLS.get(tool_name)
+    value = None
+    if field is not None:
+        tool_input = payload.get("tool_input")
+        value = tool_input.get(field) if isinstance(tool_input, dict) else None
+        if not isinstance(value, str) or not value:
+            return block(f"invalid hook input: expected tool_input.{field} to be a non-empty "
+                         "string")
+    rows, _reason = load_compiled_policy(args.policy)
+    if field is None:
+        reason = mcp_tool_problem(tool_name, rows)
+        return block(reason) if reason is not None else 0
+    spellings = key_file_spellings(value, payload.get("cwd"))
+    if spellings is None or not key_file_candidate(spellings, rows):
+        return 0
+    base, reason = load_base_policy(args.base_policy)
+    if base is None:
+        return block(f"invalid policy: {reason}")
+    git_bin = args.git_bin or base.git_bin
+    try:
+        refusal = key_file_problem(
+            spellings, rows, git_bin, started + INVOCATION_DEADLINE_SECONDS,
+            args.child_timeout_seconds)
+    except DeadlineExhausted:
+        return block(DEADLINE_REFUSAL)
+    return block(refusal) if refusal is not None else 0
 
 
 
@@ -5948,8 +6246,12 @@ def main():
 
     if not isinstance(payload, dict):
         return block("invalid hook input: expected a JSON object")
+    tool_name = payload.get("tool_name")
+    if tool_name in FILE_EDIT_TOOLS or (
+            isinstance(tool_name, str) and tool_name.startswith(MCP_TOOL_PREFIX)):
+        return judge_tool_call(payload, args, started)
     tool_input = payload.get("tool_input")
-    if payload.get("tool_name") != "Bash" or not isinstance(tool_input, dict):
+    if tool_name != "Bash" or not isinstance(tool_input, dict):
         return block("invalid hook input: expected a Bash tool call")
     command = tool_input.get("command")
     if not isinstance(command, str):

@@ -1504,8 +1504,20 @@ class DocsTreeTest(unittest.TestCase):
                        "raise label", "production rule", "read-only route", "approved release path",
                        "2026-11-16", "anis-desktop", "outside standing authorization", "ADR-guard-011"):
             self.assertIn(needle, adr)
-        self.assertIn("- **Status:** accepted; amended by ADR-guard-011",
+        self.assertIn("- **Status:** accepted; amended by ADR-guard-011, ADR-guard-012",
                       (REPO_ROOT / path).read_text().splitlines())
+        eleven = "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-outside-its-release-path.md"
+        self.assertIn("- **Status:** accepted; amended by ADR-guard-012",
+                      (REPO_ROOT / eleven).read_text().splitlines())
+        twelve = ("docs/areas/guard/adr/012-the-guard-refuses-declared-production-mcp-tools-"
+                  "and-key-file-writes.md")
+        adr12 = self.doc(twelve)
+        self.assertTrue(adr12.startswith(
+            "# ADR-guard-012 \u2014 The guard refuses declared production MCP tools and key file writes"))
+        self.assertIn("- **Status:** accepted", (REPO_ROOT / twelve).read_text().splitlines())
+        for needle in ("Edit|Write|MultiEdit|NotebookEdit", "^mcp__", "fnmatchcase",
+                       "ADR-guard-009", "ADR-guard-011"):
+            self.assertIn(needle, adr12)
         context = self.doc("docs/areas/guard/CONTEXT.md")
         for term in ("Production rule", "Read-only route", "Approved release path"):
             self.assertIn("**" + term + "**:", context)
@@ -1517,6 +1529,9 @@ class DocsTreeTest(unittest.TestCase):
             if term != "Derived row":
                 self.assertNotIn("Planned:", definition)
             self.assertIn("ADR-guard-011", definition)
+            if term == "Production rule":
+                self.assertIn("ADR-guard-012", definition)
+                self.assertNotIn("not yet enforced", definition)
         self.assertIn("ADR-guard-004", adr)
         self.assertIn("CLAUDECODE", adr)
         self.assertIn("`pre-push`", adr)

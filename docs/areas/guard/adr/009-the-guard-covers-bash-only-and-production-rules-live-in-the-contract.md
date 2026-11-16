@@ -1,6 +1,6 @@
 # ADR-guard-009 — The guard covers the Bash tool only, and production rules live in the project contract
 
-- **Status:** accepted; amended by ADR-guard-011
+- **Status:** accepted; amended by ADR-guard-011, ADR-guard-012
 - **Decided in:** #1147
 
 ## Context

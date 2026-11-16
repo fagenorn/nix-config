@@ -92,7 +92,7 @@ class DerivationTest(WorldCase):
         derivation = policy["derivation"]
         self.assertEqual(set(derivation),
                          {"schema_version", "platform_version", "registry_digest"})
-        self.assertEqual(derivation["schema_version"], 4)
+        self.assertEqual(derivation["schema_version"], 5)
         self.assertRegex(derivation["registry_digest"], r"^sha256:[0-9a-f]{64}$")
         # D11: identity evidence only, never the contract or a resolved snapshot.
         text = self.world.output.read_text("utf-8")
@@ -276,8 +276,10 @@ class DeriveTest(WorldCase):
         def declare(contract):
             contract["production"] = {
                 "none": False,
-                "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
-                "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+                "changes": {"commands": ["nix-activate"], "key_files": ["deploy/*.yaml"],
+                            "mcp_tools": ["mcp__deployer__apply"]},
+                "read_only": {"commands": ["nix-build"],
+                              "mcp_tools": ["mcp__deployer__status"]},
                 "release_profile": "github-release"}
 
         self.world.project("fixture/prod", "fagenorn/prod", mutate=declare)
@@ -290,7 +292,9 @@ class DeriveTest(WorldCase):
         self.assertEqual(rows["fagenorn/prod"]["production"], {
             "changes": [{"id": "nix-activate", "argv": ["just", "switch"]}],
             "read_only": [{"id": "nix-build", "argv": ["just", "build"]}],
-            "release_profile": "github-release"})
+            "release_profile": "github-release",
+            "key_files": ["deploy/*.yaml"], "mcp_tools": ["mcp__deployer__apply"]})
+        self.assertNotIn("mcp__deployer__status", json.dumps(rows["fagenorn/prod"]))
         self.assertEqual(set(rows["fagenorn/none"]), ROW_MEMBERS)
         self.assertEqual(set(rows["fagenorn/absent"]), ROW_MEMBERS)
         self.assertEqual(self.derived("fagenorn/prod")["row"], rows["fagenorn/prod"])
