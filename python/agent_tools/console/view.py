@@ -449,13 +449,15 @@ a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owne
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else the stage phrase, `NOW_STAGE_TEXT`:
-the leading stage, its issue count, the total and the report's whole milestone (just the milestone
-when the report names no issue), prefixed by `NOW_QUIET_TEXT` when the ball is `nobody`. The
+wait, `NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+(`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
+`NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
+(just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
+ball is `nobody`. The
 leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
 `REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common
-remaining stage. The sentence is never the status line and never shortened (the page holds it to
-two lines).
+remaining stage. The sentence is never the status line but for a merge refusal, and never
+shortened (the page holds it to two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
@@ -577,6 +579,7 @@ from agent_tools.console.sprints import (
     NOW_QUESTION_TEXT,
     NOW_QUIET_TEXT,
     NOW_QUOTA_TEXT,
+    NOW_REFUSED_TEXT,
     NOW_STAGE_TEXT,
     NOW_STALLED_TEXT,
     NOW_STARTING_TEXT,
@@ -624,6 +627,7 @@ from agent_tools.console.sprints import (
     ended_at,
     goal_title,
     manager_status,
+    merge_refused,
     message_state,
     open_questions,
     progress_text,
@@ -1060,7 +1064,9 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_QUOTA_TEXT
     if report is None:
         return NOW_STARTING_TEXT
-    phrase = _stage_phrase(stages, report.milestone)
+    reason = merge_refused(state)
+    phrase = (NOW_REFUSED_TEXT.format(reason=reason) if reason is not None
+              else _stage_phrase(stages, report.milestone))
     return NOW_QUIET_TEXT.format(phrase=phrase) if ball == BALL_NOBODY else phrase
 
 

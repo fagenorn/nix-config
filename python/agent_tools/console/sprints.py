@@ -227,7 +227,10 @@ order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the stage phrase
 (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
-line and never shortened.
+line and never shortened. The now-sentence of a report whose status marks a refused merge
+(`refused_reason`) is `NOW_REFUSED_TEXT` in place of the stage phrase, shown by `merge_refused`
+until a later report without the marker or a closing clears it (no run observation clears it: the
+status names no issue); it is the one now-sentence that may equal the status line.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
@@ -591,6 +594,8 @@ NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
 NOW_STARTING_TEXT = "starting the work"
 NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
 NOW_QUIET_TEXT = "last seen {phrase}"
+NOW_REFUSED_TEXT = "merge refused: {reason}"
+REFUSED_STATUS = re.compile(r"merge refused:\s*(\S.*)", re.IGNORECASE | re.DOTALL)
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -1777,6 +1782,23 @@ def _folded_row_pictures(state: SprintState, event: Event) -> SprintState:
     named = {p for p in listed if isinstance(p, str) and PICTURE_ID.fullmatch(p)} \
         if isinstance(listed, list) else set()
     return replace(state, pictures=state.pictures | named) if named else state
+
+
+def refused_reason(status: str) -> str | None:
+    """The reason of a status that marks a refused merge (#1115): the stripped text after a leading
+    `merge refused:` (any case, any whitespace after the colon) when that text is not empty, else
+    None. The words anywhere but the start are not a refusal."""
+    found = REFUSED_STATUS.fullmatch(status.strip())
+    return found.group(1).strip() if found else None
+
+
+def merge_refused(state: SprintState) -> str | None:
+    """The merge refusal the sprint shows now, else None: the reason in its report's status, unless
+    the sprint is closing. It reads no run observation: the status names no issue, so no run can be
+    tied to the refused merge, and only a later report or a closing clears it."""
+    if state.report is None or state.closing is not None:
+        return None
+    return refused_reason(state.report.status)
 
 
 def ended_at(state: SprintState) -> str | None:
