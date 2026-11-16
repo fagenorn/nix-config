@@ -530,6 +530,15 @@ class QuestionWithdrawDigestTest(unittest.TestCase):
                 found = self.said(*rows)
                 self.assertEqual([m for m in found if m["at"] == rows[-1].at], [])
 
+    def test_a_withdrawal_after_the_sprint_closed_says_nothing(self):
+        closed = Event(5, at(5, hour=9), SPRINT_CLOSED, "owner/p01", {
+            "sprint_id": self.SID, "goal": self.GOAL,
+            "closing": {"summary": "done", "issues": [], "differently": "n"}})
+        late = self.withdrawal(6)
+        found = self.said(closed, late)
+        self.assertEqual([m for m in found if m["at"] == late.at], [])
+        self.assertEqual(sentences(found), [])
+
     def test_a_replacing_round_is_said_once_with_the_old_ask(self):
         found = self.said(self.round(5, {"round": 4, "index": 0}))
         self.assertEqual(sentences(found), [

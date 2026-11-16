@@ -44,8 +44,9 @@ Event kinds read:
   that replaces a question (`questions.asked`) apart.
 - `question.withdrawn` (`event_log.QUESTION_WITHDRAWN`, #1099): a manager took back one of its open
   questions. It speaks only when the event's project is a str, the payload `question` and `goal` are
-  str and the sprint fold before the row has that question of that sprint (by `sprint_id`, `round`
-  and `index`) open, with no answer and no `withdrawn_at`, so a row the fold ignores says nothing.
+  str and that question of that sprint (by `sprint_id`, `round` and `index`) has no `withdrawn_at`
+  in the fold before the row and one in the fold after it, so a row the fold ignores (a question
+  answered, gone or already taken back, a sprint closed, stopped or ended) says nothing.
 - `questions.asked` (`event_log.QUESTIONS_ASKED`, #1099): a round that replaces questions. It speaks
   only when the event's project is a str and the fold after the row has a question whose
   `replaced_by` is the row's `seq`; a round that replaces nothing says nothing.
@@ -289,11 +290,13 @@ def _withdrawn_moment(event: Event, previous: Mapping[str, SprintState],
     if not isinstance(event.project, str) or not isinstance(goal, str) or not isinstance(ask, str):
         return None
     before = previous.get(sprint_id) if isinstance(sprint_id, str) else None
-    if before is None:
+    after = folded.get(sprint_id) if isinstance(sprint_id, str) else None
+    if before is None or after is None:
         return None
     key = (payload.get("round"), payload.get("index"))
-    if not any((q.round_id, q.index) == key and q.answer is None and q.withdrawn_at is None
-               for q in before.questions):
+    was_open = {(q.round_id, q.index) for q in before.questions if q.withdrawn_at is None}
+    if not any((q.round_id, q.index) == key and q.withdrawn_at is not None
+               and key in was_open for q in after.questions):
         return None
     return (QUESTION_WITHDRAWN_MOMENT,
             f"The manager of {_title(sprint_id, goal, folded)} took back a question: {ask}")
