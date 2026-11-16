@@ -225,7 +225,8 @@ followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-ze
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
-`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the stage phrase
+`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
+`NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT`, #1110) or the stage phrase
 (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
 line and never shortened.
 
@@ -591,6 +592,9 @@ NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
 NOW_STARTING_TEXT = "starting the work"
 NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
 NOW_QUIET_TEXT = "last seen {phrase}"
+NOW_CI_TEXT = "waiting for CI on its pull request"
+NOW_COMMITTING_TEXT = "a delivery is committing"
+NOW_RELEASE_TEXT = "waiting for a release step"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
