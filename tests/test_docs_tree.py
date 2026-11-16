@@ -1363,19 +1363,46 @@ class DocsTreeTest(unittest.TestCase):
             "# ADR-guard-009 \u2014 The guard covers the Bash tool only, and production rules live in the project contract"))
         for needle in ("bypassPermissions", "2.1.322", "mcp__", "Edit", "Write", "just", "residual gap",
                        "ADR-guard-005", "ADR-guard-006", "ADR-console-021", "detaching word",
-                       "raise label", "production rule", "read-only route", "approved release path"):
+                       "raise label", "production rule", "read-only route", "approved release path",
+                       "2026-11-16", "anis-desktop", "outside standing authorization", "ADR-guard-011"):
             self.assertIn(needle, adr)
+        self.assertIn("- **Status:** accepted; amended by ADR-guard-011",
+                      (REPO_ROOT / path).read_text().splitlines())
         context = self.doc("docs/areas/guard/CONTEXT.md")
         for term in ("Production rule", "Read-only route", "Approved release path"):
             self.assertIn("**" + term + "**:", context)
             self.assertIn("| " + term + " | Guard |", self.doc("docs/CONTEXT-MAP.md"))
         self.assertIn("ADR-guard-009", context)
-        for term in ("Production rule", "Approved release path"):
-            definition = context.split("**" + term + "**:")[1].split("\n\n")[0]
-            self.assertIn("Planned:", definition)
+        raw = (REPO_ROOT / "docs/areas/guard/CONTEXT.md").read_text()
+        for term in ("Production rule", "Read-only route", "Approved release path", "Derived row"):
+            definition = " ".join(raw.split("**" + term + "**:", 1)[1].split("\n\n", 1)[0].split())
+            if term != "Derived row":
+                self.assertNotIn("Planned:", definition)
+            self.assertIn("ADR-guard-011", definition)
         self.assertIn("ADR-guard-004", adr)
         self.assertIn("CLAUDECODE", adr)
         self.assertIn("`pre-push`", adr)
+
+    def test_the_production_rule_enforcement_is_recorded(self):
+        path = ("docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
+                "outside-its-release-path.md")
+        adr = self.doc(path)
+        self.assertTrue(adr.startswith(
+            "# ADR-guard-011 \u2014 The guard refuses a project's production commands outside its release path"))
+        for needle in ("#1149", "ADR-guard-006", "ADR-guard-007", "ADR-guard-009",
+                       "ADR-project-contract-007", "row check", "read-only route",
+                       "release transaction run", "cd", "xargs", "schema", "just switch",
+                       "command position", "--title",
+                       "can remove a project's production refusals"):
+            self.assertIn(needle, adr)
+        adr_006 = "docs/areas/guard/adr/006-two-policy-files-one-trust-rule-each.md"
+        for amended in (adr_006, "docs/areas/guard/adr/007-derived-rows-rechecked-at-use.md"):
+            status = [line for line in (REPO_ROOT / amended).read_text().splitlines()
+                      if line.startswith("- **Status:**")]
+            self.assertEqual(status, ["- **Status:** accepted; amended by ADR-guard-011"])
+            self.assertIn("ADR-guard-011", self.doc(amended))
+        self.assertNotIn("Rewriting the compiled policy alone gains nothing", self.doc(adr_006))
+        self.assertIn("can remove a project's production refusals", self.doc(adr_006))
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")

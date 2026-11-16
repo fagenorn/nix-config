@@ -1,6 +1,6 @@
 # ADR-guard-007 — A derived row is re-derived at use before the guard relies on it
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-guard-011
 - **Decided in:** issue 126 D6, issue 377 D2, D3, D6, D12, issue 385, issue 844
 
 ## Context
@@ -9,7 +9,7 @@ A derived row is compiled at activation and stored in a file a session can write
 
 ## Decision
 
-For a repository that has a row, the guard re-derives that one row at use with the compiler's own proof, by running the row check, and relies on the row only when `origin/HEAD`, the row check's outcome and the row's branches and required checks all agree with the compiled row. The check runs once per repository context, when the context is built, on every repository-bound verb, nix-config included, and only for a repository that has a row. A repository with a row is judged by the row and never falls back to its owner literal when the check fails.
+For a repository that has a row, the guard re-derives that one row at use with the compiler's own proof, by running the row check, and relies on the row only when `origin/HEAD`, the row check's outcome and the row's branches and required checks all agree with the compiled row. The check runs once per repository context, when the context is built, on every repository-bound verb, nix-config included, and only for a repository that has a row. A repository with a row is judged by the row and never falls back to its owner literal when the check fails. A row's production rules are outside this comparison: they only refuse, and the guard reads them from the compiled row without the row check (ADR-guard-011).
 
 The check is bounded by a 15-second limit inside a shared 27-second invocation deadline that keeps the verdict ahead of the hook's 30-second timeout, and the guard kills its whole process group on the bound. An unreachable `origin` or provider fails the check and refuses the verb: there is no fallback to a ref already present or to the unchecked row.
 
