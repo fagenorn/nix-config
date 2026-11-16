@@ -429,8 +429,9 @@ is above 0, the brief waits on the owner (decision none), the sprint is stalled,
 set, or one of the sprint's listed sessions is waiting for an answer or a permission (the manager
 waits on the owner at its terminal); `manager` ("manager working") when a listed session is
 working, `now_ms` is None, or `now_ms` minus the latest movement (stated time, an approved brief's
-time, the report's time, the fold's `moved_ms`) is below `QUIET_AFTER_MS`; else `nobody` ("nothing
-running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
+time, the report's time, the fold's `moved_ms`) is below `QUIET_AFTER_MS`, unless the sprint's
+manager row is `failed` and it has no listed session (a known launch failure, shown with its retry);
+else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, then for
 a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
@@ -541,6 +542,7 @@ from agent_tools.console.sprints import (
     DRAFTING,
     DRAFTING_TEXT,
     DROPPED,
+    FAILED,
     FINISHED_AFTER_MS,
     HELD,
     LANDED,
@@ -953,7 +955,8 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
     waiting at its terminal. Else the manager when a session works, `now_ms` is None, or the sprint
     moved less than `QUIET_AFTER_MS` ago (the latest of its stated time, an approved brief's time,
-    the report's time and the fold's movement); else nobody."""
+    the report's time and the fold's movement); else nobody. A `failed` manager with no listed
+    session of its own is nobody whatever the clock says: its launch is known to have failed."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -963,6 +966,8 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
         return BALL_OWNER
     if WORKING in listed or now_ms is None:
         return BALL_MANAGER
+    if state.manager is not None and state.manager.state == FAILED and not listed:
+        return BALL_NOBODY
     moves = [_millis(state.stated_at)]
     if brief is not None and brief.decision == APPROVED:
         moves.append(_millis(brief.decided_at or brief.sent_at))

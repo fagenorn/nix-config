@@ -299,6 +299,15 @@ class SprintBallViewTest(unittest.TestCase):
             with self.subTest(now=now):
                 self.assertEqual(self.shown(s, now)["ball"], ball)
 
+    def test_a_failed_manager_launch_beats_the_freshness_of_the_goal(self):
+        failed = with_manager(sprint(A), state="failed")
+        shown = self.shown(failed, T0_MS + MIN)
+        self.assertEqual((shown["manager_state"], shown["retry"]), ("failed", True))
+        self.assertEqual((shown["ball"], shown["ball_text"]),
+                         ("nobody", "nothing running, may be stuck"))
+        handed_off = self.shown(failed, T0_MS + MIN, manager_session("working"))
+        self.assertEqual(handed_off["ball"], "manager")
+
     def test_waiting_on_the_owner_wins_over_a_working_manager(self):
         working = manager_session("working")
         stalled = dataclasses.replace(started(A), stalled="launch failed")
