@@ -53,8 +53,12 @@ _Avoid_: chat, comment
 The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option or their own words, and the answer reaches the manager as a message. A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040).
 _Avoid_: poll, survey
 
+**Notice**:
+A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-044). Every manager is shown the open notices of its project's other sprints, one line each, in its first prompt, with `sprint inbox` and with `sprint status`, and an overlap with a claim goes to the owner as a question (ADR-console-046). The owner reads a project's open notices in its closed "Notices (n)" fold in the Work column, which counts in nothing that needs the owner (ADR-console-002). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
+_Avoid_: lock, reservation, announcement
+
 **Picture**:
-One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041).
+One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041); an owner check card shows the PNGs its prompt names under the project's root or a configured screenshot location the same way (ADR-console-045).
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
@@ -112,6 +116,10 @@ _Avoid_: quota bar
 **Accounts panel**:
 The one place that holds every account control and detail: opened from the capacity strip or the `a` key and closed with Escape, one row per account with its allowance details, the account it is signed in to, sign-in end and run status, and Exclude, Pin, Sign in and Remove, then Add account (ADR-console-002, ADR-console-023, ADR-console-024, ADR-console-025, ADR-console-026).
 _Avoid_: settings page, account menu
+
+**Activation line**:
+The one line at the head of the Work column when origin's integration branch carries a console change this host does not run, naming `just switch` and the checkout to run it in; it is not an inbox item and is not counted in the statement (ADR-console-043).
+_Avoid_: deploy banner, update notice
 
 **Sign-in state**:
 Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025). The reading also keeps the account name (address) the status command reports; the profile's row of the accounts panel shows it and flags two profiles on one account as "same account as <other>" (ADR-console-022, ADR-console-023).

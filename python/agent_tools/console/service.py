@@ -40,6 +40,9 @@ stream `Content-Length`):
     POST /api/message-reply 200 application/json, a manager answers one message (below)
     POST /api/ask   200 application/json, a manager sends a round of questions (below)
     POST /api/withdraw-question 200 application/json, a manager takes back one open question (below)
+    POST /api/notice 200 application/json, a manager posts one notice for its project (below)
+    POST /api/notices 200 application/json, a manager lists its project's open notices (below)
+    POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -51,7 +54,8 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/picture` and `/api/round-answer`;
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`,
+                    `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
@@ -595,6 +599,31 @@ question the manager took back (withdrawn or replaced) with `Refused(TAKEN_BACK)
 owner is still told why), appending no row and storing no message; a question not taken back in an
 ended sprint is still `ENDED`.
 
+Notices (#1117, ADR-console-044): `POST /api/notice`, `POST /api/notices` and `POST
+/api/withdraw-notice` are manager writes dispatched like `/api/withdraw-question`, before
+`PAGE_WRITES`, each through `_checked_length` with its own limit (`MAX_NOTICE_BYTES` 16384,
+`MAX_NOTICES_BYTES` 4096, `MAX_WITHDRAW_NOTICE_BYTES` 4096: any `Origin` 403 `origin refused`, 415,
+411, 413 `too large`). A body `sprints.parse_notice_request` (`sprint_id`, `secret`, `notice`),
+`sprints.parse_inbox_request` (`sprint_id`, `secret`) or `sprints.parse_withdraw_notice_request`
+(`sprint_id`, `secret`, `notice`) does not accept is 400 `bad notice`, `bad notices` or `bad withdraw
+notice`; a `sprints.SecretRefused` is `console: <route>_refused <sprint_id> secret refused` and 403
+`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason; any other exception is `console: <route>_failed <Type>: <message>` and 500 `notice failed`,
+`notices failed` or `withdraw notice failed`. `<route>` is `notice`, `notices` or `withdraw_notice`.
+The reason is always one of `sprints.py`'s fixed refusal texts, which never carry a key or value the
+manager sent, so every stderr line is one line and neither the secret nor the notice text is printed.
+Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for a post (the new row's
+`seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...]}` for the list.
+`post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint; it appends exactly
+one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
+folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
+`sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
+"notice": <id>}` and returns the id. `list_notices` is `_manager_sprint` then
+`sprints.project_notices` over every folded sprint of the project, and appends and publishes
+nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
+writer; a refusal appends and publishes nothing.
+
 Pictures (#1089, ADR-console-036): `POST /api/picture` is a manager write dispatched like `/api/brief`,
 before `PAGE_WRITES`, whose body is one PNG and whose identity travels in headers. The checks run in
 this order and each refusal appends nothing and writes no file: any `Origin` (the console's own
@@ -627,7 +656,8 @@ not fully match `pictures.PICTURE_ID`, is 400 `bad picture id`. The file is read
 unreadable file is 404 `this picture is not known`. Success is 200 `image/png`, the stored bytes,
 `X-Content-Type-Options: nosniff` and `Cache-Control: private`; a refusal keeps
 `Cache-Control: no-store`. The token appears in no header or body. The page draws a picture from an object URL, so
-CSP's img-src is data: blob: (ADR-console-038).
+CSP's img-src is data: blob: (ADR-console-038). A verification item's pictures (#1112) are stored in
+the same directory by the tracker poll and read by this same route.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -736,7 +766,23 @@ now marked stale, and only a change of read health is appended (`inbox.health`),
 stays stale across a restart. A read that ends after its project was unregistered appends
 nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
-thread starts and nothing is read.
+thread starts and nothing is read. After a read succeeds, outside the lock, every item holding a
+`check_id` is replaced by `inbox.attach_pictures(item, [project root, *screenshot_dirs], pictures_dir)`
+(#1112; the roots are the project's checkout and the `--screenshots` locations the command passes), after
+which the stop flag is checked again; an exception from one item is one stderr line
+`console: picture_attach_failed <project_id> <Type>: <message>` and that item is kept without its
+`pictures` and `missing_pictures`. The attach is deterministic, so unchanged files append no row.
+
+Activation (#1114): when the service is given an `activation_reader`, a thread, `ACTIVATION_THREAD`,
+started by `start()`, calls `poll_activation()` at once and then every `activation_seconds`
+(`ACTIVATION_SECONDS`, one minute). One poll calls the reader with the sorted roots of the registered
+projects, outside the ingest lock; the reading it returns (an `activation.Activation` or None) is kept
+in memory only, never logged, and handed to `derive_view` as `activation`; a reading equal to the last
+one publishes nothing. A reader that raises (the production reader raises `activation.ReadFailed` for
+a failed read) keeps the previous reading, publishes nothing and is one stderr line
+`console: activation_failed <Type>: <message>`; only a returned value replaces the reading. An
+exception escaping a poll is one stderr line `console: activation_poll_failed <Type>: <message>` and
+the loop goes on. Without a reader no thread starts and no line is shown.
 
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
@@ -854,7 +900,10 @@ no row appended, and otherwise, unless the service is stopping, `manager.started
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
-settings file. The sprint's secret appears in no row, view or stderr line.
+settings file. The sprint's secret appears in no row, view or stderr line. `_prepared_launch`
+passes `manager.new_launch` `sprints.notice_block` of the project's open notices for the sprint
+(every other sprint's, never its own, #1118), so a first launch, an owner retry and a takeover
+all carry the block before the goal; a wake does not (the manager reads it with `sprint inbox`).
 
 Profile choice (#1011, ADR-console-023): `GET /api/profile` answers the profile a new session should
 use, `manager.session_profile` over `capacity.capacity_view` of the profile directories read at that
@@ -1154,12 +1203,13 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    activation, account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
-    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
+    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_POSTED, NOTICE_WITHDRAWN,
+    QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
@@ -1210,6 +1260,9 @@ INBOX_PATH = "/api/inbox"
 MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
+NOTICE_PATH = "/api/notice"
+NOTICES_PATH = "/api/notices"
+WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
@@ -1262,10 +1315,14 @@ SECRET_HEADER = "X-Console-Secret"
 MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
+                                            NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
                                             PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
+MAX_NOTICE_BYTES = 16384
+MAX_NOTICES_BYTES = 4096
+MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -1285,6 +1342,8 @@ SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
 TRACKER_THREAD = "console-tracker-poll"
+ACTIVATION_SECONDS = 60.0
+ACTIVATION_THREAD = "console-activation-poll"
 ADOPTION_SECONDS = 120.0
 ADOPTION_THREAD = "console-adoption-poll"
 RETENTION_SECONDS = 86400.0
@@ -1436,6 +1495,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._ask_request()
         if route == WITHDRAW_QUESTION_PATH:
             return self._withdraw_question_request()
+        if route == NOTICE_PATH:
+            return self._notice_request()
+        if route == NOTICES_PATH:
+            return self._notices_request()
+        if route == WITHDRAW_NOTICE_PATH:
+            return self._withdraw_notice_request()
         if route == PICTURE_PATH:
             return self._picture_request()
         if route == RECAP_PATH:
@@ -2071,6 +2136,81 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"index": index, "round": round_id}, sort_keys=True, separators=(",", ":")).encode())
 
+    def _notice_request(self):
+        """The manager's route: one notice posted for its project, with the sprint's secret."""
+        length = self._checked_length(MAX_NOTICE_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, notice = sprints.parse_notice_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad notice")
+        try:
+            notice_id = self.server.console.post_notice(sprint_id, secret, notice)
+        except sprints.SecretRefused:
+            print(f"console: notice_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: notice_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: notice_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "notice failed")
+        self._send(200, "application/json", json.dumps(
+            {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _notices_request(self):
+        """The manager's route: the project's open notices, read with the sprint's secret."""
+        length = self._checked_length(MAX_NOTICES_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret = sprints.parse_inbox_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad notices")
+        try:
+            entries = self.server.console.list_notices(sprint_id, secret)
+        except sprints.SecretRefused:
+            print(f"console: notices_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: notices_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: notices_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "notices failed")
+        self._send(200, "application/json", json.dumps(
+            {"notices": entries}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _withdraw_notice_request(self):
+        """The manager's route: one open notice of the sprint taken back, with its secret."""
+        length = self._checked_length(MAX_WITHDRAW_NOTICE_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, notice_id = sprints.parse_withdraw_notice_request(
+                self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad withdraw notice")
+        try:
+            self.server.console.withdraw_notice(sprint_id, secret, notice_id)
+        except sprints.SecretRefused:
+            print(f"console: withdraw_notice_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: withdraw_notice_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: withdraw_notice_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "withdraw notice failed")
+        self._send(200, "application/json", json.dumps(
+            {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
+
     def _picture_request(self):
         """The manager's route: one PNG picture sent with the sprint's secret in headers."""
         length = self._checked_length(MAX_PICTURE_BYTES, media="image/png", wrong_media="png only")
@@ -2526,6 +2666,8 @@ class ConsoleService:
                  tracker: Callable[..., list[dict]] | None = None,
                  tracker_seconds: float = TRACKER_SECONDS,
                  adoption_seconds: float = ADOPTION_SECONDS,
+                 activation_reader: Callable[[Iterable[str]], activation.Activation | None] | None = None,
+                 activation_seconds: float = ACTIVATION_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
@@ -2560,8 +2702,10 @@ class ConsoleService:
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
-                 choice_file: Path | None = None):
+                 choice_file: Path | None = None,
+                 screenshot_dirs: Iterable[Path] = ()):
         self.registry = Path(registry)
+        self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
         self._choice = manager.read_choice(choice_file) if choice_file is not None else None
         self._prober = prober
@@ -2656,6 +2800,10 @@ class ConsoleService:
         self._tracker_seconds = tracker_seconds
         self._adoption_seconds = adoption_seconds
         self._adoption_thread: threading.Thread | None = None
+        self._activation_reader = activation_reader
+        self._activation_seconds = activation_seconds
+        self._activation: activation.Activation | None = None
+        self._activation_thread: threading.Thread | None = None
         self._slug_of = slug_of
         self._branch_pattern_of = branch_pattern_of
         self._patterns: dict[str, str] = {}
@@ -2677,6 +2825,8 @@ class ConsoleService:
         self._signature = None
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
+        # Keeps a sweep from deleting a picture an attach is storing; taken after `_ingest`, never before it.
+        self._storing = threading.Lock()
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
@@ -2816,7 +2966,7 @@ class ConsoleService:
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
-            capacity=cap,
+            capacity=cap, activation=self._activation,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
@@ -4252,9 +4402,12 @@ class ConsoleService:
             self._append_manager(MANAGER_WAITING, project_id, {
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
             return None
+        notices = sprints.notice_block(
+            sprints.project_notices(self._sprints.values(), project_id), sprint_id,
+            int(self._clock() * 1000))
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
-                                  seen_after=sprint.manager_seen_seq or 0)
+                                  seen_after=sprint.manager_seen_seq or 0, notices=notices)
 
     def _unexcluded_launch(self, launch: manager.Launch, token: object,
                            prepared_pin: str | None) -> manager.Launch | None:
@@ -4377,7 +4530,8 @@ class ConsoleService:
 
     def _sweep_pictures(self, events: Iterable[Event]) -> None:
         try:
-            pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
+            with self._storing:
+                pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
         except Exception as error:
             print(f"console: picture_sweep_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
@@ -5198,6 +5352,34 @@ class ConsoleService:
             self._apply(appended)
             return appended[-1].seq
 
+    def post_notice(self, sprint_id: str, secret: str, notice: dict) -> int:
+        """Append one `notice.posted` event for the sprint's project; its seq, the notice's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            others = [other for key, other in self._sprints.items() if key != sprint_id]
+            checked = sprints.postable_notice(sprint, notice, others)
+            appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def list_notices(self, sprint_id: str, secret: str) -> list[dict]:
+        """The open notices of the sprint's project in id order; appends and publishes nothing."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            return sprints.project_notices(self._sprints.values(), sprint.project_id)
+
+    def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
+        """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            others = [other for key, other in self._sprints.items() if key != sprint_id]
+            sprints.withdrawable_notice(sprint, notice_id, others)
+            appended = self.log.append([(NOTICE_WITHDRAWN, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "notice": notice_id})])
+            self._apply(appended)
+            return notice_id
+
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
                         choice: int | None, text: str | None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
@@ -5630,9 +5812,41 @@ class ConsoleService:
                     return
                 self._read_failed(project_id, error)
             else:
+                items = self._with_pictures(project_id, state.root, items)
                 if self._stop.is_set():
                     return
                 self._read_succeeded(project_id, items, generation)
+
+    def _with_pictures(self, project_id: str, root: str, items: list[dict]) -> list[dict]:
+        """Each verification item with its pictures attached; one that fails is kept without them."""
+        roots = [Path(root), *self._screenshot_dirs]
+        attached = []
+        for entry in items:
+            if "check_id" in entry:
+                try:
+                    with self._storing:
+                        entry = inbox.attach_pictures(entry, roots, self.pictures_dir)
+                except Exception as error:
+                    print(f"console: picture_attach_failed {project_id} {type(error).__name__}: {error}",
+                          file=sys.stderr)
+            attached.append(entry)
+        return attached
+
+    def poll_activation(self) -> None:
+        """One activation reading over the registered roots; see the module docstring."""
+        if self._activation_reader is None:
+            return
+        with self._ingest:
+            roots = sorted(state.root for state in self._states.values())
+        try:
+            found = self._activation_reader(roots)
+        except Exception as error:
+            print(f"console: activation_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return
+        with self._ingest:
+            if found != self._activation:
+                self._activation = found
+                self._publish()
 
     def _read_failed(self, project_id: str, error: Exception) -> None:
         print(f"console: tracker_failed {project_id} {type(error).__name__}: {error}", file=sys.stderr)
@@ -5836,6 +6050,16 @@ class ConsoleService:
             if self._stop.wait(self._tracker_seconds):
                 return
 
+    def _activate(self) -> None:
+        while True:
+            try:
+                self.poll_activation()
+            except Exception as error:
+                print(f"console: activation_poll_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            if self._stop.wait(self._activation_seconds):
+                return
+
     def _watch(self) -> None:
         while not self._stop.wait(self._poll_seconds):
             current = signature(self.registry)
@@ -5858,6 +6082,10 @@ class ConsoleService:
             self._tracker_thread = threading.Thread(
                 target=self._track, name=TRACKER_THREAD, daemon=True)
             self._tracker_thread.start()
+        if self._activation_reader is not None:
+            self._activation_thread = threading.Thread(
+                target=self._activate, name=ACTIVATION_THREAD, daemon=True)
+            self._activation_thread.start()
         if self._forge is not None:
             self._adoption_thread = threading.Thread(
                 target=self._adopt, name=ADOPTION_THREAD, daemon=True)
@@ -5894,6 +6122,8 @@ class ConsoleService:
             self._session_poller.join()
         if self._tracker_thread is not None:
             self._tracker_thread.join()
+        if self._activation_thread is not None:
+            self._activation_thread.join()
         if self._adoption_thread is not None:
             self._adoption_thread.join()
         if self._retention_thread is not None:

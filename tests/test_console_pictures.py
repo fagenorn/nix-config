@@ -35,11 +35,8 @@ from .test_console_sprint_command import run_sprint
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
-PIXEL = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f00050001ff56c72f0d0000000049454e44ae426082")
-WIDE = bytes.fromhex(
-    "89504e470d0a1a0a0000000d4948445200000002000000010806000000f4227f8a0000000e4944415478da636060f8ff1f84010dfb03fd9a369bf10000000049454e44ae426082")
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + b"\x00" * 64 + b"\xff\xd9"
+from .console_test_support import JPEG, PIXEL, WIDE  # noqa: F401 -- fixtures shared with the inbox suite (#1112)
+from .console_test_support import get_page as get
 
 
 def chunk(kind: bytes, data: bytes) -> bytes:
@@ -182,6 +179,12 @@ class PictureStoreTest(unittest.TestCase):
             Event(3, "t", "other", None, {"pictures": a}),
         ]
         self.assertEqual(pictures.referenced(events), frozenset({a}))
+
+    def test_an_inbox_rows_picture_entries_reference_their_ids(self):
+        d = "d" * 64
+        event = Event(4, "t", "inbox.changed", "o/p", {"pictures": [
+            {"id": d, "line": "x.png", "pair": None}, {"id": "bad"}, {"line": "y"}]})
+        self.assertEqual(pictures.referenced([event]), frozenset({d}))
 
     def test_the_stored_kind_is_the_event_logs_and_is_not_kept(self):
         a = "a" * 64
@@ -923,21 +926,6 @@ class PictureRetentionTest(PictureCase):
         self.assertEqual(len(lines), 2)
 
 
-def get(address, path, headers=None):
-    connection = http.client.HTTPConnection(*address, timeout=5)
-    try:
-        connection.putrequest("GET", path, skip_host=True)
-        connection.putheader("Host", f"{address[0]}:{address[1]}")
-        for name, value in (headers or {}).items():
-            for member in (value if isinstance(value, list) else [value]):
-                connection.putheader(name, member)
-        connection.endheaders()
-        response = connection.getresponse()
-        return response.status, response.getheaders(), response.read()
-    finally:
-        connection.close()
-
-
 def values(headers, name):
     return [value for key, value in headers if key.lower() == name.lower()]
 
@@ -1647,7 +1635,7 @@ class PictureDocsTest(unittest.TestCase):
                 ("019-a-managers-questions-arrive-as-inbox-items.md",
                  "- **Status:** accepted; amended by ADR-console-038, ADR-console-040"),
                 ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-038")):
+                 "- **Status:** accepted; amended by ADR-console-038 and ADR-console-045")):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
@@ -1671,12 +1659,14 @@ class PictureDocsTest(unittest.TestCase):
                        "ADR-console-014", "ADR-console-036", "ADR-console-038"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
-        for path in ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
-                     "038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md"):
+        for path, amended in (
+                ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
+                 "- **Status:** accepted; amended by ADR-console-041"),
+                ("038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
+                 "- **Status:** accepted; amended by ADR-console-041 and ADR-console-045")):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
-                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
-                                 "- **Status:** accepted; amended by ADR-console-041")
+                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
         with self.subTest("014"):
             lines = (ROOT / adr / "014-a-managers-report-becomes-the-sprints-line.md"
                      ).read_text().splitlines()

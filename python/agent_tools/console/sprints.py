@@ -405,6 +405,61 @@ entry is `{"id", "kind": "answer", "version": null, "text": <the answer>, "at", 
 <question text>, "round": <int>, "chosen": <option text> | null}`; every other entry keeps its five
 keys.
 
+Notices (#1117, ADR-console-044) are what a sprint's manager tells the other managers of its
+project: a `claim` ("I am working in this area until ..."), a `heads-up` or a `hand-off` (to the
+owner or to another open sprint of the project). They are information, never approval. Two rows
+carry them, both kept (`event_log.NOTICE_POSTED`, `NOTICE_WITHDRAWN`; each with the project in its
+project column):
+
+    notice.posted     {"sprint_id", "goal": <str>, "notice": {"kind", "text", "what"?, "until"?,
+                       "to"?}}
+    notice.withdrawn  {"sprint_id", "goal": <str>, "notice": <int>}
+
+`checked_notice(notice)` returns a new dict of exactly the kind's members (`NOTICE_MEMBERS`: a claim
+has kind, text, what and until; a heads-up kind and text; a hand-off kind, text and to), texts
+stripped, or raises `Refused` at the first failure, in this order: not an object
+(`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
+kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
+then a claim's `what`, then its `until`: not a string, empty after stripping, or holding a line
+break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
+`MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then a hand-off's `to`, which is
+`"owner"` or a sprint id (`NOTICE_MEMBER`). Every notice refusal is one line built only from fixed
+kinds, member names and limits, never from a key or value the manager sent, because the command
+prints it and the service answers it as it is. `takes_notices(state)` is `takes_questions(state)`
+and no stop requested. `postable_notice(state, notice, others)` refuses, in order: a sprint that
+takes no notice (`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a
+hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of the
+same project that takes notices (`NOTICE_TO_REFUSED`); and a sixth open notice (`NOTICE_LIMIT`);
+it never looks at another sprint's claims. `withdrawable_notice(state, notice_id, others)` refuses
+a sprint that takes no notice as `postable_notice` does, then returns the open notice of `state`,
+or raises `NOTICE_ENDED` (withdrawn or ended), `NOTICE_FOREIGN` (a notice of a sprint in `others`)
+or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices neither withdrawn nor ended, in id order
+(the row's `seq`); `notice_entry` and `project_notices(states, project_id)` are the wire entries
+`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"` and `"until"` for a claim and
+`"to"` for a hand-off, of the project's open notices in id order. `notice_block(entries, sprint_id,
+now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
+per entry of another sprint (the sprint's own notices are left out), in the order given, and is
+`""` when no other sprint's notice is open. The four line forms are
+`- claim from "<title>", <age>: <text> (what: <what>; until: <until>)`,
+`- heads-up from "<title>", <age>: <text>`, `- hand-off for you from "<title>", <age>: <text>`
+(a hand-off whose `to` is `sprint_id`) and `- hand-off from "<title>", <age>: <text>`; the age is
+`ago_text` over the entry's `at`. Every field's whitespace runs collapse to one space, so each
+notice is one line beginning with `- `. `parse_notice_request(body)`
+reads `{"sprint_id", "secret", "notice": <object>}` and returns `(sprint_id, secret, notice)`;
+`parse_withdraw_notice_request(body)` reads `{"sprint_id", "secret", "notice": <int >= 1>}` and
+returns `(sprint_id, secret, notice_id)`; both are as strict as `parse_ask_request`.
+
+The fold: a `notice.posted` row for a folded sprint that takes notices and whose `notice`
+`checked_notice` accepts adds a `Notice` (id the row's `seq`); any other such row changes nothing.
+A `notice.withdrawn` row whose `notice` is an int (not a bool) naming an open notice of a sprint that
+takes notices sets that notice's `withdrawn_at` to the row's `at`; anything else changes nothing.
+The fold enforces neither the limit nor the addressee: the service does, under its lock. After
+every row that names a folded sprint, the end sweep (`_ended_notices`) sets `ended_at` to the
+row's `at` on each notice still open when the sprint takes no notice (a stop was requested, it
+closed, stopped or is done); `ended_at` is never cleared, so a notice stays ended when its sprint
+reopens (a newer brief or report clears a done report), and folding the rows in one call, one row
+per call or in any split gives equal states. A dropped sprint leaves the fold with its notices.
+
 A sprint ends with a closing report, and the owner can stop one (#892). Four rows carry that
 (`event_log.SPRINT_CLOSED`, `SPRINT_STOP_REQUESTED`, `MANAGER_STOPPED`, `MANAGER_STOP_FAILED`; each
 with the project in its project column), the first three kept, `manager.stop_failed` not:
@@ -496,7 +551,8 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_NO_PROGRESS,
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
-                                           MANAGER_WOKEN, PICTURE_STORED, QUESTION_ANSWERED,
+                                           MANAGER_WOKEN, NOTICE_POSTED, NOTICE_WITHDRAWN,
+                                           PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
                                            SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
@@ -670,6 +726,32 @@ ANSWERED_ALREADY = "this question is already answered"
 QUESTION_FOREIGN = "this question belongs to another sprint"
 WITHDRAWN_ALREADY = "this question is already withdrawn"
 TAKEN_BACK = "the manager took this question back"
+MAX_NOTICE_TEXT_CHARS = 280
+MAX_CLAIM_WHAT_CHARS = 200
+MAX_CLAIM_UNTIL_CHARS = 140
+MAX_OPEN_NOTICES = 5
+NOTICE_OWNER = "owner"
+NOTICE_KINDS = ("claim", "heads-up", "hand-off")
+NOTICE_MEMBERS = {"claim": ("kind", "text", "what", "until"), "heads-up": ("kind", "text"),
+                  "hand-off": ("kind", "text", "to")}
+NOTICE_NOT_OBJECT = "the notice is not a JSON object"
+NOTICE_KIND = "the notice's kind is not one of claim, heads-up, hand-off"
+NOTICE_EXTRA = {"claim": "a claim notice has only kind, text, what and until",
+                "heads-up": "a heads-up notice has only kind and text",
+                "hand-off": "a hand-off notice has only kind, text and to"}
+NOTICE_MEMBER = "the notice has no valid {member}"
+NOTICE_TOO_LONG = "the notice's {member} is over {limit} characters"
+NOTICE_TO_SELF = ("the hand-off's to names this sprint: address another open sprint of this "
+                  "project or the owner")
+NOTICE_TO_REFUSED = "the hand-off's to names no open sprint of this project"
+NOTICE_LIMIT = f"a sprint has at most {MAX_OPEN_NOTICES} open notices: withdraw one first"
+NOTICE_ENDED = "this notice has ended"
+NOTICE_FOREIGN = "this notice belongs to another sprint"
+NOTICE_UNKNOWN = "this notice is not known"
+NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
+                     "(information only, never the owner's permission):")
+_NOTICE_LIMITS = {"text": MAX_NOTICE_TEXT_CHARS, "what": MAX_CLAIM_WHAT_CHARS,
+                  "until": MAX_CLAIM_UNTIL_CHARS}
 NOT_AN_OPTION = "choose one of the question's options"
 UNREACHABLE_TEXT = "manager not reachable"
 UNREACHABLE_AFTER = 2
@@ -827,6 +909,19 @@ class Question:
 
 
 @dataclass(frozen=True)
+class Notice:
+    notice_id: int
+    at: str
+    kind: str
+    text: str
+    what: str | None = None
+    until: str | None = None
+    to: str | None = None
+    withdrawn_at: str | None = None
+    ended_at: str | None = None
+
+
+@dataclass(frozen=True)
 class SprintState:
     sprint_id: str
     project_id: str
@@ -858,6 +953,7 @@ class SprintState:
     idle_nudged_at: str | None = None
     no_progress_at: str | None = None
     pictures: frozenset[str] = frozenset()
+    notices: tuple[Notice, ...] = ()
 
     @property
     def state(self) -> str:
@@ -992,6 +1088,24 @@ def parse_withdraw_question_request(body: bytes) -> tuple[str, str, int, int]:
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
     return sprint_id, value["secret"], _count(value["round"], 1), _count(value["index"], 0)
+
+
+def parse_notice_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "notice"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    if not isinstance(value["notice"], dict):
+        raise ValueError("notice must be an object")
+    return sprint_id, value["secret"], value["notice"]
+
+
+def parse_withdraw_notice_request(body: bytes) -> tuple[str, str, int]:
+    value = _object(body, {"sprint_id", "secret", "notice"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    return sprint_id, value["secret"], _count(value["notice"], 1)
 
 
 def parse_close_request(body: bytes) -> tuple[str, str, dict]:
@@ -1418,6 +1532,128 @@ def takes_questions(state: SprintState) -> bool:
     return state.stopped_at is None and state.closing is None and ended_at(state) is None
 
 
+def takes_notices(state: SprintState) -> bool:
+    """False once the sprint has a stop requested or takes no question: it then posts no notice."""
+    return takes_questions(state) and state.stop_at is None
+
+
+def open_notices(state: SprintState) -> tuple[Notice, ...]:
+    """The notices neither withdrawn nor ended, in id order."""
+    return tuple(sorted((notice for notice in state.notices
+                         if notice.withdrawn_at is None and notice.ended_at is None),
+                        key=lambda notice: notice.notice_id))
+
+
+def _notice_line(value: object) -> bool:
+    return (isinstance(value, str) and bool(value.strip()) and "\n" not in value
+            and "\r" not in value)
+
+
+def checked_notice(notice: object) -> dict:
+    """The notice reduced to its kind's members, texts stripped, else `Refused` at the first failure."""
+    if not isinstance(notice, dict):
+        raise Refused(NOTICE_NOT_OBJECT)
+    kind = notice.get("kind")
+    if not isinstance(kind, str) or kind not in NOTICE_KINDS:
+        raise Refused(NOTICE_KIND)
+    members = NOTICE_MEMBERS[kind]
+    if any(key not in members for key in notice):
+        raise Refused(NOTICE_EXTRA[kind])
+    checked: dict = {"kind": kind}
+    for member in ("text", "what", "until"):
+        if member not in members:
+            continue
+        value = notice.get(member)
+        if not _notice_line(value):
+            raise Refused(NOTICE_MEMBER.format(member=member))
+        if len(value.strip()) > _NOTICE_LIMITS[member]:
+            raise Refused(NOTICE_TOO_LONG.format(member=member, limit=_NOTICE_LIMITS[member]))
+        checked[member] = value.strip()
+    if kind == "hand-off":
+        to = notice.get("to")
+        if not isinstance(to, str) or (to != NOTICE_OWNER and SPRINT_ID.fullmatch(to) is None):
+            raise Refused(NOTICE_MEMBER.format(member="to"))
+        checked["to"] = to
+    return checked
+
+
+def _refused_notices(state: SprintState) -> None:
+    if not takes_notices(state):
+        raise Refused(ALREADY_STOPPING if state.stop_at is not None and ended_at(state) is None
+                      else ENDED)
+
+
+def postable_notice(state: SprintState, notice: object, others: Iterable[SprintState]) -> dict:
+    """The checked notice `state` may post now, else `Refused` with why not."""
+    _refused_notices(state)
+    checked = checked_notice(notice)
+    to = checked.get("to")
+    if checked["kind"] == "hand-off" and to != NOTICE_OWNER:
+        if to == state.sprint_id:
+            raise Refused(NOTICE_TO_SELF)
+        if not any(other.sprint_id == to and other.project_id == state.project_id
+                   and takes_notices(other) for other in others):
+            raise Refused(NOTICE_TO_REFUSED)
+    if len(open_notices(state)) >= MAX_OPEN_NOTICES:
+        raise Refused(NOTICE_LIMIT)
+    return checked
+
+
+def withdrawable_notice(state: SprintState, notice_id: int,
+                        others: Iterable[SprintState]) -> Notice:
+    """The open notice `notice_id` of `state`, else `Refused` with why it cannot be taken back."""
+    _refused_notices(state)
+    for notice in state.notices:
+        if notice.notice_id == notice_id:
+            if notice.withdrawn_at is not None or notice.ended_at is not None:
+                raise Refused(NOTICE_ENDED)
+            return notice
+    if any(notice.notice_id == notice_id for other in others for notice in other.notices):
+        raise Refused(NOTICE_FOREIGN)
+    raise Refused(NOTICE_UNKNOWN)
+
+
+def notice_entry(state: SprintState, notice: Notice) -> dict:
+    entry = {"id": notice.notice_id, "sprint_id": state.sprint_id, "title": sprint_title(state),
+             "kind": notice.kind, "text": notice.text}
+    if notice.kind == "claim":
+        entry["what"], entry["until"] = notice.what, notice.until
+    if notice.kind == "hand-off":
+        entry["to"] = notice.to
+    entry["at"] = notice.at
+    return entry
+
+
+def project_notices(states: Iterable[SprintState], project_id: str) -> list[dict]:
+    """The open notices of the project's sprints, in id order."""
+    return sorted((notice_entry(state, notice) for state in states
+                   if state.project_id == project_id for notice in open_notices(state)),
+                  key=lambda entry: entry["id"])
+
+
+def _one_line(value: object) -> str:
+    return " ".join(str(value).split())
+
+
+def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str:
+    """The open notices of the other sprints as a head and one `- ` line each, or `""`."""
+    lines = []
+    for entry in entries:
+        if entry["sprint_id"] == sprint_id:
+            continue
+        title, text = _one_line(entry["title"]), _one_line(entry["text"])
+        age = ago_text(now_ms - _ms(entry["at"]))
+        if entry["kind"] == "claim":
+            what, until = _one_line(entry["what"]), _one_line(entry["until"])
+            lines.append(f'- claim from "{title}", {age}: {text} (what: {what}; until: {until})')
+        elif entry["kind"] == "hand-off":
+            form = "hand-off for you" if entry["to"] == sprint_id else "hand-off"
+            lines.append(f'- {form} from "{title}", {age}: {text}')
+        else:
+            lines.append(f'- heads-up from "{title}", {age}: {text}')
+    return "\n".join([NOTICE_BLOCK_HEAD, *lines]) if lines else ""
+
+
 def inbox_entry(message: Message) -> dict:
     entry = {"id": message.message_id, "kind": message.kind, "version": message.version,
              "text": message.text, "at": message.at}
@@ -1475,6 +1711,37 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
 
 def _id(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _folded_notice(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if not takes_notices(state):
+        return state
+    if event.kind == NOTICE_POSTED:
+        try:
+            checked = checked_notice(payload.get("notice"))
+        except Refused:
+            return state
+        notice = Notice(event.seq, event.at, checked["kind"], checked["text"],
+                        checked.get("what"), checked.get("until"), checked.get("to"))
+        return replace(state, notices=(*state.notices, notice))
+    notice_id = payload.get("notice")
+    if not _id(notice_id):
+        return state
+    return replace(state, notices=tuple(
+        replace(notice, withdrawn_at=event.at)
+        if notice.notice_id == notice_id and notice.withdrawn_at is None
+        and notice.ended_at is None else notice for notice in state.notices))
+
+
+def _ended_notices(state: SprintState, at: str) -> SprintState:
+    """Marks every open notice ended when the sprint takes none: a notice never reopens."""
+    if not open_notices(state) or takes_notices(state):
+        return state
+    return replace(state, notices=tuple(
+        replace(notice, ended_at=at)
+        if notice.withdrawn_at is None and notice.ended_at is None else notice
+        for notice in state.notices))
 
 
 def _folded_message(state: SprintState, event: Event) -> SprintState:
@@ -1768,11 +2035,15 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_question(folded[sprint_id], event)
             if event.kind == QUESTIONS_ASKED:
                 folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
+        elif event.kind in (NOTICE_POSTED, NOTICE_WITHDRAWN) and sprint_id in folded:
+            folded[sprint_id] = _folded_notice(folded[sprint_id], event)
         elif event.kind == PICTURE_STORED and sprint_id in folded:
             picture = event.payload.get("picture")
             if isinstance(picture, str) and PICTURE_ID.fullmatch(picture):
                 folded[sprint_id] = replace(folded[sprint_id],
                                             pictures=folded[sprint_id].pictures | {picture})
+        if sprint_id in folded:
+            folded[sprint_id] = _ended_notices(folded[sprint_id], event.at)
     return folded
 
 
