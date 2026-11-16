@@ -1,4 +1,4 @@
-# ADR-console-043 — A sprint waiting on CI, a committing delivery or a release step reads what it waits for
+# ADR-console-045 — A sprint waiting on CI, a committing delivery or a release step reads what it waits for
 
 - **Status:** accepted
 - **Decided in:** #1110
@@ -19,9 +19,12 @@ ADR-console-042 gave the state line, the ball, the "last seen" prefix and the di
 
 **D5. One forge read per project with a running sprint every two minutes.** The service reads, on its own thread, one GraphQL call per project with a running sprint every two minutes, for at most fifty open pull requests, newest updated first, through the retries of ADR-console-032 D2 and D3, never inside the ingest lock. A failed or timed-out read keeps the last reading, whose signals age out after the window. Readings live in memory, not in the event log; a restart loses them and reads at once.
 
+**D6. CI counts only while a check is queued or in progress.** The forge read counts the head commit's contexts by state (`checkRunCountsByState`, `statusContextCountsByState`), so a pull request with more than a page of checks is still read whole. A check run counts as CI running in `QUEUED`, `IN_PROGRESS` or `PENDING`, a status in `PENDING`. A check in `WAITING` is held on a person, such as a deployment environment waiting for a reviewer, and like `attention_required` in D4 it lets the sprint read may be stuck.
+
 ## Consequences
 
 - A sprint whose only movement is CI on its pull request, a commit on its branch or a release in progress reads moving, and its line says which: `waiting for CI on its pull request`, `a delivery is committing` or `waiting for a release step`.
+- A check held for a reviewer's approval moves nothing, so the sprint reads may be stuck once the window passes.
 - A release left nonterminal keeps the sprint reading "waiting for a release step"; a parked release (`attention_required`) lets it read may be stuck.
 - A release state outside the release core's vocabulary moves nothing and is reported once as `movement_release_invalid`.
 - A merged pull request or a deleted branch keeps moving the sprint for the window after it was last seen, then stops.

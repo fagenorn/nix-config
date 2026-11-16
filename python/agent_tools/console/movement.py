@@ -4,11 +4,13 @@ clock: the caller passes `now_ms`. `read_pulls` takes the `gh` call and a cancel
 arguments; `branch_updates` and `release_reading` only read files, start no process and take no lock.
 
 Pull requests. One GraphQL query (`PULLS_QUERY`, `pulls_argv`) asks for the `MAX_PULLS` most recently
-updated open pull requests with the head commit's `committedDate` and its check contexts. `read_pulls`
+updated open pull requests with the head commit's `committedDate` and its check contexts counted by state. `read_pulls`
 makes exactly one `call`, with `pulls_argv(slug)`, and asks `cancelled()` before it; when cancelled it
-raises `ForgeError("cancelled")` and makes no call. A pull request is `running` when any `CheckRun`
-context's `status` is in `RUNNING_CHECKS` or any `StatusContext` context's `state` is in
-`RUNNING_STATUSES`; a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
+raises `ForgeError("cancelled")` and makes no call. A pull request is `running` when the head commit has a `CheckRun` counted
+in a state of `RUNNING_CHECKS` (queued, in progress or pending) or a `StatusContext` counted in a state
+of `RUNNING_STATUSES`, however many other contexts it has, since the counts cover every context and not
+a first page of them. A check in `WAITING` is held on a person (a deployment environment's reviewer),
+not running CI, so it does not count (ADR-console-045 D6); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
 `deliveries.branch_issue(pattern, headRefName)` (when not None) united with `body_issues(body)`, which
 matches `(?<![\\w/])#(\\d+)\\b`, so `owner/repo#6` and `abc#6` name nothing. `committed_ms` is the head
 commit's `committedDate` in epoch milliseconds, None with no commit. An answer of another shape raises
@@ -69,12 +71,9 @@ PULLS_QUERY = """query($owner: String!, $name: String!) {
             commit {
               committedDate
               statusCheckRollup {
-                contexts(first: 100) {
-                  nodes {
-                    __typename
-                    ... on CheckRun { status }
-                    ... on StatusContext { state }
-                  }
+                contexts(first: 1) {
+                  checkRunCountsByState { state count }
+                  statusContextCountsByState { state count }
                 }
               }
             }
@@ -84,7 +83,7 @@ PULLS_QUERY = """query($owner: String!, $name: String!) {
     }
   }
 }"""
-RUNNING_CHECKS = frozenset({"QUEUED", "IN_PROGRESS", "WAITING", "PENDING", "REQUESTED"})
+RUNNING_CHECKS = frozenset({"QUEUED", "IN_PROGRESS", "PENDING"})
 RUNNING_STATUSES = frozenset({"PENDING"})
 HELD_FOR_A_PERSON = "attention_required"
 REFLOG_TAIL_BYTES = 4096
@@ -162,16 +161,22 @@ def _committed_ms(text: object) -> int:
     return int(moment.timestamp() * 1000)
 
 
-def _running(contexts: list) -> bool:
-    running = False
-    for context in contexts:
-        context = _dict(context, "check context")
-        kind = context.get("__typename")
-        if kind == "CheckRun" and context.get("status") in RUNNING_CHECKS:
-            running = True
-        elif kind == "StatusContext" and context.get("state") in RUNNING_STATUSES:
-            running = True
-    return running
+def _counts(value: object, what: str) -> dict[str, int]:
+    counted: dict[str, int] = {}
+    for entry in _list(value, what):
+        entry = _dict(entry, what)
+        state, count = entry.get("state"), entry.get("count")
+        if not isinstance(state, str) or type(count) is not int or count < 0:
+            raise _invalid(f"{what} has an entry without a state and a count")
+        counted[state] = counted.get(state, 0) + count
+    return counted
+
+
+def _running(contexts: dict) -> bool:
+    checks = _counts(contexts.get("checkRunCountsByState"), "checkRunCountsByState")
+    statuses = _counts(contexts.get("statusContextCountsByState"), "statusContextCountsByState")
+    return (any(checks.get(state) for state in RUNNING_CHECKS)
+            or any(statuses.get(state) for state in RUNNING_STATUSES))
 
 
 def _pull(node: object, pattern: str | None) -> PullRequest:
@@ -195,7 +200,7 @@ def _pull(node: object, pattern: str | None) -> PullRequest:
         rollup = commit.get("statusCheckRollup")
         if rollup is not None:
             contexts = _dict(_dict(rollup, "statusCheckRollup").get("contexts"), "contexts")
-            running = _running(_list(contexts.get("nodes"), "contexts.nodes"))
+            running = _running(contexts)
     return PullRequest(number, frozenset(issues), running, committed)
 
 

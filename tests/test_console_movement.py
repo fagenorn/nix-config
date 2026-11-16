@@ -65,6 +65,28 @@ class PullsTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "cancelled")
         self.assertEqual(len(calls), 1)
 
+    def test_only_a_check_still_queued_or_running_counts_however_many_have_finished(self):
+        def running(check_runs, statuses=()):
+            data = answer()
+            node = nodes_of(data)[0]
+            node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"] = {
+                "checkRunCountsByState": [{"state": s, "count": c} for s, c in check_runs],
+                "statusContextCountsByState": [{"state": s, "count": c} for s, c in statuses]}
+            return movement.pulls_from_answer(data, PATTERN)[0].running
+
+        self.assertTrue(running([("SUCCESS", 100), ("IN_PROGRESS", 1)]))
+        self.assertTrue(running([("SUCCESS", 100), ("QUEUED", 1)]))
+        self.assertTrue(running([("SUCCESS", 100)], [("PENDING", 1)]))
+        self.assertFalse(running([("SUCCESS", 150), ("FAILURE", 2), ("IN_PROGRESS", 0)]))
+        # held on a person, such as a deployment environment's reviewer: not CI running
+        self.assertFalse(running([("SUCCESS", 3), ("WAITING", 1)]))
+        self.assertFalse(running([("WAITING", 1)], [("SUCCESS", 1)]))
+
+    def test_the_query_asks_for_counts_by_state_not_a_page_of_contexts(self):
+        self.assertIn("checkRunCountsByState", movement.PULLS_QUERY)
+        self.assertIn("statusContextCountsByState", movement.PULLS_QUERY)
+        self.assertNotIn("__typename", movement.PULLS_QUERY)
+
     def test_an_answer_of_another_shape_is_payload_invalid(self):
         def with_node(change):
             data = answer()
@@ -80,7 +102,13 @@ class PullsTest(unittest.TestCase):
             "string number": with_node(lambda n: n.update(number="40")),
             "bad date": with_node(
                 lambda n: n["commits"]["nodes"][0]["commit"].update(committedDate="not a date")),
-            "contexts not a list": with_node(lambda n: contexts(n).update(nodes="x")),
+            "counts not a list": with_node(
+                lambda n: contexts(n).update(checkRunCountsByState="x")),
+            "count of no state": with_node(
+                lambda n: contexts(n).update(statusContextCountsByState=[{"count": 1}])),
+            "count not a number": with_node(
+                lambda n: contexts(n).update(
+                    checkRunCountsByState=[{"state": "QUEUED", "count": "1"}])),
         }
         for name, data in cases.items():
             with self.subTest(name):
