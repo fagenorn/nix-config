@@ -661,6 +661,9 @@ function sprintDetail(sprint) {
   fold.appendChild(el("summary", "", reported || closed ? "Show the report" : "Show the goal"));
   if (reported) fold.appendChild(el("p", "report-status", sprint.status));
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
+  if (typeof sprint.permission_text === "string") {
+    fold.appendChild(el("p", "permission", "Permission mode " + sprint.permission_text));
+  }
   if (typeof sprint.progress_text === "string") {
     fold.appendChild(el("p", "progress", sprint.progress_text));
   }

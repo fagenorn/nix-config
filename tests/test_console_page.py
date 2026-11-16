@@ -4805,6 +4805,22 @@ class PageSprintReportTest(unittest.TestCase):
         for cls in ("progress", "status", "report-status"):
             self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
 
+    def test_the_sprint_detail_shows_the_permission_mode(self) -> None:
+        shown = {**SPRINT, "permission_text": "bypass: production rules in place"}
+        closing = {**SPRINT, "closing": CLOSING,
+                   "permission_text": "auto: no production rules declared"}
+        open_sprint, closed_sprint = render([
+            START, {"frame": with_sprints([shown])}, {"snapshot": True},
+            {"frame": with_sprints([closing])}, {"snapshot": True}])
+        (fold,) = detail_nodes(sprint_lines(open_sprint)[0])
+        self.assertEqual([c["cls"] for c in fold["children"]],
+                         ["", "sprint-goal-full", "permission"])
+        self.assertEqual(full(fold["children"][2]),
+                         "Permission mode bypass: production rules in place")
+        (closed_fold,) = detail_nodes(sprint_lines(closed_sprint)[0])
+        (note,) = [c for c in closed_fold["children"] if has_class(c, "permission")]
+        self.assertEqual(full(note), "Permission mode auto: no production rules declared")
+
 
 CLOSING = {
     "at": "2026-11-12T11:00:00+00:00", "summary": "The importer now resumes after a crash.",

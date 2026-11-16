@@ -42,6 +42,15 @@ def iso(seconds):
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="microseconds")
 
 
+def sprint_in_view(test, svc, sid):
+    for entry in view_of(svc)["entries"]:
+        for project in entry["projects"] if entry["type"] == "quiet_group" else [entry]:
+            for sprint in project["sprints"]:
+                if sprint["sprint_id"] == sid:
+                    return sprint
+    test.fail("the sprint is not in the view")
+
+
 class ManagerPermissionTest(Case):
     """The service reads the project's mode off the lock and launches the manager in it (#1151)."""
 
@@ -99,6 +108,25 @@ class ManagerPermissionTest(Case):
                       stderr.getvalue())
 
 
+    def sprint(self, svc, sid):
+        return sprint_in_view(self, svc, sid)
+
+    def test_the_sprint_shows_the_mode_its_manager_was_started_in(self):
+        bypass = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
+        auto = permission.Permission(permission.AUTO, permission.NOT_DECLARED)
+        svc, launches = self.launch(lambda project_id, root: bypass)
+        self.assertEqual(self.sprint(svc, launches.calls[0].sprint_id)["permission_text"],
+                         "bypass: production rules in place")
+        launched = support.Launches()
+        other = self.start(
+            launcher=launched, permission_reader=lambda project_id, root: auto,
+            session_poll_seconds=3600,
+            profile_dirs=[support.profile_dir(self.store, "work")])
+        other.state_goal("owner/p00", "make the importer resumable")
+        self.assertEqual(self.sprint(other, launched.calls[0].sprint_id)["permission_text"],
+                         "auto: no production rules declared")
+
+
 class ManagerServiceTest(Case):
     def start(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
@@ -125,12 +153,7 @@ class ManagerServiceTest(Case):
         return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
 
     def sprint(self, svc, sid):
-        for entry in view_of(svc)["entries"]:
-            for project in entry["projects"] if entry["type"] == "quiet_group" else [entry]:
-                for sprint in project["sprints"]:
-                    if sprint["sprint_id"] == sid:
-                        return sprint
-        self.fail("the sprint is not in the view")
+        return sprint_in_view(self, svc, sid)
 
     def manager_rows(self):
         return [r for r in support.log_rows(self.store) if r[2].startswith("manager.")]
