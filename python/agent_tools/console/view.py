@@ -35,7 +35,8 @@ whose `ok` is not a bool is ignored, `project.unregistered` removes the project'
 Every inbox event also moves its registered project's last sequence and time.
 
 Ordering and folding: a project is active when `open_work > 0`, it has a
-listed session or it has a shown sprint, and quiet otherwise. Each group is sorted by newest `last_seq` first, then `project_id`.
+listed session, it has a shown sprint or it has a waiting line of its own (`waits` of its entry), and
+quiet otherwise. Each group is sorted by newest `last_seq` first, then `project_id`.
 The entries are the active projects, then the quiet projects, except that more
 than `FOLD_AFTER` quiet projects are replaced by one `quiet_group` entry.
 
@@ -108,6 +109,21 @@ the stored `question`), and `answered_at` is the record's (null while open). The
 registered projects are shown. Open tracker items are sorted by most held work first, then
 `waiting_since`, then `key`; answered items are listed apart, never counted, by
 `waiting_since` then `key`.
+
+A waiting check (#1129) is an open inbox item of a shown project whose `wait` member is a mapping
+(`is_waiting`, which takes no time): an owner check that is not due, or whose wording states a wait its
+verify block does not date. It is a line and nothing else: it is no card, it is not in `inbox.open`,
+and it changes no `inbox_items`, headline, sentence, sprint `waiting` or `ball`. Its wait entry has the
+item's `key`, `issue` and `url`; a dated wait (`reason` `not_before` or `window`, with a string `until`)
+has that `until` and its `what` as `text`, every other wait has `until` null and the `WAIT_TEXT` of its
+reason (`unknown` for any other): `window_opening`, `not_released`, `not_deployed`, `ci_not_passed`,
+`unknown`, `no_when` and `due`. The line sits in the `waits` of the first shown sprint of its project,
+newest `stated_seq` first, whose report names its issue (its `issues` or `inbox`, as `waiting` reads
+them), else in its project entry's `waits`; a finished sprint's `waits` is `[]`, and every list is
+sorted by `key`. No clock ends a wait here: `now_ms` is the host's, and a wait changes only when a
+tracker read, which evaluates with the forge's clock (`inbox.read_items`), changes or drops the item's
+`wait`, so a dated line whose day has passed stays until that read. A project with a `waits` line is
+active, never quiet and never folded into the quiet group.
 
 A waiting brief (a shown sprint whose `brief` is not None and whose decision is `none`) is one
 entry of `inbox.open`, before every tracker item, ordered by `waiting_since` then `sprint_id`, and
@@ -339,11 +355,12 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
-"notices": [<notice entry>, ...]}`; a group entry is
+"notices": [<notice entry>, ...], "waits": [<wait entry>, ...]}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
+    <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
                       "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
                       "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
@@ -365,6 +382,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "tracker_url": "<url>" | null,
                       "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
                       "waiting": <int>,
+                      "waits": [<wait entry>, ...],
                       "sessions": [<session entry>, ...],
                       "messages": [<message entry>, ...],
                       "reach_text": "manager not reachable" | null,
@@ -712,6 +730,15 @@ NEEDS_LINE = "Register {name}: needs you"
 REGISTER_TYPE_SENTENCE = "Type the answer on its card and press Enter."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
+WAIT_TEXT = {
+    "window_opening": "Waiting for the next verification pass to start its wait: what it waits for has been seen",
+    "not_released": "Waiting for the release to be seen: no release yet includes its merge",
+    "not_deployed": "Waiting for the deploy to be seen: no deploy is known to include its merge",
+    "ci_not_passed": "Waiting for a CI run to pass at its commit",
+    "unknown": "Waiting: the tracker could not say whether it is due yet",
+    "no_when": "Waiting with no date: its wording states a wait, but its verify block has no when field for that wait",
+    "due": "Due now: the next verification pass asks you here",
+}
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")
 UNREAD_DECISION = "A decision waits on the tracker, but its questions could not be read."
@@ -760,6 +787,20 @@ class InboxRecord:
     waiting_since: str
     updated_at: str
     answered_at: str | None = None
+
+
+def is_waiting(item: Mapping) -> bool:
+    """Whether `item` is an owner check that waits (a `wait` member) and is not answered. No clock is read."""
+    return isinstance(item.get("wait"), Mapping) and not item.get("answered")
+
+
+def _wait_entry(record: InboxRecord) -> dict:
+    item, wait = record.item, record.item["wait"]
+    reason, until, what = wait.get("reason"), wait.get("until"), wait.get("what")
+    dated = reason in ("not_before", "window") and isinstance(until, str) and isinstance(what, str)
+    text = WAIT_TEXT["unknown"] if not isinstance(reason, str) else WAIT_TEXT.get(reason, WAIT_TEXT["unknown"])
+    return {"key": item["key"], "issue": item.get("issue"), "url": item.get("url"),
+            "until": until if dated else None, "text": what if dated else text}
 
 
 @dataclass(frozen=True)
@@ -961,9 +1002,12 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
     """How many open items wait on the sprint: `records` naming an issue its report names, plus its
     open questions."""
+    return sum(r.item.get("issue") in _named_issues(state) for r in records) + len(open_questions(state))
+
+
+def _named_issues(state: SprintState) -> set:
     report = state.report
-    named = set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
-    return sum(r.item.get("issue") in named for r in records) + len(open_questions(state))
+    return set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
 
 
 def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str]) -> int | None:
@@ -1167,7 +1211,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   sessions: Sequence[SessionState],
                   deliveries: Mapping[str, Sequence[DeliveryState]],
                   records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
-                  nudges: bool = True, looked: str | None = None) -> dict:
+                  nudges: bool = True, looked: str | None = None,
+                  waits: Sequence[Mapping] = ()) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1221,6 +1266,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "issues": [{"issue": issue, "stage": stage, "stage_text": text}
                    for issue, stage, text in stages],
         "waiting": waiting,
+        "waits": [dict(w) for w in waits],
         "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)
@@ -1249,16 +1295,19 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    finished: Sequence[SprintState] = (),
                    capacity: Mapping = EMPTY,
                    nudges: bool = True, looked: str | None = None,
-                   notices: Sequence[Mapping] = ()) -> dict:
+                   notices: Sequence[Mapping] = (),
+                   sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
+                   waits: Sequence[Mapping] = ()) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
-                              deliveries, records, capacity, nudges, looked) for s in group]
+                              deliveries, records, capacity, nudges, looked,
+                              (sprint_waits or {}).get(s.sprint_id, ())) for s in group]
 
     return {
         "type": "project",
         "project_id": state.project_id,
         "root": state.root,
-        "quiet": state.open_work == 0 and not sessions and not sprints,
+        "quiet": state.open_work == 0 and not sessions and not sprints and not waits,
         "open_work": state.open_work,
         "last_activity": state.last_at,
         "sprints": entries(sprints),
@@ -1267,6 +1316,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                               "sprints": entries(finished)}),
         "outside_sprints": _line(sessions, deliveries, now_ms),
         "notices": [dict(n) for n in notices],
+        "waits": [dict(w) for w in waits],
     }
 
 
@@ -1477,9 +1527,10 @@ def derive_view(
     shown = [r for r in (records or {}).values()
              if r.item.get("project_id") in registered]
     open_items = sorted(
-        (r for r in shown if not r.item["answered"]),
+        (r for r in shown if not r.item["answered"] and not is_waiting(r.item)),
         key=lambda r: (-r.item["held_work"], r.waiting_since, r.item["key"],
                        r.item["project_id"]))
+    waiting_items = [r for r in shown if is_waiting(r.item)]
     answered = sorted(
         (r for r in shown if r.item["answered"]),
         key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
@@ -1582,9 +1633,18 @@ def derive_view(
     notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles)
                for pid in registered}
 
+    sprint_waits: dict[str, list[dict]] = {}
+    project_waits: dict[str, list[dict]] = {}
+    for record in sorted(waiting_items, key=lambda r: r.item["key"]):
+        owner = next((s for s in drafted.get(record.item["project_id"], ())
+                      if record.item.get("issue") in _named_issues(s)), None)
+        into = (project_waits.setdefault(record.item["project_id"], []) if owner is None
+                else sprint_waits.setdefault(owner.sprint_id, []))
+        into.append(_wait_entry(record))
+
     def is_active(state: ProjectState) -> bool:
         return (state.open_work > 0 or bool(owned.get(state.project_id))
-                or state.project_id in drafted)
+                or state.project_id in drafted or bool(project_waits.get(state.project_id)))
 
     active = _order(s for s in states if is_active(s))
     quiet = _order(s for s in states if not is_active(s))
@@ -1595,7 +1655,8 @@ def derive_view(
                               drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()),
                               finished.get(s.project_id, ()), capacity, nudges, looked,
-                              notices=notices[s.project_id])
+                              notices=notices[s.project_id],
+                              sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()))
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,

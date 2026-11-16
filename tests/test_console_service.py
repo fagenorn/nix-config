@@ -1542,6 +1542,33 @@ class RetentionServiceTest(Case):
         self.assertNotIn(service.DIGEST_THREAD, names)
 
 
+class WaitClockTest(Case):
+    def test_a_fast_host_clock_does_not_end_a_wait(self):
+        now = [datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp()]
+        waiting = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
+                   "issue": 7, "comment_id": 1, "url": "https://example.test/7", "reason": "verify-wait",
+                   "kind": "waiting", "question": "Read the hourly rows.", "questions": [], "items": [],
+                   "answers": [], "answered": False, "held_work": 1,
+                   "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                            "what": "Read the hourly rows."}}
+        current = [waiting]
+        svc = self.start(support.entries(1),
+                         tracker=lambda project_id, slug, *, cancelled: [current[0]],
+                         slug_of=lambda root: "octo/p00", activity=lambda root: now[0], **clocks(now))
+        svc.poll_tracker()
+        shown = json.loads(svc.view_bytes)
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        self.assertEqual(shown["inbox"]["open"], [])
+        wait = shown["entries"][0]["waits"][0]
+        self.assertEqual((wait["until"], wait["text"]), ("2026-11-18T10:00:00+00:00", "Read the hourly rows."))
+        current[0] = {**waiting, "wait": {"reason": "due", "until": None, "what": "Read the hourly rows."}}
+        svc.poll_tracker()
+        shown = json.loads(svc.view_bytes)
+        self.assertEqual(shown["entries"][0]["waits"][0]["text"], "Due now: the next verification pass asks you here")
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        svc.close()
+
+
 class BindTest(Case):
     def test_a_taken_port_raises_before_the_log_opens(self):
         with socket.socket() as held:

@@ -132,6 +132,25 @@ class DigestTest(unittest.TestCase):
                          ["owner/p00 needs you: Which database?",
                           "owner/p00 was answered: Which database?"])
 
+    def test_a_waiting_item_seen_says_nothing(self):
+        self.assertEqual(moments([Event(1, at(5), "inbox.seen", "owner/p00", self.waiting())], {}, {}), [])
+
+    def test_a_waiting_item_that_turns_due_says_it_needs_you(self):
+        waiting = self.waiting()
+        due = {key: value for key, value in waiting.items() if key != "wait"}
+        events = [Event(1, at(5), "inbox.seen", "owner/p00", waiting),
+                  Event(2, at(6), "inbox.changed", "owner/p00", due)]
+        found = moments(events, {}, {})
+        self.assertEqual([(m.kind, m.sentence) for m in found],
+                         [("inbox_appeared", "owner/p00 needs you: Read the hourly rows.")])
+
+    @staticmethod
+    def waiting():
+        return {"key": "k", "project_id": "owner/p00", "issue": 7, "reason": "verify-wait",
+                "question": "Read the hourly rows.", "questions": [], "answers": [], "answered": False,
+                "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                         "what": "Read the hourly rows."}}
+
     def test_a_session_moment_names_no_session_and_no_path(self):
         def seen(seq, project, sid, repo, name):
             return Event(seq, at(seq), "session.seen", project,
