@@ -64,7 +64,11 @@ its reason in the refusal's detail (`timed out`, the executable error, or `exit
 name it gave.
 
 The compiled policy. A row is `{default_branch, integration_branch,
-required_checks, evidence}`. `required_checks` is the contract's
+required_checks, evidence}` plus, for a contract whose snapshot declares
+production rules (ADR-project-contract-007), `production`: each changing and
+read-only command id resolved to its argv as authored, and the release profile;
+it is absent when the contract declares none or no production, and key files and
+MCP tools are not carried. `required_checks` is the contract's
 `bindings.vcs.merge.required_checks`, read from the resolved snapshot of the
 pinned contract as the two branches are, sorted, or `[]` when the contract
 declares none; the guard's loader accepts exactly the entries the resolver
@@ -75,13 +79,15 @@ blob id at that commit, the provider's `full_name` and each compiled profile's
 `id`, `version` and `digest`. No resolved snapshot and no contract body is
 persisted. The written document has exactly two members, the rows under
 `derived_repositories` and `derivation`: `{schema_version, platform_version,
-registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (3) and
+registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (4) and
 the digest is `null` when no registry file exists. The base policy is only
 validated and consulted for `literal_conflict`, and none of its members is
 copied into the output. The lifecycle guard reads its trusted members
 (`authorized_owners`, `integration_bases` and the three tools) from the base
-policy only and takes nothing but a row's two branches and its required checks
-from this file. The only repository writes are the remote-tracking refs of the
+policy only and takes a row's two branches, its required checks and its
+production rules from this file, reading the production rules without the row
+check (ADR-guard-011). Every value the resolver accepts is one the guard loads,
+so no name check applies to them. The only repository writes are the remote-tracking refs of the
 branches fetched and the fetched objects. The write is atomic
 (`agent_platform.write_atomically`), so a reader sees the old file or the new
 one.
@@ -202,7 +208,7 @@ from agent_tools.system import github_remote
 
 REPORT_SCHEMA_VERSION = 1
 DERIVE_REPORT_SCHEMA_VERSION = 2
-DERIVATION_SCHEMA_VERSION = 3
+DERIVATION_SCHEMA_VERSION = 4
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
 POLICY_MEMBERS = ("derived_repositories", "derivation")
@@ -421,6 +427,22 @@ def _compiled_profiles(profile_ids: list[str], contract: dict) -> list[dict]:
     return compiled
 
 
+def production_row(snapshot: dict) -> dict | None:
+    """The row's `production` member from a resolved snapshot, or None unless it is declared."""
+    production = snapshot["production"]
+    if production["status"] != "declared":
+        return None
+    commands = snapshot["bindings"]["commands"]
+
+    def resolved(ids: list) -> list[dict]:
+        return [{"id": command_id, "argv": list(commands[command_id]["argv"])}
+                for command_id in ids]
+
+    return {"changes": resolved(production["changes"]["commands"]),
+            "read_only": resolved(production["read_only"]["commands"]),
+            "release_profile": production["release_profile"]}
+
+
 def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.VerificationSource) -> dict:
     """Steps 4 and 5 to 10 over the pinned `source`: the row for `slug`."""
     status, payload = resolver(source.resolver_root, "resolve")
@@ -446,14 +468,17 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
     if code != 0:
         raise ProjectRefused("contract_unresolved", f"{source.commit} holds no contract blob")
     required_checks = sorted(vcs["merge"].get("required_checks") or [])
-    return {"default_branch": vcs["default_branch"], "integration_branch": vcs["integration_branch"],
-            "required_checks": required_checks,
-            "evidence": {
-                "project_id": entry["project_id"],
-                "registry_entry_digest": canonical.telemetry_digest(entry),
-                "source": {"ref": source.ref, "commit": source.commit},
-                "contract_blob": blob.decode("ascii", "replace").strip(),
-                "provider_full_name": answer.strip(), "profiles": compiled}}
+    row = {"default_branch": vcs["default_branch"], "integration_branch": vcs["integration_branch"],
+           "required_checks": required_checks,
+           "evidence": {
+               "project_id": entry["project_id"],
+               "registry_entry_digest": canonical.telemetry_digest(entry),
+               "source": {"ref": source.ref, "commit": source.commit},
+               "contract_blob": blob.decode("ascii", "replace").strip(),
+               "provider_full_name": answer.strip(), "profiles": compiled}}
+    if (production := production_row(payload)) is not None:
+        row["production"] = production
+    return row
 
 
 def entry_slug(entry: dict) -> tuple[Path, str]:
