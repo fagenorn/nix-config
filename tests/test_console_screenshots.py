@@ -41,10 +41,10 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifteen_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 15)
-        self.assertEqual(shots.STATES[-5:], ("owner-check", "spend-page", "notices-fold",
-                                             "notice-post-open", "desk-spend"))
+    def test_the_set_is_sixteen_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 16)
+        self.assertEqual(shots.STATES[-6:], ("owner-check", "spend-page", "notices-fold",
+                                             "notice-post-open", "desk-spend", "failed-start"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -201,6 +201,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 ended = [s for s in sprints if s["ended_at"] is not None]
                 self.assertEqual(launches, [])
                 for sprint in running:
+                    if state == "failed-start":
+                        continue
                     self.assertEqual(sprint["manager_state"], "started", sprint["title"])
                     self.assertIsNone(sprint["manager_text"], sprint["title"])
                     self.assertFalse(sprint["now_text"].startswith("Working on"), sprint["title"])
@@ -253,6 +255,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state == "failed-start":
+                    (sprint,) = running
+                    self.assertEqual(sprint["manager_state"], "failed")
+                    self.assertTrue(sprint["retry"])
+                    self.assertEqual(sprint["now_text"],
+                                     "waiting for you: the manager failed to start")
+                    (item,) = [i for i in view["inbox"]["open"]]
+                    self.assertEqual(item["reason"], "failed_start")
+                    self.assertEqual(item["last_reason"],
+                                     "this account does not trust the project's folder")
+                    self.assertNotIn("/home/", json.dumps(view))
                 elif state in ("notices-fold", "notice-post-open"):
                     self.assertEqual(
                         sorted(s["title"] for s in running),

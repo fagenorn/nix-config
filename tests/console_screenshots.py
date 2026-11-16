@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifteen screens the sprint block, the finished list, the message life, the
+- `STATES` names the sixteen screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold and the desk's spend figures must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -14,8 +14,10 @@ Contract:
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
-  so the spend figures show); `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 30 files.
+  so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
+  card carrying the reason and the Retry and Drop the sprint buttons); `WIDTHS` are the two
+  viewport widths each is shot at. `capture` writes `<state>-<width>.png` for every pair, so a
+  full run writes 32 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -62,7 +64,7 @@ from .console_test_support import write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "owner-check", "spend-page", "notices-fold", "notice-post-open",
-          "desk-spend")
+          "desk-spend", "failed-start")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -179,6 +181,17 @@ class _Seed:
             self.put(stop - 20, "manager.stopped", project, {"sprint_id": sid})
         return sid, goal
 
+    def failed_start(self, project: str, title: str, ago: float) -> tuple[str, str]:
+        """One sprint whose first launch was refused: a stated goal and a `manager.failed`."""
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        self.put(ago, "goal.stated", project, {"sprint_id": sid, "goal": goal})
+        self.put(ago - 10, "manager.failed", project, {"sprint_id": sid, "reason": (
+            "Workspace not trusted. Run `claude` in /home/owner/Projects/web once and accept "
+            "the trust prompt, then retry.")})
+        return sid, goal
+
     def check(self, project: str, issue: int, ago: float) -> None:
         """One open `verify-ask` inbox item on `issue`, which blocks none of the manager's work."""
         self.put(ago, "inbox.seen", project, {
@@ -217,6 +230,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
                     asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "failed-start":
+        seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state == "tell-box-open":
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
