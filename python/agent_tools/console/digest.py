@@ -38,7 +38,9 @@ Event kinds read:
   It speaks only when the sprint fold accepted it and the sprint's shown words (the ball words of
   its block, `sprints.BALL_TEXT` from `view.sprint_ball`, or the ended state's words from
   `view.sprint_state`; the open inbox items counted as the page counts them, no clock read) differ
-  from the ones before the report; a refused, ignored or words-repeating report says nothing.
+  from the ones before the report (the ball is read with no clock, which always reads moving, so a
+  report never names a sprint quiet or nothing running); a refused, ignored or words-repeating
+  report says nothing.
 - `question.answered` (`event_log.QUESTION_ANSWERED`, `sprints.py`): the owner answered a manager's
   question. It speaks only when its `differs` is `True`, so an answer that took the recommendation
   says nothing, and nothing else about a round (asking it, answering the others) speaks, a round
