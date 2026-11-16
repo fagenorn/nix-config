@@ -14,7 +14,7 @@ The per-host loopback service and its one page that say whether the owner is nee
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
-Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief or question is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004).
+Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief or question is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004). A held issue whose only open acceptance criteria are owner reviews, with no live runner prompt, is one owner check card per such criterion (ADR-console-049).
 _Avoid_: ask, notification
 
 **Answered item**:
