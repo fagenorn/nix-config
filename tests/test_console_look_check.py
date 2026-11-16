@@ -5,8 +5,11 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import os
 import subprocess
+import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +25,8 @@ SINCE = "0" * 39 + "1"
 HEAD = "1a2b3c4" + "d" * 33
 OTHER_HEAD = "9f8e7d6" + "c" * 33
 MARKED = "## Acceptance criteria\n\n- [ ] [human] before merge: the page — measured: the owner\n"
+MARKED_AND_HUMAN = ("## Acceptance criteria\n\n- [ ] [human] before merge: the page — measured: the owner\n"
+                    "- [ ] [human] the copy reads well\n")
 UNMARKED = "## Acceptance criteria\n\n- [ ] [auto] the page works\n"
 ACTIVATED = datetime(2026, 11, 16, 10, 30, tzinfo=timezone.utc)
 PAGES = f"repos/{SLUG}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page="
@@ -47,14 +52,16 @@ def comment(cid, number, pr, head=HEAD, answer="approved", association="OWNER"):
             "body": look_marker.approval_body(number, pr, head, answer, "m1")}
 
 
-def view(open=(), read=("2026-11-16T13:00:00.000000+00:00", True), entries=None):
+def view(open=(), read=("2026-11-16T13:00:00.000000+00:00", True, "2026-11-16T12:59:00.000000+00:00"),
+         entries=None):
     project = {"type": "project", "root": "/w",
-               "tracker_read": None if read is None else {"read_at": read[0], "ok": read[1]}}
+               "tracker_read": None if read is None else {"read_at": read[0], "ok": read[1],
+                                                          "began_at": read[2]}}
     return {"entries": entries or [project], "inbox": {"open": list(open), "answered": []}}
 
 
-def card(key="octo/widgets#7/ac1", repo="Octo/Widgets", issue=7, kind="owner-review"):
-    return {"key": key, "repo": repo, "issue": issue, "kind": kind}
+def card(key="octo/widgets#7/ac1", repo="Octo/Widgets", issue=7, kind="owner-review", criterion=1):
+    return {"key": key, "repo": repo, "issue": issue, "kind": kind, "criterion": criterion}
 
 
 class World:
@@ -97,7 +104,7 @@ def never(url):
 
 class LookCheckTest(unittest.TestCase):
     def run_check(self, world=None, argv=None, *, state=None, activated=ACTIVATED,
-                  slug_of=None):
+                  slug_of=None, fixed=None):
         world = world or World()
         argv = argv if argv is not None else ["--repo", SLUG, "--since", SINCE]
         out = io.StringIO()
@@ -105,6 +112,7 @@ class LookCheckTest(unittest.TestCase):
             code = look_check.main(
                 argv, get=world.get, comments=world.comments_of,
                 state=state or (lambda url: view()), activated_at=lambda: activated,
+                fixed_activation=fixed or (lambda since, current: current),
                 slug_of={"/w": SLUG}.get if slug_of is None else slug_of)
         lines = out.getvalue().splitlines()
         self.assertEqual(1, len(lines), out.getvalue())
@@ -213,15 +221,52 @@ class LookCheckTest(unittest.TestCase):
         cases = (
             ("not_registered", view(), lambda root: None),
             ("not_read", view(read=None), None),
-            ("stale", view(read=("2026-11-16T13:00:00.000000+00:00", False)), None),
-            ("not_read", view(read=("2026-11-16T11:20:00.000000+00:00", True)), None),
-            ("not_read", view(read=("later", True)), None),
+            ("stale", view(read=("2026-11-16T13:00:00.000000+00:00", False,
+                                 "2026-11-16T12:59:00.000000+00:00")), None),
+            ("not_read", view(read=("2026-11-16T13:00:00.000000+00:00", True,
+                                    "2026-11-16T11:20:00.000000+00:00")), None),
+            ("not_read", view(read=("2026-11-16T13:00:00.000000+00:00", True, "later")), None),
+            ("not_read", view(read=("2026-11-16T13:00:00.000000+00:00", True, None)), None),
         )
         for status, answer, slug_of in cases:
             with self.subTest(status, view=answer["entries"][0].get("tracker_read")):
                 code, out = self.run_check(state=lambda url, answer=answer: answer,
                                            slug_of=slug_of)
                 self.assertEqual((75, {"issue": 7, "pr": 50, "status": status}), (code, out))
+
+    def test_a_read_that_began_before_the_hold_and_ended_after_it_is_not_fresh(self):
+        straddling = view(read=("2026-11-16T11:45:00.000000+00:00", True,
+                                "2026-11-16T11:29:00.000000+00:00"))
+        code, out = self.run_check(state=lambda url: straddling)
+        self.assertEqual((75, {"issue": 7, "pr": 50, "status": "not_read"}), (code, out))
+        started_at_the_hold = view(read=("2026-11-16T11:45:00.000000+00:00", True,
+                                          "2026-11-16T11:30:00.000000+00:00"))
+        code, out = self.run_check(state=lambda url: started_at_the_hold)
+        self.assertEqual((0, "met"), (code, out["status"]))
+
+    def test_only_cards_of_look_marker_criteria_count(self):
+        world = lambda: World(issues={7: issue_fake(7, body=MARKED_AND_HUMAN)})
+        ordinary = card("octo/widgets#7/ac2", criterion=2)
+        code, out = self.run_check(world(), state=lambda url: view(open=[ordinary]))
+        self.assertEqual((0, "met"), (code, out["status"]))
+        code, out = self.run_check(world(), state=lambda url: view(open=[ordinary, card()]))
+        self.assertEqual((1, "not_met", ["octo/widgets#7/ac1"]), (code, out["status"], out["keys"]))
+
+    def test_a_later_activation_does_not_move_the_boundary(self):
+        later = datetime(2026, 11, 16, 12, 30, tzinfo=timezone.utc)
+        code, out = self.run_check(activated=later, state=never)
+        self.assertEqual((75, {"status": "waiting"}), (code, out))
+        code, out = self.run_check(activated=later, fixed=lambda since, current: ACTIVATED)
+        self.assertEqual((0, 7, 50), (code, out["issue"], out["pr"]))
+
+    def test_the_first_activation_is_recorded_once_and_read_back(self):
+        later = datetime(2026, 11, 16, 12, 30, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"HOME": home}):
+            self.assertEqual(ACTIVATED, look_check.default_fixed_activation(SINCE, ACTIVATED))
+            self.assertEqual(ACTIVATED, look_check.default_fixed_activation(SINCE, later))
+            self.assertEqual(later, look_check.default_fixed_activation(OTHER_HEAD, later))
+        with mock.patch.dict(os.environ, {"HOME": ""}):
+            self.assertEqual(later, look_check.default_fixed_activation(SINCE, later))
 
     def test_a_quiet_project_inside_a_group_is_found(self):
         project = view()["entries"][0]

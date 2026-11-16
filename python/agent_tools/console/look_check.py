@@ -10,10 +10,14 @@ Usage. `--since` is the 40-hex merge commit of the change; `--url` defaults to
 else is a usage error.
 
 Boundary. Times are parsed with `datetime.fromisoformat(s.replace("Z", "+00:00"))`; an unparseable
-time is treated as missing. T is `commit.committer.date` of the `--since` commit and A the time the
-running system generation was activated (the `st_mtime` of `lstat("/run/current-system")`, replaced
-by an activation). The boundary is B = max(T, A). When A is unknown the check exits 75
-`activation_unknown` without listing pulls.
+time is treated as missing. T is `commit.committer.date` of the `--since` commit and A the time of the
+first activation of a system that carried the change on this host: A is the `st_mtime` of
+`lstat("/run/current-system")` (replaced by every activation and boot) the first time this check runs
+for `--since`, written once to `$HOME/.agents/state/verify-pending/look-check-activation-<since>` and read
+back on every later run, so a later switch or reboot never moves it (verify-pending runs the check only
+once the system contains the change, so the first run follows its first activation). Without `HOME` or when
+the file cannot be written or read, A is the current `st_mtime`. The boundary is B = max(T, A). When the
+current `st_mtime` is unknown the check exits 75 `activation_unknown` without listing pulls.
 
 Landing. Closed pulls are read page by page (`sort=updated&direction=desc&per_page=100&page=k`,
 k = 1, 2, ...), stopping after a page of fewer than 100 items or one whose last item was updated
@@ -30,15 +34,18 @@ landing the check exits 75 `waiting` and does not read the console.
 Console. The state is read from `<url>/api/state` (5 second timeout). A console that does not answer
 200 with a JSON object is 75 `not_running`. The project is every project entry, in `entries` or in a
 `quiet_group`'s `projects`, whose `slug_of(root)` equals the repository case-insensitively; none is
-75 `not_registered`. A fresh read is a `tracker_read` that is `ok` with `read_at` not before
-max(hold time, merge time of the landing): a missing or unparseable read is 75 `not_read`, a failed
-one 75 `stale`. With a fresh read, the offending keys are the sorted `key` of the open inbox items of
-that repository and issue whose kind is `owner-review`: any is 1 `not_met` with `keys`, none is 0
-`met`. Every not-yet and verdict line carries `issue` and `pr` once there is a landing.
+75 `not_registered`. A fresh read is a `tracker_read` that is `ok` with `began_at` (the time the read
+started, before it fetched anything; the console sets it, `read_at` is its finish time) not before
+max(hold time, merge time of the landing): a missing read or a missing, unparseable or earlier
+`began_at` is 75 `not_read`, a failed one 75 `stale`. With a fresh read, the offending keys are the
+sorted `key` of the open inbox items of that repository and issue whose kind is `owner-review` and whose
+`criterion` is one of the issue's look-marker criteria (the checkbox lines of its acceptance criteria
+that `look_marker.marker_line` accepts; a card of an ordinary `[human]` criterion never counts): any is
+1 `not_met` with `keys`, none is 0 `met`. Every not-yet and verdict line carries `issue` and `pr` once there is a landing.
 
-Output and exits: one JSON line with sorted keys, nothing written. 0 met, 1 not met, 75 not yet,
+Output and exits: one JSON line with sorted keys; the only file written is the activation record. 0 met, 1 not met, 75 not yet,
 2 a usage error, a forge error or a malformed forge answer (`{"status": "error", "detail"}`). The
-seams of `main` are `get`, `comments`, `state`, `activated_at` and `slug_of`.
+seams of `main` are `get`, `comments`, `state`, `activated_at`, `fixed_activation` and `slug_of`.
 """
 import argparse
 import http.client
@@ -52,6 +59,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from agent_tools.claims import forge_markers, owner_actions
+from agent_tools.console import inbox
 from agent_tools.delivery import look_marker
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
@@ -61,6 +69,8 @@ LOOPBACK = ("127.0.0.1", "localhost")
 STATE_PATH = "/api/state"
 STATE_TIMEOUT = 5.0
 ACTIVATION_LINK = "/run/current-system"
+RECORD_DIR = ".agents/state/verify-pending"
+RECORD_PREFIX = "look-check-activation-"
 HELD_LABEL = "needs-verification"
 REVIEW_KIND = "owner-review"
 PAGE = 100
@@ -109,6 +119,31 @@ def default_activated_at() -> datetime | None:
         return datetime.fromtimestamp(os.lstat(ACTIVATION_LINK).st_mtime, timezone.utc)
     except OSError:
         return None
+
+
+def default_fixed_activation(since: str, current: datetime) -> datetime:
+    """The first activation recorded for `since`; the current one, written once, when none is."""
+    home = os.environ.get("HOME")
+    if not home:
+        return current
+    path = os.path.join(home, RECORD_DIR, RECORD_PREFIX + since)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            recorded = parse_time(handle.read().strip())
+        if recorded is not None:
+            return recorded
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return current
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(current.isoformat() + "\n")
+    except OSError:
+        pass
+    return current
 
 
 def _list(value: Any, what: str) -> list:
@@ -163,17 +198,25 @@ def hold_time(get: Get, repo: str, issue: int) -> datetime | None:
         page += 1
 
 
-def landing(get: Get, comments: Callable[[str, int], list], repo: str,
-            boundary: datetime) -> tuple[dict | None, tuple[int, int, datetime, datetime] | None]:
-    """`(stop, None)` for a not-yet answer, `(None, (issue, pr, merged_at, held_at))` for the landing,
-    `(None, None)` when no marked issue landed under an approved look."""
+def look_criteria(text: str) -> frozenset[int]:
+    """The indexes of the acceptance criteria of an issue body whose line is a look marker."""
+    lines = text.split("\n")
+    return frozenset(c.index for c in inbox.acceptance_criteria(text)
+                     if look_marker.marker_line(lines[c.line]))
+
+
+def landing(get: Get, comments: Callable[[str, int], list], repo: str, boundary: datetime
+            ) -> tuple[dict | None, tuple[int, int, datetime, datetime, frozenset[int]] | None]:
+    """`(stop, None)` for a not-yet answer, `(None, (issue, pr, merged_at, held_at, looks))` for the
+    landing, `(None, None)` when no marked issue landed under an approved look."""
     for merged, number, pull in candidates(get, repo, boundary):
         head = pull["head"]["sha"]
         body = pull.get("body")
         for issue in sorted({int(n) for n in CLOSES.findall(body if isinstance(body, str) else "")}):
             found = _object(get(f"repos/{repo}/issues/{issue}"), "an issue")
             text = found.get("body")
-            if not look_marker.read_look(text if isinstance(text, str) else "").marked:
+            text = text if isinstance(text, str) else ""
+            if not look_marker.read_look(text).marked:
                 continue
             answer = look_marker.look_answer(comments(repo, issue), issue, number, head)
             if answer is None or answer.fields.get("answer") != "approved":
@@ -185,7 +228,7 @@ def landing(get: Get, comments: Callable[[str, int], list], repo: str,
             held = hold_time(get, repo, issue) if HELD_LABEL in labels else None
             if held is None:
                 return {"issue": issue, "pr": number, "status": "not_held"}, None
-            return None, (issue, number, merged, held)
+            return None, (issue, number, merged, held, look_criteria(text))
     return None, None
 
 
@@ -201,16 +244,16 @@ def _projects(view: Mapping[str, Any]):
 
 def _read_status(project: Mapping[str, Any], after: datetime) -> str | None:
     read = project.get("tracker_read")
-    read_at = parse_time(read.get("read_at")) if isinstance(read, dict) else None
-    if read_at is None:
+    if not isinstance(read, dict):
         return "not_read"
     if read.get("ok") is not True:
         return "stale"
-    return "not_read" if read_at < after else None
+    began = parse_time(read.get("began_at"))
+    return "not_read" if began is None or began < after else None
 
 
 def judge_state(view: Mapping[str, Any], repo: str, issue: int, pr: int, after: datetime,
-                slug_of: Callable[[str], str | None]) -> tuple[int, dict]:
+                looks: frozenset[int], slug_of: Callable[[str], str | None]) -> tuple[int, dict]:
     """The verdict of the console's view for the landing: `(exit code, output)`."""
     who = {"issue": issue, "pr": pr}
     statuses = [_read_status(project, after) for project in _projects(view)
@@ -222,7 +265,8 @@ def judge_state(view: Mapping[str, Any], repo: str, issue: int, pr: int, after: 
     items = (view.get("inbox") or {}).get("open") or []
     keys = sorted(str(item.get("key")) for item in items if isinstance(item, dict)
                   and str(item.get("repo", "")).lower() == repo.lower()
-                  and item.get("issue") == issue and item.get("kind") == REVIEW_KIND)
+                  and item.get("issue") == issue and item.get("kind") == REVIEW_KIND
+                  and item.get("criterion") in looks)
     if keys:
         return 1, {**who, "keys": keys, "status": "not_met"}
     return 0, {**who, "status": "met"}
@@ -254,11 +298,12 @@ def _parse(argv) -> argparse.Namespace:
 
 
 def main(argv=None, *, get=None, comments=None, state=None, activated_at=None,
-         slug_of=None) -> int:
+         fixed_activation=None, slug_of=None) -> int:
     get = get or forge_api.api_get
     comments = comments or forge_markers.list_comments
     state = state or default_state
     activated_at = activated_at or default_activated_at
+    fixed_activation = fixed_activation or default_fixed_activation
     slug_of = slug_of or owner_actions.checkout_slug
     try:
         args = _parse(sys.argv[1:] if argv is None else argv)
@@ -273,18 +318,19 @@ def main(argv=None, *, get=None, comments=None, state=None, activated_at=None,
                                        "committer").get("date"))
         if merged_at is None:
             raise ForgeError("payload_invalid", "the commit has no readable committer date")
-        stop, found = landing(get, comments, args.repo, max(merged_at, activated))
+        stop, found = landing(get, comments, args.repo,
+                              max(merged_at, fixed_activation(args.since, activated)))
     except (ForgeError, KeyError, TypeError, AttributeError, ValueError) as error:
         return _emit(2, {"status": "error", "detail": str(error)[:300]})
     if stop is not None:
         return _emit(NOT_YET, stop)
     if found is None:
         return _emit(NOT_YET, {"status": "waiting"})
-    issue, pr, merged, held = found
+    issue, pr, merged, held, looks = found
     view = state(args.url)
     if view is None:
         return _emit(NOT_YET, {"issue": issue, "pr": pr, "status": "not_running"})
-    return _emit(*judge_state(view, args.repo, issue, pr, max(held, merged), slug_of))
+    return _emit(*judge_state(view, args.repo, issue, pr, max(held, merged), looks, slug_of))
 
 
 if __name__ == "__main__":
