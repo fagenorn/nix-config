@@ -181,6 +181,12 @@ LEGACY_POLICY_SURFACE = (  # policy-gate-pattern
     "worktreePrefix", "branchPattern", "agentBudgetMinutes", "maxParallel",  # policy-gate-pattern
 )
 
+# GitHub's GraphQL schema names a repository's default branch `defaultBranchRef`; that  # policy-gate-pattern
+# API field is not the legacy `defaultBranch` policy key, so the scan leaves it alone.  # policy-gate-pattern
+LEGACY_POLICY_PATTERN = re.compile("|".join(
+    re.escape(name) + (r"(?!Ref\b)" if name == "defaultBranch" else "")  # policy-gate-pattern
+    for name in LEGACY_POLICY_SURFACE))
+
 POLICY_GATE_PATTERN_FILES = frozenset({
     "home/common/agent-skills/tests/test_resolve_project.py",
     "home/common/agent-skills/tests/test_workflow_skill_contracts.py",
@@ -347,6 +353,14 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertIn("bindings.vcs.worktree.root", text)
         self.assertNotIn("bindings.vcs.branch_naming", text)
 
+    def test_legacy_pattern_spares_the_graphql_default_branch_field_only(self):
+        self.assertIsNone(LEGACY_POLICY_PATTERN.search(
+            "repository { defaultBranchRef { name } }"))  # policy-gate-pattern
+        self.assertEqual(
+            LEGACY_POLICY_PATTERN.search("the defaultBranch key").group(0),  # policy-gate-pattern
+            "defaultBranch")  # policy-gate-pattern
+        self.assertIsNotNone(LEGACY_POLICY_PATTERN.search("defaultBranchRefs"))  # policy-gate-pattern
+
     def test_living_source_has_no_legacy_policy_surface(self):
         tracked = subprocess.run(
             ["git", "ls-files", "-z", "--", "AGENTS.md", "CLAUDE.md",
@@ -356,8 +370,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         ).stdout.split(b"\0")
         text_suffixes = {".md", ".py", ".sh", ".nix", ".json", ".toml", ".yaml", ".yml"}
         historical_prefixes = (Path(".claude/specs"), Path(".claude/plans"))
-        legacy = re.compile("|".join(
-            re.escape(name) for name in LEGACY_POLICY_SURFACE))
+        legacy = LEGACY_POLICY_PATTERN
         matches = []
         migration_inputs_seen = {name: set() for name in LEGACY_MIGRATION_INPUTS}
         for encoded in tracked:

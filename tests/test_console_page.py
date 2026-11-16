@@ -535,7 +535,7 @@ class PageTest(unittest.TestCase):
                 self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 4)
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
         lines = self.text.splitlines()
         (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
         self.assertIn("isHttps(", lines[at - 1] + lines[at])
@@ -543,6 +543,8 @@ class PageTest(unittest.TestCase):
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
         self.assertEqual(self.text.count("link.href = item.url;"), 1)
+        self.assertEqual(self.text.count("link.href = wait.url;"), 1)
+        self.assertEqual(self.text.count("if (isHttps(wait.url)) {"), 1)
         self.assertNotIn("adoption.url", self.text)
         self.assertEqual(self.text.count("if (isHttps(item.url)) {"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
@@ -1297,6 +1299,15 @@ class PageNoticeTest(unittest.TestCase):
         self.assertTrue(some(".notice-words", color="var(--text)"))
         self.assertTrue(some(".notice code", background="var(--mantle)",
                              **{"white-space": "nowrap"}))
+
+    def test_the_post_control_stands_a_notice_gap_below_the_last_notice(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE_TEXT)
+        for width in (1440, 480):
+            between = margin_top_at(style, width, ".notice", ".notice + .notice")
+            for control in (".notice-open", ".notice-post"):
+                gap = margin_top_at(style, width, control, ".notice-list + " + control)
+                self.assertGreaterEqual(gap, 12, (width, control))
+                self.assertGreaterEqual(gap, between, (width, control))
 
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
@@ -6436,6 +6447,28 @@ def media_block(style: str, query: str) -> str:
     return style[start:at - 1]
 
 
+def margin_top_at(style: str, width: int, *selectors: str) -> float:
+    """The px margin-top the page's cascade gives an element matched by `selectors` at a viewport width.
+
+    Top-level rules apply at every width; a max-width media block applies only at or below its width.
+    The highest specificity (class count) wins, the later rule on a tie.
+    """
+    top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+    layers = [style_rules(top)]
+    for limit in re.findall(r"@media \(max-width: (\d+)px\) \{", style):
+        if width <= int(limit):
+            layers.append(style_rules(media_block(style, f"(max-width: {limit}px)")))
+    best = None
+    for layer in layers:
+        for selector, decls in layer:
+            if selector in selectors and "margin-top" in decls:
+                rank = selector.count(".")
+                if best is None or rank >= best[0]:
+                    best = (rank, decls["margin-top"])
+    assert best is not None, (width, selectors)
+    return float(re.fullmatch(r"([\d.]+)px", best[1]).group(1))
+
+
 class PageAnsweredRowTest(unittest.TestCase):
     def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
@@ -8649,6 +8682,79 @@ class PageCheckPictureTest(unittest.TestCase):
             self.assertEqual(with_class(snap["inbox"], name), [], name)
 
 
+def review_item(key: str, **fields) -> dict:
+    return item(key, reason="held-review", kind="owner-review", answers=["passed", "note"],
+                detail="", paid=False, confirm="", version="v1-" + key, check_id="", reading="",
+                pictures=PIC_CHECK["pictures"], missing_pictures=[],
+                headline="The card looks right at 1440 and 480 px", **fields)
+
+
+class PageReviewTest(unittest.TestCase):
+    def test_a_review_card_offers_approve_and_not_yet_and_shows_its_pictures(self) -> None:
+        first, second = render([
+            START, {"frame": frame([review_item("A"), check_item("B", "manual-check")])},
+            {"snapshot": True}, {"click": "ans-passed"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        lead = lead_of(first)
+        (approve,) = with_class(lead, "ans-passed")
+        (not_yet,) = with_class(lead, "ans-note")
+        self.assertEqual(full(approve), "Approve")
+        self.assertEqual(full(not_yet), "Not yet")
+        self.assertEqual(field(first, "note-text")["placeholder"], "What is not right yet")
+        self.assertEqual(with_class(lead, "confirm-text"), [])
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
+        self.assertIn("The card looks right at 1440 and 480 px", full(lead))
+        for cls, texts in (("ans-passed", ["Approve", "Passed"]), ("ans-failed", ["Failed"]),
+                           ("ans-note", ["Not yet", "Send note"])):
+            self.assertEqual([full(n) for n in with_class(first["inbox"], cls)], texts, cls)
+        (post,) = checks(second)
+        self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A",
+                                        "answer": "passed", "version": "v1-A"})
+
+    def test_a_before_picture_reads_ahead_of_the_after_picture_of_its_width(self) -> None:
+        pics = [{"id": f"{n + 1:064x}", "line": line, "pair": None} for n, line in enumerate(
+            ["after-480.png", "after-1440.png", "before-1440.png", "notes.png", "before-480.png"])]
+        (snap,) = render([START, {"frame": frame([{**review_item("A"), "pictures": pics}])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
+                         ["Before, 480 px", "After, 480 px", "Before, 1440 px", "After, 1440 px", "Notes"])
+        shown = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(shown, [f"owner/p00#A/{i}" for i in range(5)])
+        in_order = [{"id": A, "line": "before-1440.png", "pair": None}, {"id": B, "line": "after-1440.png", "pair": None}]
+        (kept,) = render([START, {"frame": frame([{**review_item("A"), "pictures": in_order}])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(kept), "pic-line")],
+                         ["Before, 1440 px", "After, 1440 px"])
+
+    def test_a_review_cards_detail_shows_the_measured_tail_only_when_its_fold_is_opened(self) -> None:
+        tail = "the owner judges the PNG screenshots"
+        card = {**review_item("A"), "detail": f"The card looks right - measured: {tail}"}
+        closed, opened = render([START, {"frame": frame([card])}, {"snapshot": True},
+                                 {"open": "check:owner/p00#A"}, {"snapshot": True}])
+        self.assertIn("Show the check", visible_text(closed["inbox"]))
+        self.assertNotIn(tail, visible_text(closed["inbox"]))
+        self.assertIn(tail, visible_text(opened["inbox"]))
+
+    def test_a_manual_check_keeps_passed_failed_and_send_note(self) -> None:
+        (snap,) = render([START, {"frame": frame([check_item("B", "manual-check")])},
+                          {"snapshot": True}])
+        self.assertEqual(ans_buttons(snap), {"ans-passed": "Passed", "ans-failed": "Failed",
+                                             "ans-note": "Send note"})
+        self.assertEqual(field(snap, "note-text")["placeholder"], "Write a note")
+
+    def test_not_yet_sends_the_note_and_keeps_the_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([review_item("A")])},
+            {"type": {"class": "note-text", "text": "The 480 px card cuts the text."}},
+            {"click": "ans-note"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        (post,) = checks(snap)
+        self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A", "answer": "note",
+                                        "version": "v1-A", "note": "The 480 px card cuts the text."})
+        self.assertIn("Note sent.", full(snap["inbox"]))
+        (not_yet,) = with_class(snap["inbox"], "ans-note")
+        self.assertEqual(full(not_yet), "Not yet")
+
+
 
 def captioned(lines: list) -> dict:
     return {**PIC_CHECK, "pictures": [{"id": f"{n + 1:064x}", "line": line, "pair": None}
@@ -8659,6 +8765,8 @@ class PageCheckCaptionTest(unittest.TestCase):
     def test_each_file_name_reads_as_its_caption(self) -> None:
         table = [
             ("before-1440.png", "Before, 1440 px"),
+            ("before-after-1440.png", "Before, 1440 px"),
+            ("card-(before)-1440.png", "Before, 1440 px"),
             ("after-1440.png", "After, 1440 px"),
             ("owner-check-viewer-480.png", "Owner check viewer, 480 px"),
             ("OWNER-CHECK-VIEWER-480.png", "Owner check viewer, 480 px"),
@@ -8666,7 +8774,6 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("Settings-PAGE.Wide.PNG", "Settings page wide"),
             ("AFTER_480PX.PNG", "After, 480 px"),
             ("card-before.png", "Before"),
-            ("before-after-1440.png", "Before, 1440 px"),
             ("shots/after-480.png", "After, 480 px"),
             ("C:\\shots\\Card-1440.png", "Card, 1440 px"),
             ("settings__page--wide.png", "Settings page wide"),
@@ -8675,7 +8782,6 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("beforehand-1440.png", "Beforehand, 1440 px"),
             ("480.png", "Picture, 480 px"),
             ("__.png", "Picture"),
-            ("card-(before)-1440.png", "Before, 1440 px"),
             ("[After] card (480px).png", "After, 480 px"),
             ("(owner) check,.png", "Owner check"),
             ("(--).png", "Picture"),
@@ -10479,3 +10585,69 @@ class PageReportPictureTest(unittest.TestCase):
         (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertEqual(focused["key"], REPORT_KEY + "/1")
         self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/message"]), 1)
+
+
+DATED_WAIT = {
+    "key": "o/r#619/wait/1/0", "issue": 619, "until": "2026-11-18T12:00:00+00:00",
+    "url": "https://github.com/o/r/issues/619#issuecomment-1", "text": "Read the hourly rows.",
+}
+UNDATED_WAIT = {
+    "key": "o/r#620/wait/2/0", "issue": 620, "until": None,
+    "url": "https://github.com/o/r/issues/620#issuecomment-2",
+    "text": "Waiting for the release to be seen: no release yet includes its merge",
+}
+
+
+class WaitingLinePageTest(unittest.TestCase):
+    def test_a_dated_wait_reads_its_day_and_an_undated_one_its_reason(self) -> None:
+        frame = view([{**project(0, []), "waits": [UNDATED_WAIT],
+                       "sprints": [running_sprint("a", waits=[DATED_WAIT])]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        lines = [n for n in nodes(snap["projects"]) if has_class(n, "wait")]
+        self.assertEqual([full(n) for n in lines], [
+            "Waiting until Wed 18 Nov: Read the hourly rows. #619",
+            "Waiting for the release to be seen: no release yet includes its merge #620",
+        ])
+        self.assertEqual([n["tag"] for n in lines], ["li", "li"])
+        self.assertEqual([[a["href"] for a in nodes(n) if a["tag"] == "a"] for n in lines],
+                         [[DATED_WAIT["url"]], [UNDATED_WAIT["url"]]])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "card")], [])
+
+    def test_a_sprints_wait_sits_in_the_check_list_with_the_check_lines_indent_and_gap(self) -> None:
+        # The owner's round 144954: the waiting line aligns with the sprint head text (the
+        # list's 28 px indent, at 1440 and 480 px) and takes the check line's even gap above and below.
+        frame = view([{**project(0, []), "sprints": [running_sprint("a", waits=[DATED_WAIT])]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        (block,) = sprint_lines(snap)
+        (checks,) = of_class(block, "ul", "sprint-checks")
+        self.assertEqual([c["cls"] for c in checks["children"]], ["wait"])
+        children = block["children"]
+        head = next(i for i, c in enumerate(children) if has_class(c, "sp-head"))
+        self.assertIs(children[head + 1], checks)
+        (style, top) = page_css()
+        line = css_declared(top, ".sprint-checks .wait")
+        check = css_declared(top, ".sprint-check")
+        self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
+        self.assertEqual(line.get("margin"), "0")
+        self.assertEqual(line.get("padding"), check.get("padding"))
+        self.assertEqual(line.get("font-size"), check.get("font-size"))
+        (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
+        self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
+        # At 480 px the check line is a 44 px tap target with its text at the top; the waiting
+        # line takes the same box, so the gap below it is the check line's too.
+        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"),
+                         css_declared(narrow, ".sprint-check").get("min-height"))
+        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"), "44px")
+
+    def test_a_project_with_only_waits_draws_its_name_and_its_line(self) -> None:
+        frame = view([{**project(1, []), "waits": [UNDATED_WAIT]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        projects = snap["projects"]
+        self.assertEqual([full(n) for n in nodes(projects) if has_class(n, "pname")], ["owner/p01"])
+        (parent,) = [n for n in nodes(projects)
+                     if any(has_class(c, "wait") for c in n["children"])]
+        kinds = [c["cls"] for c in parent["children"]]
+        at = next(i for i, c in enumerate(parent["children"]) if has_class(c, "wait"))
+        self.assertTrue(has_class(parent["children"][at - 1], "line"), kinds)
+        self.assertEqual(full(parent["children"][at]),
+                         "Waiting for the release to be seen: no release yet includes its merge #620")

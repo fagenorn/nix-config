@@ -92,7 +92,7 @@ class DerivationTest(WorldCase):
         derivation = policy["derivation"]
         self.assertEqual(set(derivation),
                          {"schema_version", "platform_version", "registry_digest"})
-        self.assertEqual(derivation["schema_version"], 3)
+        self.assertEqual(derivation["schema_version"], 4)
         self.assertRegex(derivation["registry_digest"], r"^sha256:[0-9a-f]{64}$")
         # D11: identity evidence only, never the contract or a resolved snapshot.
         text = self.world.output.read_text("utf-8")
@@ -269,6 +269,31 @@ class DeriveTest(WorldCase):
         self.assertEqual([rows[slug]["required_checks"]
                           for slug in ("fagenorn/null", "fagenorn/absent")], [[], []])
         self.assertEqual(self.derived("fagenorn/checks")["row"], rows["fagenorn/checks"])
+
+    def test_declared_production_rules_reach_the_row_as_argv(self):
+        """Issue 1149 D1: a declared contract's row carries its changing and read-only
+        commands as authored argv and the release profile; none or absent adds nothing."""
+        def declare(contract):
+            contract["production"] = {
+                "none": False,
+                "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+                "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+                "release_profile": "github-release"}
+
+        self.world.project("fixture/prod", "fagenorn/prod", mutate=declare)
+        self.world.project("fixture/none", "fagenorn/none",
+                           mutate=lambda contract: contract.update(production={"none": True}))
+        self.world.project("fixture/absent", "fagenorn/absent")
+        code = self.world.compile()[0]
+        rows = self.world.policy()["derived_repositories"]
+        self.assertEqual(code, 0)
+        self.assertEqual(rows["fagenorn/prod"]["production"], {
+            "changes": [{"id": "nix-activate", "argv": ["just", "switch"]}],
+            "read_only": [{"id": "nix-build", "argv": ["just", "build"]}],
+            "release_profile": "github-release"})
+        self.assertEqual(set(rows["fagenorn/none"]), ROW_MEMBERS)
+        self.assertEqual(set(rows["fagenorn/absent"]), ROW_MEMBERS)
+        self.assertEqual(self.derived("fagenorn/prod")["row"], rows["fagenorn/prod"])
 
     @staticmethod
     def jarbird_shape(contract):

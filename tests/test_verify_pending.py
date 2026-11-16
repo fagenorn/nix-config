@@ -21,10 +21,13 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.verification import verify_exec as vx
 from agent_tools.verification import verify_facts as vf
 from agent_tools.verification import verify_issues as vi
+from agent_tools.verification import verify_owner
 from agent_tools.verification import verify_pending
 from agent_tools.verification import verify_run as vr
+from agent_tools.verification import verify_wait
 from agent_tools.project_contract.resolve_project import resolve
 from agent_tools.verification.verify_block import lint_block
+from agent_tools.system.forge_api import ForgeError
 
 from .forge_world import ForgeWorld, host_clock
 
@@ -396,10 +399,329 @@ class WhenTest(unittest.TestCase):
         self.assertEqual(due.reason, "not_before")
         self.assertNotIn("darwin-version", [call["tool"] for call in world.calls()])
 
+    def test_a_future_not_before_names_its_time(self):
+        world = world_with(self)
+        with host_clock(WRONG, vf, fm):
+            due = vf.evaluate_when({"not_before": "2026-11-06T11:00:00+00:00"}, MERGE, context(world))
+        self.assertEqual((due.due, due.reason, due.until),
+                         (False, "not_before", datetime(2026, 11, 6, 11, tzinfo=timezone.utc)))
+
+    def test_an_open_window_names_its_end(self):
+        _, due = self.window("2026-11-03T10:00:00Z", 7)
+        self.assertEqual(due.reason, "window_not_open")
+        self.assertEqual(due.until, datetime(2026, 11, 10, 10, tzinfo=timezone.utc))
+
+    def test_an_unseen_event_has_no_time(self):
+        world = world_with(self, "darwin-version")
+        world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
+        pushed(world, REV)
+        ancestry(world, MERGE, REV, 1)
+        due = vf.evaluate_when({"days_after": {"event": "deployed", "days": 7}}, MERGE, context(world))
+        self.assertEqual(due.reason, "window_not_open")
+        self.assertIsNone(due.until)
+
+    def test_a_given_clock_replaces_the_forge_clock(self):
+        world = world_with(self)
+        fixed = datetime(2026, 11, 16, 9, tzinfo=timezone.utc)
+        ctx = vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                         markers=[], clock=lambda: fixed)
+        self.assertEqual((ctx.now(), ctx.now()), (fixed, fixed))
+        self.assertEqual([a for a in world.argvs("gh") if "rate_limit" in a], [])
+
+    def test_a_context_that_reads_no_host_runs_no_version_tool(self):
+        world = world_with(self, "darwin-version")
+        world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
+        ctx = vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                         markers=[], reads_host=False)
+        reading = vf.deployed_includes(ctx, MERGE)
+        self.assertEqual(reading.reason, "revision_unknown")
+        self.assertNotIn("darwin-version", [c["tool"] for c in world.calls()])
+
+    def test_a_wait_on_two_dates_names_the_later(self):
+        world = world_with(self)
+        nodes = [gnode(10, hold(block())),
+                 gnode(11, marker(vi.WINDOW, {"event": "deployed", "merge": MERGE, "host": "eleven-m5"}),
+                       at="2026-11-16T09:00:00Z")]
+        held = vi.select(vi.comments_from_graphql(nodes))
+        when = {"not_before": "2026-11-18T10:00:00+00:00", "days_after": {"event": "deployed", "days": 7}}
+
+        def ctx_at(at):
+            return vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                              markers=held.markers, clock=lambda: at)
+
+        def utc(day, hour):
+            return datetime(2026, 11, day, hour, tzinfo=timezone.utc)
+
+        waited = vf.evaluate_wait(when, MERGE, ctx_at(utc(16, 10)))
+        self.assertEqual((waited.due, waited.until), (False, utc(23, 9)))
+        first = vf.evaluate_when(when, MERGE, ctx_at(utc(16, 10)))
+        self.assertEqual((first.due, first.reason, first.until), (False, "not_before", utc(18, 10)))
+        waited = vf.evaluate_wait(when, MERGE, ctx_at(utc(19, 10)))
+        self.assertEqual((waited.due, waited.reason, waited.until), (False, "window_not_open", utc(23, 9)))
+        self.assertTrue(vf.evaluate_wait(when, MERGE, ctx_at(utc(23, 9))).due)
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_date_beside_an_unseen_release_gives_no_date(self):
+        world = world_with(self)
+        world.not_found("gh", ["api", f"repos/{SLUG}/releases/latest"])
+        when = {"not_before": "2026-11-18T10:00:00+00:00", "released_includes": MERGE}
+        clock = lambda: datetime(2026, 11, 16, 10, tzinfo=timezone.utc)
+
+        def ctx():
+            return vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                              markers=[], clock=clock)
+
+        waited = vf.evaluate_wait(when, MERGE, ctx())
+        self.assertEqual((waited.due, waited.reason, waited.until), (False, "not_released", None))
+        before = len([a for a in world.argvs("gh") if f"repos/{SLUG}/releases/latest" in a])
+        first = vf.evaluate_when(when, MERGE, ctx())
+        self.assertEqual((first.due, first.reason), (False, "not_before"))
+        after = len([a for a in world.argvs("gh") if f"repos/{SLUG}/releases/latest" in a])
+        self.assertEqual(after, before)
+
+    def test_a_stop_during_the_first_forge_read_reads_nothing_more(self):
+        world = world_with(self)
+        world.respond_json("gh", ["api", f"repos/{SLUG}/releases/latest"], {"tag_name": "v1"})
+        asked = []
+        ctx = vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER, markers=[],
+                         cancelled=lambda: (asked.append(1), len(asked) > 1)[1])
+        with self.assertRaises(ForgeError) as raised:
+            vf.evaluate_when({"released_includes": MERGE}, MERGE, ctx)
+        self.assertEqual(raised.exception.code, "cancelled")
+        self.assertEqual(world.argvs("gh"), [["api", f"repos/{SLUG}/releases/latest"]])
+
 
 RELEASES = ["api", "--paginate", "--slurp", f"repos/{SLUG}/releases?per_page=100"]
 RUNS_SINCE = ["api", "--paginate", "--slurp", f"repos/{SLUG}/actions/workflows/ci.yaml/runs?per_page=100"
               "&branch=main&created=%3E%3D2026-11-01T00%3A00%3A00Z"]
+
+
+NOW = datetime(2026, 11, 16, 10, tzinfo=timezone.utc)
+JARBIRD_ASK = ("Two days after the release, read the hourly sonnet-5.5 job rows on kestrel; "
+               "there are no impossible_usage rows.")
+
+
+def utc(day, hour):
+    return datetime(2026, 11, day, hour, tzinfo=timezone.utc)
+
+
+class OwnerWaitTest(unittest.TestCase):
+    """What each owner check of a held block waits for (issue 1129)."""
+
+    def asking(self, when, ask="Read the hourly rows.", **over):
+        return {"ac": "AC4", "kind": "human", "host": "mbp", "reason": "senses", "when": when,
+                "run": {"ask": ask}, **over}
+
+    def nodes(self, *checks, prompted=(), window_at=None, window_event="released", results=(), others=()):
+        """The comment nodes of a held block: the block, then prompts of the listed checks, a
+        window marker and results; `others` are (reason, index) prompts of another reason."""
+        blk = block(*checks)
+        key = vi.block_key(10, blk)
+        found = [gnode(10, hold(blk))]
+        for offset, index in enumerate(prompted):
+            body = marker(verify_owner.KIND, {"reason": verify_owner.ASK, "block": key,
+                                              "check": str(index), "host": "mbp"})
+            found.append(gnode(20 + offset, body))
+        for offset, (reason, index) in enumerate(others):
+            body = marker(verify_owner.KIND, {"reason": reason, "block": key, "check": str(index), "host": "mbp"})
+            found.append(gnode(50 + offset, body))
+        if window_at:
+            body = marker(vi.WINDOW, {"event": window_event, "merge": MERGE, "host": "mbp"})
+            found.append(gnode(30, body, at=window_at))
+        for offset, (index, state) in enumerate(results):
+            body = marker(vi.RESULT, {"block": key, "check": str(index), "ac": "AC4", "state": state,
+                                      "host": "mbp"})
+            found.append(gnode(40 + offset, body))
+        return found
+
+    def waits(self, world, *checks, clock=lambda: NOW, **kwargs):
+        held = vi.select(vi.comments_from_graphql(self.nodes(*checks, **kwargs)))
+        ctx = vf.Context(slug=SLUG, root=Path("/"), default_branch="main", tracker={}, markers=held.markers,
+                         clock=clock, reads_host=False)
+        return verify_wait.owner_waits(held, ctx)
+
+    def test_a_future_not_before_waits_until_it(self):
+        world = world_with(self)
+        ask = self.asking({"not_before": "2026-11-18T10:00:00+00:00"})
+        self.assertEqual(self.waits(world, ask),
+                         [verify_wait.Wait(0, "AC4", "not_before", utc(18, 10), False, "Read the hourly rows.")])
+
+    def test_an_open_release_window_waits_until_its_end(self):
+        world = world_with(self)
+        ask = self.asking({"days_after": {"event": "released", "days": 2}})
+        waits = self.waits(world, ask, window_at="2026-11-16T09:00:00Z")
+        self.assertEqual([(w.reason, w.until) for w in waits], [("window", utc(18, 9))])
+
+    def test_a_date_and_an_open_window_wait_until_the_later(self):
+        world = world_with(self)
+        ask = self.asking({"not_before": "2026-11-18T10:00:00+00:00",
+                           "days_after": {"event": "released", "days": 7}})
+        waits = self.waits(world, ask, window_at="2026-11-16T09:00:00Z")
+        self.assertEqual([(w.reason, w.until) for w in waits], [("window", utc(23, 9))])
+
+    def test_an_unseen_release_is_named_with_no_date(self):
+        world = world_with(self)
+        world.not_found("gh", ["api", f"repos/{SLUG}/releases/latest"])
+        ask = self.asking({"days_after": {"event": "released", "days": 2}})
+        waits = self.waits(world, ask)
+        self.assertEqual([(w.reason, w.until) for w in waits], [("not_released", None)])
+
+    def test_an_unseen_deploy_is_named_with_no_date(self):
+        world = world_with(self)
+        ask = self.asking({"days_after": {"event": "deployed", "days": 2}})
+        waits = self.waits(world, ask)
+        self.assertEqual([(w.reason, w.until) for w in waits], [("not_deployed", None)])
+
+    def test_a_worded_wait_without_a_dated_member_names_it(self):
+        world = world_with(self)
+        ask = self.asking({"released_includes": MERGE}, ask=JARBIRD_ASK)
+        waits = self.waits(world, ask, prompted=(0,))
+        self.assertEqual([w.reason for w in waits], ["no_when"])
+        self.assertTrue(waits[0].prompted)
+        self.assertIsNone(waits[0].until)
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_due_prompted_check_does_not_wait(self):
+        world = world_with(self)
+        ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
+        self.assertEqual(self.waits(world, ask, prompted=(0,)), [])
+
+    def test_a_prompted_check_is_never_evaluated(self):
+        world = world_with(self, "darwin-version")
+
+        def refuses():
+            raise AssertionError("a prompted check reads no clock")
+
+        ask = self.asking({"not_before": "2026-11-18T10:00:00+00:00", "deployed_includes": MERGE})
+        self.assertEqual(self.waits(world, ask, prompted=(0,), clock=refuses), [])
+        self.assertEqual(world.argvs("gh"), [])
+        self.assertNotIn("darwin-version", [call["tool"] for call in world.calls()])
+
+    def test_a_runnable_evidence_check_never_waits(self):
+        world = world_with(self)
+        for when in ({"not_before": "2026-11-18T10:00:00+00:00"}, {"not_before": "2026-11-15T10:00:00+00:00"}):
+            probe = check(when=when, run={"probe": "released_includes", "sha": MERGE})
+            self.assertEqual(self.waits(world, probe), [])
+
+    def test_an_unprompted_due_owner_check_is_due_now(self):
+        world = world_with(self)
+        ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
+        waits = self.waits(world, ask)
+        self.assertEqual([(w.reason, w.until, w.prompted) for w in waits], [("due", None, False)])
+
+    def test_a_stale_or_decision_prompt_does_not_make_a_check_prompted(self):
+        world = world_with(self)
+        ask = self.asking({"released_includes": MERGE}, ask=JARBIRD_ASK)
+        for reason in (verify_owner.STALE, verify_owner.DECISION):
+            with self.subTest(reason):
+                waits = self.waits(world, ask, others=[(reason, 0)])
+                self.assertEqual([(w.reason, w.prompted) for w in waits], [("no_when", False)])
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_worded_wait_names_the_missing_field_while_the_release_does_not_exist(self):
+        world = world_with(self)
+        world.not_found("gh", ["api", f"repos/{SLUG}/releases/latest"])
+        ask = self.asking({"released_includes": MERGE}, ask=JARBIRD_ASK)
+        self.assertEqual([w.reason for w in self.waits(world, ask)], ["no_when"])
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_worded_wait_that_is_unprompted_and_due_names_no_when(self):
+        world = world_with(self)
+        ask = self.asking({"released_includes": MERGE}, ask=JARBIRD_ASK)
+        world.respond_json("gh", ["api", f"repos/{SLUG}/releases/latest"], {"tag_name": "v1", "draft": False})
+        world.respond_json("gh", ["api", f"repos/{SLUG}/compare/{MERGE}...v1"], {"status": "ahead"})
+        world.respond_json("gh", ["api", f"repos/{SLUG}/compare/v1...main"], {"status": "ahead"})
+        self.assertEqual([w.reason for w in self.waits(world, ask)], ["no_when"])
+
+    def test_a_check_with_a_result_never_waits(self):
+        world = world_with(self)
+        ask = self.asking({"not_before": "2026-11-18T10:00:00+00:00"})
+        self.assertEqual(self.waits(world, ask, results=[(0, "fail")]), [])
+
+    def test_a_forge_failure_reads_unknown(self):
+        world = world_with(self)
+        world.respond("gh", ["api", f"repos/{SLUG}/releases/latest"], exit=1,
+                      stderr="gh: Internal Server Error (HTTP 500)")
+        ask = self.asking({"released_includes": MERGE})
+        with contextlib.redirect_stderr(io.StringIO()):
+            waits = self.waits(world, ask)
+        self.assertEqual([(w.reason, w.until) for w in waits], [("unknown", None)])
+
+    def test_a_forge_failure_is_logged_with_its_cause(self):
+        world = world_with(self)
+        world.respond("gh", ["api", f"repos/{SLUG}/releases/latest"], exit=1,
+                      stderr="gh: Internal Server Error (HTTP 500)")
+        ask = self.asking({"released_includes": MERGE})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.waits(world, ask)
+        line = err.getvalue()
+        self.assertEqual(line.count("check_unreadable"), 1)
+        self.assertIn(f"slug={SLUG}", line)
+        self.assertIn(f"block={vi.block_key(10, block(ask))}", line)
+        self.assertIn("check=0", line)
+        self.assertIn("code=gh_failed", line)
+        self.assertIn("HTTP 500", line)
+
+    def test_a_due_live_command_does_not_promise_a_prompt(self):
+        world = world_with(self)
+        for effects in ("live", "paid"):
+            live = check(when={"not_before": "2026-11-15T10:00:00+00:00"}, effects=effects,
+                         run={"command": "nix-activate"})
+            with self.subTest(effects):
+                waits = self.waits(world, live)
+                self.assertEqual([(w.reason, w.prompted) for w in waits], [("due_command", False)])
+
+    def test_a_duration_in_the_ask_does_not_hide_a_due_card(self):
+        world = world_with(self)
+        for ask in ("Does the hourly job write 24 rows in a day?", "Finished in two hours or less?"):
+            with self.subTest(ask):
+                check_ = self.asking({"released_includes": MERGE}, ask=ask)
+                self.assertEqual(self.waits(world, check_, prompted=(0,)), [])
+
+    def test_a_cancelled_read_is_not_a_wait(self):
+        world = world_with(self)
+        ask = self.asking({"released_includes": MERGE})
+        with self.assertRaises(ForgeError) as raised:
+            verify_wait.held_waits(self.nodes(ask), SLUG, "main", lambda: NOW, cancelled=lambda: True)
+        self.assertEqual(raised.exception.code, "cancelled")
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_held_waits_reads_graphql_nodes_and_no_clock_without_a_block(self):
+        world_with(self)
+        ask = self.asking({"not_before": "2026-11-18T10:00:00+00:00"})
+        held, waits = verify_wait.held_waits(self.nodes(ask), SLUG, "main", lambda: NOW)
+        self.assertEqual(held.key, vi.block_key(10, block(ask)))
+        self.assertEqual([(w.reason, w.until) for w in waits], [("not_before", utc(18, 10))])
+
+        def refuses():
+            raise AssertionError("no block, no clock")
+
+        self.assertEqual(verify_wait.held_waits([gnode(10, "No fence here.")], SLUG, "main", refuses),
+                         (None, []))
+
+    def test_a_block_the_runner_refuses_has_no_waits(self):
+        world_with(self)
+        ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
+        bad = [{**block(ask), "extra": 1}, {**block(ask), "checks": ["x"]}, {**block(ask), "checks": 5},
+               {"v": 1, "merge": MERGE}]
+        for blk in bad:
+            with self.subTest(block=blk):
+                held, waits = verify_wait.held_waits([gnode(10, hold(blk))], SLUG, "main", lambda: NOW)
+                self.assertEqual(waits, [])
+                self.assertIsNone(held)
+
+    def test_the_wording_of_a_wait(self):
+        for text in ("Two days after the release, read the rows.", "After 2 days, read the rows.",
+                     "Wait until Friday, then look.", "Not before Monday.", "one week from the deploy"):
+            self.assertTrue(verify_wait.states_wait(text), text)
+        for text in ("Check again in 3 days.", "Come back in two weeks."):
+            self.assertTrue(verify_wait.states_wait(text), text)
+        for text in ("Read the hourly rows on kestrel.", "After the release, look at the page.",
+                     "The release includes the fix.", "Days of rows.", "Two days of rows after the release.",
+                     "Does the hourly job write 24 rows in a day?", "Once in a week the job runs.",
+                     "Finished in two hours or less?"):
+            self.assertFalse(verify_wait.states_wait(text), text)
 
 
 class ProbeTest(unittest.TestCase):
@@ -1005,6 +1327,20 @@ class PassTransitionsTest(PassBase):
         mark = len(self.world.argvs("gh"))
         self.assertEqual(self.run_pass()[0]["reason"], "window_not_open")
         self.assertEqual(self.mutations(mark), [])
+
+    def test_a_due_unattended_check_is_answered_by_the_pass_without_a_prompt(self):
+        probe = check(run={"probe": "released_includes", "sha": MERGE}, when={"not_before": "2026-01-01T00:00:00+00:00"})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/releases/latest"], {"tag_name": "v1", "draft": False})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/compare/{MERGE}...v1"], {"status": "ahead"})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/compare/v1...main"], {"status": "ahead"})
+        self.hold(probe)
+        self.assertEqual(self.run_pass()[0]["state"], "pass")
+        self.assertEqual([c for c in self.world.stored() if "agent:owner-action" in c["body"]], [])
+        held = vi.select(vi.comments_from_graphql(
+            [gnode(c["id"], c["body"], c["author_association"], c["created_at"]) for c in self.world.stored()]))
+        self.assertEqual(verify_wait.owner_waits(held, vf.Context(
+            slug=SLUG, root=Path("/"), default_branch="main", tracker={}, markers=held.markers,
+            clock=lambda: NOW, reads_host=False)), [])
 
     def test_a_replacement_block_inherits_the_window_and_posts_none(self):
         self.world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
