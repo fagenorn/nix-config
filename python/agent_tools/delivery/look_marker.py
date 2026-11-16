@@ -32,9 +32,13 @@ answer is not `approved`, or for which the head is unknown, yields `Verdict(Fals
 covers)`; otherwise `Verdict(True, marked=...)`, `marked` the numbers of the marked issues it
 admitted, ascending. An unmarked issue needs nothing.
 
-Near misses: a body line outside fences that is not a marker, matches `before[\\s_-]*merg`
-(any case) and holds `[human]` or a word starting with `look` (any case) is a near miss, a
-marker its author meant and misspelt. `near_misses` returns them in body order with their 1-based
+Near misses: a body line outside fences that is not a marker and, once its inline code spans
+(backtick runs) are removed, is criterion-shaped is a near miss, a marker its author meant and
+misspelt. Criterion-shaped is an optional list bullet (`-`, `*`, `+`) then one or more bracket
+groups (`[ ]`, `[human]`, `[code]`); the line is a near miss when it matches `before[\\s_-]*merg`
+(any case) and a bracket group is `[human]` (any case), or when the bracket groups are
+immediately followed by `before[\\s_-]*merg`. Prose, a bullet that only talks about the
+marker and text inside inline code are never near misses. `near_misses` returns them in body order with their 1-based
 line numbers; `look-lint` prints them, and a body with any is refused even beside a valid marker.
 
 This module reads no network, runs no subprocess and reads no clock.
@@ -55,7 +59,8 @@ LINE = re.compile(r"- \[[ xX]\] \[human\] before merge: (?P<what>\S.*?) — meas
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
 NEAR = re.compile(r"before[\s_-]*merg", re.IGNORECASE)
-NEAR_WORD = re.compile(r"\[human\]|\blook", re.IGNORECASE)
+CODE_SPAN = re.compile(r"(`+).*?\1")
+SHAPED = re.compile(r"\s*(?:[-*+]\s*)?(?P<groups>(?:\[[^\]]*\]\s*)+)")
 
 
 @dataclass(frozen=True)
@@ -126,13 +131,19 @@ class NearMiss:
     text: str
 
 
+def _near(line: str) -> bool:
+    text = CODE_SPAN.sub("", line)
+    shaped = SHAPED.match(text)
+    if shaped is None:
+        return False
+    return bool(NEAR.match(text, shaped.end())
+                or (NEAR.search(text) and "[human]" in shaped["groups"].lower()))
+
+
 def near_misses(body: str | None) -> tuple[NearMiss, ...]:
-    """The lines outside fences that read like a look marker but are not one, in body order."""
-    return tuple(
-        NearMiss(n, line)
-        for n, line in body_lines(body)
-        if not LINE.fullmatch(line) and NEAR.search(line) and NEAR_WORD.search(line)
-    )
+    """The criterion-shaped lines outside fences that read like a look marker but are not one."""
+    return tuple(NearMiss(n, line) for n, line in body_lines(body)
+                 if not LINE.fullmatch(line) and _near(line))
 
 
 def _positive(name: str, value: Any) -> None:

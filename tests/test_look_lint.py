@@ -51,7 +51,9 @@ class LookLintCommandTest(unittest.TestCase):
             "- [ ] [human] before merge: the settings page at 390 px",
             " " + LINE,
             LINE.replace("- [ ] ", "- [] "),
-            "Hold this for a look before merge: the owner must see the page first.",
+            "- [ ] before-merge: the owner must see the page first",
+            "[ ] [human] Before merge: the owner looks at the page — measured: the owner",
+            "- [ ] [human] the owner looks at `the page` before merging — measured: the owner, on the console",
             "- [ ] [human] the owner looks at the page before merging — measured: the owner, on the console",
         ]
         for text in texts:
@@ -65,19 +67,34 @@ class LookLintCommandTest(unittest.TestCase):
         for text in (
             "- [ ] [human] the owner likes the colours — measured: the owner, on the page",
             "- [ ] [code] CI is green before merge — measured: the CI run",
+            "- [ ] [code] the cache lookup is warmed before merge — measured: CI",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(lint(HEAD + text + "\n"), (0, verdict("ok", False, [], [])))
+
+    def test_prose_and_code_spans_that_use_the_words_are_accepted(self):
+        for text in (
+            "- It returns the stage **awaiting look**, with the reason in plain words (`issue N needs the owner's look before merge`), "
+            "the before and after pictures if its verify step wrote any, and a `cont` to resume from.",
+            "- **`to-issues`**: write one criterion in the exact line form. A malformed attempt (for example "
+            "`[human] before-merge` or a hold in prose) is caught by a lint.",
+            "`- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`",
+            "The `[human]` kind token followed by the literal words `before merge:` is the marker; a hold written in prose is not.",
+            "Hold this for a look before merge: the owner must see the page first.",
+            "A look before merge is held [human] by the owner.",
         ):
             with self.subTest(text=text):
                 self.assertEqual(lint(HEAD + text + "\n"), (0, verdict("ok", False, [], [])))
 
     def test_a_marker_beside_a_near_miss_is_refused(self):
-        code, out = lint(HEAD + LINE + "\nHold this for a look before merge.\n")
+        code, out = lint(HEAD + LINE + "\n- [ ] [human] before-merge: the page\n")
         self.assertEqual(code, 1)
         self.assertIs(out["marked"], True)
         self.assertEqual(out["covers"], ["the settings page at 390 px"])
-        self.assertEqual(out["malformed"], [{"line": 4, "text": "Hold this for a look before merge."}])
+        self.assertEqual(out["malformed"], [{"line": 4, "text": "- [ ] [human] before-merge: the page"}])
 
     def test_a_near_miss_inside_a_fence_is_not_read(self):
-        for body in ("```\n- [ ] [human] before-merge: x\n```\n", "~~~~\nHold for a look before merge\n"):
+        for body in ("```\n- [ ] [human] before-merge: x\n```\n", "~~~~\n- [ ] [human] before-merge: x\n"):
             with self.subTest(body=body):
                 self.assertEqual(lint(body), (0, verdict("ok", False, [], [])))
 
@@ -112,8 +129,8 @@ class LookLintCommandTest(unittest.TestCase):
 class NearMissTest(unittest.TestCase):
     def test_line_numbers_count_fence_lines(self):
         self.assertEqual(
-            lm.near_misses("```\nx\n```\nHold for a look before merge\n"),
-            (lm.NearMiss(4, "Hold for a look before merge"),),
+            lm.near_misses("```\nx\n```\n- [ ] [human] before-merge: x\n"),
+            (lm.NearMiss(4, "- [ ] [human] before-merge: x"),),
         )
 
     def test_body_lines_skip_fences_and_strip_the_end(self):

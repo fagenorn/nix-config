@@ -27,7 +27,7 @@ The project-declared reduced route for changes that a project's contract names a
 The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved` or `changes`, and the console message it came from (issue 1138). It covers exactly that head; the latest one for a head decides.
 
 **Look marker**:
-An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
+An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a criterion line that is a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
 
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.

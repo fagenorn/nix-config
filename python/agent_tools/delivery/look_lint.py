@@ -11,9 +11,10 @@ Prints exactly one JSON line on stdout and nothing on stderr:
 Exit 0 when the body has no near miss (`marked` says whether it carries a look marker), 1 when
 it has one or more (`malformed` lists each with its 1-based line number, even beside a valid
 marker), 2 on a usage error: no arguments, an unknown argument, a path that cannot be opened,
-or bytes that are not UTF-8 (file or stdin). A near miss is a line outside code fences that is
-not a marker, matches `before[\\s_-]*merg` and holds `[human]` or a word starting with `look`,
-any case (`look_marker.near_misses`).
+or bytes that are not UTF-8 (file or stdin). A near miss is a criterion-shaped line
+(an optional list bullet then bracket groups) outside code fences and inline code spans that is
+not a marker and says `before[\\s_-]*merg` after its bracket groups or beside a `[human]` group,
+any case (`look_marker.near_misses`); prose is never one.
 
 This module reads no network, runs no subprocess and reads no environment.
 """
