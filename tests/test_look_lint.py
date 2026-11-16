@@ -121,5 +121,23 @@ class NearMissTest(unittest.TestCase):
         self.assertEqual(list(lm.body_lines(None)), [(1, "")])
 
 
+class TemplateTest(unittest.TestCase):
+    TO_ISSUES = REPO_ROOT / "home/common/agent-skills/skills/to-issues/SKILL.md"
+
+    def test_the_to_issues_template_carries_the_look_line(self):
+        text = self.TO_ISSUES.read_text(encoding="utf-8")
+        template = text[text.index("<issue-template>") : text.index("</issue-template>")]
+        look = lm.read_look(template)
+        self.assertEqual(look.covers, ("<what the owner looks at>",))
+        self.assertEqual(look.criteria[0].measured, "<who judges, where>")
+        self.assertEqual(lm.near_misses(template), ())
+        start = text.index("Before publishing, reread each body")
+        sentence = text[start : text.index("\n", start)]
+        self.assertIn("then run `look-lint --body-file <f>` on it and fix each refusal.", sentence)
+
+    def test_the_skill_stays_within_its_budget(self):
+        self.assertTrue(6075 <= len(self.TO_ISSUES.read_bytes()) <= 6378)
+
+
 if __name__ == "__main__":
     unittest.main()
