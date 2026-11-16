@@ -222,6 +222,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
 .activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
 .activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
+.notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
@@ -291,9 +292,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
 .notice-list { margin-top: 4px; }
-.notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--ov2); }
+.notice { color: var(--ov2); }
+.notice + .notice { margin-top: 12px; }
 .notice > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.notice .notice-poster { color: var(--sub0); }
+.notice-head { display: flex; align-items: baseline; gap: 0 8px; color: var(--sub0); }
+.notice-head > *, .notice-claim > * { min-width: 0; }
+.notice-who { flex: 1 1 auto; min-width: 0; }
+.notice-head .notice-age { flex: none; margin-left: auto; color: var(--ov2); white-space: nowrap; }
+.notice-words { color: var(--text); }
+.notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 .notices-project { min-width: 0; overflow-wrap: anywhere; }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
@@ -1562,13 +1569,26 @@ function projectLine(entry) {
 }
 function noticeLine(notice) {
   const item = el("li", "notice");
-  item.appendChild(el("span", "notice-poster", notice.poster));
-  item.appendChild(el("span", "notice-kind", notice.kind_text));
-  if (typeof notice.what === "string") item.appendChild(pathWords(el("span", "notice-what"), notice.what));
-  item.appendChild(el("span", "notice-text", notice.text));
-  if (typeof notice.until_text === "string") item.appendChild(el("span", "notice-until", notice.until_text));
-  if (typeof notice.to_text === "string") item.appendChild(el("span", "notice-for", notice.to_text));
-  item.appendChild(timeEl("ago", notice.at, "notice-age"));
+  const head = el("p", "notice-head");
+  const who = el("span", "notice-who");
+  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + notice.to_text : notice.kind_text;
+  who.appendChild(el("b", "notice-label", label));
+  who.appendChild(el("span", "notice-from", ", from " + notice.poster));
+  head.appendChild(who);
+  head.appendChild(timeEl("ago", notice.at, "notice-age"));
+  item.appendChild(head);
+  item.appendChild(el("p", "notice-words", notice.text));
+  if (typeof notice.what === "string") {
+    const claim = el("p", "notice-claim");
+    const paths = el("span", "notice-paths");
+    notice.what.trim().split(/\s+/).forEach((path, at) => {
+      if (at > 0) paths.appendChild(el("span", "", " "));
+      paths.appendChild(el("code", "notice-path", path));
+    });
+    claim.appendChild(paths);
+    if (typeof notice.until_text === "string") claim.appendChild(el("span", "notice-until", notice.until_text));
+    item.appendChild(claim);
+  }
   return item;
 }
 // One closed fold of a project's open notices, in the view's order and words; null when it has none.

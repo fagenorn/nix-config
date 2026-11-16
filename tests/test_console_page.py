@@ -1061,19 +1061,24 @@ def times(tree: dict) -> dict:
 
 CLAIM_W = {
     "id": 3, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "claim",
-    "kind_text": "claims", "text": "the page fold",
+    "kind_text": "Claim", "text": "the page fold",
     "what": "python/agent_tools/console/page.html", "until_text": "until the board fold lands",
     "to_text": None, "at": utc(12 * 60000),
 }
 HANDOFF_W = {
     "id": 7, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "hand-off",
-    "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+    "kind_text": "Hand-off", "text": "the importer needs a retry", "what": None,
     "until_text": None, "to_text": "for you", "at": utc(3 * 60000),
 }
 HEADSUP_W = {
     "id": 8, "sprint_id": "b" * 16, "poster": "Keep the importer fast", "kind": "heads-up",
-    "kind_text": "heads-up", "text": "take the reader", "what": None, "until_text": None,
+    "kind_text": "Heads-up", "text": "take the reader", "what": None, "until_text": None,
     "to_text": None, "at": utc(60000),
+}
+HANDOFF_SPRINT_W = {
+    "id": 9, "sprint_id": "b" * 16, "poster": "Keep the importer fast", "kind": "hand-off",
+    "kind_text": "Hand-off", "text": "the reader is yours", "what": None, "until_text": None,
+    "to_text": "for Fix the settings page", "at": utc(2 * 60000),
 }
 PAGE_TEXT = PAGE.read_text()
 ALLOWED = {"--text", "--sub1", "--sub0", "--ov2", "--hair", "--s0", "--s1", "--s2", "--base",
@@ -1100,6 +1105,15 @@ def css_rules(text: str) -> list:
         css = re.sub(r"(?s)/\*.*?\*/", "", body)
         rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
     return rules
+
+
+def css_decls(selector: str) -> list:
+    return [
+        {p.strip(): v.strip() for p, _, v in (d.partition(":") for d in body.split(";"))
+         if p.strip()}
+        for sel, body in css_rules(PAGE_TEXT)
+        if selector in [x.strip() for x in sel.split(",")]
+    ]
 
 
 def fold_colour_faults(text: str, tokens: set) -> list:
@@ -1173,20 +1187,85 @@ class PageNoticeTest(unittest.TestCase):
         self.assertEqual([n["key"] for n in folds(quiet)], ["notices:owner/p03"])
         self.assertEqual([n["key"] for n in folds(snap["projects"])], ["notices:owner/p03"])
 
-    def test_an_opened_fold_lists_each_notice_as_one_plain_line(self) -> None:
-        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+    def notice_blocks(self, *notices: dict) -> list:
+        p0 = with_notices(project(0, []), *notices)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"open": "notices:owner/p00"},
                           {"snapshot": True}])
         (fold,) = folds(snap["projects"])
-        lines = [n for n in nodes(fold) if n["tag"] == "li" and has_class(n, "notice")]
+        return [n for n in nodes(fold) if n["tag"] == "li" and has_class(n, "notice")]
+
+    def test_an_opened_fold_draws_each_notice_as_its_own_block(self) -> None:
+        blocks = self.notice_blocks(HEADSUP_W, HANDOFF_SPRINT_W, HANDOFF_W, CLAIM_W)
+        self.assertEqual(len(blocks), 4)
         self.assertEqual(
-            [[full(c) for c in li["children"]] for li in lines],
-            [["Fix the settings page", "hand-off", "the importer needs a retry", "for you",
-              "3 min ago"],
-             ["Fix the settings page", "claims", "python/agent_tools/console/page.html",
-              "the page fold", "until the board fold lands", "12 min ago"]])
-        for li in lines:
-            self.assertEqual(li["children"][-1]["tag"], "time")
+            [[c["cls"] for c in b["children"]] for b in blocks],
+            [["notice-head", "notice-words"]] * 3 + [["notice-head", "notice-words", "notice-claim"]])
+        heads = [b["children"][0] for b in blocks]
+        for head in heads:
+            self.assertEqual([(c["tag"], c["cls"]) for c in head["children"]],
+                             [("span", "notice-who"), ("time", "notice-age")])
+        whos = [head["children"][0] for head in heads]
+        for who in whos:
+            self.assertEqual([(c["tag"], c["cls"]) for c in who["children"]],
+                             [("b", "notice-label"), ("span", "notice-from")])
+        self.assertEqual([full(who) for who in whos], [
+            "Heads-up, from Keep the importer fast",
+            "Hand-off for Fix the settings page, from Keep the importer fast",
+            "Hand-off for you, from Fix the settings page",
+            "Claim, from Fix the settings page"])
+        self.assertEqual([head["children"][1]["text"] for head in heads],
+                         ["1 min ago", "2 min ago", "3 min ago", "12 min ago"])
+        self.assertEqual([full(b["children"][1]) for b in blocks], [
+            "take the reader", "the reader is yours", "the importer needs a retry",
+            "the page fold"])
+
+    def test_a_claim_block_has_a_third_line_of_paths_and_until(self) -> None:
+        claim = {**CLAIM_W,
+                 "what": "python/agent_tools/console/page.html tests/test_console_page.py"}
+        heads_up, hand_off, claim_block = self.notice_blocks(HEADSUP_W, HANDOFF_W, claim)
+        third = claim_block["children"][2]
+        self.assertEqual(third["cls"], "notice-claim")
+        self.assertEqual([(c["tag"], c["cls"]) for c in third["children"]],
+                         [("span", "notice-paths"), ("span", "notice-until")])
+        codes = [n for n in nodes(third) if n["tag"] == "code"]
+        self.assertEqual([full(n) for n in codes],
+                         ["python/agent_tools/console/page.html", "tests/test_console_page.py"])
+        self.assertTrue(all(has_class(n, "notice-path") for n in codes))
+        self.assertEqual(full(third["children"][0]),
+                         "python/agent_tools/console/page.html tests/test_console_page.py")
+        self.assertEqual(full(third["children"][1]), "until the board fold lands")
+        for other in (heads_up, hand_off):
+            self.assertEqual(len(other["children"]), 2)
+            self.assertEqual([n for n in nodes(other) if n["tag"] == "code"], [])
+
+    def test_only_its_words_set_a_hand_off_for_you_apart(self) -> None:
+        for_sprint, for_you, heads_up = self.notice_blocks(HANDOFF_SPRINT_W, HANDOFF_W, HEADSUP_W)
+
+        def classes(b: dict) -> list:
+            return sorted(t for n in nodes(b) for t in n["cls"].split())
+
+        self.assertEqual(classes(for_you), classes(for_sprint))
+        self.assertEqual(classes(for_you), classes(heads_up))
+        label = next(n for n in nodes(for_you) if has_class(n, "notice-label"))
+        self.assertEqual(full(label), "Hand-off for you")
+        for b in (for_sprint, for_you, heads_up):
+            self.assertFalse([n for n in nodes(b) if has_class(n, "needs")])
+
+    def test_notice_blocks_stand_apart_with_the_age_at_the_end_of_the_first_line(self) -> None:
+        def some(selector: str, **want: str) -> bool:
+            return any(all(d.get(k) == v for k, v in want.items()) for d in css_decls(selector))
+
+        self.assertTrue(some(".notice + .notice", **{"margin-top": "12px"}))
+        self.assertTrue(some(".notice-head", display="flex"))
+        self.assertFalse([d for d in css_decls(".notice-head") if d.get("flex-wrap") == "wrap"])
+        self.assertTrue(some(".notice-who", flex="1 1 auto", **{"min-width": "0"}))
+        for selector in (".notice-who", ".notice-label", ".notice-from"):
+            self.assertFalse([d for d in css_decls(selector) if "display" in d], selector)
+        self.assertTrue(some(".notice-head .notice-age", **{"margin-left": "auto"}, flex="none",
+                             color="var(--ov2)"))
+        self.assertTrue(some(".notice-words", color="var(--text)"))
+        self.assertTrue(some(".notice code", background="var(--mantle)",
+                             **{"white-space": "nowrap"}))
 
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
@@ -1215,7 +1294,10 @@ class PageNoticeTest(unittest.TestCase):
         item = next(n for n in nodes(snap["projects"]) if n["tag"] == "li" and any(
             c["key"] == "notices:owner/p00" for c in n["children"]))
         tokens = {t for n in nodes(item) for t in n["cls"].split()}
-        self.assertLessEqual({"line", "notices", "notice", "notice-poster", "seg"}, tokens)
+        self.assertLessEqual(
+            {"line", "notices", "notice", "notice-head", "notice-who", "notice-label",
+             "notice-from", "notice-age", "notice-words", "notice-claim", "notice-paths",
+             "notice-path", "notice-until"}, tokens)
         self.assertNotIn("needs", tokens)
         self.assertEqual(fold_colour_faults(PAGE_TEXT, tokens), [])
         rules = css_rules(PAGE_TEXT)
