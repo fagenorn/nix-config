@@ -301,7 +301,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
         activity=lambda root: None, slug_of=lambda root: None,
         branch_pattern_of=lambda repo: None, dispatch=lambda job: job(),
-        repo_of=lambda cwd: cwd)
+        repo_of=lambda cwd: cwd, ping_log=lambda: None)
     service.start()
     service.poll_spend()
     return service

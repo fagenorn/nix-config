@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import pwd
+import sys
 import tempfile
 import time
 import unittest
@@ -161,6 +162,27 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(svc.registry, fixture.registry)
                 finally:
                     svc.close()
+
+    def test_the_fixture_service_never_reads_a_real_keepalive_log(self) -> None:
+        # On darwin the service's default ping log is under the real HOME; the fixture
+        # must not read it, or today's real pings price as keepalive spend (#1135).
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as tmp:
+            log = Path(home) / "Library/Logs/claude-cache-proxy.log"
+            log.parent.mkdir(parents=True)
+            log.write_text(json.dumps({
+                "event": "ping", "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "conversation": "real", "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 1000000}}) + "\n", encoding="utf-8")
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp), "finished-list", now_s)
+            with mock.patch.dict(os.environ, {"HOME": home}), \
+                    mock.patch.object(sys, "platform", "darwin"):
+                svc = shots.start_service(fixture, now_s)
+            try:
+                days = json.loads(svc.view_bytes)["spend"]["days"]
+            finally:
+                svc.close()
+            self.assertEqual([d["total"]["dollars"] for d in days if d["total"]["dollars"]], [])
 
     def test_each_fixture_view_shows_its_state(self) -> None:
         for state in shots.STATES:

@@ -1,4 +1,4 @@
-# ADR-console-051 — The Spend page is a second, read-only page of the console
+# ADR-console-052 — The Spend page is a second, read-only page of the console
 
 - **Status:** accepted
 - **Decided in:** #1135

@@ -10,7 +10,7 @@ Console covers the local pages, the desk page that tells the owner whether they 
 ## Language
 
 **Console**:
-The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-051). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001).
+The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001).
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
@@ -106,7 +106,7 @@ The tokens (input, cache writes, cache reads, output) and estimated list-price d
 _Avoid_: cost, usage
 
 **Spend page**:
-The console's second page, at `/spend`, opened from the "Spend" link in the desk page's top bar: today's, the last 7 days' or the last 30 days' spend in tokens and estimated dollars, a per-day trend and the breakdowns by project, sprint, phase, account and aspect. It only reads (ADR-console-051).
+The console's second page, at `/spend`, opened from the "Spend" link in the desk page's top bar: today's, the last 7 days' or the last 30 days' spend in tokens and estimated dollars, a per-day trend and the breakdowns by project, sprint, phase, account and aspect. It only reads (ADR-console-052).
 _Avoid_: metrics page, dashboard
 
 **Limit reading**:

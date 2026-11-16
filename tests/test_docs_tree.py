@@ -433,10 +433,10 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-049", self.doc("docs/areas/console/CONTEXT.md"))
 
     def test_the_spend_page_decision_is_recorded(self):
-        path = "docs/areas/console/adr/051-the-spend-page-is-a-second-read-only-page-of-the-console.md"
+        path = "docs/areas/console/adr/052-the-spend-page-is-a-second-read-only-page-of-the-console.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
         self.assertEqual(
-            first, "# ADR-console-051 — The Spend page is a second, read-only page of the console")
+            first, "# ADR-console-052 — The Spend page is a second, read-only page of the console")
         adr = self.doc(path)
         for needle in ("#1135", "/spend", "/api/stream", "ADR-console-001",
                        "ADR-console-002", "ADR-console-008", "ADR-console-049",
@@ -447,14 +447,14 @@ class DocsTreeTest(unittest.TestCase):
         self.assertNotIn("owner approved", adr)
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Spend page**:", context)
-        self.assertIn("ADR-console-051", context)
+        self.assertIn("ADR-console-052", context)
         self.assertNotIn("its one page", context)
         entry = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
         self.assertIn("Spend page", entry)
         for other in ("docs/areas/console/adr/001-the-console-truth-is-an-append-only-event-log.md",
                       "docs/areas/console/adr/002-the-desk-page-design-rules.md"):
-            self.assertIn("ADR-console-051", self.doc(other))
-        self.assertIn('a quiet "Spend" link to the Spend page (ADR-console-051)',
+            self.assertIn("ADR-console-052", self.doc(other))
+        self.assertIn('a quiet "Spend" link to the Spend page (ADR-console-052)',
                       self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
 
     def test_the_console_signin_decision_is_recorded(self):
@@ -656,7 +656,7 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-037"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
-                 "ADR-console-035, ADR-console-038, ADR-console-051"),
+                 "ADR-console-035, ADR-console-038, ADR-console-052"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -690,7 +690,7 @@ class DocsTreeTest(unittest.TestCase):
                                           "ADR-console-036, ADR-console-037"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
-                                          "ADR-console-038, ADR-console-051")):
+                                          "ADR-console-038, ADR-console-052")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -766,7 +766,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                  "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
-                 "ADR-console-033, ADR-console-035, ADR-console-038, ADR-console-051"),
+                 "ADR-console-033, ADR-console-035, ADR-console-038, ADR-console-052"),
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
                  "- **Status:** accepted; amended by ADR-console-033")):
