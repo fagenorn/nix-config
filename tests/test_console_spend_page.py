@@ -14,6 +14,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_page import media_block, style_rules
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
