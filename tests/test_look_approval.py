@@ -120,6 +120,43 @@ class StatusTest(unittest.TestCase):
         self.assertEqual((code, out["verdict"]), (1, "error"))
 
 
+class MarkedTest(unittest.TestCase):
+    MARKED = ["marked", "--repo", SLUG, "--issue", "7"]
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def test_marked_reads_the_marker_from_the_issue_body_alone(self):
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+        code, out = run(*self.MARKED)
+        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "marked", "repo": SLUG,
+                                           "issue": 7, "verdict": "marked", "covers": [WHAT]}))
+        self.assertEqual([call["argv"] for call in self.world.calls()], [ISSUE_ARGV])
+
+    def test_an_unmarked_or_fenced_body_is_unmarked(self):
+        for body in ("plain", None, "```\n" + BODY + "```\n"):
+            with self.subTest(body=body):
+                self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+                code, out = run(*self.MARKED)
+                self.assertEqual((code, out["verdict"], out["covers"]), (0, "unmarked", []))
+
+    def test_an_issue_with_no_body_key_is_a_forge_error(self):
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7})
+        code, out = run(*self.MARKED)
+        self.assertEqual((code, out["verdict"], out["error"], out["action"]),
+                         (1, "error", "payload_invalid", "marked"))
+
+    def test_marked_usage_errors_come_before_any_gh_call(self):
+        cases = [["marked", "--repo", "bad", "--issue", "7"],
+                 ["marked", "--repo", SLUG, "--issue", "0"],
+                 ["marked", "--repo", SLUG]]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                code, out = run(*argv)
+                self.assertEqual((code, out["error"], out["action"]), (2, "usage", "marked"))
+        self.assertEqual(self.world.calls(), [])
+
+
 class UsageTest(unittest.TestCase):
     def test_bad_arguments_are_usage_errors_before_any_gh_call(self):
         world = ForgeWorld(self)
