@@ -49,7 +49,7 @@ If this text is no longer in your context, run `sprint contract` again.
 
 1. The goal can narrow this section: when it says to cut no issues or to deliver nothing, answer the approval with `sprint reply` and end your turn.
 2. Before cutting issues and before each batch, run `sprint status` and go on only while its decision is `approved`. It also prints the other sprints' open notices: check the slices against their claims before you cut or start one, as Notices says. A decision of `withdrawn`, or any `sprint` command refused with `this sprint is not open` or `secret refused`, means the sprint is over: say so in one line and end your turn, with no tracker action.
-3. Cut the approved brief's slices into issues under one tracker milestone with the `to-issues` skill, in the brief's order, leaving out a slice that overlaps another sprint's open claim until the owner answers the question card (Notices).
+3. Cut the approved brief's slices into issues under one tracker milestone with the `to-issues` skill, in the brief's order, leaving out a slice that overlaps another sprint's open claim until the owner answers the question card (Notices). Mark each slice that changes how something looks with one acceptance criterion written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`: it holds the merge until the owner has looked at the pull request's head.
 4. Deliver them with the `deliver-batch` skill.
 5. Send `sprint report --report-file -` after each batch and on any change of state, as Reporting says.
 6. A message that changes the scope (what done looks like, what is excluded or the slices) is answered with a new brief: send it with `sprint brief --brief-file -`, say so with `sprint reply`, and end your turn. Continue only once `sprint status` says the new version is approved.
@@ -79,6 +79,15 @@ Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one li
 ```
 
 A merge the guard refuses is reported, never asked. When the guard refuses a merge that a delivery of this sprint attempts, for example because required checks are not green, send a report at once whose `status` starts with `merge refused: ` followed by the guard's reason in plain words, with no issue or pull request number: `merge refused: required checks are not green`. Never send a `sprint ask` question about it and never list its issue in `inbox`: the owner cannot act on it, and the page shows it in the sprint's line. Keep that start on each later report while the merge stays refused, because a report without it clears the line, and drop it on the first report after the merge lands; the owner's digest says a repeated identical refusal once.
+
+## A look before merge
+
+A delivery stops at awaiting look when its issue carries that criterion: its pull request is open and nothing merges until the owner answers. Handle each such stop at once:
+
+1. Report it: list the issue in `issues` at stage `landing` and in `inbox`, and say why in `status`, in plain words with no issue number, for example `a slice waits for your look before it merges`.
+2. Take or collect the before and after pictures of the pull request's head, and keep the full sha of the head the delivery returned: the pictures it returned, or, when it returned none, pictures you take of the integration branch (before) and of that head (after).
+3. Ask the owner on a card with `sprint ask`, under the Questions rules: one question saying what to look at, its two pictures marked `"pair": "before"` and `"pair": "after"`, each with its line, and the options to approve this head or to ask for changes.
+4. Give the owner's answer back to the same delivery's resume with three values: the full 40-hex sha of the head the pictures show, the id of the owner's `answer` message as `sprint inbox` printed it, and the answer, approve for that head or changes with the owner's own words. The resume records the approval with that message id, so it traces to the owner's answer. Never merge it any other way: never record an approval yourself, never start another delivery of the issue, and never answer the look for the owner.
 
 ## Questions
 

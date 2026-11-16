@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import manager, service, sprint, sprints
+from agent_tools.delivery import look_marker
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -1004,6 +1005,43 @@ class ManagerContractTest(unittest.TestCase):
         got = run_sprint("contract")
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, CONTRACT.read_text(encoding="utf-8"), ""))
+
+    def test_the_contract_says_to_mark_a_look_change_when_cutting_issues(self):
+        text = run_sprint("contract").stdout
+        after = text.partition("## After approval\n")[2].partition("\n## ")[0]
+        found = re.search(r"`(- \[ \] \[human\] before merge: [^`]*)`", after)
+        self.assertIsNotNone(found)
+        marker = found.group(1)
+        self.assertEqual(
+            marker, "- [ ] [human] before merge: <what the owner looks at>"
+                    " \u2014 measured: <who judges, where>")
+        self.assertEqual(look_marker.read_look(marker).covers,
+                         ("<what the owner looks at>",))
+        item = next(line for line in after.split("\n") if line.startswith("3. "))
+        item = " ".join(item.split())
+        self.assertIn("`to-issues`", item)
+        self.assertIn("changes how something looks", item)
+
+    def test_the_contract_says_what_to_do_on_an_awaiting_look_stop(self):
+        text = run_sprint("contract").stdout
+        self.assertIn("\n## A look before merge\n", text)
+        self.assertLess(text.index("## Reporting"), text.index("## A look before merge"))
+        self.assertLess(text.index("## A look before merge"), text.index("## Questions"))
+        section = " ".join(
+            text.partition("## A look before merge\n")[2].partition("\n## ")[0].split())
+        for needle in (
+                "awaiting look", "stage `landing`", "`inbox`", "no issue number",
+                "before and after pictures of the pull request's head", "`sprint ask`",
+                '"pair": "before"', '"pair": "after"', "the same delivery's resume",
+                "the full 40-hex sha of the head the pictures show",
+                "the id of the owner's `answer` message as `sprint inbox` printed it",
+                "records the approval with that message id", "approve for that head",
+                "changes with the owner's own words", "Never merge it any other way"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertLess(section.index("Report it"), section.index("`sprint ask`"))
+        self.assertLess(section.index("`sprint ask`"),
+                        section.index("the same delivery's resume"))
 
     def test_the_contract_says_how_a_question_carries_pictures(self):
         text = CONTRACT.read_text(encoding="utf-8")
