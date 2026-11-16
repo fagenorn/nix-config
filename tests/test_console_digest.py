@@ -15,7 +15,7 @@ from agent_tools.console.digest import (
 from agent_tools.console.event_log import (
     ADOPTION_REGISTRATION, BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN,
     MANAGER_FAILED, MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN,
-    QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED, SPRINT_NUDGED, SPRINT_REPORTED,
+    QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED, SPRINT_CLOSED, SPRINT_CONTINUED, SPRINT_NUDGED, SPRINT_REPORTED,
     SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import sprint_states
@@ -475,6 +475,71 @@ class QuestionDigestTest(unittest.TestCase):
                 ("differs not a bool", self.made(differs=1))):
             with self.subTest(name):
                 self.assertEqual(found, [])
+
+
+class QuestionWithdrawDigestTest(unittest.TestCase):
+    SID = "a" * 16
+    GOAL = "make the importer resumable"
+    ASK0, ASK1 = "Which store keeps the checkpoints?", "Does the reader change?"
+
+    def question(self, ask, **extra):
+        return {"question": ask, "blocks": "the resume slice", "options": ["x", "y"],
+                "recommended": "x", **extra}
+
+    def base(self):
+        row = {"sprint_id": self.SID, "goal": self.GOAL}
+        return [
+            Event(1, at(1, hour=9), GOAL_STATED, "owner/p01", row),
+            Event(2, at(2, hour=9), BRIEF_SENT, "owner/p01",
+                  {**row, "version": 1, "brief": {"done": "d"}}),
+            Event(3, at(3, hour=9), BRIEF_APPROVED, "owner/p01", {**row, "version": 1}),
+            Event(4, at(4, hour=9), QUESTIONS_ASKED, "owner/p01", {
+                **row, "blocker": False,
+                "questions": [self.question(self.ASK0), self.question(self.ASK1)]})]
+
+    def said(self, *rows):
+        return digest(moments([*self.base(), *rows], {}, {}), LOOK, NOW)["recent"]
+
+    def withdrawal(self, seq=5, project="owner/p01", **change):
+        payload = {"sprint_id": self.SID, "goal": self.GOAL, "round": 4, "index": 0,
+                   "question": self.ASK0, **change}
+        return Event(seq, at(30, seq), QUESTION_WITHDRAWN, project,
+                     {k: v for k, v in payload.items() if v is not ...})
+
+    def round(self, seq, *marks):
+        questions = [self.question(f"replacement {n}", **({"replaces": mark} if mark else {}))
+                     for n, mark in enumerate(marks)]
+        return Event(seq, at(30, seq), QUESTIONS_ASKED, "owner/p01", {
+            "sprint_id": self.SID, "goal": self.GOAL, "blocker": False, "questions": questions})
+
+    def test_a_withdrawal_is_said_with_the_sprints_title_and_the_ask(self):
+        found = self.said(self.withdrawal())
+        self.assertEqual(sentences(found), [
+            "The manager of make the importer resumable took back a question: "
+            "Which store keeps the checkpoints?"])
+        self.assertEqual(found[0]["kind"], "question_withdrawn")
+
+    def test_a_withdrawal_the_fold_ignores_or_with_a_member_missing_says_nothing(self):
+        for name, rows in (
+                ("no project", [self.withdrawal(project=None)]),
+                ("question not a string", [self.withdrawal(question=3)]),
+                ("goal missing", [self.withdrawal(goal=...)]),
+                ("a second identical withdrawal", [self.withdrawal(), self.withdrawal(6)]),
+                ("a question that is not there", [self.withdrawal(index=9)])):
+            with self.subTest(name):
+                found = self.said(*rows)
+                self.assertEqual([m for m in found if m["at"] == rows[-1].at], [])
+
+    def test_a_replacing_round_is_said_once_with_the_old_ask(self):
+        found = self.said(self.round(5, {"round": 4, "index": 0}))
+        self.assertEqual(sentences(found), [
+            "The manager of make the importer resumable replaced a question: "
+            "Which store keeps the checkpoints?"])
+        self.assertEqual(found[0]["kind"], "question_replaced")
+        self.assertEqual(sentences(self.said(
+            self.round(5, {"round": 4, "index": 0}, {"round": 4, "index": 1}))), [
+            "The manager of make the importer resumable replaced 2 questions"])
+        self.assertEqual(self.said(self.round(5, None, None)), [])
 
 
 if __name__ == "__main__":
