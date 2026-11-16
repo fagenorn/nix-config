@@ -93,8 +93,11 @@ A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) convert
 holds `1 + blocking` work, a `PullRequest` holds 1, any other node is refused.
 
 `read_items` makes at most `MAX_CALLS` calls and asks `cancelled()` before each one (`ForgeError`
-`cancelled`, no call made). A search still paging after the last call, a comment connection with
-more comments than nodes, or fewer nodes than `issueCount` is `payload_incomplete`; an answer of an
+`cancelled`, no call made). A search still paging after the last call, or fewer nodes than `issueCount`,
+is `payload_incomplete`; a node whose comment connection holds more comments than the last `COMMENTS` it
+returned (a long-held issue, which the third label now finds) has every comment read from the REST listing
+instead, as the runner reads it (`verify_wait.with_every_comment`), outside `MAX_CALLS`, so it never fails the
+repository's read for its length; an answer of an
 unexpected shape, a bad comment id or a missing or repeated cursor is `payload_invalid`. The result
 is sorted by `key` and holds only JSON-native values; every item is
 
@@ -368,6 +371,7 @@ def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], 
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int):
         raise _invalid("search node number is not an integer")
+    node = verify_wait.with_every_comment(slug, node)
     comments = _comments(node)
     markers = []
     runner_markers = []

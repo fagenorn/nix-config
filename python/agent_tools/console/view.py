@@ -739,6 +739,8 @@ WAIT_TEXT = {
     "unknown": "Waiting: the tracker could not say whether it is due yet",
     "no_when": "Waiting with no date: its wording states a wait, but its verify block has no when field for that wait",
     "due": "Due now: the next verification pass asks you here",
+    "due_command": ("Due now: the next verification pass asks you here, "
+                    "unless it refuses the command as not a verification command"),
 }
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")

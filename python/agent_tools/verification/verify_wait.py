@@ -4,15 +4,15 @@ A verification block is held until its checks answer. The runner posts an owner 
 a check that is due, so a check that is not due has no prompt and no card; this module reads the
 held block itself and says, per owner check, what it is waiting for. It reads only the context it
 is given (the caller's `clock`, `reads_host=False`, `cancelled`), reads no clock of its own and
-writes nothing.
+writes nothing to the tracker or to disk.
 
 Which checks wait. Only an owner check: `verify_exec.gate(check, ()).reason` is one of
 `verify_run.OWNER_GATES`. A check the runner may run unattended, or one stopped at
 `command_not_verification`, never yields a `Wait`: the unattended rule of
 ADR-verification-003 is reused, not restated. A check with a live result yields nothing.
 A live or paid check with a `command` run is assumed approvable: whether the command is a verification
-command is a fact of the project contract, which the console never reads, so the line may name a
-prompt the runner will refuse (`command_not_verification`).
+command is a fact of the project contract, which the console never reads, so a due one reads `due_command`
+(the runner may still refuse it with `command_not_verification`, which only the runner can say).
 
 The prompted rule (P1). A check is prompted when it has a live `ask`, `act` or `approve` prompt
 (`ASKING`); a `stale` or `decision` prompt is a card of its own that asks the owner something else
@@ -34,10 +34,13 @@ The wording rule (P2). When the check's text (its `run.ask`, else `run.act`) sta
 the wording and the reason is `no_when`, prompted or not, and before any reading: no member of
 `when` is evaluated, so a release that does not exist yet does not hide the missing field.
 Otherwise a prompted check yields nothing and an unprompted one that is due yields `due` (P3: the
-runner has not prompted it yet).
+runner has not prompted it yet), or `due_command` when the check is a live or paid `command` run (no `ask`, no
+`act`): the runner prompts it only when the command is one the project's `workflow.verification` names,
+which the console never reads, so the line may not promise a prompt.
 
 A `forge_api.ForgeError` from one check's evaluation yields `unknown` for that check and
-evaluation goes on; one with code `cancelled` propagates. A check whose shape makes evaluation
+evaluation goes on, after one `check_unreadable` line (slug, block key, check, code, transient, detail) on
+stderr so the cause is not lost; one with code `cancelled` propagates. A check whose shape makes evaluation
 raise `KeyError`, `TypeError` or `ValueError` is skipped.
 
 `held_waits(nodes, slug, default_branch, clock, cancelled)` is the console's entry: it selects the
@@ -49,6 +52,7 @@ runs with `StructuralReferences`, which accepts every command and script referen
 judges the block's shape only, and a reference the runner finds absent is not seen here.
 """
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,7 +64,7 @@ from agent_tools.verification import (verify_block, verify_exec, verify_facts, v
 
 HELD_LABEL = verify_run.NEEDS
 WAIT_REASONS = ("not_before", "window", "window_opening", "not_released", "not_deployed", "ci_not_passed",
-                "unknown", "no_when", "due")
+                "unknown", "no_when", "due", "due_command")
 DATED = ("not_before", "window")
 ASKING = (verify_owner.ASK, verify_owner.ACT, verify_owner.APPROVE)
 
@@ -68,7 +72,7 @@ NUMBER = r"(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|f
 UNIT = r"(?:hours?|days?|weeks?|months?)"
 WAIT_WORDING = re.compile(
     rf"\b{NUMBER}\s+{UNIT}\s+(?:after|from|since|past|following)\b"
-    rf"|\b(?:after|in|wait(?:ing)?(?:\s+for)?)\s+{NUMBER}\s+{UNIT}\b"
+    rf"|\b(?:after|(?:again|back)\s+in|wait(?:ing)?(?:\s+for)?)\s+{NUMBER}\s+{UNIT}\b"
     r"|\b(?:not\s+before|no\s+earlier\s+than|wait(?:ing)?\s+until)\b",
     re.IGNORECASE)
 
@@ -100,6 +104,13 @@ class StructuralReferences:
         return None
 
 
+def with_every_comment(slug: str, node: dict) -> dict:
+    """`node` with every comment of its issue when the search's last-100 window cut it short, as the runner reads it.
+
+    A held issue can pass a hundred comments, and its block may then lie outside the window."""
+    return verify_run.with_every_comment(slug, node)
+
+
 def states_wait(text: str) -> bool:
     """Whether the wording of a check says it waits for a time."""
     return WAIT_WORDING.search(text) is not None
@@ -127,9 +138,12 @@ def _wait(index: int, check: dict, held: verify_issues.Held, ctx: verify_facts.C
     except forge_api.ForgeError as error:
         if error.code == "cancelled":
             raise
+        print(f"verify_wait: check_unreadable slug={ctx.slug} block={held.key} check={index} ac={check['ac']} "
+              f"code={error.code} transient={error.transient} detail={error.detail}", file=sys.stderr)
         return Wait(index, check["ac"], "unknown", None, prompted, text)
     if due.due:
-        return Wait(index, check["ac"], "due", None, prompted, text)
+        approval = "command" in run and "ask" not in run and "act" not in run
+        return Wait(index, check["ac"], "due_command" if approval else "due", None, prompted, text)
     reason = _reason(due, when)
     return Wait(index, check["ac"], reason, due.until if reason in DATED else None, prompted, text)
 

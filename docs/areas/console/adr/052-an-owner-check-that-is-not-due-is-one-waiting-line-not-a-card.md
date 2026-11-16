@@ -1,4 +1,4 @@
-# ADR-console-051 — An owner check that is not due is one waiting line, not a card
+# ADR-console-052 — An owner check that is not due is one waiting line, not a card
 
 - **Status:** accepted
 - **Decided in:** #1129
@@ -15,7 +15,7 @@ A check held for the owner can be due by its block yet waiting by its wording. T
 
 **D3. No `when` field.** A block with no `not_before` and no `days_after` member states no date, so the check is never dated; its line reads the exact `no_when` text of the reading.
 
-**D4. Due, not yet prompted.** An unprompted due check is a `Due now` line until the runner's next pass, every 900 seconds, posts its prompt; the prompt is the card.
+**D4. Due, not yet prompted.** An unprompted due check is a `Due now` line until the runner's next pass, every 900 seconds, posts its prompt; the prompt is the card. A live or paid `command` check is the exception: the runner prompts it only for a command the project's `workflow.verification` names, which the console never reads, so its line (`due_command`) says the pass asks unless it refuses the command.
 
 **D5. The tracker read.** The read adds the `needs-verification` label to what it lists. Its forge reads are outside `inbox.MAX_CALLS`, and the stop is asked before each of them, so `close()` still waits for at most one `gh` call.
 

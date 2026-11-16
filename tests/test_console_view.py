@@ -2724,13 +2724,15 @@ class WaitingLineTest(unittest.TestCase):
             "not_released": "Waiting for the release to be seen: no release yet includes its merge",
             "no_when": "Waiting with no date: its wording states a wait, but its verify block has no when field "
                        "for that wait",
-            "due": "Due now: the next verification pass asks you here"}
+            "due": "Due now: the next verification pass asks you here",
+            "due_command": "Due now: the next verification pass asks you here, "
+                           "unless it refuses the command as not a verification command"}
         shown = self.view_of(*(self.waiting(key=f"k-{reason}", reason=reason, until=None) for reason in texts))
         self.assertEqual({w["key"]: (w["until"], w["text"]) for w in entry(shown)["waits"]},
                          {f"k-{reason}": (None, text) for reason, text in texts.items()})
         self.assertEqual([w["key"] for w in entry(shown)["waits"]], sorted(f"k-{r}" for r in texts))
         self.assertEqual(set(WAIT_TEXT), {"window_opening", "not_released", "not_deployed", "ci_not_passed",
-                                          "unknown", "no_when", "due"})
+                                          "unknown", "no_when", "due", "due_command"})
         self.assertEqual(WAIT_TEXT["window_opening"],
                          "Waiting for the next verification pass to start its wait: what it waits for has been seen")
         self.assertEqual(WAIT_TEXT["not_deployed"], "Waiting for the deploy to be seen: no deploy is known to include its merge")

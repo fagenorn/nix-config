@@ -643,8 +643,41 @@ class OwnerWaitTest(unittest.TestCase):
         world.respond("gh", ["api", f"repos/{SLUG}/releases/latest"], exit=1,
                       stderr="gh: Internal Server Error (HTTP 500)")
         ask = self.asking({"released_includes": MERGE})
-        waits = self.waits(world, ask)
+        with contextlib.redirect_stderr(io.StringIO()):
+            waits = self.waits(world, ask)
         self.assertEqual([(w.reason, w.until) for w in waits], [("unknown", None)])
+
+    def test_a_forge_failure_is_logged_with_its_cause(self):
+        world = world_with(self)
+        world.respond("gh", ["api", f"repos/{SLUG}/releases/latest"], exit=1,
+                      stderr="gh: Internal Server Error (HTTP 500)")
+        ask = self.asking({"released_includes": MERGE})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.waits(world, ask)
+        line = err.getvalue()
+        self.assertEqual(line.count("check_unreadable"), 1)
+        self.assertIn(f"slug={SLUG}", line)
+        self.assertIn(f"block={vi.block_key(10, block(ask))}", line)
+        self.assertIn("check=0", line)
+        self.assertIn("code=gh_failed", line)
+        self.assertIn("HTTP 500", line)
+
+    def test_a_due_live_command_does_not_promise_a_prompt(self):
+        world = world_with(self)
+        for effects in ("live", "paid"):
+            live = check(when={"not_before": "2026-11-15T10:00:00+00:00"}, effects=effects,
+                         run={"command": "nix-activate"})
+            with self.subTest(effects):
+                waits = self.waits(world, live)
+                self.assertEqual([(w.reason, w.prompted) for w in waits], [("due_command", False)])
+
+    def test_a_duration_in_the_ask_does_not_hide_a_due_card(self):
+        world = world_with(self)
+        for ask in ("Does the hourly job write 24 rows in a day?", "Finished in two hours or less?"):
+            with self.subTest(ask):
+                check_ = self.asking({"released_includes": MERGE}, ask=ask)
+                self.assertEqual(self.waits(world, check_, prompted=(0,)), [])
 
     def test_a_cancelled_read_is_not_a_wait(self):
         world = world_with(self)
@@ -682,8 +715,12 @@ class OwnerWaitTest(unittest.TestCase):
         for text in ("Two days after the release, read the rows.", "After 2 days, read the rows.",
                      "Wait until Friday, then look.", "Not before Monday.", "one week from the deploy"):
             self.assertTrue(verify_wait.states_wait(text), text)
+        for text in ("Check again in 3 days.", "Come back in two weeks."):
+            self.assertTrue(verify_wait.states_wait(text), text)
         for text in ("Read the hourly rows on kestrel.", "After the release, look at the page.",
-                     "The release includes the fix.", "Days of rows.", "Two days of rows after the release."):
+                     "The release includes the fix.", "Days of rows.", "Two days of rows after the release.",
+                     "Does the hourly job write 24 rows in a day?", "Once in a week the job runs.",
+                     "Finished in two hours or less?"):
             self.assertFalse(verify_wait.states_wait(text), text)
 
 

@@ -716,6 +716,42 @@ class WaitingCheckTest(unittest.TestCase):
                 self.assertEqual(raised.exception.code, "payload_invalid")
 
 
+class LongIssueTest(unittest.TestCase):
+    """An issue with more comments than the search's last-100 window is read whole (#1129)."""
+
+    def rest(self, comments):
+        return [[{"id": c["id"], "author_association": "OWNER", "body": c["body"], "created_at": CREATED}
+                 for c in comments]]
+
+    def long_held(self, number=7):
+        window = [dated_comment(10, hold_body(future()), CREATED)]
+        node = held_node(number, window)
+        node["comments"]["totalCount"] = 101
+        every = [{"id": 5, "body": "an early comment"}, {"id": 10, "body": window[0]["body"]}]
+        return node, every
+
+    def test_a_held_issue_past_a_hundred_comments_does_not_fail_the_read(self):
+        node, every = self.long_held()
+        ordinary = issue_node(8, [comment_node(C2, bullet_body("conflict", ["Merge conflict in flake.lock"]))])
+        every += [{"id": 6 + n, "body": f"comment {n}"} for n in range(99)]
+        with mock.patch.object(forge_api, "api_pages", return_value=self.rest(every)) as pages:
+            items = read(page([node, ordinary]), now=lambda: NOW)
+        self.assertEqual(pages.call_args_list, [mock.call(f"repos/{SLUG}/issues/7/comments?per_page=100")])
+        self.assertEqual(sorted((i["issue"], i["reason"]) for i in items),
+                         [(7, "verify-wait"), (8, "conflict")])
+
+    def test_a_listing_still_short_of_the_total_is_incomplete(self):
+        node, every = self.long_held()
+        with mock.patch.object(forge_api, "api_pages", return_value=self.rest(every)):
+            with self.assertRaises(ForgeError) as raised:
+                read(page([node]), now=lambda: NOW)
+        self.assertEqual(raised.exception.code, "payload_incomplete")
+
+    def test_a_complete_node_reads_no_listing(self):
+        with mock.patch.object(forge_api, "api_pages", side_effect=AssertionError("no listing")):
+            self.assertEqual(len(read(page(three_nodes()))), 3)
+
+
 class ReadTest(unittest.TestCase):
     def endless(self, calls):
         def call(argv):
@@ -737,10 +773,6 @@ class ReadTest(unittest.TestCase):
         no_type = issue_node(7, [])
         del no_type["__typename"]
         table = [
-            ("comments truncated", page([{**issue_node(7, [comment_node(C1, decision_body())]),
-                                          "comments": {"totalCount": 101,
-                                                       "nodes": [comment_node(C1, decision_body())]}}]),
-             "payload_incomplete"),
             ("fewer nodes than issueCount", page([issue_node(7, [])], count=3), "payload_incomplete"),
             ("no data", {"data": {}}, "payload_invalid"),
             ("hasNextPage not bool", page([], more="yes"), "payload_invalid"),
