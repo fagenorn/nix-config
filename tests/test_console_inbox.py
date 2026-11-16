@@ -191,7 +191,7 @@ class VerifyPromptTableTest(unittest.TestCase):
                 self.assertEqual({k: v for k, v in item.items() if k != "version"},
                                  expected(n, C1 + n, reason, kind=kind, answers=answers, paid=paid,
                                           confirm=confirm, detail=detail, answered=answered,
-                                          question=question, check_id=check_id, held_work=1))
+                                          question=question, check_id=check_id, reading="", held_work=1))
         self.assertEqual(json.loads(json.dumps(items)), items)
 
     def test_the_version_names_the_prompt_content_the_owner_saw(self):
@@ -292,6 +292,47 @@ class AskHeadingTest(unittest.TestCase):
         for name, (body, want) in table.items():
             with self.subTest(name):
                 self.assertEqual(heading(body), want)
+
+
+def reading_item(body):
+    return read(page([issue_node(7, [comment_node(C1, body)])]))[0]
+
+
+class ReadingTest(unittest.TestCase):
+    def test_a_reading_check_carries_its_instruction_apart(self):
+        item = reading_item(asked("Is the idle draw under 40 W? Reading: the watts on the plug meter after five idle minutes."))
+        self.assertEqual(item["question"], "Is the idle draw under 40 W?")
+        self.assertEqual(item["check_id"], "AC1")
+        self.assertEqual(item["reading"], "the watts on the plug meter after five idle minutes.")
+        self.assertEqual(item["detail"], "")
+
+    def test_text_around_the_reading_stays_in_the_detail(self):
+        item = reading_item(asked("Is the idle draw under 40 W? Wait five minutes. Reading:   the  watts on the meter"))
+        self.assertEqual(item["reading"], "the watts on the meter")
+        self.assertEqual(item["detail"], "Wait five minutes.")
+
+    def test_an_ask_without_a_reading_reads_empty(self):
+        item = reading_item(ask())
+        self.assertEqual((item["reading"], item["detail"]), ("", ""))
+
+    def test_only_a_manual_check_is_read(self):
+        item = reading_item(decision(extra="Reading: the meter\n\n" + DECISION_BOXES))
+        self.assertEqual((item["reading"], item["detail"]), ("", "Reading: the meter"))
+
+    def test_a_reading_inside_a_fence_is_not_read(self):
+        body = verify_body("verify-ask", {"host": "mbp"}, SENTENCES["verify-ask"],
+                           "```\nReading: x\n```\n\n" + ASK_BOXES)
+        item = reading_item(body)
+        self.assertEqual(item["reading"], "")
+        self.assertIn("Reading: x", item["detail"])
+
+    def test_an_empty_reading_is_no_reading(self):
+        item = reading_item(asked("Is it on? Reading:"))
+        self.assertEqual((item["reading"], item["detail"]), ("", "Reading:"))
+
+    def test_only_the_first_reading_is_taken(self):
+        item = reading_item(asked("Is it on? Reading: the lamp\nReading: the fan"))
+        self.assertEqual((item["reading"], item["detail"]), ("the lamp", "Reading: the fan"))
 
 
 class NoVerifyItemTest(unittest.TestCase):

@@ -27,6 +27,15 @@ that whitespace or the line end follows, else the whole line, whitespace collaps
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
 detail with `check_id` `""` (#1046). A held issue with no live runner prompt yields no item.
 
+A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
+its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
+(case-sensitive). It is the rest of that line, stripped and whitespace-collapsed, and it leaves the
+`detail`, which keeps every other character (text before `Reading:` on the line stays, a line left
+blank is dropped, blank lines at either end are dropped). A line inside a fenced block (opened and
+closed by a line starting with three backticks or `~~~`) is never read, an empty rest is no reading,
+and only the first reading is taken: a later `Reading:` stays in the detail. Every other prompt has
+`reading` `""` and its detail unchanged.
+
 A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) converted with `int`: the
 32-bit `databaseId` is not read, because comment ids already exceed 2^31-1. A node's type is its
 `__typename`: an `Issue` must carry `issueDependenciesSummary.blocking` (a non-negative integer) and
@@ -41,7 +50,7 @@ is sorted by `key` and holds only JSON-native values; every item is
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work"} and, for a verification prompt only, "version" and "check_id"
+     "confirm", "answered", "held_work"} and, for a verification prompt only, "version", "check_id" and "reading"
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
 `answers` is `[]`, `paid` is false and there is no `version`. A verification prompt's `version` is
@@ -202,16 +211,43 @@ def _ask_heading(marker: fm.Marker) -> tuple[str, str, str]:
     return " ".join(head.split()), check_id, "\n".join(lines)
 
 
+_READING = re.compile(r"(?<!\S)Reading:(.*)$")
+
+
+def _reading(detail: str) -> tuple[str, str]:
+    """The `(reading, detail_without_it)` of a manual check's detail: the rest of the first line holding
+    `Reading:` outside a fence, whitespace collapsed; an empty rest is no reading."""
+    lines = detail.split("\n")
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        found = None if fenced else _READING.search(line)
+        reading = " ".join(found.group(1).split()) if found else ""
+        if not reading:
+            continue
+        before = line[:found.start()].rstrip()
+        kept = [*lines[:index], *([before] if before else []), *lines[index + 1:]]
+        while kept and not kept[-1].strip():
+            kept.pop()
+        while kept and not kept[0].strip():
+            kept.pop(0)
+        return reading, "\n".join(kept)
+    return "", detail
+
+
 def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
                  runner_markers: Sequence[fm.Marker]) -> dict:
     reason = marker.fields["reason"]
     question, check_id, detail = _ask_heading(marker)
+    reading, detail = _reading(detail) if reason == verify_answer.ASK else ("", detail)
     return {
         "key": item_key(slug, issue, marker.comment_id), "project_id": project_id, "repo": slug,
         "issue": issue, "comment_id": marker.comment_id,
         "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{marker.comment_id}",
         "reason": reason, "kind": verify_answer.kind_of(marker), "question": question,
-        "detail": detail, "check_id": check_id, "questions": [], "items": [],
+        "detail": detail, "check_id": check_id, "reading": reading, "questions": [], "items": [],
         "answers": list(verify_answer.ANSWERS[reason]),
         "paid": verify_answer.is_paid(marker), "confirm": f"{slug}#{issue}" if reason == "verify-approve" else "",
         "answered": verify_answer.answered(marker, runner_markers), "held_work": held,
