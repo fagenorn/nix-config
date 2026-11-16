@@ -14,6 +14,9 @@ import time
 import types
 import unittest
 
+from agent_tools.claims import forge_markers
+from agent_tools.delivery import look_marker
+
 from .guard_policy_world import GuardPolicyWorld
 
 
@@ -37,9 +40,12 @@ EXPECTED_ALLOW = [
     "Bash(forge-issue:*)", "Bash(~/.agents/bin/forge-issue:*)", "Agent",
 ]
 
-# Stand-in for `gh`. Answers the two lookups the guard makes for any slug and
+# Stand-in for `gh`. Answers the lookups the guard makes for any slug and
 # any protected branch, so the merge path can be exercised in every fixture
-# repository. FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
+# repository: the PR, its protection, and (issue 1138) the PR body, an issue and
+# an issue's comments, the last two from FAKE_ISSUES (a JSON object of issue
+# number -> {"body", "comments"}; an absent number answers an empty issue).
+# FAKE_<STAGE>_MODE injects failures; FAKE_<STAGE>_JSON overrides
 # the payload. Mode `http_error` replays a failed `gh api` read as gh reports
 # it (issue 552): exit 1, the response body on stdout (FAKE_<STAGE>_JSON, else
 # GitHub's plan-gated protection answer) and `gh: <message> (HTTP <status>)` on
@@ -78,6 +84,14 @@ if (
     and argv[6] == "state,baseRefName,headRefName,headRefOid,mergeStateStatus,url,statusCheckRollup"
 ):
     stage, number, slug, branch = "pr", argv[2], argv[4], "main"
+elif (
+    len(argv) == 7
+    and argv[0:2] == ["pr", "view"]
+    and argv[3] == "--repo"
+    and argv[5] == "--json"
+    and argv[6] == "body"
+):
+    stage, number, slug = "body", argv[2], argv[4]
 elif len(argv) == 2 and argv[0] == "api":
     parts = argv[1].split("/")
     if (
@@ -89,6 +103,25 @@ elif len(argv) == 2 and argv[0] == "api":
         stage = "protection"
         slug = parts[1] + "/" + parts[2]
         branch = parts[4]
+    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "issues":
+        stage = "issue"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[4]
+elif (
+    len(argv) == 4
+    and argv[0:3] == ["api", "--paginate", "--slurp"]
+):
+    parts = argv[3].split("?")[0].split("/")
+    if (
+        len(parts) == 6
+        and parts[0] == "repos"
+        and parts[3] == "issues"
+        and parts[5] == "comments"
+        and argv[3].endswith("?per_page=100")
+    ):
+        stage = "comments"
+        slug = parts[1] + "/" + parts[2]
+        number = parts[4]
 if stage is None:
     print("unexpected fake-gh argv: " + repr(argv), file=sys.stderr)
     raise SystemExit(64)
@@ -123,6 +156,14 @@ if stage == "pr":
         '"statusCheckRollup":[{"__typename":"CheckRun",'
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
+elif stage == "body":
+    default = '{"body": ""}'
+elif stage == "issue":
+    issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
+    default = json.dumps({"number": int(number), "body": issue.get("body", "")})
+elif stage == "comments":
+    issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
+    default = json.dumps([issue.get("comments", [])])
 else:
     default = (
         '{"required_status_checks":{"contexts":["Nix Eval"]},'
@@ -258,6 +299,17 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             f"#!{sys.executable}\n" + FAKE_DERIVE_SCRIPT.replace("@ROWS@", repr(str(rows_path))),
             encoding="utf-8")
         cls.fake_derive.chmod(0o755)
+        # The look check (issue 1138): the source-run judge, standing in for the
+        # store script the wrapper names with `--look-bin`.
+        cls.look_bin = Path(cls.fixture_dir.name) / "look-bin"
+        cls.look_bin.write_text(
+            f"#!{sys.executable}\n"
+            "import os\nimport sys\n"
+            f"os.environ['PYTHONPATH'] = {str(Path(__file__).resolve().parents[1] / 'python')!r}\n"
+            "os.execv(sys.executable, [sys.executable, '-m', 'agent_tools.delivery.look_approval',"
+            " 'judge', *sys.argv[1:]])\n",
+            encoding="utf-8")
+        cls.look_bin.chmod(0o755)
         # The registered wrapper names the store base policy and the compiled policy
         # of this host, which no test may read: every invocation passes the built base
         # policy and a fixture compiled policy (`cls.policy`, one row for Nodo) as later
@@ -301,6 +353,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             guard_args = (*guard_args, "--policy", str(self.policy))
         if "--derive-bin" not in guard_args:
             guard_args = (*guard_args, "--derive-bin", str(self.fake_derive))
+        if "--look-bin" not in guard_args:
+            guard_args = (*guard_args, "--look-bin", str(self.look_bin))
         child_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
         child_env.update(env or {})
         return subprocess.run(
@@ -4905,6 +4959,233 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=repo)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
+
+
+    # ------------------------------------------------------------------
+    # Look gate (issue 1138): a merge of a pull request whose issues carry a
+    # look marker waits for the owner's approval of its head.
+    # ------------------------------------------------------------------
+
+    LOOK_HEAD = "1a2b3c4" + "d" * 33
+    LOOK_BODY = (
+        "## Acceptance criteria\n\n"
+        "- [ ] [human] before merge: the settings page at 390 px "
+        "\u2014 measured: the owner, on the console\n"
+    )
+    LOOK_MARKED = {"1200": {"body": LOOK_BODY}}
+    LOOK_MERGE = "gh pr merge 1300 --repo fagenorn/nix-config --merge --delete-branch"
+    LOOK_REFUSAL = (
+        "lifecycle guard: unsafe merge: issue 1200 needs the owner's look before merge, "
+        "and head 1a2b3c4 has no recorded approval; ask the owner and record the answer"
+    )
+
+    def look_comment(self, cid, issue=1200, pr=1300, head=LOOK_HEAD, answer="approved",
+                     association="OWNER"):
+        return {
+            "id": cid,
+            "body": look_marker.approval_body(issue, pr, head, answer, f"m{cid}"),
+            "updated_at": "2026-11-16T10:00:00Z",
+            "author_association": association,
+        }
+
+    def look_end_comment(self, cid, of, association="OWNER"):
+        return {
+            "id": cid,
+            "body": forge_markers.end_body(of, "withdrawn"),
+            "updated_at": "2026-11-16T10:00:00Z",
+            "author_association": association,
+        }
+
+    def look_env(self, issues, body="", branch="issue-1200-page", head=LOOK_HEAD,
+                 base="main", slug="fagenorn/nix-config", number=1300):
+        pr = {
+            "state": "OPEN",
+            "baseRefName": base,
+            "headRefName": branch,
+            "mergeStateStatus": "CLEAN",
+            "url": f"https://github.com/{slug}/pull/{number}",
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        }
+        if head is not None:
+            pr["headRefOid"] = head
+        return {
+            "FAKE_PR_JSON": json.dumps(pr),
+            "FAKE_BODY_JSON": json.dumps({"body": body}),
+            "FAKE_ISSUES": json.dumps(issues),
+        }
+
+    def look_repo(self):
+        return self.make_repo("git@github.com:fagenorn/nix-config.git")
+
+    def marked_with(self, *comments, **env):
+        return self.look_env({"1200": {"body": self.LOOK_BODY, "comments": list(comments)}}, **env)
+
+    def assert_look_refusal(self, result, refusal=None):
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(refusal or self.LOOK_REFUSAL, result.stderr.splitlines())
+
+    def test_a_marked_issue_without_an_approval_refuses_the_merge(self):
+        result = self.run_guard(self.LOOK_MERGE, self.look_repo(), self.look_env(self.LOOK_MARKED))
+        self.assert_look_refusal(result)
+
+    def test_the_look_gate_refuses_each_unapproved_shape(self):
+        repo = self.look_repo()
+        other = {"7": {"body": ""}, "1200": {"body": self.LOOK_BODY}}
+        by_reference = lambda text: self.look_env(  # noqa: E731
+            other, body=text, branch="issue-7-page")
+        nodo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        cases = {
+            "an older head": (repo, self.LOOK_MERGE,
+                              self.marked_with(self.look_comment(10, head="e" * 40))),
+            "a collaborator": (repo, self.LOOK_MERGE, self.marked_with(
+                self.look_comment(10, association="COLLABORATOR"))),
+            "a contributor": (repo, self.LOOK_MERGE, self.marked_with(
+                self.look_comment(10, association="CONTRIBUTOR"))),
+            "only changes": (repo, self.LOOK_MERGE, self.marked_with(
+                self.look_comment(10, answer="changes"))),
+            "changes after approved": (repo, self.LOOK_MERGE, self.marked_with(
+                self.look_comment(10), self.look_comment(11, answer="changes"))),
+            "an approval on another issue": (repo, self.LOOK_MERGE, self.look_env(
+                {"7": {"body": "", "comments": [self.look_comment(10, issue=7)]},
+                 "1200": {"body": self.LOOK_BODY}},
+                body="Refs #1200", branch="issue-7-page")),
+            "an approval naming another PR": (repo, self.LOOK_MERGE, self.marked_with(
+                self.look_comment(10, pr=999))),
+            "a Refs-only reference": (repo, self.LOOK_MERGE, by_reference("Refs #1200")),
+            "Closes with a colon": (repo, self.LOOK_MERGE, by_reference("Closes: #1200")),
+            "upper-case Fixes": (repo, self.LOOK_MERGE, by_reference("FIXES #1200")),
+            "a slug-qualified reference": (
+                repo, self.LOOK_MERGE, by_reference("resolves fagenorn/nix-config#1200")),
+            "an ended approval": (repo, self.LOOK_MERGE, self.marked_with(
+                self.look_comment(10), self.look_end_comment(11, 10))),
+            "an integration base": (
+                nodo, "gh pr merge 1300 --repo elevenyellow/nodocom --merge --delete-branch",
+                {**self.marked_with(base="dev", slug="elevenyellow/nodocom"),
+                 "FAKE_PROTECTION_MODE": "nonzero"}),
+        }
+        for name, (cwd, command, env) in cases.items():
+            with self.subTest(case=name):
+                self.assert_look_refusal(self.run_guard(command, cwd, env))
+
+    def test_an_admin_merge_of_a_marked_issue_is_refused(self):
+        result = self.run_guard(
+            "gh pr merge 1300 --repo fagenorn/nix-config --admin --merge --delete-branch",
+            self.look_repo(), self.look_env(self.LOOK_MARKED))
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertTrue(result.stderr.startswith("lifecycle guard: unsafe merge:"), result.stderr)
+
+    def test_a_failed_look_lookup_refuses(self):
+        repo = self.look_repo()
+        broken = Path(self.fixture_dir.name) / "broken-look-bin"
+        broken.write_text("#!/bin/sh\necho '{'\n", encoding="utf-8")
+        broken.chmod(0o755)
+        marked = self.look_env(self.LOOK_MARKED)
+        cases = (
+            ({"FAKE_ISSUE_MODE": "nonzero"}, None,
+             "lifecycle guard: issue 1200 lookup failed:"),
+            ({"FAKE_COMMENTS_MODE": "nonzero"}, None,
+             "lifecycle guard: issue 1200 comment lookup failed:"),
+            ({"FAKE_BODY_MODE": "nonzero"}, None, "lifecycle guard: PR body lookup failed:"),
+            ({"FAKE_ISSUE_MODE": "invalid"}, None,
+             "lifecycle guard: unsafe merge: cannot read issue 1200"),
+            ({"FAKE_COMMENTS_MODE": "invalid"}, None,
+             "lifecycle guard: unsafe merge: cannot read the comments of issue 1200"),
+            ({}, ("--gh-bin", str(self.fake_gh), "--look-bin", str(broken)),
+             "lifecycle guard: look check failed:"),
+        )
+        for extra, guard_args, prefix in cases:
+            with self.subTest(prefix=prefix):
+                result = self.run_guard(self.LOOK_MERGE, repo, {**marked, **extra},
+                                        guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertTrue(result.stderr.startswith(prefix), result.stderr)
+
+    def test_a_trusted_approval_of_the_current_head_admits(self):
+        repo = self.look_repo()
+        for association in ("OWNER", "MEMBER"):
+            with self.subTest(association=association):
+                result = self.run_guard(self.LOOK_MERGE, repo, self.marked_with(
+                    self.look_comment(10, association=association)))
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stderr)
+
+    def test_unmarked_issues_merge_as_before(self):
+        repo = self.look_repo()
+        plain = "- [ ] [human] the owner likes the colours \u2014 measured: the owner"
+        cases = {
+            "an unmarked human criterion": self.look_env(
+                {"7": {"body": ""}, "8": {"body": plain}},
+                body="Closes #8", branch="issue-7-page"),
+            "another repository's issue": self.look_env(
+                self.LOOK_MARKED, body="Closes other/repo#1200", branch="topic"),
+            "no issue at all": self.look_env(self.LOOK_MARKED, branch="topic"),
+        }
+        for name, env in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(self.LOOK_MERGE, repo, env)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_look_demo_refuses_admits_and_refuses_again(self):
+        repo = self.look_repo()
+        refused = self.run_guard(self.LOOK_MERGE, repo, self.look_env(self.LOOK_MARKED))
+        self.assert_look_refusal(refused)
+        approved = self.run_guard(self.LOOK_MERGE, repo, self.marked_with(self.look_comment(10)))
+        self.assertEqual(0, approved.returncode, approved.stderr)
+        moved = self.run_guard(
+            self.LOOK_MERGE, repo, self.marked_with(self.look_comment(10), head="f" * 40))
+        self.assert_look_refusal(moved, self.LOOK_REFUSAL.replace("1a2b3c4", "fffffff"))
+
+    RELEASE_MERGE = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
+
+    def test_the_release_arm_meets_the_look_gate(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
+               "FAKE_ISSUES": json.dumps(self.LOOK_MARKED)}
+        result = self.run_guard(self.RELEASE_MERGE, repo, env)
+        self.assert_look_refusal(
+            result, self.LOOK_REFUSAL.replace("1a2b3c4", self.HEAD_SHA[:7]))
+
+    def test_a_marked_issue_with_an_unreadable_head_refuses(self):
+        result = self.run_guard(
+            self.LOOK_MERGE, self.look_repo(), self.look_env(self.LOOK_MARKED, head=None))
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("lifecycle guard: unsafe merge: cannot read the PR head commit",
+                      result.stderr.splitlines())
+
+    def test_a_merge_without_a_look_bin_refuses(self):
+        payload = {"tool_name": "Bash", "tool_input": {"command": self.LOOK_MERGE},
+                   "cwd": str(self.look_repo())}
+        child_env = {k: v for k, v in os.environ.items() if not k.startswith("FAKE_")}
+        child_env.update(self.look_env(self.LOOK_MARKED))
+        result = subprocess.run(
+            [sys.executable, "-I", str(GUARD_SOURCE), "--base-policy", str(BASE_POLICY_PATH),
+             "--policy", str(self.policy), "--derive-bin", str(self.fake_derive),
+             "--gh-bin", str(self.fake_gh)],
+            input=json.dumps(payload), text=True, capture_output=True, timeout=5,
+            check=False, env=child_env)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertEqual("lifecycle guard: look check failed: no --look-bin was given\n",
+                         result.stderr)
+
+    def test_registered_hook_names_the_look_check(self):
+        wrapper = self.guard.read_text(encoding="utf-8")
+        self.assertRegex(wrapper, r"lifecycle_guard\.py --look-bin /nix/store/\S+-claude-guard-"
+                                  r"look-check --base-policy ")
+        look_check = Path(wrapper.split("--look-bin ", 1)[1].split(" ", 1)[0])
+        script = look_check.read_text(encoding="utf-8")
+        self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
+        self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-look-approval judge "\$@"\n')
+
+    def test_a_marked_release_with_a_matching_approval_admits(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        issues = {"1200": {"body": self.LOOK_BODY, "comments": [
+            self.look_comment(10, issue=1200, pr=1484, head=self.HEAD_SHA)]}}
+        env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
+               "FAKE_ISSUES": json.dumps(issues)}
+        result = self.run_guard(self.RELEASE_MERGE, repo, env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
 
 
 if __name__ == "__main__":

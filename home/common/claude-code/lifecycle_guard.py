@@ -283,7 +283,9 @@ The verbs the guard adjudicates are validated against the live repository:
   below, issue 476), or, in a repository with a declared integration branch,
   the release arm: the same form without `--delete-branch`, only the
   integration branch merged into the default branch, gated on a fully green
-  check rollup instead of forge protection.
+  check rollup instead of forge protection; and, for a pull request whose
+  issues carry a look marker, the owner's look approval of its head (the look
+  gate below, issue 1138).
 
 Each may sit behind a credential-scrub prefix (issue 400), spelled exactly
 `unset N && `, `unset N M && `, `env -u N ` or `env -u N -u M ` with single
@@ -432,6 +434,43 @@ GitHub stays the authority: it still compares `--match-head-commit` atomically
 with the merge and enforces its own up-to-date rule, which closes the window
 between this check and the merge.
 
+The look gate (issue 1138) holds a merge whose issues await the owner's look.
+Each merge arm runs it right after the mergeability check, so before the
+feature arm's integration-base exemption and protection lookup and before the
+release arm's rollup predicate, with the matched PR number (the release arm
+receives it as `validate_release_merge`'s last parameter).
+1. The guard reads the PR body, `gh pr view <n> --repo <slug> --json body`.
+2. The PR's issues are the number in an `issue-<n>-` head branch plus every
+   `Closes`, `Fixes`, `Resolves` or `Refs` (any case, an optional colon) in the
+   body followed by `#<n>` or `<slug>#<n>` for this repository's slug; a
+   reference naming another repository is ignored. No issue: the merge is
+   judged exactly as before, with no further child.
+3. For each issue it reads `gh api repos/<slug>/issues/<n>` and
+   `gh api --paginate --slurp repos/<slug>/issues/<n>/comments?per_page=100`
+   (pages flattened in order), and takes the PR's `headRefOid` when it is 40
+   lowercase hex characters, else none.
+4. It runs the look check, the store script `--look-bin` names
+   (`look-approval judge`), with `{"pr", "head", "issues": [{"number", "body",
+   "comments"}]}` on stdin and the row check's scrubbed environment. Exit 0 with
+   verdict `admit` passes. Exit 1 with verdict `refuse` and an integer `issue`
+   refuses as `unsafe merge: issue <n> needs the owner's look before merge, and
+   head <first seven characters> has no recorded approval; ask the owner and
+   record the answer`, or, with no readable head, as `unsafe merge: cannot read
+   the PR head commit`. Anything else (another exit, output that is not that
+   verdict) is `look check failed: <child diagnostic>`; a missing `--look-bin` is
+   `look check failed: no --look-bin was given`; a timeout is `look check timed
+   out`.
+Every lookup runs with the token variables scrubbed and the child timeout; a
+timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
+`issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,
+`issue <n> lookup failed` or `issue <n> comment lookup failed` with the child's
+diagnostic, and output that is not the expected shape is refused as `unsafe
+merge: cannot read the PR body`, `cannot read issue <n>` or `cannot read the
+comments of issue <n>`. Which issues are marked, and which approvals count
+(the owner's or a member's, naming this issue, this PR and this head, the
+latest answer deciding), is `look-approval`'s contract; `--admin` is in no merge
+form, so it is refused by the grammar before any lookup.
+
 The plan-gated floor (issue 552) replaces that protection demand for one answer
 only. When the feature arm's protection read of the default branch exits
 non-zero, the guard parses its stdout, gh's response body, and never its
@@ -488,7 +527,8 @@ distinct members of `GITHUB_TOKEN`, `GH_TOKEN`). A refusal of the repository or
 the forge state (authorization and row problems, an unresolvable default
 branch, a default-branch push, a permanent-branch deletion, head equal to base,
 a tag that is not an existing annotated tag, every PR, protection and rollup
-lookup or predicate failure, a PR behind its base, a `--match-head-commit` that
+lookup or predicate failure, every look-gate lookup or unreadable answer and a
+merge awaiting the owner's look, a PR behind its base, a `--match-head-commit` that
 is not the PR head, every plan-gated floor refusal, an unreadable PR merge
 state or head commit, timeouts, the invocation deadline) names only its
 problem, since no spelling would pass there.
@@ -681,8 +721,8 @@ It opens the compiled policy only when it judges a repository-bound verb (push,
 PR creation, merge or release creation), at the point it builds the repository
 context, so a command with none of those, branch deletion included, never reads
 it. The compiled policy supplies no value the guard executes, and the guard
-runs only the base policy's three tools and the row check, which it finds by
-the absolute path `--derive-bin` names. The compiled policy is a user-writable
+runs only the base policy's three tools, the row check and the look check,
+which it finds by the absolute paths `--derive-bin` and `--look-bin` name. The compiled policy is a user-writable
 state file, because compiling at activation cannot write the store. Since issue
 377 the guard takes no trusted member from it and treats each derived row as a
 claim to be confirmed before it is relied on (issue 377 D1, D2).
@@ -807,7 +847,8 @@ Tests
 `CLAUDE_GUARD_BASE_POLICY_PATH`, runs under `python3 -m unittest` with `python/`
 on `PYTHONPATH`, and passes a fixture compiled policy and a stub row check on
 every invocation, so it never reads this host's compiled policy or fleet
-registry. Three tests, `test_a_compiled_policy_round_trips_through_the_guard`,
+registry, and a look check fixture that runs `look-approval judge` from source as
+`--look-bin`. Three tests, `test_a_compiled_policy_round_trips_through_the_guard`,
 `test_a_compiled_policy_loads_whatever_branch_names_the_fleet_carries` and
 `test_an_arcwave_shaped_project_is_judged_by_its_compiled_row`, run
 `guard-policy derive` from source as the row check over a fixture fleet, and
@@ -1088,6 +1129,12 @@ FORM_TABLE = {
 # The value `--match-head-commit` takes: a full commit SHA (issue 402 D10), which
 # must also be the PR's head commit (issue 476 D3).
 HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
+# The words that tie a pull request to an issue it settles (issue 1138): an optional
+# colon, then `#<n>` or `<owner>/<name>#<n>`; the look gate reads only the
+# repository's own references.
+LOOK_REFERENCE = re.compile(
+    r"\b(?:closes|fixes|resolves|refs)\b[ \t]*:?[ \t]*(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#([1-9][0-9]*)\b",
+    re.IGNORECASE)
 # GitHub's answer to a branch-protection read on a plan that cannot protect the
 # branch (issue 552 D2): `gh api` exits non-zero and writes this body to stdout.
 PLAN_GATED_STATUS = "403"
@@ -3464,6 +3511,7 @@ class Context:
         self.git_bin = args.git_bin
         self.gh_bin = args.gh_bin
         self.jq_bin = args.jq_bin
+        self.look_bin = args.look_bin
         self.deadline = deadline
         self.child_timeout = args.child_timeout_seconds
         self.authorized_owners = base.authorized_owners
@@ -4816,7 +4864,7 @@ def validate_merge(text, context, compiled):
 
     if not delete_branch:
         return validate_release_merge(
-            pr_facts, base, integration_base, head_commit, context, compiled)
+            pr_facts, base, integration_base, head_commit, context, compiled, number)
 
     # The feature arm deletes the PR's head branch, so the head must be
     # disposable: never the default branch, never the declared integration
@@ -4839,6 +4887,9 @@ def validate_merge(text, context, compiled):
     problem = mergeability_problem(pr_facts, base, head_commit)
     if problem is not None:
         return refuse("merge", problem)
+    status = look_problem(context, number, pr_facts)
+    if status is not None:
+        return status
 
     # A declared integration branch is deliberately exempt from the
     # protection demand: it is the development-pace branch, and its CI
@@ -4919,6 +4970,148 @@ def mergeability_problem(pr_facts, base, head_commit):
         return (f"--match-head-commit {head_commit} is not the PR head commit {head}; "
                 "merge only a head you reviewed")
     return None
+
+
+def look_issue_numbers(head_ref, body, repository):
+    """The issues a pull request settles, ascending (issue 1138).
+
+    The number in an `issue-<n>-` head branch, and every `Closes`, `Fixes`,
+    `Resolves` or `Refs` (any case, an optional colon) in the body followed by
+    `#<n>` or `<repository>#<n>`; a reference naming another repository is
+    ignored.
+    """
+    found = set()
+    named = re.match(r"issue-([1-9][0-9]*)-", head_ref) if isinstance(head_ref, str) else None
+    if named is not None:
+        found.add(int(named.group(1)))
+    for slug, number in LOOK_REFERENCE.findall(body):
+        if not slug or slug.lower() == repository.lower():
+            found.add(int(number))
+    return sorted(found)
+
+
+def look_json(context, argv, timed_out, failed, unreadable):
+    """The parsed stdout of one gh lookup of the look gate, or the status to return.
+
+    Returns `(value, None)` on success and `(None, status)` on a timeout, a
+    non-zero exit or output that is not JSON; `unreadable` is the refusal text of
+    the last.
+    """
+    try:
+        child = subprocess.run(
+            [context.gh_bin, *argv],
+            capture_output=True,
+            text=True,
+            timeout=context.timeout,
+            check=False,
+            env=gh_lookup_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return None, block(timed_out)
+    if child.returncode != 0:
+        return None, block_child_failure(failed, child)
+    try:
+        return json.loads(child.stdout), None
+    except ValueError:
+        return None, refuse("merge", unreadable)
+
+
+def look_issue_facts(context, number):
+    """`({"number", "body", "comments"}, None)` for one issue, or `(None, status)`."""
+    repository = context.repository
+    issue, status = look_json(
+        context, ["api", f"repos/{repository}/issues/{number}"],
+        f"issue {number} lookup timed out", f"issue {number} lookup failed",
+        f"cannot read issue {number}")
+    if status is not None:
+        return None, status
+    if not isinstance(issue, dict) or not (
+        issue.get("body") is None or isinstance(issue["body"], str)
+    ):
+        return None, refuse("merge", f"cannot read issue {number}")
+    pages, status = look_json(
+        context,
+        ["api", "--paginate", "--slurp", f"repos/{repository}/issues/{number}/comments?per_page=100"],
+        f"issue {number} comment lookup timed out", f"issue {number} comment lookup failed",
+        f"cannot read the comments of issue {number}")
+    if status is not None:
+        return None, status
+    if not isinstance(pages, list) or not all(
+        isinstance(page, list) and all(isinstance(entry, dict) for entry in page)
+        for page in pages
+    ):
+        return None, refuse("merge", f"cannot read the comments of issue {number}")
+    comments = [entry for page in pages for entry in page]
+    return {"number": number, "body": issue.get("body"), "comments": comments}, None
+
+
+def look_problem(context, number, pr_facts):
+    """None when the look gate passes, else the status the merge returns (issue 1138).
+
+    `number` is the pull request number string. The gate reads the PR body, then
+    each issue the PR settles (`look_issue_numbers`) with its comments, and asks the
+    look check (`--look-bin`) whether every issue whose body carries a look marker
+    has the owner's approval of the PR's head. A PR settling no issue passes with
+    no further lookup; any failed, timed-out or unreadable lookup refuses.
+    """
+    repository = context.repository
+    pr_body, status = look_json(
+        context, ["pr", "view", number, "--repo", repository, "--json", "body"],
+        "PR body lookup timed out", "PR body lookup failed", "cannot read the PR body")
+    if status is not None:
+        return status
+    if not isinstance(pr_body, dict) or not (
+        pr_body.get("body") is None or isinstance(pr_body["body"], str)
+    ):
+        return refuse("merge", "cannot read the PR body")
+    numbers = look_issue_numbers(
+        pr_facts.get("headRefName"), pr_body.get("body") or "", repository)
+    if not numbers:
+        return None
+    issues = []
+    for issue_number in numbers:
+        facts, status = look_issue_facts(context, issue_number)
+        if status is not None:
+            return status
+        issues.append(facts)
+    head = pr_facts.get("headRefOid")
+    if not isinstance(head, str) or HEAD_COMMIT.fullmatch(head) is None:
+        head = None
+    if context.look_bin is None:
+        return block("look check failed: no --look-bin was given")
+    try:
+        child = subprocess.run(
+            [context.look_bin],
+            input=json.dumps({"pr": int(number), "head": head, "issues": issues}),
+            capture_output=True,
+            text=True,
+            timeout=context.timeout,
+            check=False,
+            env=row_check_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return block("look check timed out")
+    try:
+        verdict = json.loads(child.stdout)
+    except ValueError:
+        verdict = None
+    if isinstance(verdict, dict):
+        if child.returncode == 0 and verdict.get("verdict") == "admit":
+            return None
+        issue = verdict.get("issue")
+        if (
+            child.returncode == 1
+            and verdict.get("verdict") == "refuse"
+            and isinstance(issue, int)
+            and not isinstance(issue, bool)
+        ):
+            if head is None:
+                return refuse("merge", "cannot read the PR head commit")
+            return refuse(
+                "merge",
+                f"issue {issue} needs the owner's look before merge, and head {head[:7]} "
+                "has no recorded approval; ask the owner and record the answer")
+    return block_child_failure("look check failed", child)
 
 
 def plan_gated_answer(stdout):
@@ -5004,7 +5197,8 @@ def merge_floor_problem(pr_facts, base, head_commit, required_checks):
     return None
 
 
-def validate_release_merge(pr_facts, base, integration_base, head_commit, context, compiled):
+def validate_release_merge(
+        pr_facts, base, integration_base, head_commit, context, compiled, number):
     """The release arm: the integration branch promoted into the default branch.
 
     Its head is permanent, so the merge may omit `--delete-branch`, and in
@@ -5032,6 +5226,9 @@ def validate_release_merge(pr_facts, base, integration_base, head_commit, contex
     problem = mergeability_problem(pr_facts, base, head_commit)
     if problem is not None:
         return refuse("merge", problem)
+    status = look_problem(context, number, pr_facts)
+    if status is not None:
+        return status
     try:
         rollup_predicate = subprocess.run(
             [
@@ -5094,6 +5291,7 @@ def main():
     parser.add_argument("--base-policy", required=True)
     parser.add_argument("--policy", required=True)
     parser.add_argument("--derive-bin", required=True)
+    parser.add_argument("--look-bin", default=None)
     parser.add_argument("--derive-timeout-seconds", type=float, default=15)
     parser.add_argument("--git-bin", default=None)
     parser.add_argument("--gh-bin", default=None)
