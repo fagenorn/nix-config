@@ -1299,24 +1299,13 @@ class PageNoticeTest(unittest.TestCase):
                              **{"white-space": "nowrap"}))
 
     def test_the_post_control_stands_a_notice_gap_below_the_last_notice(self) -> None:
-        def top_gap(*selectors: str) -> float:
-            gap = None
-            for sel, body in css_rules(PAGE_TEXT):
-                if not set(x.strip() for x in sel.split(",")) & set(selectors):
-                    continue
-                for decl in body.split(";"):
-                    prop, _, value = decl.partition(":")
-                    if prop.strip() == "margin-top":
-                        gap = float(re.fullmatch(r"([\d.]+)px", value.strip()).group(1))
-            self.assertIsNotNone(gap, selectors)
-            return gap
-
-        between = top_gap(".notice + .notice")
-        for control in (".notice-open", ".notice-post"):
-            self.assertGreaterEqual(top_gap(control, ".notice-list + " + control), between, control)
-        for sel, body in css_rules(PAGE_TEXT):
-            if re.search(r"\.notice-(open|post)\b", sel):
-                self.assertNotRegex(body, r"margin(-top)?\s*:\s*0\b", sel)
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE_TEXT)
+        for width in (1440, 480):
+            between = margin_top_at(style, width, ".notice", ".notice + .notice")
+            for control in (".notice-open", ".notice-post"):
+                gap = margin_top_at(style, width, control, ".notice-list + " + control)
+                self.assertGreaterEqual(gap, 12, (width, control))
+                self.assertGreaterEqual(gap, between, (width, control))
 
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
@@ -6454,6 +6443,28 @@ def media_block(style: str, query: str) -> str:
         depth += {"{": 1, "}": -1}.get(style[at], 0)
         at += 1
     return style[start:at - 1]
+
+
+def margin_top_at(style: str, width: int, *selectors: str) -> float:
+    """The px margin-top the page's cascade gives an element matched by `selectors` at a viewport width.
+
+    Top-level rules apply at every width; a max-width media block applies only at or below its width.
+    The highest specificity (class count) wins, the later rule on a tie.
+    """
+    top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+    layers = [style_rules(top)]
+    for limit in re.findall(r"@media \(max-width: (\d+)px\) \{", style):
+        if width <= int(limit):
+            layers.append(style_rules(media_block(style, f"(max-width: {limit}px)")))
+    best = None
+    for layer in layers:
+        for selector, decls in layer:
+            if selector in selectors and "margin-top" in decls:
+                rank = selector.count(".")
+                if best is None or rank >= best[0]:
+                    best = (rank, decls["margin-top"])
+    assert best is not None, (width, selectors)
+    return float(re.fullmatch(r"([\d.]+)px", best[1]).group(1))
 
 
 class PageAnsweredRowTest(unittest.TestCase):
