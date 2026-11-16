@@ -1344,6 +1344,12 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn("**" + term + "**:", context)
             self.assertIn("| " + term + " | Guard |", self.doc("docs/CONTEXT-MAP.md"))
         self.assertIn("ADR-guard-009", context)
+        for term in ("Production rule", "Approved release path"):
+            definition = context.split("**" + term + "**:")[1].split("\n\n")[0]
+            self.assertIn("Planned:", definition)
+        self.assertIn("ADR-guard-004", adr)
+        self.assertIn("CLAUDECODE", adr)
+        self.assertIn("`pre-push`", adr)
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
