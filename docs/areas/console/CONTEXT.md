@@ -46,7 +46,7 @@ The one agent a sprint has: it writes the brief and the reports and never writes
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
-What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux, else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after 5 min, with what the owner can do about it. A brief approval shows only until the manager picks it up; a reply to it shows as the manager's own line, with no approval line above it. Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
+What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux, else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after 5 min, with what the owner can do about it. A brief approval shows only until the manager picks it up; a reply to it shows as the manager's own line, with no approval line above it. The owner's words read "You: <words>" and the manager's reply "Manager: <reply>". Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
 _Avoid_: chat, comment
 
 **Question round**:
@@ -70,7 +70,7 @@ The manager's fixed-shape account after each batch and on any change of state: a
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834). A running sprint is one block in the Work column naming its project, its title, one line of what it is doing now, built from its report's milestone and its issues' stages, who has the ball ("manager working", "waiting on you" or "nothing running, may be stuck") and its progress, with its own controls; its manager session and report (its status line first) are listed inside it, and a manager that failed to start or is missing offers a retry. Waiting on you covers a brief or question that waits on the owner and a manager waiting for an answer or a permission in its terminal. Ended sprints are lines of the one Finished sprints list, the closing report and the sprint's last exchange opening from its line. It is named by its brief's title (else its goal's first sentence), and only its own detail carries the goal (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018, ADR-console-027).
+One goal, later its issues and its outcome, in one project (#834). A running sprint is one block in the Work column naming its project, its title, one line of what it is doing now, built from its report's milestone and its issues' stages, who has the ball ("manager working", "waiting on you" or "nothing running, may be stuck") and its progress, with its own controls ("Stop and report" while it can be stopped and "Drop the sprint", in a closed "End the sprint" fold); its manager session and report (its status line first) are listed inside it, and a manager that failed to start or is missing offers a retry. Waiting on you covers a brief or question that waits on the owner and a manager waiting for an answer or a permission in its terminal. Ended sprints are lines of the one Finished sprints list, the closing report and the sprint's last exchange opening from its line. It is named by its brief's title (else its goal's first sentence), and only its own detail carries the goal (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018, ADR-console-027).
 _Avoid_: job, run
 
 **Session**:
@@ -90,7 +90,7 @@ The last time the page held focus for more than five seconds, recorded by the co
 _Avoid_: last seen, last visit
 
 **Digest**:
-"Since you last looked": what changed since the last look in plain sentences, newest first, five shown and the rest under "Earlier"; a first visit covers the last eight hours. A session named for a sprint adds no line: the sprint's brief, report and withdrawal lines say what it did.
+"Since you last looked": what changed since the last look in plain sentences, newest first, five shown and the rest under "Earlier"; a first visit covers the last eight hours. A session named for a sprint adds no line: the sprint's brief, report and drop lines say what it did.
 _Avoid_: activity feed, changelog
 
 **Delivery run**:

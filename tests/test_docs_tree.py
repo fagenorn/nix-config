@@ -915,18 +915,24 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_sprint_controls_on_demand_are_recorded(self) -> None:
         rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
-        for needle in ('a closed "Stop or withdraw" fold', "a typed draft keeps it open",
+        for needle in ('a closed "End the sprint" fold', "a typed draft keeps it open",
                        '"Show the report"', "holds the report's status line",
                        "never the report's status line", "is not drawn", "at most two lines",
-                       "the manager's own line"):
+                       "the manager's own line", '"Stop and report"', '"Drop the sprint"',
+                       '"goal set <age>"', '"You: <words>"', '"Manager: <reply>"',
+                       '"Next time: <text>"', "the hint right under the field"):
             self.assertIn(needle, rules)
+        self.assertNotIn('"Stop or withdraw"', rules)
         self.assertNotIn('"More" fold', rules)
         self.assertNotIn('withdraw, messages and "Tell the manager" stay under the two lines', rules)
         message = self.doc(
             "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md")
         for needle in ("opens its field on demand", 'under a closed "Earlier messages (n)" fold',
-                       'no "Stop or withdraw" fold', "once the manager has picked it up"):
+                       'no "End the sprint" fold', "once the manager has picked it up",
+                       "drop the sprint"):
             self.assertIn(needle, message)
+        self.assertNotIn("nudge it", message)
+        self.assertNotIn("withdraw the sprint", message)
 
     def test_the_console_brief_decision_is_recorded(self):
         path = "docs/areas/console/adr/013-a-managers-brief-is-approved-or-redirected-on-the-page.md"
