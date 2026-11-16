@@ -458,6 +458,53 @@ class SpendViewTest(ViewCase):
             self.assertEqual(d[dimension]["unattributed"]["input"], 3)
         self.assertEqual(d["account"]["unattributed"]["input"], 7)  # the ping and s2, no profile
 
+    def test_sprint_and_run_phase_break_each_item_down_by_phase(self):
+        self.basic()
+        self.write(self.slug / "s1.jsonl", SPRINT_NAME,
+                   assistant("M1", TODAY, input=10, write=7, read=40),
+                   assistant("M2", TODAY, input=20, read=5, output=3))
+        self.write(self.run / "agent-a2.jsonl",
+                   assistant("M5", TODAY, input=1000, write=11, read=900, output=4))
+        d = self.today()
+        sid = "0123456789abcdef"
+
+        def counts(t):
+            return (t["input"], t["cache_write"], t["cache_read"], t["output"])
+
+        sprint = d["sprint_phase"][sid]
+        run = d["run_phase"]["wf_1"]
+        self.assertEqual({p: counts(t) for p, t in sprint.items()},
+                         {"manager": (30, 7, 45, 3), "plan": (300, 0, 0, 1),
+                          "implement": (1000, 11, 900, 4)})
+        self.assertEqual({p: counts(t) for p, t in run.items()},
+                         {"plan": (300, 0, 0, 1), "implement": (1000, 11, 900, 4)})
+        self.assertEqual(counts(d["sprint"][sid]), (1330, 18, 945, 8))
+        self.assertEqual(counts(d["run"]["wf_1"]), (1300, 11, 900, 5))
+        for phases, whole in ((sprint, d["sprint"][sid]), (run, d["run"]["wf_1"])):
+            self.assertEqual(tuple(sum(c) for c in zip(*(counts(t) for t in phases.values()))),
+                             counts(whole))
+            self.assertAlmostEqual(sum(t["dollars"] for t in phases.values()),
+                                   whole["dollars"], places=4)
+            for phase in ("plan", "implement"):
+                self.assertEqual(phases[phase]["dollars"], d["phase"][phase]["dollars"])
+        self.assertGreater(sprint["manager"]["dollars"], 0)
+
+    def test_unattributed_items_have_no_phase_breakdown(self):
+        run = self.slug / "s1" / "subagents" / "workflows" / "wf_2"
+        run.mkdir(parents=True)
+        self.write(run / "agent-a9.jsonl", assistant("A", TODAY, input=6))
+        self.log.write_text(PING_LINE)
+        d = self.today()
+        self.assertEqual(d["run_phase"], {})
+        self.assertNotIn("unattributed", d["sprint_phase"])
+        self.assertEqual(set(d["run"]), {"unattributed"})
+
+    def test_an_empty_day_has_empty_item_breakdowns(self):
+        self.basic()
+        empty = self.view()["days"][0]
+        self.assertEqual(empty["sprint_phase"], {})
+        self.assertEqual(empty["run_phase"], {})
+
     def test_thirty_days_oldest_first(self):
         self.basic()
         self.write(self.slug / "s3.jsonl", assistant("M7", "2026-10-17", sid="s3", input=7))
