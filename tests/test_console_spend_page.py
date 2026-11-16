@@ -502,6 +502,20 @@ class SpendItemTest(unittest.TestCase):
         self.assertEqual(find(item, "div", "figure"), [])
         self.assertEqual(find(item, "ol", "rows"), [])
 
+    def test_an_item_named_like_an_inherited_member_reads_a_sentence(self) -> None:
+        for kind in ("sprint", "run"):
+            for name in ("constructor", "__proto__", "toString"):
+                with self.subTest(kind=kind, name=name):
+                    (snap,) = render_spend([
+                        {"start_hash": "#" + kind + "=" + name}, {"frame": spend_view_fixture()},
+                        {"snapshot": True}])["snapshots"]
+                    item = snap["item"]
+                    self.assertEqual(
+                        [n["text"] for n in find(item, "p", "empty")],
+                        ["Nothing for this " + kind + " in the last 30 days."])
+                    self.assertEqual(find(item, "div", "figure"), [])
+                    self.assertEqual(find(item, "ol", "rows"), [])
+
     def test_a_fragment_of_another_form_opens_nothing(self) -> None:
         for fragment in ("#sprint=%E0%A4%A", "#project=owner/web", "#sprint="):
             with self.subTest(fragment=fragment):

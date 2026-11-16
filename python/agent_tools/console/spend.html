@@ -225,7 +225,8 @@ function itemSection(view, opened, titles) {
   const section = el("section", "breakdown item");
   section.appendChild(el("h2", "", kind === "sprint" ? rowName("sprint", opened.id, titles) : "Run " + opened.id));
   const days = view.spend.days || [];
-  const own = days.filter((day) => day[kind] && day[kind][opened.id]);
+  const holds = (group, id) => Boolean(group) && Object.prototype.hasOwnProperty.call(group, id);
+  const own = days.filter((day) => holds(day[kind], opened.id));
   const total = sum(own.map((day) => day[kind][opened.id]));
   if (own.length === 0 || total.input + total.cache_write + total.cache_read + total.output === 0) {
     section.appendChild(el("p", "empty", "Nothing for this " + kind + " in the last 30 days."));
@@ -234,7 +235,8 @@ function itemSection(view, opened, titles) {
   section.appendChild(figure("So far, last 30 days", total));
   const sums = new Map();
   for (const day of days) {
-    const phases = (day[kind + "_phase"] || {})[opened.id] || {};
+    const group = day[kind + "_phase"];
+    const phases = holds(group, opened.id) ? group[opened.id] : {};
     for (const phase of Object.keys(phases)) {
       if (!sums.has(phase)) sums.set(phase, zero());
       add(sums.get(phase), phases[phase]);
