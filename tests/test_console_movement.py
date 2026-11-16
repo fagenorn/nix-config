@@ -21,6 +21,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 PATTERN = "issue-<num>-<slug>"
 FIXTURE = Path(__file__).parent / "fixtures" / "console" / "forge-pulls.json"
+LOCKS = Path(__file__).parent / "fixtures" / "console" / "forge-locks.json"
 REL = "rel_01890a5d-ac96-7abc-8def-0123456789ab"
 
 
@@ -30,6 +31,10 @@ def ms(text):
 
 def answer():
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def locks():
+    return json.loads(LOCKS.read_text(encoding="utf-8"))
 
 
 def nodes_of(data):
@@ -48,25 +53,78 @@ class PullsTest(unittest.TestCase):
         self.assertEqual(bare[0].issues, frozenset())
         self.assertEqual(bare[1].issues, frozenset({5}))
 
-    def test_a_read_is_one_call_asked_before_it_is_cancelled(self):
+    def test_the_lock_ref_names_the_pull_request_that_holds_it(self):
+        held = movement.locks_from_answer(locks())
+        self.assertEqual(held, {"main": "40" * 20})
+        self.assertEqual([p.holding for p in movement.pulls_from_answer(answer(), PATTERN, held)],
+                         [True, False, False])
+        self.assertEqual(movement.pulls_from_answer(answer(), PATTERN), READ)
+        node = {"number": 77, "headRefName": "dev", "baseRefName": "main",
+                "headRefOid": "77" * 20, "isCrossRepository": False, "body": "Release",
+                "commits": {"nodes": []}}
+
+        def release(locked, **change):
+            data = {"data": {"repository": {"pullRequests": {"nodes": [{**node, **change}]}}}}
+            return movement.pulls_from_answer(data, PATTERN, locked)[0]
+
+        with self.subTest("a release headed at its branch's lock holds it"):
+            pull = release({"dev": "77" * 20})
+            self.assertIs(pull.holding, True)
+            self.assertEqual(pull.issues, frozenset())
+        with self.subTest("a fork's branch of the same name never holds"):
+            self.assertIs(release({"dev": "77" * 20}, isCrossRepository=True).holding, False)
+        with self.subTest("a lock at another sha"):
+            self.assertIs(release({"dev": "78" * 20}).holding, False)
+        with self.subTest("its base's lock at another sha"):
+            self.assertIs(release({"main": "40" * 20}).holding, False)
+
+    def test_a_read_is_two_calls_each_asked_before_it_is_cancelled(self):
         calls = []
 
         def stub(argv):
             calls.append(argv)
-            return answer()
+            if argv == movement.pulls_argv("owner/p00"):
+                return answer()
+            self.assertEqual(argv, movement.locks_argv("owner/p00"))
+            return locks()
 
-        self.assertEqual(movement.read_pulls("owner/p00", PATTERN, call=stub), READ)
-        self.assertEqual(calls, [movement.pulls_argv("owner/p00")])
+        read = movement.read_pulls("owner/p00", PATTERN, call=stub)
+        self.assertEqual([p.holding for p in read], [True, False, False])
+        self.assertEqual(calls, [movement.pulls_argv("owner/p00"),
+                                 movement.locks_argv("owner/p00")])
+        self.assertEqual(movement.locks_argv("owner/p00"),
+                         ["api", "repos/owner/p00/git/matching-refs/agent-locks/land"])
         argv = calls[0]
         self.assertIn("owner=owner", argv)
         self.assertIn("name=p00", argv)
         query = [a for a in argv if a.startswith("query=")]
         self.assertEqual(len(query), 1)
         self.assertIn("pullRequests(states: OPEN, first: 50", query[0])
+        calls.clear()
+        asked = []
+
+        def after_first():
+            asked.append(1)
+            return bool(calls)
+
+        with self.assertRaises(ForgeError) as caught:
+            movement.read_pulls("owner/p00", PATTERN, call=stub, cancelled=after_first)
+        self.assertEqual(caught.exception.code, "cancelled")
+        self.assertEqual(calls, [movement.pulls_argv("owner/p00")])
+        calls.clear()
         with self.assertRaises(ForgeError) as caught:
             movement.read_pulls("owner/p00", PATTERN, call=stub, cancelled=lambda: True)
         self.assertEqual(caught.exception.code, "cancelled")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [])
+
+        def failing(argv):
+            if argv == movement.pulls_argv("owner/p00"):
+                return answer()
+            raise ForgeError("gh_failed", "HTTP 502")
+
+        with self.assertRaises(ForgeError) as caught:
+            movement.read_pulls("owner/p00", PATTERN, call=failing)
+        self.assertEqual(caught.exception.code, "gh_failed")
 
     def test_the_production_transport_is_ended_in_flight_by_a_cancellation(self):
         with tempfile.TemporaryDirectory() as home:
@@ -130,11 +188,20 @@ class PullsTest(unittest.TestCase):
             "count not a number": with_node(
                 lambda n: contexts(n).update(
                     checkRunCountsByState=[{"state": "QUEUED", "count": "1"}])),
+            "no head oid": with_node(lambda n: n.pop("headRefOid")),
+            "no base branch": with_node(lambda n: n.update(baseRefName=None)),
+            "cross repository not a bool": with_node(lambda n: n.update(isCrossRepository="no")),
         }
         for name, data in cases.items():
             with self.subTest(name):
                 with self.assertRaises(ForgeError) as caught:
                     movement.pulls_from_answer(data, PATTERN)
+                self.assertEqual(caught.exception.code, "payload_invalid")
+        for name, data in {"not a list": {},
+                           "no sha": [{"ref": "refs/agent-locks/land/main", "object": {}}]}.items():
+            with self.subTest(name):
+                with self.assertRaises(ForgeError) as caught:
+                    movement.locks_from_answer(data)
                 self.assertEqual(caught.exception.code, "payload_invalid")
 
     def test_a_body_names_an_issue_only_as_a_bare_hash_number(self):
@@ -260,6 +327,42 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(
             movement.merged(prev, None, 3000, LocalReading(((4, 1400), (6, 2000)), False)).branches,
             ((4, 1500), (5, 1600), (6, 2000)))
+
+    def test_a_pull_holding_the_lock_marks_its_issues_and_keeps_the_time_once_released(self):
+        first = movement.merged(
+            None, (PullRequest(40, frozenset({4, 7}), False, None, True),), 1000,
+            LocalReading((), False))
+        self.assertEqual(first.locks, ((4, 1000), (7, 1000)))
+        self.assertIs(first.lock_held, True)
+        later = movement.merged(
+            first, (PullRequest(40, frozenset({4, 7}), False, None, False),), 2000,
+            LocalReading((), False))
+        self.assertEqual(later.locks, ((4, 1000), (7, 1000)))
+        self.assertIs(later.lock_held, False)
+
+    def test_a_journal_lock_step_counts_only_while_a_pull_holds_a_lock(self):
+        holding = movement.merged(
+            None, (PullRequest(41, frozenset({5}), False, None, True),), 1000,
+            LocalReading((), False), locking={4})
+        self.assertEqual(holding.locks, ((4, 1000), (5, 1000)))
+        idle = movement.merged(
+            None, (PullRequest(41, frozenset({5}), False, None, False),), 1000,
+            LocalReading((), False), locking={4})
+        self.assertEqual(idle.locks, ())
+
+    def test_failed_reads_refresh_no_lock_time_so_it_ages_out(self):
+        first = movement.merged(
+            None, (PullRequest(41, frozenset({5}), False, None, True),), 1000,
+            LocalReading((), False), locking={4})
+        self.assertEqual(first.locks, ((4, 1000), (5, 1000)))
+        reading = first
+        for k in range(1, 11):
+            reading = movement.merged(reading, None, 1000 + k * 120_000,
+                                      LocalReading((), False), locking={4})
+            self.assertIs(reading.lock_held, True)
+            self.assertEqual(reading.locks, ((4, 1000), (5, 1000)))
+        cold = movement.merged(None, None, 2000, LocalReading((), False), locking={4})
+        self.assertEqual(cold.locks, ())
 
 
 if __name__ == "__main__":

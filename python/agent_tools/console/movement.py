@@ -4,9 +4,20 @@ clock: the caller passes `now_ms`. `read_pulls` takes the `gh` call and a cancel
 arguments; `branch_updates` and `release_reading` only read files, start no process and take no lock.
 
 Pull requests. One GraphQL query (`PULLS_QUERY`, `pulls_argv`) asks for the `MAX_PULLS` most recently
-updated open pull requests with the head commit's `committedDate` and its check contexts counted by state. `read_pulls`
-makes exactly one `call`, with `pulls_argv(slug)`, and asks `cancelled()` before it; when cancelled it
-raises `ForgeError("cancelled")` and makes no call. With no `call` the transport is
+updated open pull requests with the head commit's `committedDate` and its check contexts counted by state, and
+each one's `headRefOid`, `baseRefName` and `isCrossRepository`. The land lock is read by a second call, REST
+`git/matching-refs/agent-locks/land` (`locks_argv`), because GraphQL does not list `refs/agent-locks/`.
+`locks_from_answer` maps base branch name to lock oid from every item whose `ref` starts with
+`forge_land_lock.LOCK_PREFIX` (the branch is the rest of the ref); `land-wait/` and `land-beat/` refs are
+ignored; an answer that is not a list, or an item that is not an object with a str `ref` and an object
+`object` holding a str `sha`, raises `ForgeError("payload_invalid")`. A pull request is `holding` the lock
+(forge_land_lock D2) when the lock of its base branch is at its head oid, or, being a release pull request,
+when it is not cross-repository and the lock of its own head branch is at its head oid: a release's head is
+the locked integration branch itself, whatever its base, and a fork's branch of that name never holds. A
+node whose `headRefOid` or `baseRefName` is not a str or whose `isCrossRepository` is not a bool is
+payload_invalid. `read_pulls` makes two `call`s, `pulls_argv(slug)` then `locks_argv(slug)`, and asks
+`cancelled()` before each; when cancelled it raises `ForgeError("cancelled")` before that call, and a failed
+lock read fails the whole read. With no `call` the transport is
 `forge_api.gh_json(argv, cancelled=cancelled)`, which kills the `gh` process group in flight as soon
 as `cancelled()` is true and raises `ForgeError("cancelled")`. A pull request is `running` when the head commit has a `CheckRun` counted
 in a state of `RUNNING_CHECKS` (queued, in progress or pending) or a `StatusContext` counted in a state
@@ -32,7 +43,12 @@ object, or whose `state` is not a str in `transaction_history.STATES` is an inva
 into the returned invalid ids and it is never in progress, so it refreshes no movement. A valid state is
 in progress when it is not in `TERMINALS` and not `HELD_FOR_A_PERSON`. No store reads `(False, ())`.
 
-The fold. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
+The fold. `lock_held` is `any(p.holding for p in pulls)` for a read and the previous `lock_held` when
+`pulls` is None. In a good read each issue of a read pull with `holding`, and each issue of `locking` (the
+issues whose journal sits at a lock step) when that read's `lock_held` is true, is seen: its `locks` time
+becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
+issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
+out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
 (a failed read) the result keeps `previous.pulls` and `previous.read_ms` unchanged. With `pulls` given,
 `read_ms = now_ms`, and each read pull becomes a `PullMovement` with its read `issues` and
 `committed_ms` (the larger of it and the previous pull's, so a rewritten head never moves it back,
@@ -48,13 +64,14 @@ is pruned: the service drops a project's whole reading once no sprint of it runs
 import json
 import os
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from agent_tools.claims import owner_actions
+from agent_tools.claims.forge_land_lock import LOCK_PREFIX
 from agent_tools.console.deliveries import branch_issue
 from agent_tools.release.transaction_history import STATES, TERMINALS
 from agent_tools.release.transaction_storage import is_id
@@ -68,6 +85,9 @@ PULLS_QUERY = """query($owner: String!, $name: String!) {
       nodes {
         number
         headRefName
+        headRefOid
+        baseRefName
+        isCrossRepository
         body
         commits(last: 1) {
           nodes {
@@ -101,6 +121,7 @@ class PullRequest:
     issues: frozenset[int]
     running: bool
     committed_ms: int | None
+    holding: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,12 +145,18 @@ class ProjectMovement:
     read_ms: int | None = None
     branches: tuple[tuple[int, int], ...] = ()
     release_ms: int | None = None
+    locks: tuple[tuple[int, int], ...] = ()
+    lock_held: bool = False
 
 
 def pulls_argv(slug: str) -> list[str]:
     owner, name = slug.split("/", 1)
     return ["api", "graphql", "-f", f"query={PULLS_QUERY}", "-f", f"owner={owner}",
             "-f", f"name={name}"]
+
+
+def locks_argv(slug: str) -> list[str]:
+    return ["api", f"repos/{slug}/git/matching-refs/agent-locks/land"]
 
 
 def body_issues(body: str) -> frozenset[int]:
@@ -182,7 +209,21 @@ def _running(contexts: dict) -> bool:
             or any(statuses.get(state) for state in RUNNING_STATUSES))
 
 
-def _pull(node: object, pattern: str | None) -> PullRequest:
+def locks_from_answer(answer: object) -> dict[str, str]:
+    """Base branch name -> lock oid of one matching-refs answer; raises `ForgeError`."""
+    held: dict[str, str] = {}
+    for item in _list(answer, "locks answer"):
+        item = _dict(item, "lock ref")
+        ref, target = item.get("ref"), _dict(item.get("object"), "lock ref object")
+        sha = target.get("sha")
+        if not isinstance(ref, str) or not isinstance(sha, str):
+            raise _invalid("lock ref has no ref and sha text")
+        if ref.startswith(LOCK_PREFIX):
+            held[ref[len(LOCK_PREFIX):]] = sha
+    return held
+
+
+def _pull(node: object, pattern: str | None, held: Mapping[str, str]) -> PullRequest:
     node = _dict(node, "pull request")
     number = node.get("number")
     if type(number) is not int or number < 1:
@@ -190,6 +231,10 @@ def _pull(node: object, pattern: str | None) -> PullRequest:
     head, body = node.get("headRefName"), node.get("body")
     if not isinstance(head, str) or not (body is None or isinstance(body, str)):
         raise _invalid("pull request head or body is not text")
+    oid, base, cross = node.get("headRefOid"), node.get("baseRefName"), node.get("isCrossRepository")
+    if not isinstance(oid, str) or not isinstance(base, str) or type(cross) is not bool:
+        raise _invalid("pull request head oid, base or fork flag is of another type")
+    holding = held.get(base) == oid or (not cross and held.get(head) == oid)
     issues = set(body_issues(body or ""))
     named = branch_issue(pattern, head)
     if named is not None:
@@ -204,29 +249,35 @@ def _pull(node: object, pattern: str | None) -> PullRequest:
         if rollup is not None:
             contexts = _dict(_dict(rollup, "statusCheckRollup").get("contexts"), "contexts")
             running = _running(contexts)
-    return PullRequest(number, frozenset(issues), running, committed)
+    return PullRequest(number, frozenset(issues), running, committed, holding)
 
 
-def pulls_from_answer(answer: object, pattern: str | None) -> tuple[PullRequest, ...]:
+def pulls_from_answer(answer: object, pattern: str | None,
+                      locks: Mapping[str, str] | None = None) -> tuple[PullRequest, ...]:
     """The open pull requests of one answer, ascending by number; raises `ForgeError`."""
+    held = locks or {}
     data = _dict(_dict(answer, "answer").get("data"), "data")
     repository = _dict(data.get("repository"), "repository")
     nodes = _list(_dict(repository.get("pullRequests"), "pullRequests").get("nodes"),
                   "pullRequests.nodes")
-    return tuple(sorted((_pull(node, pattern) for node in nodes), key=lambda p: p.number))
+    return tuple(sorted((_pull(node, pattern, held) for node in nodes), key=lambda p: p.number))
 
 
 def read_pulls(slug: str, pattern: str | None, *,
                call: Callable[[list[str]], Any] | None = None,
                cancelled: Callable[[], bool] = lambda: False) -> tuple[PullRequest, ...]:
-    """The open pull requests of one repository in one call; raises `forge_api.ForgeError`. With no
-    `call` the production transport runs, which ends the call in flight once `cancelled()` is true."""
-    if cancelled():
-        raise ForgeError("cancelled")
+    """The open pull requests of one repository and the land lock, in two calls; raises
+    `forge_api.ForgeError`. With no `call` the production transport runs, which ends the call in flight
+    once `cancelled()` is true."""
     if call is None:
         def call(argv: list[str]) -> Any:
             return forge_api.gh_json(argv, cancelled=cancelled)
-    return pulls_from_answer(call(pulls_argv(slug)), pattern)
+    if cancelled():
+        raise ForgeError("cancelled")
+    first = call(pulls_argv(slug))
+    if cancelled():
+        raise ForgeError("cancelled")
+    return pulls_from_answer(first, pattern, locks_from_answer(call(locks_argv(slug))))
 
 
 def _last_reflog_ms(path: Path) -> int | None:
@@ -303,12 +354,20 @@ def read_local(root: str, pattern: str | None) -> LocalReading:
 
 
 def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | None,
-           now_ms: int, local: LocalReading) -> ProjectMovement:
+           now_ms: int, local: LocalReading,
+           locking: Collection[int] = ()) -> ProjectMovement:
     """Fold one reading into the last: every time kept is the last time its signal was seen."""
     before = previous or ProjectMovement()
+    locks = dict(before.locks)
     if pulls is None:
-        kept, read_ms = before.pulls, before.read_ms
+        kept, read_ms, lock_held = before.pulls, before.read_ms, before.lock_held
     else:
+        lock_held = any(pull.holding for pull in pulls)
+        seen_locking = {issue for pull in pulls if pull.holding for issue in pull.issues}
+        if lock_held:
+            seen_locking.update(locking)
+        for issue in seen_locking:
+            locks[issue] = max(now_ms, locks.get(issue, now_ms))
         old = {pull.number: pull for pull in before.pulls}
         fresh = {}
         for pull in pulls:
@@ -324,4 +383,5 @@ def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | No
     for issue, moved in local.branches:
         branches[issue] = max(moved, branches.get(issue, moved))
     return ProjectMovement(kept, read_ms, tuple(sorted(branches.items())),
-                           now_ms if local.release else before.release_ms)
+                           now_ms if local.release else before.release_ms,
+                           tuple(sorted(locks.items())), lock_held)
