@@ -41,6 +41,7 @@ class Node {
   }
   addEventListener() {}
   setAttribute() {}
+  removeAttribute() {}
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren(...nodes) { this.children = nodes; }
   set textContent(text) { this.children = [{text: String(text)}]; }
@@ -1817,10 +1818,11 @@ def role(cls: str | None) -> str | None:
 
 
 def picked(snap: dict) -> list:
-    """The option words of every `.picked` node: its `span.ot` child when it has one, else the node."""
+    """The option words of every chosen node: a pressed button (the chosen `opt`) or an `li` of a rest or done card
+    with class `picked` (D14); its `span.ot` child when it has one, else the node."""
     found = []
     for n in nodes(snap["inbox"]):
-        if has_class(n, "picked"):
+        if (n["tag"] == "button" and n["pressed"] == "true") or has_class(n, "picked"):
             words = [c for c in n["children"] if has_class(c, "ot")]
             found.append(full(words[0]) if words else full(n))
     return found
@@ -2190,7 +2192,7 @@ class PageQuestionTest(unittest.TestCase):
         self.assertEqual(len(buttons), 2)
         recs = [n for n in nodes(before["inbox"]) if has_class(n, "rec")]
         self.assertEqual(len(recs), 1)
-        self.assertEqual([has_class(b, "picked") for b in buttons], [False, True])
+        self.assertEqual([b["pressed"] == "true" for b in buttons], [False, True])
         self.assertEqual([bool([n for n in nodes(b) if has_class(n, "rec")]) for b in buttons],
                          [False, True])
         (sent,) = round_posts(after)
@@ -3306,17 +3308,21 @@ class PageCardTest(unittest.TestCase):
 
         self.assertEqual(spec(".btn-primary"), (0, 1, 0))
         block, addendum = rules_in(lines[shared + 1:end]), rules_in(lines[desk + 1:desk_end])
-        for state in ("",):
+        hover = ':hover:not(:disabled):not([aria-disabled="true"])'
+        wanted = {"": ("background", "color", "border-color"), hover: ("background", "border-color"),
+                  ":disabled": ("background", "color", "border-color")}
+        for state, props in wanted.items():
             with self.subTest(state=state):
                 mine = [s for s, d in addendum if s.endswith(".btn-primary" + state) and "background" in d]
                 rivals = [s for s, _ in block if s.endswith(".btn-primary" + state)]
                 self.assertTrue(mine)
-                self.assertTrue(rivals)
-                self.assertGreaterEqual(min(spec(s) for s in mine), max(spec(s) for s in rivals))
-                if state == "":
-                    declared = [d for s, d in addendum if s in mine]
-                    for prop in ("background", "color", "border-color"):
-                        self.assertTrue(any(prop in d for d in declared), prop)
+                if state != hover:
+                    self.assertTrue(rivals)
+                if rivals:
+                    self.assertGreaterEqual(min(spec(s) for s in mine), max(spec(s) for s in rivals))
+                declared = [d for s, d in addendum if s in mine]
+                for prop in props:
+                    self.assertTrue(any(prop in d for d in declared), prop)
         self.assertEqual(re.findall(r"[^{}]*\.primary(?![\w-])[^{}]*\{", style), [])
 
 
@@ -3420,7 +3426,7 @@ class PageOptionTest(unittest.TestCase):
             return any(selector_test(sel) and declaration in rule for sel, rule in rules)
         self.assertTrue(declares(
             lambda sel: any(t.endswith(".btn-option") for t in re.split(r"[\s,]+", sel)), "width: 100%"))
-        self.assertTrue(declares(lambda sel: ".opt.picked kbd" in sel, "background:"))
+        self.assertTrue(declares(lambda sel: '.btn-option[aria-pressed="true"] kbd' in sel, "background:"))
         for sel, rule in rules:
             if ".opt" in sel or ".btn-option" in sel:
                 self.assertNotIn("var(--peach)", rule, sel)
@@ -3606,7 +3612,7 @@ def goal_names(snap: dict) -> list:
 
 
 def goal_picked(snap: dict) -> list:
-    return [full(n) for n in goal_named(snap, "goal-project") if has_class(n, "picked")]
+    return [full(n) for n in goal_named(snap, "goal-project") if n["pressed"] == "true"]
 
 
 def box_open(snap: dict) -> bool:
@@ -6607,7 +6613,7 @@ class PageStandingRulesTest(unittest.TestCase):
         rules = style_rules(top)
         self.assertTrue([
             d for s, d in rules
-            if s == ".goal-in .goal-text:focus-visible" and d.get("outline") in ("none", "0")])
+            if s == ".field-bare:focus-visible" and d.get("outline") in ("none", "0")])
         self.assertTrue([
             d for s, d in rules
             if s == ".goal-in:focus-within" and d.get("border-color") == "var(--lav)"])

@@ -43,11 +43,24 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .field-area { display: block; width: 100%; min-height: 4.5rem; resize: vertical; }
 .field-code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; letter-spacing: .06em; }
 .field-bare { padding-left: 0; padding-right: 0; background: none; border-color: transparent; }
+.btn-primary:disabled, .btn-primary[aria-disabled="true"], .btn-quiet:disabled, .btn-quiet[aria-disabled="true"], .btn-danger:disabled, .btn-danger[aria-disabled="true"], .btn-option:disabled, .btn-option[aria-disabled="true"], .field-line:disabled, .field-line[aria-disabled="true"], .field-area:disabled, .field-area[aria-disabled="true"], .field-code:disabled, .field-code[aria-disabled="true"] { border-width: 1px; border-style: dashed; border-color: var(--s1); cursor: not-allowed; opacity: .55; }
+.btn-primary[aria-busy="true"], .btn-quiet[aria-busy="true"], .btn-danger[aria-busy="true"], .btn-option[aria-busy="true"], .field-line[aria-busy="true"], .field-area[aria-busy="true"], .field-code[aria-busy="true"] { border-width: 1px; border-style: dotted; cursor: progress; }
+.btn-primary[aria-busy="true"]::after, .btn-quiet[aria-busy="true"]::after, .btn-danger[aria-busy="true"]::after { content: "\2026"; }
+.btn-quiet:hover:not(:disabled):not([aria-disabled="true"]), .btn-danger:hover:not(:disabled):not([aria-disabled="true"]), .btn-option:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--hover); border-color: var(--s2); }
+.btn-quiet.btn-bare:hover:not(:disabled):not([aria-disabled="true"]) { border-color: transparent; }
+.btn-primary:active, .btn-quiet:active, .btn-danger:active, .btn-option:active { transform: translateY(1px); }
+.btn-primary[aria-pressed="true"], .btn-quiet[aria-pressed="true"], .btn-danger[aria-pressed="true"], .btn-option[aria-pressed="true"] { border-color: var(--lav); font-weight: 600; }
+.btn-primary:focus-visible, .btn-quiet:focus-visible, .btn-danger:focus-visible, .btn-option:focus-visible, .field-line:focus-visible, .field-area:focus-visible, .field-code:focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 8px; }
+.field-bare:focus-visible { outline: none; }
 /* end controls */
 /* controls: desk */
 .btn-primary { background: var(--peach); border-color: var(--peach); color: var(--crust); }
 .btn-primary kbd { border-color: rgba(24, 25, 38, .28); color: var(--crust); }
 .btn-danger { color: var(--red); }
+.btn-primary:hover:not(:disabled):not([aria-disabled="true"]) { background: #f8bb98; border-color: #f8bb98; }
+.btn-primary:disabled, .btn-primary[aria-disabled="true"] { background: var(--s1); border-color: var(--s2); color: var(--sub0); }
+.btn-option[aria-pressed="true"] { background: rgba(183, 189, 248, .10); }
+.btn-option[aria-pressed="true"] kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
 /* end controls: desk */
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
@@ -156,15 +169,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .opt .ot { font-size: 1.0625rem; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
 .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
-.opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
-.opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
-.goal-project.picked { color: var(--lav); border-color: var(--lav); }
 .goal-bar { position: relative; flex: 1 1 12rem; min-width: 12rem; max-width: 440px; }
 .goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
 .goal-in:hover { border-color: var(--s1); }
 .goal-in:focus-within { border-color: var(--lav); }
 .goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 7px 0; font: inherit; line-height: 22px; color: var(--text); background: none; resize: none; overflow: hidden; text-overflow: ellipsis; }
-.goal-in .goal-text:focus-visible { outline: none; }
 .goal-in .goal-text::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .goal-key { margin-top: 9px; }
 .goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
@@ -373,7 +382,6 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .draft-edit-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
 .draft-options { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px 8px; }
 .register .draft-option { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
-.register .draft-option.picked { color: var(--text); border-color: var(--s1); }
 .draft-edit { flex: 1 1 12rem; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .abox .draft-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
 .abox .draft-row input { flex: 1 1 14rem; width: auto; min-width: 0; margin-top: 0; box-sizing: border-box; }
@@ -481,6 +489,11 @@ function el(tag, cls, text) {
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+// Marks a control busy while its own post is held: aria-busy only. The caller keeps its disabling line, so busy never decides disabled or aria-disabled.
+function markBusy(node, busy) {
+  if (busy) node.setAttribute("aria-busy", "true");
+  else node.removeAttribute("aria-busy");
 }
 // Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
 function pathWords(node, text) {
@@ -831,6 +844,7 @@ function tellBox(item, entry, sprint) {
   }
   const send = actionButton("tell-send btn-quiet", "Send", () => tell(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") send.setAttribute("disabled", "");
+  markBusy(send, state !== undefined && state.phase === "sending");
   box.appendChild(send);
   if (state !== undefined && state.phase === "failed") {
     box.appendChild(el("span", "fail", "Could not send: " + state.reason));
@@ -930,6 +944,7 @@ function drawSprint(item, entry, sprint) {
   if (sprint.retry === true) {
     const again = actionButton("retry btn-quiet", "Retry", () => retry(item, entry, sprint));
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
+    markBusy(again, retrying !== undefined && retrying.phase === "sending");
     item.appendChild(again);
   }
   if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
@@ -958,6 +973,7 @@ function drawSprint(item, entry, sprint) {
   if (stopButton !== null) more.appendChild(stopButton);
   const button = actionButton("withdraw btn-danger", "Drop the sprint", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
+  markBusy(button, state !== undefined && state.phase === "sending");
   more.appendChild(button);
   controls.appendChild(more);
   item.appendChild(controls);
@@ -978,12 +994,14 @@ function stopControls(item, entry, sprint) {
       "Stop this sprint? The manager finishes what is mid-merge, starts nothing new and reports."));
     const confirm = actionButton("stop-confirm btn-quiet", "Stop and report", () => stop(item, entry, sprint));
     if (state.phase === "sending") confirm.setAttribute("disabled", "");
+    markBusy(confirm, state.phase === "sending");
     item.appendChild(confirm);
     const cancel = actionButton("stop-cancel btn-quiet", "Cancel", () => {
       stops.delete(id);
       refillRows(id);
     });
     if (state.phase === "sending") cancel.setAttribute("disabled", "");
+    markBusy(cancel, state.phase === "sending");
     item.appendChild(cancel);
   }
   if (state !== undefined && state.phase === "failed") {
@@ -1171,6 +1189,7 @@ function stallCard(item) {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
+  markBusy(retry, again !== undefined && again.phase === "sending");
   const act = el("div", "act");
   act.appendChild(retry);
   const withdrawn = actionButton("stall-withdraw btn-danger", "Drop the sprint",
@@ -1178,6 +1197,7 @@ function stallCard(item) {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  markBusy(withdrawn, away !== undefined && away.phase === "sending");
   act.appendChild(withdrawn);
   for (const state of [again, away]) {
     if (state !== undefined && state.phase === "failed") {
@@ -1216,6 +1236,7 @@ function progressCard(item) {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
+  markBusy(onward, going !== undefined && going.phase === "sending");
   const act = el("div", "act");
   act.appendChild(onward);
   const withdrawn = actionButton("progress-withdraw btn-danger", "Drop the sprint",
@@ -1223,6 +1244,7 @@ function progressCard(item) {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  markBusy(withdrawn, away !== undefined && away.phase === "sending");
   act.appendChild(withdrawn);
   for (const state of [going, away]) {
     if (state !== undefined && state.phase === "failed") {
@@ -1290,6 +1312,7 @@ function exclusionControls(acct, p) {
   // aria-disabled, not disabled: a disabled button cannot take the focus renderAccounts restores to it,
   // and the action guards itself while a POST is in flight.
   if (sending) toggle.setAttribute("aria-disabled", "true");
+  markBusy(toggle, sending);
   acct.appendChild(toggle);
   if (state !== undefined && state.phase === "failed") {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
@@ -1335,6 +1358,7 @@ function pinControls(acct, p) {
   // aria-disabled, not disabled: a disabled button cannot take the focus renderAccounts restores to it,
   // and the action guards itself while a POST is in flight.
   if (sending) toggle.setAttribute("aria-disabled", "true");
+  markBusy(toggle, sending);
   acct.appendChild(toggle);
   if (state !== undefined && state.phase === "failed") {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
@@ -1417,6 +1441,7 @@ function removeControls(act, row, p, view) {
   // renderAccounts restores to it, and removeAccount guards itself. A wrong name still disables it.
   send.disabled = input.value !== name;
   if (sending) send.setAttribute("aria-disabled", "true");
+  markBusy(send, sending);
   input.addEventListener("input", () => {
     removeDrafts.set(name, { value: input.value, start: input.selectionStart, end: input.selectionEnd });
     send.disabled = input.value !== name;
@@ -1433,6 +1458,7 @@ function removeControls(act, row, p, view) {
     redrawAccounts();
   });
   if (sending) cancel.setAttribute("aria-disabled", "true");
+  markBusy(cancel, sending);
   box.appendChild(cancel);
   if (state !== undefined && state.phase === "failed") {
     box.appendChild(el("span", "fail", "Could not remove: " + state.reason));
@@ -1585,6 +1611,7 @@ function signinStartButton(item, cls) {
     // The panel's button stays focusable (aria-disabled) so renderAccounts can restore the focus to it; signinPost guards itself.
     if (cls.split(" ").includes("acct-signin")) start.setAttribute("aria-disabled", "true");
     else start.setAttribute("disabled", "");
+    markBusy(start, true);
   }
   return start;
 }
@@ -1616,6 +1643,7 @@ function signinAct(item, quiet = false) {
     const lock = (value) => {
       send.disabled = value.trim() === "" || (sending && !quiet);
       if (sending && quiet) send.setAttribute("aria-disabled", "true");
+      markBusy(send, sending);
     };
     act.appendChild(draftField(input, stateId(item) + "\nsignin-code", lock));
     lock(input.value);
@@ -1629,6 +1657,7 @@ function signinAct(item, quiet = false) {
     if (cancelling !== undefined && cancelling.phase === "sending") {
       // The panel's Cancel stays focusable (aria-disabled) so renderAccounts can restore the focus to it.
       cancel.setAttribute(quiet ? "aria-disabled" : "disabled", quiet ? "true" : "");
+      markBusy(cancel, true);
     }
     act.appendChild(cancel);
   }
@@ -1809,6 +1838,7 @@ function noticePostControl(projectId) {
   const send = actionButton("notice-send btn-quiet", "Send", () => postNotice(projectId));
   const reason = el("span", "notice-post-reason", sending ? "Sending\u2026" : state === undefined ? "" : state.reason);
   send.disabled = sending || field.value.trim() === "";
+  markBusy(send, sending);
   field.addEventListener("input", () => {
     noticeDrafts.set(projectId, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
     const shown = noticePosts.get(projectId);
@@ -1817,6 +1847,7 @@ function noticePostControl(projectId) {
       reason.textContent = "";
     }
     send.disabled = field.value.trim() === "" || (shown !== undefined && shown.phase === "sending");
+    markBusy(send, shown !== undefined && shown.phase === "sending");
   });
   box.appendChild(field);
   box.appendChild(send);
@@ -1837,6 +1868,7 @@ function noticeLine(notice, projectId) {
   if (owned) {
     const withdraw = actionButton("notice-withdraw btn-quiet", "Withdraw", () => withdrawNotice(projectId, notice.id));
     withdraw.disabled = withdrawal !== undefined && withdrawal.phase === "sending";
+    markBusy(withdraw, withdrawal !== undefined && withdrawal.phase === "sending");
     head.appendChild(withdraw);
   }
   head.appendChild(timeEl("ago", notice.at, "notice-age"));
@@ -3145,6 +3177,7 @@ function drawBrief(rec, item, lead) {
     : words[reply.phase] === undefined ? [] : [el("span", "", words[reply.phase])];
   rec.status.replaceChildren(...status);
   rec.send.disabled = reply.phase === "sending";
+  markBusy(rec.send, reply.phase === "sending");
 }
 function approveLine(item, state, lead) {
   if (state.phase === "waiting") {
@@ -3235,6 +3268,7 @@ function actionLine(item, state, lead) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send btn-primary" : "send btn-quiet", words, () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
+    markBusy(send, planBusy(item, state));
     send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
@@ -3293,7 +3327,9 @@ function wordsBox(item, state, box) {
   const pending = !choosable(state);
   box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
   area.disabled = pending;
+  markBusy(area, state.phase === "sending");
   send.disabled = pending || area.value.trim() === "";
+  markBusy(send, state.phase === "sending");
   box.appendChild(send);
 }
 function draftInput(cls, placeholder) {
@@ -3323,7 +3359,9 @@ function draftBox(item, state, box) {
   });
   row.appendChild(draftField(input, itemId(item) + "\ndraft", (value) => { send.disabled = pending || value.trim() === ""; }));
   input.disabled = !choosable(state);
+  markBusy(input, state.phase === "sending");
   send.disabled = pending || input.value.trim() === "";
+  markBusy(send, state.phase === "sending" || planBusy(item, state));
   row.appendChild(send);
   box.appendChild(row);
 }
@@ -3396,9 +3434,10 @@ function answerBox(item, state, lead) {
     if (soleOption(item)) return;
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
-      const button = el("button", state.picks[qi] === oi ? "opt picked btn-option" : "opt btn-option");
+      const button = el("button", "opt btn-option");
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
+      markBusy(button, state.phase === "sending");
       button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
       button.appendChild(pathWords(el("span", "ot"), option === q.chosen ? "chosen: " + option : option));
@@ -4027,11 +4066,12 @@ function refreshGoalList() {
   if (goalUi === null) return;
   const chosen = chosenProject();
   const items = goalMatches().map((id) => {
-    const button = actionButton(id === chosen ? "goal-project picked btn-quiet" : "goal-project btn-quiet", id, () => {
+    const button = actionButton("goal-project btn-quiet", id, () => {
       draft.project = id;
       goalEdited();
       refreshGoalList();
     });
+    button.setAttribute("aria-pressed", String(id === chosen));
     const row = el("li");
     row.appendChild(button);
     return row;
@@ -4072,6 +4112,7 @@ async function sendGoal() {
   const sentRev = draft.rev;
   showGoalReason();
   if (goalUi !== null) goalUi.send.disabled = true;
+  if (goalUi !== null) markBusy(goalUi.send, true);
   let reason = null;
   try {
     const response = await fetch("/api/goal", {
@@ -4088,6 +4129,7 @@ async function sendGoal() {
   }
   draft.phase = "idle";
   if (goalUi !== null) goalUi.send.disabled = false;
+  if (goalUi !== null) markBusy(goalUi.send, false);
   if (reason === null) {
     draft.reason = "";
     if (draft.rev === sentRev) {
@@ -4301,14 +4343,18 @@ function renderAccountAdd(view) {
     reason = accountState.failure;
     if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
     accountCont.fetchLink.disabled = accountState.fetching;
+    markBusy(accountCont.fetchLink, accountState.fetching);
     accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
+    markBusy(accountCont.send, accountState.codeSending);
     accountCont.cancel.disabled = accountState.cancelling;
+    markBusy(accountCont.cancel, accountState.cancelling);
   } else if (want === "closed" && accountOutcome !== null && OUTCOME_WORDS.has(accountOutcome.state)) {
     want = "outcome";
     accountOutcomeNote.textContent = OUTCOME_WORDS.get(accountOutcome.state)(accountOutcome.profile);
   } else if (want === "naming") {
     const named = accountNameReason(accountName.value.trim(), view);
     accountSend.disabled = accountState.adding || named !== null;
+    markBusy(accountSend, accountState.adding);
     reason = accountState.adding ? "Adding\u2026" : named || accountState.failure;
   }
   if (accountState.shown !== want) {
@@ -4428,7 +4474,7 @@ function changeBox(registration, entry, change) {
   if (Array.isArray(entry.options) && entry.options.length > 0) {
     const list = el("div", "draft-options");
     for (const option of entry.options) {
-      const button = actionButton(change.choice === option.value ? "draft-option picked btn-quiet" : "draft-option btn-quiet", option.label, () => {
+      const button = actionButton("draft-option btn-quiet", option.label, () => {
         change.choice = option.value;
         renderRegister(lastView);
       });
@@ -4436,6 +4482,7 @@ function changeBox(registration, entry, change) {
       pathWords(button, option.label);
       button.setAttribute("aria-pressed", String(change.choice === option.value));
       button.disabled = change.posting;
+      markBusy(button, change.posting);
       picks.push(button);
       list.appendChild(button);
     }
@@ -4448,7 +4495,6 @@ function changeBox(registration, entry, change) {
       if (change.choice !== null) {
         change.choice = null;
         for (const button of picks) {
-          button.className = "draft-option btn-quiet";
           button.setAttribute("aria-pressed", "false");
         }
       }
@@ -4456,6 +4502,7 @@ function changeBox(registration, entry, change) {
     });
     registerFields.set(key, input);
     input.disabled = change.posting;
+    markBusy(input, change.posting);
     input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
@@ -4464,6 +4511,7 @@ function changeBox(registration, entry, change) {
     box.appendChild(input);
   }
   send.disabled = !ready();
+  markBusy(send, change.posting);
   box.appendChild(send);
   box.appendChild(actionButton("draft-cancel btn-quiet", "Cancel", () => {
     closeChange();
@@ -4564,6 +4612,7 @@ function drawRegisterResult(registration) {
   if (registration.status === "done" && registration.cancel === true) {
     const withdraw = actionButton("register-withdraw btn-quiet", "Cancel registration", () => withdrawRegistration(registration));
     withdraw.disabled = registerWithdraw.posting;
+    markBusy(withdraw, registerWithdraw.posting);
     parts.push(withdraw);
     if (registerWithdraw.failure !== "") parts.push(el("span", "register-withdraw-reason", registerWithdraw.failure));
   }
@@ -4575,6 +4624,7 @@ function renderRegister(view) {
   const naming = registerState.phase === "naming";
   if (naming) {
     registerSend.disabled = registerState.posting || registerPath.value.trim() === "";
+    markBusy(registerSend, registerState.posting);
   }
   const reason = naming ? (registerState.posting ? "Registering\u2026" : registerState.failure) : "";
   if (registerState.shown !== registerState.phase) {
@@ -4636,6 +4686,7 @@ function buildGoalBox() {
   goalPanel = box;
   goalUi = { filter, list, status, send };
   send.disabled = draft.phase === "sending";
+  markBusy(send, draft.phase === "sending");
   refreshGoalList();
   showGoalReason();
   return box;

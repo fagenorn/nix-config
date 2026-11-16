@@ -8,11 +8,12 @@ from pathlib import Path
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ADD_STEPS, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
-    FAILED_REGISTRATION, GOAL_FRAME, MORE_KEY, NOW_MS, NOW_S, NO_LINK_RUNNING, OPEN_A, OWNER_W, PICTURED, PROGRESS,
-    Q0, REGISTER_TYPED, REPORTED, SIGNIN, SPRINT, START, STALL, T0, V, WORK_CAP, ANSWER, cards,
-    check_item, frame, media_block, nodes, postable, project, real_capacity, render, style_rules,
-    view, with_check, with_notices, with_run, with_sprints)
+    ADD_STEPS, ADDED, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    FAILED_REGISTRATION, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
+    OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
+    SIGNIN, SPRINT, START, STALL, T0, V, WORK_CAP, ANSWER, cards,
+    check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
+    style_rules, view, with_check, with_notices, with_run, with_sprints)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -529,3 +530,334 @@ def css_px(value: str) -> float:
         return 0.0
     number = float(match.group(1))
     return number if match.group(2) in (None, "px") else number * 16
+
+
+HOVER = ':hover:not(:disabled):not([aria-disabled="true"])'
+SNAP = {"snapshot": True}
+NO_REPLY = {"status": 204, "text": ""}
+BUTTON_KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option")
+BUSY_ROLES = frozenset({
+    "tell-send", "notice-send", "register-send", "account-add-send", "goal-send", "reply-send",
+    "acct-toggle", "acct-pin", "acct-remove-send", "acct-remove-cancel", "acct-signin",
+    "account-link-get", "account-code-send", "account-signin-cancel", "draft-option", "draft-send",
+    "register-withdraw", "send", "retry", "withdraw", "stop-confirm", "stop-cancel", "try-again",
+    "stall-withdraw", "continue", "progress-withdraw", "signin-start", "signin-send",
+    "signin-cancel", "notice-withdraw", "ans-words", "ans-draft", "opt", "words-text", "draft-text"})
+
+
+def refusal(text: str) -> dict:
+    return {"status": 409, "text": text + "\n"}
+
+
+def held(click: str, *more) -> list:
+    """The act of a busy row: hold the next post, click, any further step, then a snapshot."""
+    return [{"hold": True}, {"click": click}, *more, SNAP]
+
+
+def held_click(cls: str) -> list:
+    return [{"hold": True}, {"click": cls}]
+
+
+def busy_row(name, setup, act, release, roles=None, where=None, exceptions=None) -> tuple:
+    return (name, [*setup, SNAP], act, [{"release": release}, SNAP],
+            frozenset(roles or {name}), where, exceptions or {})
+
+
+def _removal_frame() -> dict:
+    return {**view([]), "capacity": real_capacity(NOW_S, [{"name": "a", "week": .35},
+                                                          {"name": "b", "week": .7}]),
+            "profile_sessions": {"a": 2}}
+
+
+def _panel_signin_steps() -> list:
+    shown = {**frame([SIGNIN]), "capacity": WORK_CAP}
+    running = {**frame([with_run(SIGNIN, "running", 7)]), "capacity": WORK_CAP,
+               "signin_runs": {"work": {"state": "running", "at": None, "attempt": 7}}}
+    return [START, {"frame": shown}, *OPEN_A, {"frame": running},
+            {"type": {"class": "signin-code", "text": "abc"}}]
+
+
+def _signed_out_panel_steps() -> list:
+    shown = {**view([]), "capacity": real_capacity(NOW_S, [
+        {"name": "b", "week": .5, "signin": ("signed_out", None)}])}
+    return [START, {"frame": shown}, {"click": "cap"}]
+
+
+REMOVAL_STEPS = [START, {"frame": _removal_frame()}, {"click": "cap"}, {"click": "acct-remove"},
+                 {"type": {"class": "acct-remove-name", "text": "a"}}]
+OWNER_NOTICE = postable(with_notices(project(0, []), OWNER_W, HEADSUP_W))
+NOTICE_STEPS = [{"start": {"focused": False, "clock": NOW_MS}}, {"frame": view([OWNER_NOTICE])},
+                {"open": "notices:owner/p00"}]
+OTHER_DRAFT = {**DRAFTED, "draft": [DRAFTED["draft"][0], {**DRAFTED["draft"][1], "value": "tagged"}]}
+CANCELLABLE = cards([FAILED_ITEM], {**FAILED_REGISTRATION, "cancel": True})
+REGISTER_REFUSED = "only a registration that was not applied yet can be cancelled"
+TYPED_WORDS = {"type": {"class": "words-text", "text": "use the reader"}}
+SPRINT_STOPPABLE = {**SPRINT, "stoppable": True}
+
+BUSY_SCENARIOS = [
+    busy_row("tell-send", [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
+                           {"type": {"class": "tell", "text": "slow down"}}],
+             held("tell-send"), NO_REPLY),
+    busy_row("notice-send", [*NOTICE_STEPS, {"click": "notice-open"},
+                             {"type": {"class": "notice-text", "text": "routes are frozen"}}],
+             held("notice-send"), NO_REPLY),
+    busy_row("register-send", REGISTER_TYPED, held("register-send"), NO_REPLY),
+    busy_row("account-add-send", [START, {"frame": V}, {"click": "account-add-open"},
+                                  {"type": {"class": "account-name", "text": "fresh"}}],
+             held("account-add-send"), NO_REPLY),
+    busy_row("goal-send", [START, {"frame": GOAL_FRAME}, {"key": "g"},
+                           {"input": {"cls": "goal-text", "value": "ship the reader"}}],
+             held("goal-send"), refusal("no such project")),
+    busy_row("reply-send", [START, {"frame": frame([BRIEF])},
+                            {"input": {"cls": "reply-text", "value": "redo"}}],
+             held("reply-send"), NO_REPLY),
+    busy_row("acct-toggle", [START, {"frame": F3}, {"click": "cap"}], held("acct-toggle"),
+             NO_REPLY, where="panel"),
+    busy_row("acct-pin", [START, {"frame": F3}, {"click": "cap"}], held("acct-pin"),
+             NO_REPLY, where="panel"),
+    busy_row("acct-remove-send", REMOVAL_STEPS, held("acct-remove-send"),
+             {"status": 502, "text": "the account was not removed: its sign-out failed: exited\n"},
+             {"acct-remove-send", "acct-remove-cancel"}, "panel"),
+    busy_row("panel acct-signin", _signed_out_panel_steps(), held("acct-signin"),
+             refusal("a sign-in is already running"), {"acct-signin"}, "panel"),
+    busy_row("panel signin-send", _panel_signin_steps(), held("signin-send"), NO_REPLY,
+             {"signin-send"}, "panel"),
+    busy_row("panel signin-cancel", _panel_signin_steps(), held("signin-cancel"), NO_REPLY,
+             {"signin-cancel"}, "panel"),
+    busy_row("account-link-get", NO_LINK_RUNNING, held("account-link-get"),
+             {"status": 200, "text": ADDED}),
+    busy_row("account-code-send", [*NO_ITEM, {"type": {"class": "account-code", "text": "abc"}}],
+             held("account-code-send"), NO_REPLY),
+    busy_row("account-signin-cancel", NO_ITEM, held("account-signin-cancel"), NO_REPLY),
+    busy_row("draft-option", [START, {"frame": cards([], OTHER_DRAFT)}, {"open": "draft-more"},
+                              {"click": "draft-pick"}, {"click": "draft-option"}],
+             held("draft-send"), NO_REPLY, {"draft-option", "draft-send"}),
+    busy_row("draft-text", [START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"},
+                            {"type": {"class": "draft-edit", "text": "main"}}],
+             held("draft-send"), refusal("not a branch"), {"draft-text", "draft-send"}),
+    busy_row("register-withdraw", [START, {"frame": CANCELLABLE}], held("register-withdraw"),
+             refusal(REGISTER_REFUSED)),
+    busy_row("send", [START, {"frame": cards([R0, R2])}],
+             [{"hold": True}, {"key": "1"}, {"key": "Enter"}, {"clock": 20000}, SNAP],
+             refusal("no")),
+    busy_row("retry", [START, {"frame": with_sprints([{
+        **SPRINT, "manager_state": "failed", "manager_text": "x", "retry": True}])}],
+             held("retry"), refusal("this sprint has a manager")),
+    busy_row("withdraw", [START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}],
+             held("withdraw"), refusal("this sprint is not open")),
+    busy_row("stop-confirm", [START, {"frame": with_sprints([SPRINT_STOPPABLE])},
+                              {"open": MORE_KEY}, {"click": "stop"}],
+             held("stop-confirm"), refusal("this sprint is already stopping"),
+             {"stop-confirm", "stop-cancel"}),
+    busy_row("try-again", [START, {"frame": frame([STALL])}], held("try-again"),
+             refusal("this sprint has a manager")),
+    busy_row("stall-withdraw", [START, {"frame": frame([STALL])}], held("stall-withdraw"),
+             refusal("this sprint is not open")),
+    busy_row("continue", [START, {"frame": frame([PROGRESS])}], held("continue"),
+             refusal("this sprint's manager is not waiting for you")),
+    busy_row("progress-withdraw", [START, {"frame": frame([PROGRESS])}],
+             held("progress-withdraw"), refusal("this sprint is not open")),
+    busy_row("card signin-start", [START, {"frame": frame([SIGNIN])}], held("signin-start"),
+             refusal("a sign-in is running"), {"signin-start"}),
+    busy_row("card signin-send", [*SIGNED_IN_STEPS, {"type": {"class": "signin-code",
+                                                         "text": "ab#C-1"}}],
+             held("signin-send"), NO_REPLY, {"signin-send"}),
+    busy_row("card signin-cancel", SIGNED_IN_STEPS, held("signin-cancel"), NO_REPLY,
+             {"signin-cancel"}),
+    busy_row("notice-withdraw", NOTICE_STEPS, held("notice-withdraw"),
+             refusal("this notice has ended")),
+    busy_row("ans-words", [START, {"frame": frame([Q0, Q1])}, TYPED_WORDS],
+             held("ans-words", {"clock": 5000}), NO_REPLY, {"ans-words", "words-text", "opt"}),
+    busy_row("ans-draft", [START, {"frame": cards([T0])},
+                           {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}}],
+             held("ans-draft", {"clock": 5000}), refusal("no"), {"ans-draft", "draft-text"}),
+]
+
+
+BUSY_FOCUS = (
+    ("acct-toggle", [START, {"frame": F3}, {"click": "cap"}, {"focus_on": "acct-toggle"},
+                     *held_click("acct-toggle")]),
+    ("acct-pin", [START, {"frame": F3}, {"click": "cap"}, {"focus_on": "acct-pin"},
+                  *held_click("acct-pin")]),
+    ("acct-remove-send", [*REMOVAL_STEPS, {"focus_on": "acct-remove-send"}, {"hold": True},
+                          {"click": "acct-remove-send"}, {"focus_on": "acct-remove-send"}]),
+    ("acct-remove-cancel", [*REMOVAL_STEPS, {"focus_on": "acct-remove-send"}, {"hold": True},
+                            {"click": "acct-remove-send"}, {"focus_on": "acct-remove-cancel"}]),
+    ("acct-signin", [*_signed_out_panel_steps(), {"focus_on": "acct-signin"},
+                     *held_click("acct-signin")]),
+    ("signin-send", [*_panel_signin_steps(), {"focus_on": "signin-send"},
+                     *held_click("signin-send")]),
+    ("signin-cancel", [*_panel_signin_steps(), {"focus_on": "signin-cancel"},
+                       *held_click("signin-cancel")]),
+)
+
+
+def _is_disabled(node: dict) -> bool:
+    return node["disabled"] is True or node["aria_disabled"] == "true"
+
+
+def _pool(snapshot: dict, where: str | None) -> list:
+    """The control nodes a busy row reads: the panel's alone for a panel row, else every tree's."""
+    return controls_of({"accounts_body": panel(snapshot)} if where == "panel" else snapshot)
+
+
+def _every_node(snapshot: dict) -> list:
+    return [node for tree in TREES if snapshot.get(tree) is not None
+            for node, _parent in _walk(snapshot[tree], None)]
+
+
+def decls_of(rules: list, selector: str) -> dict:
+    merged = {}
+    for name, decls in rules:
+        if name == selector:
+            merged.update(decls)
+    return merged
+
+
+class ControlStateTest(unittest.TestCase):
+    def test_a_sending_control_is_busy(self) -> None:
+        self.assertEqual(frozenset().union(*(row[4] for row in BUSY_SCENARIOS)), BUSY_ROLES)
+        for name, setup, act, settle, roles, where, exceptions in BUSY_SCENARIOS:
+            with self.subTest(row=name):
+                before, during, after = render([*setup, *act, *settle])
+                pool = _pool(during, where)
+                for want in sorted(roles):
+                    self.assertTrue(
+                        [n for n in pool if role(n["cls"]) == want and n["busy"] == "true"],
+                        f"{want} is not busy while the post is held")
+                for node in pool:
+                    if node["busy"] != "true":
+                        continue
+                    self.assertTrue(_is_disabled(node), node["cls"])
+                    if where == "panel":
+                        self.assertEqual(node["aria_disabled"], "true", node["cls"])
+                        self.assertIs(node["disabled"], False, node["cls"])
+                was = {role(n["cls"]) for n in _pool(before, where) if _is_disabled(n)}
+                for node in pool:
+                    kind = role(node["cls"])
+                    if _is_disabled(node) and kind not in was and kind not in exceptions:
+                        self.assertEqual(node["busy"], "true", f"{node['cls']} is disabled, not busy")
+                self.assertEqual([n["cls"] for n in _every_node(after) if n["busy"] is not None], [])
+
+    def test_a_busy_account_control_keeps_the_focus(self) -> None:
+        for cls, steps in BUSY_FOCUS:
+            with self.subTest(cls=cls):
+                (snap,) = render([*steps, SNAP])
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertEqual(role(kept["cls"]), cls)
+                self.assertEqual(kept["busy"], "true")
+                self.assertEqual(kept["aria_disabled"], "true")
+                self.assertIs(kept["disabled"], False)
+
+    def test_disabled_and_busy_carry_an_attribute_and_a_non_colour_cue(self) -> None:
+        for name, page in (("desk", PAGE), ("spend", SPEND)):
+            rules = style_rules(controls_block(page.read_text(encoding="utf-8")))
+            with self.subTest(page=name):
+                dashed = {"border-width": "1px", "border-style": "dashed",
+                          "border-color": "var(--s1)", "cursor": "not-allowed", "opacity": ".55"}
+                dotted = {"border-width": "1px", "border-style": "dotted", "cursor": "progress"}
+                last_disabled, first_busy = -1, len(rules)
+                for kind in KINDS:
+                    for state, want in ((":disabled", dashed), ('[aria-disabled="true"]', dashed),
+                                        ('[aria-busy="true"]', dotted)):
+                        selector = "." + kind + state
+                        found = [i for i, (sel, _d) in enumerate(rules) if sel == selector]
+                        self.assertTrue(found, selector)
+                        have = decls_of(rules, selector)
+                        self.assertEqual({k: have.get(k) for k in want}, want, selector)
+                        if want is dashed:
+                            last_disabled = max(last_disabled, *found)
+                        else:
+                            first_busy = min(first_busy, *found)
+                self.assertGreater(first_busy, last_disabled)
+                after = [sel for sel, decls in rules if "::after" in sel]
+                self.assertEqual(sorted(after), sorted(
+                    f'.{k}[aria-busy="true"]::after' for k in
+                    ("btn-primary", "btn-quiet", "btn-danger")))
+                for sel, decls in rules:
+                    if "::after" in sel:
+                        self.assertEqual(decls.get("content"), r'"\2026"', sel)
+        desk = style_rules(desk_block(PAGE.read_text(encoding="utf-8")))
+        self.assertFalse([sel for sel, _d in desk if "::after" in sel])
+
+    def test_hover_is_shared_by_both_pages(self) -> None:
+        shared = {"background": "var(--hover)", "border-color": "var(--s2)"}
+        for name, page in (("desk", PAGE), ("spend", SPEND)):
+            text = page.read_text(encoding="utf-8")
+            rules = style_rules(controls_block(text))
+            with self.subTest(page=name):
+                for kind in ("btn-quiet", "btn-danger", "btn-option"):
+                    have = decls_of(rules, "." + kind + HOVER)
+                    self.assertEqual({k: have.get(k) for k in shared}, shared, kind)
+                self.assertEqual(
+                    decls_of(rules, ".btn-quiet.btn-bare" + HOVER).get("border-color"), "transparent")
+                self.assertFalse([sel for sel, _d in rules if ":enabled" in sel])
+        addendum = style_rules(desk_block(PAGE.read_text(encoding="utf-8")))
+        self.assertFalse([sel for sel, _d in addendum if ":enabled" in sel])
+        have = decls_of(addendum, ".btn-primary" + HOVER)
+        self.assertEqual((have.get("background"), have.get("border-color")), ("#f8bb98", "#f8bb98"))
+
+    def test_every_kind_shows_the_lavender_ring_on_keyboard_focus(self) -> None:
+        ring = {"outline": "2px solid var(--lav)", "outline-offset": "2px", "border-radius": "8px"}
+        for name, page in (("desk", PAGE), ("spend", SPEND)):
+            text = page.read_text(encoding="utf-8")
+            rules = style_rules(controls_block(text))
+            with self.subTest(page=name):
+                for kind in KINDS:
+                    have = decls_of(rules, "." + kind + ":focus-visible")
+                    self.assertEqual({k: have.get(k) for k in ring}, ring, kind)
+                self.assertEqual(decls_of(rules, ".field-bare:focus-visible").get("outline"), "none")
+                ring_at = max(i for i, (sel, _d) in enumerate(rules) if sel == ".field-code:focus-visible")
+                bare_at = max(i for i, (sel, _d) in enumerate(rules) if sel == ".field-bare:focus-visible")
+                self.assertGreater(bare_at, ring_at)
+        for name, style in (("desk", page_style()), ("spend", spend_style())):
+            quiet = []
+            for selector, decls in rules_of(outside_blocks(style) if name == "desk" else style):
+                if decls.get("outline") in ("none", "0") and targets_control(selector) is not None:
+                    quiet.append(selector)
+            with self.subTest(outside=name):
+                self.assertEqual(quiet, [])
+
+    def test_pressed_is_an_attribute_with_a_non_colour_cue(self) -> None:
+        (goal,) = render([START, {"frame": GOAL_FRAME}, {"key": "g"}, SNAP])
+        (register,) = render([
+            START, {"frame": cards([], OTHER_DRAFT)}, {"open": "draft-more"},
+            {"click": "draft-pick"}, {"click": "draft-option"}, SNAP])
+        projects = [n for n in controls_of(goal) if role(n["cls"]) == "goal-project"]
+        self.assertEqual([n["pressed"] for n in projects], ["true", "false", "false"])
+        options = [n for n in controls_of(register) if role(n["cls"]) == "draft-option"]
+        self.assertTrue(options)
+        self.assertEqual([n["pressed"] for n in options], ["true"] + ["false"] * (len(options) - 1))
+        for node in projects + options:
+            self.assertNotIn("picked", node["cls"].split())
+        for name, page in (("desk", PAGE), ("spend", SPEND)):
+            rules = style_rules(controls_block(page.read_text(encoding="utf-8")))
+            with self.subTest(page=name):
+                for kind in BUTTON_KINDS:
+                    active = decls_of(rules, "." + kind + ":active")
+                    self.assertEqual(active.get("transform"), "translateY(1px)", kind)
+                    pressed = decls_of(rules, "." + kind + '[aria-pressed="true"]')
+                    self.assertEqual((pressed.get("border-color"), pressed.get("font-weight")),
+                                     ("var(--lav)", "600"), kind)
+
+    def test_peach_is_only_on_the_primary_kind(self) -> None:
+        for name, style in (("desk", page_style()), ("spend", spend_style())):
+            for selector, decls in rules_of(style):
+                if not any("var(--peach)" in value for value in decls.values()):
+                    continue
+                classes = set(re.findall(r"\.([\w-]+)", last_compound(selector)))
+                primary = "btn-primary" in classes and not classes & (set(KINDS) - {"btn-primary"})
+                needs = ".needs" in selector and targets_control(selector) is None
+                with self.subTest(page=name, selector=selector):
+                    self.assertTrue(primary or needs)
+        for snap in snapshots_of(desk_scenarios()):
+            for node in controls_of(snap):
+                self.assertNotIn("needs", node["cls"].split(), node["cls"])
+            for tree in ("inbox", "statement"):
+                if snap.get(tree) is None:
+                    continue
+                for card, _parent in _walk(snap[tree], None):
+                    if {"card", "lead"} <= set(card["cls"].split()):
+                        primaries = [n for n, _p in _walk(card, None)
+                                     if "btn-primary" in n["cls"].split()]
+                        self.assertLessEqual(len(primaries), 1)
