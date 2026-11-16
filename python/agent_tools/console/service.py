@@ -656,7 +656,8 @@ not fully match `pictures.PICTURE_ID`, is 400 `bad picture id`. The file is read
 unreadable file is 404 `this picture is not known`. Success is 200 `image/png`, the stored bytes,
 `X-Content-Type-Options: nosniff` and `Cache-Control: private`; a refusal keeps
 `Cache-Control: no-store`. The token appears in no header or body. The page draws a picture from an object URL, so
-CSP's img-src is data: blob: (ADR-console-038).
+CSP's img-src is data: blob: (ADR-console-038). A verification item's pictures (#1112) are stored in
+the same directory by the tracker poll and read by this same route.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -765,7 +766,12 @@ now marked stale, and only a change of read health is appended (`inbox.health`),
 stays stale across a restart. A read that ends after its project was unregistered appends
 nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
-thread starts and nothing is read.
+thread starts and nothing is read. After a read succeeds, outside the lock, every item holding a
+`check_id` is replaced by `inbox.attach_pictures(item, [project root, *screenshot_dirs], pictures_dir)`
+(#1112; the roots are the project's checkout and the `--screenshots` locations the command passes), after
+which the stop flag is checked again; an exception from one item is one stderr line
+`console: picture_attach_failed <project_id> <Type>: <message>` and that item is kept without its
+`pictures` and `missing_pictures`. The attach is deterministic, so unchanged files append no row.
 
 Activation (#1114): when the service is given an `activation_reader`, a thread, `ACTIVATION_THREAD`,
 started by `start()`, calls `poll_activation()` at once and then every `activation_seconds`
@@ -2696,8 +2702,10 @@ class ConsoleService:
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
-                 choice_file: Path | None = None):
+                 choice_file: Path | None = None,
+                 screenshot_dirs: Iterable[Path] = ()):
         self.registry = Path(registry)
+        self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
         self._choice = manager.read_choice(choice_file) if choice_file is not None else None
         self._prober = prober
@@ -2817,6 +2825,8 @@ class ConsoleService:
         self._signature = None
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
+        # Keeps a sweep from deleting a picture an attach is storing; taken after `_ingest`, never before it.
+        self._storing = threading.Lock()
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
@@ -4520,7 +4530,8 @@ class ConsoleService:
 
     def _sweep_pictures(self, events: Iterable[Event]) -> None:
         try:
-            pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
+            with self._storing:
+                pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
         except Exception as error:
             print(f"console: picture_sweep_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
@@ -5801,9 +5812,25 @@ class ConsoleService:
                     return
                 self._read_failed(project_id, error)
             else:
+                items = self._with_pictures(project_id, state.root, items)
                 if self._stop.is_set():
                     return
                 self._read_succeeded(project_id, items, generation)
+
+    def _with_pictures(self, project_id: str, root: str, items: list[dict]) -> list[dict]:
+        """Each verification item with its pictures attached; one that fails is kept without them."""
+        roots = [Path(root), *self._screenshot_dirs]
+        attached = []
+        for entry in items:
+            if "check_id" in entry:
+                try:
+                    with self._storing:
+                        entry = inbox.attach_pictures(entry, roots, self.pictures_dir)
+                except Exception as error:
+                    print(f"console: picture_attach_failed {project_id} {type(error).__name__}: {error}",
+                          file=sys.stderr)
+            attached.append(entry)
+        return attached
 
     def poll_activation(self) -> None:
         """One activation reading over the registered roots; see the module docstring."""

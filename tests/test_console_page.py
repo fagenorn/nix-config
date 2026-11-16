@@ -1059,6 +1059,209 @@ def times(tree: dict) -> dict:
     return {n["text"]: n["title"] for n in nodes(tree) if n["tag"] == "time"}
 
 
+CLAIM_W = {
+    "id": 3, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "claim",
+    "kind_text": "claims", "text": "the page fold",
+    "what": "python/agent_tools/console/page.html", "until_text": "until the board fold lands",
+    "to_text": None, "at": utc(12 * 60000),
+}
+HANDOFF_W = {
+    "id": 7, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "hand-off",
+    "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+    "until_text": None, "to_text": "for you", "at": utc(3 * 60000),
+}
+HEADSUP_W = {
+    "id": 8, "sprint_id": "b" * 16, "poster": "Keep the importer fast", "kind": "heads-up",
+    "kind_text": "heads-up", "text": "take the reader", "what": None, "until_text": None,
+    "to_text": None, "at": utc(60000),
+}
+PAGE_TEXT = PAGE.read_text()
+ALLOWED = {"--text", "--sub1", "--sub0", "--ov2", "--hair", "--s0", "--s1", "--s2", "--base",
+           "--mantle", "--ui", "--display"}
+COLOUR_PROPERTY = re.compile(
+    r"^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?"
+    r"|box-shadow|text-shadow|text-decoration(-color)?|fill|stroke|caret-color|accent-color"
+    r"|column-rule(-color)?)$")
+QUIET_TOKEN = re.compile(r"^(-?[\d.]+(px|rem|em|%)?|none|solid|transparent|currentColor|inherit|inset)$")
+COLOUR_FUNCTION = re.compile(r"(?i)\b(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\(")
+
+
+def with_notices(entry: dict, *notices: dict) -> dict:
+    return {**entry, "notices": list(notices)}
+
+
+def folds(tree: dict) -> list:
+    return [n for n in nodes(tree) if (n["key"] or "").startswith("notices:")]
+
+
+def css_rules(text: str) -> list:
+    rules = []
+    for body in re.findall(r"(?s)<style>(.*?)</style>", text):
+        css = re.sub(r"(?s)/\*.*?\*/", "", body)
+        rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+    return rules
+
+
+def fold_colour_faults(text: str, tokens: set) -> list:
+    faults = []
+    for selector, body in css_rules(text):
+        if not any(re.search(r"\." + re.escape(t) + r"(?![\w-])", selector) for t in tokens):
+            continue
+        for decl in body.split(";"):
+            if not decl.strip():
+                continue
+            prop, _, value = decl.partition(":")
+            prop, value = prop.strip(), value.strip()
+            names = re.findall(r"var\((--[\w-]+)\)", value)
+            rest = re.sub(r"var\((--[\w-]+)\)", " ", value)
+            for literal in ("rgba(202, 211, 245, .05)", "rgba(202, 211, 245, .09)"):
+                rest = rest.replace(literal, " ")
+            faulty = (
+                prop.startswith("--")
+                or any(name not in ALLOWED for name in names)
+                or re.search(r"#[0-9a-fA-F]{3,8}\b", rest) is not None
+                or COLOUR_FUNCTION.search(rest) is not None
+                or (COLOUR_PROPERTY.match(prop) is not None
+                    and any(not QUIET_TOKEN.match(t) for t in re.split(r"[\s,]+", rest) if t))
+            )
+            if faulty:
+                faults.append(f"{selector.strip()} {{ {decl.strip()} }}")
+    return faults
+
+
+class PageNoticeTest(unittest.TestCase):
+    begin = {"start": {"focused": False, "clock": NOW_MS}}
+
+    def test_one_closed_notices_fold_per_project_with_notices(self) -> None:
+        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        p1 = with_notices(project(1, [session("b1", "working", "working")]))
+        p2 = project(2, [], quiet=True)
+        (snap,) = render([self.begin, {"frame": view([p0, p1, p2])}, {"snapshot": True}])
+        found = folds(snap["projects"])
+        self.assertEqual([f["key"] for f in found], ["notices:owner/p00"])
+        self.assertFalse(found[0]["open"])
+        summary = next(c for c in found[0]["children"] if c["tag"] == "summary")
+        self.assertEqual([full(c) for c in summary["children"]], ["Notices (2)", "owner/p00"])
+        self.assertNotIn("the importer needs a retry", visible_text(snap["projects"]))
+
+    def test_a_fold_follows_its_projects_line(self) -> None:
+        p1 = with_notices(project(1, [session("b1", "working", "working")]), HEADSUP_W)
+        (snap,) = render([self.begin, {"frame": view([p1])}, {"snapshot": True}])
+        (lst,) = [n for n in nodes(snap["projects"]) if n["tag"] == "ul" and any(
+            c["tag"] == "li" and has_class(c, "line") for c in n["children"])]
+        items = lst["children"]
+
+        def holds(li: dict, key: str) -> bool:
+            return any(n["key"] == key for n in nodes(li))
+
+        at = next(i for i, li in enumerate(items) if holds(li, "line:owner/p01"))
+        after = items[at + 1]
+        self.assertTrue(holds(after, "notices:owner/p01"))
+        for name in ("line", "notices", "after-line"):
+            self.assertTrue(has_class(after, name), name)
+        summary = next(n for n in nodes(after) if n["tag"] == "summary")
+        self.assertEqual([full(c) for c in summary["children"]], ["Notices (1)"])
+
+    def test_a_quiet_groups_project_draws_its_fold_inside_the_group(self) -> None:
+        projects = [project(n, [], quiet=True) for n in range(2, 6)]
+        projects[1] = with_notices(projects[1], HEADSUP_W)
+        group = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
+                 "projects": projects}
+        (snap,) = render([self.begin, {"frame": view([group], count=4)}, {"open": "quiet"},
+                          {"snapshot": True}])
+        (quiet,) = [n for n in nodes(snap["projects"]) if n["key"] == "quiet"]
+        self.assertEqual([n["key"] for n in folds(quiet)], ["notices:owner/p03"])
+        self.assertEqual([n["key"] for n in folds(snap["projects"])], ["notices:owner/p03"])
+
+    def test_an_opened_fold_lists_each_notice_as_one_plain_line(self) -> None:
+        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        (snap,) = render([self.begin, {"frame": view([p0])}, {"open": "notices:owner/p00"},
+                          {"snapshot": True}])
+        (fold,) = folds(snap["projects"])
+        lines = [n for n in nodes(fold) if n["tag"] == "li" and has_class(n, "notice")]
+        self.assertEqual(
+            [[full(c) for c in li["children"]] for li in lines],
+            [["Fix the settings page", "hand-off", "the importer needs a retry", "for you",
+              "3 min ago"],
+             ["Fix the settings page", "claims", "python/agent_tools/console/page.html",
+              "the page fold", "until the board fold lands", "12 min ago"]])
+        for li in lines:
+            self.assertEqual(li["children"][-1]["tag"], "time")
+
+    def test_a_notice_adds_nothing_to_the_statement(self) -> None:
+        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        (snap,) = render([self.begin, {"frame": view([p0])}, {"snapshot": True}])
+        self.assertEqual(len(folds(snap["projects"])), 1)
+        h1 = next(n for n in nodes(snap["statement"]) if n["tag"] == "h1")
+        self.assertEqual(h1["text"], "Nothing needs you")
+        self.assertFalse(has_class(h1, "needs"))
+
+    def test_an_opened_notices_fold_stays_open_across_a_frame(self) -> None:
+        first = view([with_notices(project(0, []), HANDOFF_W, CLAIM_W)])
+        second = view([with_notices(project(0, []), HEADSUP_W, HANDOFF_W, CLAIM_W)])
+        (snap,) = render([self.begin, {"frame": first}, {"open": "notices:owner/p00"},
+                          {"frame": second}, {"snapshot": True}])
+        (fold,) = folds(snap["projects"])
+        self.assertTrue(fold["open"])
+        summary = next(n for n in nodes(fold) if n["tag"] == "summary")
+        self.assertEqual(next(c for c in summary["children"] if c["tag"] == "b")["text"],
+                         "Notices (3)")
+        self.assertIn("take the reader", visible_text(snap["projects"]))
+
+    def test_the_notices_fold_uses_no_peach_and_no_new_colour(self) -> None:
+        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        (snap,) = render([self.begin, {"frame": view([p0])}, {"open": "notices:owner/p00"},
+                          {"snapshot": True}])
+        item = next(n for n in nodes(snap["projects"]) if n["tag"] == "li" and any(
+            c["key"] == "notices:owner/p00" for c in n["children"]))
+        tokens = {t for n in nodes(item) for t in n["cls"].split()}
+        self.assertLessEqual({"line", "notices", "notice", "notice-poster", "seg"}, tokens)
+        self.assertNotIn("needs", tokens)
+        self.assertEqual(fold_colour_faults(PAGE_TEXT, tokens), [])
+        rules = css_rules(PAGE_TEXT)
+        self.assertTrue([s for s, _ in rules if re.search(r"\.notice(?![\w-])", s)])
+        (root,) = [body for s, body in rules if s.strip() == ":root"]
+        self.assertEqual(sorted(re.findall(r"(--[\w-]+):", root)), [
+            "--base", "--crust", "--display", "--green", "--hair", "--lav", "--mantle", "--ov2",
+            "--peach", "--red", "--s0", "--s1", "--s2", "--sub0", "--sub1", "--text", "--ui",
+            "--yellow"])
+
+    def test_the_colour_check_rejects_peach_written_any_way(self) -> None:
+        faulty = [
+            ".notice { color: rgb(245,169,127); }",
+            ".notice { color: #f5a97f; }",
+            ".notice { color: var(--peach); }",
+            ".notice { color: orange; }",
+            ".notice { background: color-mix(in srgb, var(--ov2) 60%, white); }",
+            ".notice { --tint: var(--ov2); }",
+            ".notice { border-top: 1px solid hsl(23 86% 73%); }",
+            ".notice { color: var(--lav); }",
+        ]
+        clean = ("<style>.notice { color: var(--ov2); } .line summary:hover { background: "
+                 "rgba(202, 211, 245, .05); } #list > li.line + li.line { border-top: 1px solid "
+                 "var(--hair); } .needs .k { color: var(--peach); }</style>")
+        for rule in faulty:
+            with self.subTest(rule=rule):
+                self.assertEqual(
+                    len(fold_colour_faults("<style>" + rule + "</style>", {"notice"})), 1)
+        self.assertEqual(fold_colour_faults(clean, {"notice", "line"}), [])
+
+    def test_notice_words_wrap_within_the_column(self) -> None:
+        rules = css_rules(PAGE_TEXT)
+
+        def decls(sel: str) -> list:
+            return [
+                {p.strip(): v.strip() for p, _, v in (d.partition(":") for d in body.split(";"))
+                 if p.strip()}
+                for s, body in rules if sel in [x.strip() for x in s.split(",")]
+            ]
+
+        self.assertTrue([d for d in decls(".notice > *")
+                         if d.get("overflow-wrap") == "anywhere" and d.get("min-width") == "0"])
+        self.assertTrue([d for d in decls(".notices-project")
+                         if d.get("overflow-wrap") == "anywhere"])
+
+
 class PageTimeTest(unittest.TestCase):
     begin = {"start": {"focused": False, "clock": NOW_MS}}
 
@@ -7954,6 +8157,75 @@ class PageCheckHeadingTest(unittest.TestCase):
         self.assertEqual(labels_of(snap["inbox"]), [])
         (heading,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "h2" and has_class(n, "q")]
         self.assertEqual(full(heading), "Which host?")
+
+PIC_CHECK = check_item("P", "manual-check", headline=DEMO_QUESTION, check_id="A3", pictures=[
+    {"id": A, "line": "before-1440.png", "pair": None},
+    {"id": B, "line": "after-1440.png", "pair": None}], missing_pictures=[], reading="")
+
+
+class PageCheckPictureTest(unittest.TestCase):
+    def test_a_check_card_draws_one_thumbnail_per_picture_with_its_file_name(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual(len(with_class(lead, "pics")), 1)
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
+                         ["before-1440.png", "after-1440.png"])
+        keys = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(keys, [f"owner/p00#{PIC_CHECK['key']}/{i}" for i in range(2)])
+
+    def test_a_check_thumbnail_opens_the_shared_viewer(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+        (count,) = with_class(snap["viewer"], "viewer-count")
+        self.assertEqual(full(count), "1 of 2")
+        (img,) = with_class(snap["viewer"], "viewer-img")
+        made = {m["picture"]: m["url"] for m in snap["object_urls"]["made"]}
+        self.assertEqual(img["src"], made[A])
+
+    def test_a_check_row_shows_its_pictures_too(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE, PIC_CHECK])}, {"snapshot": True}])
+        rows = [r for r in rows_of(snap) if with_class(r, "pic-thumb")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(with_class(rows[0], "pic-thumb")), 2)
+
+    def test_a_missing_picture_is_one_plain_line(self) -> None:
+        gone = {**PIC_CHECK, "pictures": [], "missing_pictures": ["gone.png"]}
+        (snap,) = render([START, {"frame": frame([gone])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        (line,) = with_class(lead, "pic-missing")
+        self.assertEqual(full(line), "gone.png was not found on this host.")
+        self.assertEqual(with_class(lead, "pic-img"), [])
+
+    def test_a_reading_shows_above_the_answers(self) -> None:
+        read = {**PIC_CHECK, "reading": "the watts on the plug meter"}
+        (snap,) = render([START, {"frame": frame([read])}, {"snapshot": True}])
+        (reading,) = with_class(lead_of(snap), "reading")
+        self.assertEqual(full(reading), "Reading: the watts on the plug meter")
+        (box,) = [n for n in nodes(snap["inbox"]) if has_class(n, "abox")]
+        kids = box["children"]
+        self.assertLess(next(i for i, c in enumerate(kids) if c is reading),
+                        next(i for i, c in enumerate(kids) if has_class(c, "act")))
+
+    def test_an_open_viewer_closes_when_the_checks_picture_file_changes(self) -> None:
+        swapped = {**PIC_CHECK, "pictures": [{"id": C, "line": "before-1440.png", "pair": None},
+                                             {"id": B, "line": "after-1440.png", "pair": None}]}
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"frame": frame([swapped])}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+
+    def test_an_open_viewer_stays_when_the_checks_pictures_are_unchanged(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"frame": frame([dict(PIC_CHECK)])}, {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+
+    def test_a_check_without_the_new_members_draws_none(self) -> None:
+        old = check_item("Q", "manual-check", headline=DEMO_QUESTION, check_id="A4")
+        (snap,) = render([START, {"frame": frame([old])}, {"snapshot": True}])
+        for name in ("pics", "pic-missing", "reading"):
+            self.assertEqual(with_class(snap["inbox"], name), [], name)
+
 
 
 class LapsedResetPageTest(unittest.TestCase):

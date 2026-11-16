@@ -18,9 +18,12 @@ LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-tools-console$")
 
 def check_command(case, command):
     words = command.split(" ")
-    case.assertEqual(len(words), 3, command)
+    case.assertEqual(len(words), 5, command)
     case.assertRegex(words[0], LAUNCHER)
-    case.assertEqual(words[1:], ["--port", str(PORT)])
+    case.assertEqual(words[1:3], ["--port", str(PORT)])
+    # The one default screenshot folder a manual check's pictures may come from (issue 1112).
+    case.assertEqual(words[3], "--screenshots")
+    case.assertRegex(words[4], r"^/(home|Users)/[^/ ]+/tmp/clarity-screenshots$")
 
 
 class LinuxUnit(unittest.TestCase):

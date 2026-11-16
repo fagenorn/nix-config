@@ -13,6 +13,12 @@ from agent_tools.console import sessions as console_sessions
 from agent_tools.console import signin
 from agent_tools.console.event_log import EventLog
 
+PIXEL = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f00050001ff56c72f0d0000000049454e44ae426082")
+WIDE = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000002000000010806000000f4227f8a0000000e4944415478da636060f8ff1f84010dfb03fd9a369bf10000000049454e44ae426082")
+JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + b"\x00" * 64 + b"\xff\xd9"
+
 
 def entries(n):
     return [{"project_id": f"owner/p{i:02d}", "root": f"/srv/p{i:02d}"} for i in range(n)]
@@ -195,3 +201,18 @@ def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, pro
     svc.start()
     test.addCleanup(svc.close)
     return svc
+
+
+def get_page(address, path, headers=None):
+    connection = http.client.HTTPConnection(*address, timeout=5)
+    try:
+        connection.putrequest("GET", path, skip_host=True)
+        connection.putheader("Host", f"{address[0]}:{address[1]}")
+        for name, value in (headers or {}).items():
+            for member in (value if isinstance(value, list) else [value]):
+                connection.putheader(name, member)
+        connection.endheaders()
+        response = connection.getresponse()
+        return response.status, response.getheaders(), response.read()
+    finally:
+        connection.close()

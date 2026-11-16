@@ -394,6 +394,22 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, context)
 
+    def test_the_owner_check_pictures_decision_is_recorded(self):
+        adr = self.doc(
+            "docs/areas/console/adr/045-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"
+        )
+        for needle in (
+            "#1112", "--screenshots", "agentConsole.screenshotDirs", "Reading:",
+            "was not found on this host.", "1440", "480", "ADR-console-036", "ADR-console-038",
+        ):
+            self.assertIn(needle, adr)
+        for path in (
+            "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
+            "docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
+            "docs/areas/console/CONTEXT.md",
+        ):
+            self.assertIn("ADR-console-045", self.doc(path))
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
@@ -1253,6 +1269,18 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-046", notice)
         self.assertIn("ADR-console-044", notice)
+
+    def test_the_notices_fold_is_recorded(self):
+        adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        self.assertIn('"Notices (n)"', adr)
+        self.assertIn("it never counts in the statement (#1119)", adr)
+        raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
+        decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
+        self.assertTrue(decided.endswith(", #1119"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn('"Notices (n)" fold', notice)
+        self.assertIn("ADR-console-002", notice)
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")

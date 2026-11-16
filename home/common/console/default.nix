@@ -10,7 +10,8 @@
 # retries and `StartLimitIntervalSec = 0` removes the limit, and the unit serves
 # within one interval of the port being freed. On darwin it is the nix-darwin agent in
 # `hosts/common/darwin-console.nix`, which reads `agentConsole.command` and
-# `agentConsole.path` from here so both hosts run one command.
+# `agentConsole.path` from here so both hosts run one command. The command also names the
+# screenshot folders a manual check's pictures may come from (issue 1112).
 #
 # `PATH` carries gh because the tracker poll runs `gh` by name (not by store path), and
 # a user service starts with a bare `PATH`. `/usr/bin:/bin` follows it for the system tools.
@@ -29,7 +30,11 @@
 let
   consolePort = 27184;
 
-  command = "${agentTools.launchers.console} --port ${toString consolePort}";
+  command =
+    "${agentTools.launchers.console} --port ${toString consolePort}"
+    + lib.concatMapStrings (
+      d: " --screenshots ${lib.escapeShellArg d}"
+    ) config.agentConsole.screenshotDirs;
 
   path = lib.concatStringsSep ":" (
     [ (lib.makeBinPath [ config.programs.gh.package ]) ]
@@ -45,6 +50,11 @@ let
 in
 {
   options.agentConsole = {
+    screenshotDirs = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "${config.home.homeDirectory}/tmp/clarity-screenshots" ];
+      description = "Folders whose PNGs a manual check may show on the console (issue 1112), beside the project's own checkout.";
+    };
     command = lib.mkOption {
       type = lib.types.str;
       readOnly = true;
