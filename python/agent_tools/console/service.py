@@ -40,6 +40,9 @@ stream `Content-Length`):
     POST /api/message-reply 200 application/json, a manager answers one message (below)
     POST /api/ask   200 application/json, a manager sends a round of questions (below)
     POST /api/withdraw-question 200 application/json, a manager takes back one open question (below)
+    POST /api/notice 200 application/json, a manager posts one notice for its project (below)
+    POST /api/notices 200 application/json, a manager lists its project's open notices (below)
+    POST /api/withdraw-notice 200 application/json, a manager takes back one of its notices (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -51,7 +54,8 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/picture` and `/api/round-answer`;
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`,
+                    `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
@@ -594,6 +598,31 @@ question the manager took back (withdrawn or replaced) with `Refused(TAKEN_BACK)
 `NOT_OPEN` and before `ENDED` (withdrawing a done sprint's last open question ends the sprint, and the
 owner is still told why), appending no row and storing no message; a question not taken back in an
 ended sprint is still `ENDED`.
+
+Notices (#1117, ADR-console-044): `POST /api/notice`, `POST /api/notices` and `POST
+/api/withdraw-notice` are manager writes dispatched like `/api/withdraw-question`, before
+`PAGE_WRITES`, each through `_checked_length` with its own limit (`MAX_NOTICE_BYTES` 16384,
+`MAX_NOTICES_BYTES` 4096, `MAX_WITHDRAW_NOTICE_BYTES` 4096: any `Origin` 403 `origin refused`, 415,
+411, 413 `too large`). A body `sprints.parse_notice_request` (`sprint_id`, `secret`, `notice`),
+`sprints.parse_inbox_request` (`sprint_id`, `secret`) or `sprints.parse_withdraw_notice_request`
+(`sprint_id`, `secret`, `notice`) does not accept is 400 `bad notice`, `bad notices` or `bad withdraw
+notice`; a `sprints.SecretRefused` is `console: <route>_refused <sprint_id> secret refused` and 403
+`secret refused`; any other `sprints.Refused` is the same prefix with the reason and 409 with the
+reason; any other exception is `console: <route>_failed <Type>: <message>` and 500 `notice failed`,
+`notices failed` or `withdraw notice failed`. `<route>` is `notice`, `notices` or `withdraw_notice`.
+The reason is always one of `sprints.py`'s fixed refusal texts, which never carry a key or value the
+manager sent, so every stderr line is one line and neither the secret nor the notice text is printed.
+Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for a post (the new row's
+`seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...]}` for the list.
+`post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint; it appends exactly
+one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
+folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
+`sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
+"notice": <id>}` and returns the id. `list_notices` is `_manager_sprint` then
+`sprints.project_notices` over every folded sprint of the project, and appends and publishes
+nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
+writer; a refusal appends and publishes nothing.
 
 Pictures (#1089, ADR-console-036): `POST /api/picture` is a manager write dispatched like `/api/brief`,
 before `PAGE_WRITES`, whose body is one PNG and whose identity travels in headers. The checks run in
@@ -1176,7 +1205,8 @@ from agent_tools.console import (
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
-    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
+    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_POSTED, NOTICE_WITHDRAWN,
+    QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
@@ -1227,6 +1257,9 @@ INBOX_PATH = "/api/inbox"
 MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
 WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
+NOTICE_PATH = "/api/notice"
+NOTICES_PATH = "/api/notices"
+WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
@@ -1279,10 +1312,14 @@ SECRET_HEADER = "X-Console-Secret"
 MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
+                                            NOTICE_PATH, NOTICES_PATH, WITHDRAW_NOTICE_PATH,
                                             PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_WITHDRAW_QUESTION_BYTES = 4096
+MAX_NOTICE_BYTES = 16384
+MAX_NOTICES_BYTES = 4096
+MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -1455,6 +1492,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._ask_request()
         if route == WITHDRAW_QUESTION_PATH:
             return self._withdraw_question_request()
+        if route == NOTICE_PATH:
+            return self._notice_request()
+        if route == NOTICES_PATH:
+            return self._notices_request()
+        if route == WITHDRAW_NOTICE_PATH:
+            return self._withdraw_notice_request()
         if route == PICTURE_PATH:
             return self._picture_request()
         if route == RECAP_PATH:
@@ -2089,6 +2132,81 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(500, "withdraw question failed")
         self._send(200, "application/json", json.dumps(
             {"index": index, "round": round_id}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _notice_request(self):
+        """The manager's route: one notice posted for its project, with the sprint's secret."""
+        length = self._checked_length(MAX_NOTICE_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, notice = sprints.parse_notice_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad notice")
+        try:
+            notice_id = self.server.console.post_notice(sprint_id, secret, notice)
+        except sprints.SecretRefused:
+            print(f"console: notice_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: notice_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: notice_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "notice failed")
+        self._send(200, "application/json", json.dumps(
+            {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _notices_request(self):
+        """The manager's route: the project's open notices, read with the sprint's secret."""
+        length = self._checked_length(MAX_NOTICES_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret = sprints.parse_inbox_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad notices")
+        try:
+            entries = self.server.console.list_notices(sprint_id, secret)
+        except sprints.SecretRefused:
+            print(f"console: notices_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: notices_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: notices_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "notices failed")
+        self._send(200, "application/json", json.dumps(
+            {"notices": entries}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _withdraw_notice_request(self):
+        """The manager's route: one open notice of the sprint taken back, with its secret."""
+        length = self._checked_length(MAX_WITHDRAW_NOTICE_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, notice_id = sprints.parse_withdraw_notice_request(
+                self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad withdraw notice")
+        try:
+            self.server.console.withdraw_notice(sprint_id, secret, notice_id)
+        except sprints.SecretRefused:
+            print(f"console: withdraw_notice_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: withdraw_notice_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: withdraw_notice_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "withdraw notice failed")
+        self._send(200, "application/json", json.dumps(
+            {"notice": notice_id}, sort_keys=True, separators=(",", ":")).encode())
 
     def _picture_request(self):
         """The manager's route: one PNG picture sent with the sprint's secret in headers."""
@@ -5227,6 +5345,34 @@ class ConsoleService:
                 "question": asked.question})])
             self._apply(appended)
             return appended[-1].seq
+
+    def post_notice(self, sprint_id: str, secret: str, notice: dict) -> int:
+        """Append one `notice.posted` event for the sprint's project; its seq, the notice's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            others = [other for key, other in self._sprints.items() if key != sprint_id]
+            checked = sprints.postable_notice(sprint, notice, others)
+            appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def list_notices(self, sprint_id: str, secret: str) -> list[dict]:
+        """The open notices of the sprint's project in id order; appends and publishes nothing."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            return sprints.project_notices(self._sprints.values(), sprint.project_id)
+
+    def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
+        """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            others = [other for key, other in self._sprints.items() if key != sprint_id]
+            sprints.withdrawable_notice(sprint, notice_id, others)
+            appended = self.log.append([(NOTICE_WITHDRAWN, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "notice": notice_id})])
+            self._apply(appended)
+            return notice_id
 
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
                         choice: int | None, text: str | None) -> int:
