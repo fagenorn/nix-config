@@ -187,5 +187,76 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
+class ScreenshotReadingTest(unittest.TestCase):
+    def read_pages(self, htmls, expression):
+        """Load each markup alone in one 1440x900 Chromium page and return what `expression` reads."""
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                found = []
+                for html in htmls:
+                    page.set_content(html)
+                    found.append(page.evaluate(expression))
+                return found
+            finally:
+                browser.close()
+
+    def test_the_jargon_count_counts_each_visible_review_phrase(self) -> None:
+        samples = {
+            "on track": "<p>The sprint for owner/p00 is now on track: x</p>",
+            "stated": '<div id="projects"><span>stated <time>3 min ago</time></span></div>',
+            "withdraw": '<div id="projects"><button>Withdraw</button></div>',
+            "nudge": '<div id="projects"><p>Tell the manager again to nudge it.</p></div>',
+            "stop or": '<div id="projects"><p>Stop or go</p></div>',
+            "would do differently":
+                '<div id="projects"><p>Would do differently: cut smaller slices</p></div>',
+            "approval row": '<div id="projects"><ul><li class="message">'
+                            '<span class="message-text">You: Approved version 2</span>'
+                            '<span class="message-state">picked up</span></li></ul></div>'}
+        counts = self.read_pages([f"<body>{html}</body>" for html in samples.values()],
+                                 shots.JARGON_COUNT)
+        for name, count in zip(samples, counts):
+            with self.subTest(name):
+                self.assertEqual(count, 1)
+
+    def test_the_jargon_count_skips_hidden_text_and_the_new_words(self) -> None:
+        html = ('<body><div id="projects"><details><summary>End the sprint</summary>'
+                '<button>Drop the sprint</button>'
+                '<p>withdraw nudge on track stated 3 min ago Stop or go Would do differently</p>'
+                '</details><p style="display:none">Withdraw</p>'
+                '<span>goal set <time>3 min ago</time></span><p><button>Stop and report</button></p>'
+                '<p>Could not drop: no</p><p>Next time: cut smaller slices</p>'
+                '<ul><li class="message"><span class="message-text">You: Approved version 2</span>'
+                '<span class="message-state">sent just now</span></li></ul></div></body>')
+        self.assertEqual(self.read_pages([html], shots.JARGON_COUNT), [0])
+
+    def test_the_tell_reading_flags_an_overlapping_or_narrow_field(self) -> None:
+        def layout(*, hint_first=False, field="width:100%"):
+            hint = '<p class="tell-hint">hint</p>'
+            label = ('<label class="tell-label" style="display:block">'
+                     '<span style="display:block">Tell the manager</span>'
+                     f'<textarea class="tell" style="display:block;{field};box-sizing:border-box">'
+                     '</textarea></label>')
+            body = (hint + label if hint_first else label + hint) + '<button class="tell-send">Send</button>'
+            return ('<ul><li class="sprint" style="width:600px;padding:0 12px;list-style:none">'
+                    f'<div class="sprint-tell">{body}</div></li></ul>')
+
+        layouts = {"good": layout(), "hint above": layout(hint_first=True),
+                   "narrow": layout(field="width:200px")}
+        readings = self.read_pages(list(layouts.values()), shots.TELL_READING)
+        for (name, _), reading in zip(layouts.items(), readings):
+            with self.subTest(name):
+                self.assertEqual(reading[:3], [True, "Send", "hint"])
+                self.assertIs(reading[3], name == "good")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,9 +21,12 @@ Contract:
   `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is
   doing now" sentence is squeezed (it starts above its title's bottom, is narrower than the
   head's line or than the title, is taller than two lines, or is clipped); when a shot shows a
-  jargon label (a "Detail" or "More" fold, or an "Approved version" message row that is not
-  sent or not picked up); or when a `tell-box-open` shot does not show the open Tell box (the
-  textarea, the Send button and the pick-up hint, `OPEN_TELL`). It returns 2 with a one-line
+  jargon label (a "Detail" or "More" fold, an "Approved version" message row that is not
+  sent or not picked up, or one of the review's phrases in the rendered text: "on track",
+  "stated" before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a
+  `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
+  pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
+  the sprint block's content, `OPEN_TELL`). It returns 2 with a one-line
   reason when Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
 """
@@ -60,7 +63,7 @@ MILESTONES = {"Add resumable uploads": "the upload form",
               "Keep the importer fast": "the batch reader",
               "Retire the old exporter": "the last export path",
               "Try a new cache": "the cache layer"}
-OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT)
+OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
 
 
 class Unavailable(Exception):
@@ -89,7 +92,7 @@ class Shot:
     scroll_width: int
     squeezed: int = 0
     jargon: int = 0
-    tell: tuple[bool, str | None, str | None] | None = None
+    tell: tuple[bool, str | None, str | None, bool] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -285,8 +288,20 @@ TELL_READING = """(() => {
     const node = document.querySelector(selector);
     return node ? node.textContent.trim() : null;
   };
+  const span = document.querySelector('label.tell-label > span');
+  const hint = document.querySelector('p.tell-hint');
+  const sprint = document.querySelector('li.sprint');
+  let laidOut = false;
+  if (rect && span && hint && sprint) {
+    const s = span.getBoundingClientRect();
+    const h = hint.getBoundingClientRect();
+    const style = getComputedStyle(sprint);
+    const content = sprint.clientWidth - parseFloat(style.paddingLeft)
+      - parseFloat(style.paddingRight);
+    laidOut = s.bottom <= rect.top + 1 && rect.bottom <= h.top + 1 && rect.width >= content - 1;
+  }
   return [Boolean(rect && rect.width > 0 && rect.height > 0),
-          text('button.tell-send'), text('p.tell-hint')];
+          text('button.tell-send'), text('p.tell-hint'), laidOut];
 })()"""
 
 SQUEEZED_COUNT = """Array.from(document.querySelectorAll('li.sprint')).filter((sprint) => {
@@ -301,17 +316,19 @@ SQUEEZED_COUNT = """Array.from(document.querySelectorAll('li.sprint')).filter((s
     || now.scrollHeight > now.clientHeight + 1;
 }).length"""
 
-JARGON_COUNT = """(() => {
+JARGON_COUNT = r"""(() => {
   const folds = Array.from(document.querySelectorAll('#projects summary')).filter(
     (summary) => ['Detail', 'More'].includes(summary.textContent.trim())).length;
   const rows = Array.from(document.querySelectorAll('#projects li.message')).filter((row) => {
     const text = row.querySelector('.message-text');
     const state = row.querySelector('.message-state');
     const said = state ? state.textContent.trim() : '';
-    return text && text.textContent.trim().startsWith('Approved version')
+    return text && text.textContent.trim().startsWith('You: Approved version')
       && !said.startsWith('sent') && !said.startsWith('not picked up');
   }).length;
-  return folds + rows;
+  const phrases = document.body.innerText.match(
+    /\bon track\b|\bstated (just now|\d)|\bwithdraw|\bnudge|\bstop or\b|would do differently/gi);
+  return folds + rows + (phrases ? phrases.length : 0);
 })()"""
 
 
