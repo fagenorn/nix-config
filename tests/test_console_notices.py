@@ -252,7 +252,7 @@ FROZEN = "routes are frozen until Friday"
 
 
 class OwnerNoticeRouteTest(Case):
-    """The owner posts and withdraws a heads-up from the page (#1120, ADR-console-052)."""
+    """The owner posts and withdraws a heads-up from the page (#1120, ADR-console-053)."""
 
     def open(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))

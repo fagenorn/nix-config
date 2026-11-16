@@ -1603,7 +1603,7 @@ class PictureDocsTest(unittest.TestCase):
         self.assertEqual(
             status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                    "ADR-console-037, ADR-console-052")
+                    "ADR-console-037, ADR-console-053")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
         self.assertTrue(decided.endswith("#1089, #1120"))
         text = self.doc(adr008)

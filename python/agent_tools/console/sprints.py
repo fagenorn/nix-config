@@ -450,7 +450,7 @@ reads `{"sprint_id", "secret", "notice": <object>}` and returns `(sprint_id, sec
 `parse_withdraw_notice_request(body)` reads `{"sprint_id", "secret", "notice": <int >= 1>}` and
 returns `(sprint_id, secret, notice_id)`; both are as strict as `parse_ask_request`.
 
-The owner posts a notice too (#1120, ADR-console-052): a heads-up to every sprint of one project,
+The owner posts a notice too (#1120, ADR-console-053): a heads-up to every sprint of one project,
 information only. It reuses the two kept rows with the project in the project column and no
 `sprint_id` member, so the sprint fold never sees it:
 

@@ -1,4 +1,4 @@
-# ADR-console-052 — The owner posts and withdraws a notice to every manager of a project
+# ADR-console-053 — The owner posts and withdraws a notice to every manager of a project
 
 - **Status:** accepted
 - **Decided in:** #1120
