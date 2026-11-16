@@ -32,6 +32,11 @@ A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) convert
 `__typename`: an `Issue` must carry `issueDependenciesSummary.blocking` (a non-negative integer) and
 holds `1 + blocking` work, a `PullRequest` holds 1, any other node is refused.
 
+An `Issue` must also carry its `blocking` connection (at most 100 nodes read; `totalCount` above the
+nodes read is `payload_incomplete`, a malformed one `payload_invalid`), and `blocking` lists,
+ascending and without repeats, the open issues of the same repository (the slug compared
+case-insensitively) that the issue blocks; a pull request's is `[]`.
+
 `read_items` makes at most `MAX_CALLS` calls and asks `cancelled()` before each one (`ForgeError`
 `cancelled`, no call made). A search still paging after the last call, a comment connection with
 more comments than nodes, or fewer nodes than `issueCount` is `payload_incomplete`; an answer of an
@@ -41,7 +46,8 @@ is sorted by `key` and holds only JSON-native values; every item is
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work"} and, for a verification prompt only, "version" and "check_id"
+     "confirm", "answered", "held_work", "blocking": [int]} and, for a verification prompt only, "version"
+     and "check_id"
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
 `answers` is `[]`, `paid` is false and there is no `version`. A verification prompt's `version` is
@@ -84,6 +90,7 @@ QUERY = """query($search: String!, $after: String) {
       ... on Issue {
         number
         issueDependenciesSummary { blocking }
+        blocking(first: 100) { totalCount nodes { number state repository { nameWithOwner } } }
         comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation updatedAt } }
       }
       ... on PullRequest {
@@ -136,6 +143,27 @@ def _held_work(node: dict) -> int:
     raise _invalid(f"search node type {kind!r}")
 
 
+def _blocking(node: dict, slug: str) -> list[int]:
+    """The open issues of `slug` that this issue blocks, ascending."""
+    if node.get("__typename") == "PullRequest":
+        return []
+    connection = node.get("blocking")
+    if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+        raise _invalid("issue blocking is not a connection")
+    nodes = connection["nodes"]
+    if _count(connection.get("totalCount"), "blocking.totalCount") > len(nodes):
+        raise forge_api.ForgeError("payload_incomplete",
+                                   f"issue {node.get('number')} blocks more issues than read")
+    for blocked in nodes:
+        number = blocked.get("number") if isinstance(blocked, dict) else None
+        repository = blocked.get("repository") if isinstance(blocked, dict) else None
+        if (isinstance(number, bool) or not isinstance(number, int) or not isinstance(blocked.get("state"), str)
+                or not isinstance(repository, dict) or not isinstance(repository.get("nameWithOwner"), str)):
+            raise _invalid("a blocked issue is malformed")
+    return sorted({b["number"] for b in nodes if b["state"] == "OPEN"
+                   and b["repository"]["nameWithOwner"].casefold() == slug.casefold()})
+
+
 def _comments(node: dict) -> list[dict]:
     connection = node.get("comments")
     if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
@@ -148,7 +176,8 @@ def _comments(node: dict) -> list[dict]:
     return nodes
 
 
-def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker) -> dict:
+def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
+          blocking: list[int]) -> dict:
     reason = marker.fields["reason"]
     decision = reason == "decision"
     return {
@@ -161,7 +190,7 @@ def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker) 
                        for q, rec in zip(foa.verified_questions(marker), foa.recommended(marker))]
                       if decision else []),
         "items": [] if decision else foa.marker_items(marker), "answers": [], "paid": False, "confirm": "",
-        "answered": foa.answered(marker), "held_work": held,
+        "answered": foa.answered(marker), "held_work": held, "blocking": list(blocking),
     }
 
 
@@ -203,7 +232,7 @@ def _ask_heading(marker: fm.Marker) -> tuple[str, str, str]:
 
 
 def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
-                 runner_markers: Sequence[fm.Marker]) -> dict:
+                 runner_markers: Sequence[fm.Marker], blocking: list[int]) -> dict:
     reason = marker.fields["reason"]
     question, check_id, detail = _ask_heading(marker)
     return {
@@ -215,7 +244,7 @@ def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.M
         "answers": list(verify_answer.ANSWERS[reason]),
         "paid": verify_answer.is_paid(marker), "confirm": f"{slug}#{issue}" if reason == "verify-approve" else "",
         "answered": verify_answer.answered(marker, runner_markers), "held_work": held,
-        "version": verify_answer.content_version(marker),
+        "blocking": list(blocking), "version": verify_answer.content_version(marker),
     }
 
 
@@ -224,6 +253,7 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
     if not isinstance(node, dict):
         raise _invalid("search node is not an object")
     held = _held_work(node)
+    blocks = _blocking(node, slug)
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int):
         raise _invalid("search node number is not an integer")
@@ -242,9 +272,9 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
             runner_markers.append(marker)
     markers.sort(key=lambda m: m.comment_id)
     runner_markers.sort(key=lambda m: m.comment_id)
-    items = [_item(project_id, slug, number, held, m) for m in markers
+    items = [_item(project_id, slug, number, held, m, blocks) for m in markers
              if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
-    items += [_verify_item(project_id, slug, number, held, m, runner_markers) for m in runner_markers
+    items += [_verify_item(project_id, slug, number, held, m, runner_markers, blocks) for m in runner_markers
               if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, runner_markers)]
     return sorted(items, key=lambda item: item["key"])
 

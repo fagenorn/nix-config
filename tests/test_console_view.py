@@ -830,6 +830,7 @@ def decision_prompt(extra):
 
 def held_node(number, comments):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": 0},
+            "blocking": {"totalCount": 0, "nodes": []},
             "comments": {"totalCount": len(comments), "nodes": comments}}
 
 
