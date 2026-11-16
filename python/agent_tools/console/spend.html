@@ -32,11 +32,36 @@ h1, h2, p, ul { margin: 0; padding: 0; }
 .conn { color: var(--ov2); font-size: .8125rem; }
 .nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; }
 .nav:hover { color: var(--text); }
-.spend { max-width: 1360px; margin: 0 auto; padding: 40px 48px 64px; }
+main.spend { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; }
+main.spend h1 { font: 600 1.375rem/1.3 var(--display); color: var(--text); }
 .empty { color: var(--sub0); }
+.spans { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.span { min-height: 36px; padding: 6px 14px; font: inherit; color: var(--text); background: var(--base); border: 1px solid var(--s1); border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.span[aria-pressed="true"] { border-color: var(--lav); font-weight: 600; }
+.estimate-note { margin-top: 12px; color: var(--ov2); font-size: .8125rem; }
+#summary { display: flex; flex-wrap: wrap; gap: 16px 56px; margin-top: 28px; }
+.figure { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.figure-label { color: var(--sub0); font-size: .8125rem; }
+.figure .usd { font: 600 2rem/1.2 var(--display); color: var(--text); }
+.approx { color: var(--ov2); font-size: .8125rem; }
+.tokens { color: var(--ov2); font-size: .8125rem; }
+.trend { list-style: none; margin: 32px 0 0; padding: 0; display: flex; gap: 6px; }
+.trend-day { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.trend-bar { display: flex; align-items: flex-end; height: 120px; background: var(--s1); border-radius: 4px; overflow: hidden; }
+.trend-bar i { display: block; width: 100%; background: var(--sub0); }
+.trend-label { color: var(--ov2); font-size: .75rem; line-height: 1.4; min-height: 1.4em; text-align: center; white-space: nowrap; }
+.trend-day:first-child .trend-label { text-align: left; }
+.trend-day:last-child .trend-label { display: flex; justify-content: flex-end; }
+.breakdown { margin-top: 36px; }
+.breakdown h2 { font-size: .9375rem; font-weight: 600; line-height: 1.4; color: var(--text); }
+.rows { list-style: none; margin: 8px 0 0; padding: 0; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 16px; padding: 10px 0; border-top: 1px solid var(--hair); }
+.row-name { overflow-wrap: anywhere; min-width: 0; }
+.row .usd, .row .approx { grid-column: 2; text-align: right; }
+.row .tokens { grid-column: 1 / -1; }
 @media (max-width: 480px) {
   .top-in { padding: 10px 16px; gap: 10px 16px; flex-wrap: wrap; }
-  .spend { padding: 24px 16px 48px; }
+  main.spend { padding: 24px 16px 48px; }
 }
 </style>
 </head>
@@ -51,16 +76,183 @@ h1, h2, p, ul { margin: 0; padding: 0; }
 <section id="breakdowns" aria-label="Breakdowns"></section>
 </main>
 <script>
-function render(view) {
-  const summary = document.getElementById("summary");
-  summary.textContent = "";
-  if (view.spend === null || view.spend === undefined) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "Spend shows once the console has read the transcripts.";
-    summary.appendChild(empty);
+const SPANS = [["Today", 1], ["7 days", 7], ["30 days", 30]];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DIMENSIONS = [
+  ["project", "By project"], ["sprint", "By sprint"], ["phase", "By phase"],
+  ["account", "By account"], ["aspect", "By aspect"],
+];
+const ASPECTS = {
+  managers: "Managers", deliveries: "Deliveries", outside_sprint: "Outside-sprint sessions",
+  keepalive: "Keepalive pings", unattributed: "unattributed",
+};
+const state = {span: 7, view: null};
+
+function zero() {
+  return {input: 0, cache_write: 0, cache_read: 0, output: 0, dollars: 0, approximate: false};
+}
+function add(total, part) {
+  total.input += part.input;
+  total.cache_write += part.cache_write;
+  total.cache_read += part.cache_read;
+  total.output += part.output;
+  total.dollars += part.dollars;
+  total.approximate = total.approximate || Boolean(part.approximate);
+  return total;
+}
+function sum(list) {
+  const total = zero();
+  for (const part of list) add(total, part);
+  return total;
+}
+function usd(dollars) {
+  const parts = dollars.toFixed(2).split(".");
+  return "~$" + parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "." + parts[1];
+}
+function count(n) {
+  if (n < 1000) return String(Math.round(n));
+  const scale = n < 1e6 ? [1e3, "k"] : n < 1e9 ? [1e6, "M"] : [1e9, "B"];
+  return (n / scale[0]).toFixed(1).replace(/\.0$/, "") + scale[1];
+}
+function tokensText(t) {
+  return "input " + count(t.input) + " · cache writes " + count(t.cache_write) +
+    " · cache reads " + count(t.cache_read) + " · output " + count(t.output);
+}
+function dayLabel(day, isToday) {
+  if (isToday) return "Today";
+  const parts = day.split("-").map(Number);
+  const at = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  return WEEKDAYS[at.getUTCDay()] + " " + at.getUTCDate() + " " + MONTHS[at.getUTCMonth()];
+}
+function sprintTitles(entries) {
+  const titles = new Map();
+  for (const entry of entries || []) {
+    const projects = entry.type === "quiet_group" ? (entry.projects || []) : [entry];
+    for (const project of projects) {
+      const finished = project.finished_sprints ? (project.finished_sprints.sprints || []) : [];
+      for (const sprint of (project.sprints || []).concat(finished)) {
+        titles.set(sprint.sprint_id, sprint.title);
+      }
+    }
+  }
+  return titles;
+}
+function rowName(dimension, key, titles) {
+  if (key === "unattributed") return "unattributed";
+  if (dimension === "sprint") return titles.get(key) || "sprint " + key.slice(0, 8);
+  if (dimension === "aspect") return Object.prototype.hasOwnProperty.call(ASPECTS, key) ? ASPECTS[key] : key;
+  return key;
+}
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function usdNode(dollars) {
+  const node = el("span", "usd", usd(dollars));
+  node.title = "Estimated at API list prices";
+  return node;
+}
+function figure(label, total) {
+  const node = el("div", "figure");
+  node.appendChild(el("span", "figure-label", label));
+  node.appendChild(usdNode(total.dollars));
+  if (total.approximate) node.appendChild(el("span", "approx", "approximate"));
+  node.appendChild(el("p", "tokens", tokensText(total)));
+  return node;
+}
+function trendList(days, last) {
+  const top = Math.max(0, ...days.map((day) => day.total.dollars));
+  const list = el("ol", "trend");
+  days.forEach((day, at) => {
+    const label = dayLabel(day.day, day === last);
+    const item = el("li", "trend-day");
+    item.title = label + ": " + usd(day.total.dollars) + (day.total.approximate ? ", approximate" : "");
+    const bar = el("span", "trend-bar");
+    const fill = document.createElement("i");
+    fill.style.height = (top === 0 ? 0 : Math.round(day.total.dollars / top * 100)) + "%";
+    bar.appendChild(fill);
+    item.appendChild(bar);
+    const edge = at === 0 || at === days.length - 1;
+    item.appendChild(el("span", "trend-label", state.span === 30 && !edge ? "" : label));
+    list.appendChild(item);
+  });
+  return list;
+}
+function breakdown(heading, dimension, days, titles) {
+  const section = el("section", "breakdown");
+  section.appendChild(el("h2", "", heading));
+  const sums = new Map();
+  for (const day of days) {
+    const keyed = day[dimension] || {};
+    for (const key of Object.keys(keyed)) {
+      if (!sums.has(key)) sums.set(key, zero());
+      add(sums.get(key), keyed[key]);
+    }
+  }
+  const rows = [...sums].map(([key, total]) => ({name: rowName(dimension, key, titles), total}));
+  rows.sort((a, b) => (b.total.dollars - a.total.dollars) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (rows.length === 0) {
+    section.appendChild(el("p", "empty", "Nothing in this span."));
+    return section;
+  }
+  const list = el("ol", "rows");
+  for (const row of rows) {
+    const item = el("li", "row");
+    item.appendChild(el("span", "row-name", row.name));
+    item.appendChild(usdNode(row.total.dollars));
+    if (row.total.approximate) item.appendChild(el("span", "approx", "approximate"));
+    item.appendChild(el("span", "tokens", tokensText(row.total)));
+    list.appendChild(item);
+  }
+  section.appendChild(list);
+  return section;
+}
+function showPressed() {
+  for (const button of document.getElementById("spans").children) {
+    button.setAttribute("aria-pressed", String(Number(button.dataset.span) === state.span));
   }
 }
+function render(view) {
+  state.view = view;
+  showPressed();
+  const note = document.getElementById("note");
+  const summary = document.getElementById("summary");
+  const trend = document.getElementById("trend");
+  const breakdowns = document.getElementById("breakdowns");
+  if (view.spend === null || view.spend === undefined) {
+    note.textContent = "";
+    summary.replaceChildren(el("p", "empty", "Spend shows once the console has read the transcripts."));
+    trend.replaceChildren();
+    breakdowns.replaceChildren();
+    return;
+  }
+  const all = view.spend.days || [];
+  const days = all.slice(Math.max(0, all.length - state.span));
+  const last = all[all.length - 1];
+  const total = sum(days.map((day) => day.total));
+  note.textContent = "Dollar figures (~) are estimates at API list prices." +
+    (total.approximate ? " Some are approximate: a model without its own price row is priced like its family." : "");
+  const figures = [figure("Today", last ? last.total : zero())];
+  if (state.span > 1) figures.push(figure("Last " + state.span + " days", total));
+  summary.replaceChildren(...figures);
+  trend.replaceChildren(trendList(days, last));
+  const titles = sprintTitles(view.entries);
+  breakdowns.replaceChildren(...DIMENSIONS.map(([dimension, heading]) => breakdown(heading, dimension, days, titles)));
+}
+for (const [text, span] of SPANS) {
+  const button = el("button", "span", text);
+  button.setAttribute("type", "button");
+  button.dataset.span = String(span);
+  button.addEventListener("click", () => {
+    state.span = span;
+    if (state.view) render(state.view); else showPressed();
+  });
+  document.getElementById("spans").appendChild(button);
+}
+showPressed();
 const conn = document.getElementById("conn");
 const source = new EventSource("/api/stream");
 source.addEventListener("view", (event) => render(JSON.parse(event.data)));
