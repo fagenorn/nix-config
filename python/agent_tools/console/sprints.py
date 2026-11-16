@@ -590,7 +590,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
                                            SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
-from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
+from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT, plain_reason
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 from agent_tools.console.pictures import PICTURE_ID
 from agent_tools.console.sessions import SEEN
@@ -2325,7 +2325,7 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
       manager and the stated time (`stated_at`) otherwise.
     - No manager row: `none`, with `NO_MANAGER_TEXT` and retry when overdue, else no text, no retry.
     - `started`: `missing`, `MISSING_TEXT` and retry when overdue, else `started`, no text, no retry.
-    - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
+    - `failed`: `failed` and `"<FAILED_TEXT>: <plain_reason(reason)>"`.
     - `waiting`: `waiting` and `manager.WAITING_TEXT`.
 
     A `failed` or `waiting` manager of a first launch offers retry only while the sprint has no
@@ -2354,7 +2354,7 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
         return (MISSING, MISSING_TEXT, not stopping) if overdue else (STARTED, None, False)
     free = not listed and (state.brief is None or manager.takeover) and not stopping
     if manager.state == FAILED:
-        return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
+        return FAILED, f"{FAILED_TEXT}: {plain_reason(manager.reason)}", free
     return WAITING, MANAGER_WAITING_TEXT, free
 
 

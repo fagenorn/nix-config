@@ -1196,7 +1196,7 @@ class ManagerViewTest(unittest.TestCase):
     def test_a_failed_start_shows_its_reason_and_retry(self):
         entry = self.shown(Manager("failed", T0, reason="the directory is not trusted"))
         self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
-                         ("failed", "could not start a manager: the directory is not trusted",
+                         ("failed", "could not start a manager: this account does not trust the project's folder",
                           True))
 
     def test_waiting_on_quota_reads_until_the_earliest_reset(self):
