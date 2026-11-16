@@ -88,6 +88,7 @@
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
+| Production rules | Project contract |
 | Project contract | Project contract |
 | Projection | Project contract |
 | Publication-free profile | Release |
@@ -105,6 +106,7 @@
 | Session | Console |
 | Sign-in state | Console |
 | Spend | Console |
+| Spend page | Console |
 | Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |

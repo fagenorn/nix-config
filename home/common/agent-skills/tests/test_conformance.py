@@ -1020,6 +1020,7 @@ class TrackerCredentialTest(ReportAssertions, unittest.TestCase):
             # A declared GitHub release profile fails on a non-GitHub tracker and would
             # suppress this check; the tracker rule is what is under test.
             authored["release"] = "unsupported"
+            authored.pop("production", None)
             contract.write_text(json.dumps(authored, indent=2), encoding="utf-8")
             report, by_id = doctor(self, root, env=gh_env(tmp, 0))
             check = by_id[self.CHECK_ID]

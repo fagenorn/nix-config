@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import manager, service, sprint, sprints
+from agent_tools.delivery import look_marker
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -527,6 +528,27 @@ class SprintCommandTest(Case):
                 else:
                     self.assertEqual(json.loads(lines[0])["decision"], "none")
 
+    def test_every_open_sprints_inbox_lists_the_owners_notice_until_it_is_withdrawn(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        for sid in (a, b):
+            with self.subTest(sid=sid, phase="open"):
+                got = self.inbox(svc, sid)
+                self.assertEqual((got.returncode, got.stderr), (0, ""))
+                lines = got.stdout.splitlines()
+                self.assertEqual(len(lines), 3)
+                self.assertEqual(lines[1], sprints.NOTICE_BLOCK_HEAD)
+                self.assertRegex(lines[2], r"- heads-up from the owner, (just now|\d+ min ago): "
+                                           r"routes are frozen until Friday")
+        svc.withdraw_owner_notice("owner/p01", n)
+        for sid in (a, b):
+            with self.subTest(sid=sid, phase="withdrawn"):
+                got = self.inbox(svc, sid)
+                self.assertEqual((got.returncode, got.stderr), (0, ""))
+                self.assertEqual(len(got.stdout.splitlines()), 1)
+
     def test_inbox_and_status_print_no_block_without_another_sprints_notice(self):
         svc = self.open()
         a = self.goal(svc)
@@ -984,6 +1006,43 @@ class ManagerContractTest(unittest.TestCase):
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, CONTRACT.read_text(encoding="utf-8"), ""))
 
+    def test_the_contract_says_to_mark_a_look_change_when_cutting_issues(self):
+        text = run_sprint("contract").stdout
+        after = text.partition("## After approval\n")[2].partition("\n## ")[0]
+        found = re.search(r"`(- \[ \] \[human\] before merge: [^`]*)`", after)
+        self.assertIsNotNone(found)
+        marker = found.group(1)
+        self.assertEqual(
+            marker, "- [ ] [human] before merge: <what the owner looks at>"
+                    " \u2014 measured: <who judges, where>")
+        self.assertEqual(look_marker.read_look(marker).covers,
+                         ("<what the owner looks at>",))
+        item = next(line for line in after.split("\n") if line.startswith("3. "))
+        item = " ".join(item.split())
+        self.assertIn("`to-issues`", item)
+        self.assertIn("changes how something looks", item)
+
+    def test_the_contract_says_what_to_do_on_an_awaiting_look_stop(self):
+        text = run_sprint("contract").stdout
+        self.assertIn("\n## A look before merge\n", text)
+        self.assertLess(text.index("## Reporting"), text.index("## A look before merge"))
+        self.assertLess(text.index("## A look before merge"), text.index("## Questions"))
+        section = " ".join(
+            text.partition("## A look before merge\n")[2].partition("\n## ")[0].split())
+        for needle in (
+                "awaiting look", "stage `landing`", "`inbox`", "no issue number",
+                "before and after pictures of the pull request's head", "`sprint ask`",
+                '"pair": "before"', '"pair": "after"', "the same delivery's resume",
+                "the full 40-hex sha of the head the pictures show",
+                "the id of the owner's `answer` message as `sprint inbox` printed it",
+                "records the approval with that message id", "approve for that head",
+                "changes with the owner's own words", "Never merge it any other way"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertLess(section.index("Report it"), section.index("`sprint ask`"))
+        self.assertLess(section.index("`sprint ask`"),
+                        section.index("the same delivery's resume"))
+
     def test_the_contract_says_how_a_question_carries_pictures(self):
         text = CONTRACT.read_text(encoding="utf-8")
         for needle in ("pictures", "file", "line", "before", "after", "8", "140"):
@@ -1030,7 +1089,8 @@ class ManagerContractTest(unittest.TestCase):
         for needle in ("sprint notice --notice-file -", "sprint notices",
                        "sprint withdraw-notice --notice <id>", "`claim`", "`heads-up`",
                        "`hand-off`", "280 characters", "200 characters", "140 characters",
-                       "at most 5 open notices", "never approval"):
+                       "at most 5 open notices", "never approval",
+                       "heads-up from the owner"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
 

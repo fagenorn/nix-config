@@ -547,6 +547,7 @@ class ReleaseProfileLintTest(ReportAssertions, unittest.TestCase):
             path = root / ".agents/project.json"
             contract = json.loads(path.read_text(encoding="utf-8"))
             contract["release"] = "unsupported"
+            contract.pop("production", None)
             path.write_text(json.dumps(contract), encoding="utf-8")
             report, by_id = doctor(self, root)
             for check_id in RELEASE_PROFILE_IDS:
