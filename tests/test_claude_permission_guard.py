@@ -89,7 +89,7 @@ elif (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "body,commits,closingIssuesReferences"
+    and argv[6] == "title,body,commits,closingIssuesReferences"
 ):
     stage, number, slug = "body", argv[2], argv[4]
 elif len(argv) == 2 and argv[0] == "api":
@@ -157,7 +157,7 @@ if stage == "pr":
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
 elif stage == "body":
-    default = '{"body": "", "commits": [], "closingIssuesReferences": []}'
+    default = '{"title": "", "body": "", "commits": [], "closingIssuesReferences": []}'
 elif stage == "issue":
     issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
     default = json.dumps({"number": int(number), "body": issue.get("body", "")})
@@ -4974,6 +4974,9 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     )
     LOOK_MARKED = {"1200": {"body": LOOK_BODY}}
     LOOK_MERGE = "gh pr merge 1300 --repo fagenorn/nix-config --merge --delete-branch"
+    LOOK_SUBJECT_MERGE = (
+        'gh pr merge 1300 --repo fagenorn/nix-config --merge --subject "Fix #1200 layout" '
+        "--delete-branch")
     LOOK_PINNED = (
         "gh pr merge 1300 --repo fagenorn/nix-config --merge "
         f"--match-head-commit {LOOK_HEAD} --delete-branch")
@@ -5003,9 +5006,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         }
 
     @staticmethod
-    def look_pr_json(body="", commits=(), linked=()):
-        """The PR body lookup's answer: body, commit messages and linked issue numbers."""
+    def look_pr_json(body="", commits=(), linked=(), title="Page"):
+        """The PR lookup's answer: title, body, commit messages and linked issue numbers."""
         return json.dumps({
+            "title": title,
             "body": body,
             "commits": [{"messageHeadline": line, "messageBody": ""} for line in commits],
             "closingIssuesReferences": [
@@ -5015,7 +5019,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         })
 
     def look_env(self, issues, body="", branch="issue-1200-page", head=LOOK_HEAD,
-                 base="main", slug="fagenorn/nix-config", number=1300, commits=(), linked=()):
+                 base="main", slug="fagenorn/nix-config", number=1300, commits=(), linked=(),
+                 title="Page"):
         pr = {
             "state": "OPEN",
             "baseRefName": base,
@@ -5029,7 +5034,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             pr["headRefOid"] = head
         return {
             "FAKE_PR_JSON": json.dumps(pr),
-            "FAKE_BODY_JSON": self.look_pr_json(body, commits, linked),
+            "FAKE_BODY_JSON": self.look_pr_json(body, commits, linked, title),
             "FAKE_ISSUES": json.dumps(issues),
         }
 
@@ -5078,6 +5083,13 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "a closing keyword in a commit message": (repo, self.LOOK_MERGE, self.look_env(
                 self.LOOK_MARKED, branch="topic", body="Page change",
                 commits=("Fix #1200 layout",))),
+            "a closing keyword in the PR title": (repo, self.LOOK_MERGE, self.look_env(
+                self.LOOK_MARKED, branch="topic", body="Page change",
+                title="Fix #1200 layout")),
+            "a closing keyword in --subject": (repo, self.LOOK_SUBJECT_MERGE, self.look_env(
+                self.LOOK_MARKED, branch="topic", body="Page change")),
+            "a closing keyword in the head branch name": (repo, self.LOOK_MERGE, self.look_env(
+                self.LOOK_MARKED, branch="fix#1200-page", body="Page change")),
             "a Development link": (repo, self.LOOK_MERGE, self.look_env(
                 self.LOOK_MARKED, branch="1200-page", body="Page change", linked=(1200,))),
             "an ended approval": (repo, self.LOOK_MERGE, self.marked_with(
@@ -5118,13 +5130,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "lifecycle guard: unsafe merge: cannot read issue 1200"),
             ({"FAKE_BODY_JSON": "{}"}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": '{"body": "", "closingIssuesReferences": []}'}, None,
+            ({"FAKE_BODY_JSON": '{"title": "", "body": "", "closingIssuesReferences": []}'}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": '{"body": "", "commits": []}'}, None,
+            ({"FAKE_BODY_JSON": '{"title": "", "body": "", "commits": []}'}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": '{"body": "", "commits": [{}], "closingIssuesReferences": []}'},
+            ({"FAKE_BODY_JSON":
+              '{"title": "", "body": "", "commits": [{}], "closingIssuesReferences": []}'},
              None, "lifecycle guard: unsafe merge: cannot read the PR body"),
-            ({"FAKE_BODY_JSON": '{"body": "", "commits": [], "closingIssuesReferences": [{}]}'},
+            ({"FAKE_BODY_JSON":
+              '{"title": "", "body": "", "commits": [], "closingIssuesReferences": [{}]}'},
+             None, "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON": '{"body": "", "commits": [], "closingIssuesReferences": []}'},
+             None, "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON":
+              '{"title": null, "body": "", "commits": [], "closingIssuesReferences": []}'},
              None, "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({"FAKE_BODY_JSON": self.look_pr_json(commits=["x"] * 100)}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
@@ -5219,6 +5238,23 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         script = look_check.read_text(encoding="utf-8")
         self.assertRegex(script, r"\A#!/nix/store/\S+/bin/\S+ -p\nunset BASH_ENV ENV\n")
         self.assertRegex(script, r'exec /nix/store/\S+-agent-tools-look-approval judge "\$@"\n')
+
+    def test_the_merge_commit_text_reaches_the_look_gate_on_the_release_arm(self):
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        marked = {"FAKE_ISSUES": json.dumps(self.LOOK_MARKED)}
+        subject = f'{self.RELEASE_MERGE} --subject "Closes #1200"'
+        refusal = self.LOOK_REFUSAL.replace("1a2b3c4", self.HEAD_SHA[:7])
+        by_subject = {**self.release_env(), **marked,
+                      "FAKE_BODY_JSON": self.look_pr_json("Release")}
+        by_title = {**self.release_env(), **marked,
+                    "FAKE_BODY_JSON": self.look_pr_json("Release", title="Closes #1200")}
+        for name, command, env in (("subject", subject, by_subject),
+                                   ("title", self.RELEASE_MERGE, by_title)):
+            with self.subTest(text=name):
+                self.assert_look_refusal(self.run_guard(command, repo, env), refusal)
+        other = f'{self.RELEASE_MERGE} --subject "Closes other/repo#1200"'
+        result = self.run_guard(other, repo, by_subject)
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_a_marked_release_with_a_matching_approval_admits(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")

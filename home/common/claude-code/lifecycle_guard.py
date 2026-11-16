@@ -439,14 +439,16 @@ Each merge arm runs it right after the mergeability check, so before the
 feature arm's integration-base exemption and protection lookup and before the
 release arm's rollup predicate, with the matched PR number (the release arm
 receives it as `validate_release_merge`'s last parameter).
-1. The guard reads the PR's body, commits and linked issues, `gh pr view <n>
-   --repo <slug> --json body,commits,closingIssuesReferences`.
+1. The guard reads the PR's title, body, commits and linked issues, `gh pr view <n>
+   --repo <slug> --json title,body,commits,closingIssuesReferences`.
 2. The PR's issues are the number in an `issue-<n>-` head branch, every issue
    of this repository in `closingIssuesReferences` (the Development sidebar and
    `gh issue develop` links), plus every closing keyword GitHub honours
    (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`,
-   `resolved`) or `Refs` (any case, an optional colon) in the body or in a
-   commit message (headline and body) followed by `#<n>`, `<slug>#<n>` or
+   `resolved`) or `Refs` (any case, an optional colon) in the PR title or body, in a
+   commit message (headline and body), in the head branch name or in the merge's
+   `--subject` (GitHub closes on the merge commit too, whose default body is the PR
+   title) followed by `#<n>`, `<slug>#<n>` or
    `https://github.com/<slug>/issues/<n>` for this repository's slug; a
    reference naming another repository is ignored. A PR of
    `LOOK_COMMIT_LIMIT` (100) commits or more is refused as unreadable, since
@@ -479,7 +481,7 @@ timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 diagnostic, and output that is not the expected shape is refused as `unsafe
 merge: cannot read the PR body`, `cannot read issue <n>` or `cannot read the
 comments of issue <n>`; an issue or PR object with no `body` key, a PR object
-with no `commits` or `closingIssuesReferences` list, or an entry of either that
+with no string `title`, no `commits` or `closingIssuesReferences` list, or an entry of either that
 is not readable, is unreadable, never an empty body or an empty list. Which issues are marked, and which approvals count
 (the owner's or a member's, naming this issue, this PR and this head, the
 latest answer deciding), is `look-approval`'s contract; `--admin` is in no merge
@@ -4890,7 +4892,8 @@ def validate_merge(text, context, compiled):
 
     if not delete_branch:
         return validate_release_merge(
-            pr_facts, base, integration_base, head_commit, context, compiled, number)
+            pr_facts, base, integration_base, head_commit, context, compiled, number,
+            match.values.get("subject"))
 
     # The feature arm deletes the PR's head branch, so the head must be
     # disposable: never the default branch, never the declared integration
@@ -4913,7 +4916,8 @@ def validate_merge(text, context, compiled):
     problem = mergeability_problem(pr_facts, base, head_commit)
     if problem is not None:
         return refuse("merge", problem)
-    status = look_problem(context, number, pr_facts, head_commit)
+    status = look_problem(
+        context, number, pr_facts, head_commit, match.values.get("subject"))
     if status is not None:
         return status
 
@@ -5022,13 +5026,13 @@ def look_issue_numbers(head_ref, body, repository, linked=()):
 def look_pr_texts(pr, repository):
     """`(text, linked)` from the PR lookup's object, or `(None, None)` when unreadable.
 
-    `text` is the PR body and every commit message (headline and body) joined by
+    `text` is the PR title, body and every commit message (headline and body) joined by
     newlines; `linked` the numbers of `repository`'s issues in
     `closingIssuesReferences`, other repositories' issues ignored. A missing or
     mistyped field, an entry that is not readable, or `LOOK_COMMIT_LIMIT` commits
     or more is unreadable.
     """
-    if not isinstance(pr, dict) or "body" not in pr:
+    if not isinstance(pr, dict) or "body" not in pr or not isinstance(pr.get("title"), str):
         return None, None
     body, commits, references = pr["body"], pr.get("commits"), pr.get("closingIssuesReferences")
     if not (body is None or isinstance(body, str)):
@@ -5037,7 +5041,7 @@ def look_pr_texts(pr, repository):
         return None, None
     if not isinstance(references, list):
         return None, None
-    texts = [body or ""]
+    texts = [pr["title"], body or ""]
     for commit in commits:
         if not isinstance(commit, dict):
             return None, None
@@ -5112,11 +5116,14 @@ def look_issue_facts(context, number):
     return {"number": number, "body": issue.get("body"), "comments": comments}, None
 
 
-def look_problem(context, number, pr_facts, head_commit):
+def look_problem(context, number, pr_facts, head_commit, subject=None):
     """None when the look gate passes, else the status the merge returns (issue 1138).
 
-    `number` is the pull request number string and `head_commit` the command's
-    `--match-head-commit` value, None without the flag. The gate reads the PR body, then
+    `number` is the pull request number string, `head_commit` the command's
+    `--match-head-commit` value, None without the flag, and `subject` its `--subject`
+    value, None without it; the subject, the PR title and the head branch name are
+    read for closing keywords like the body, since GitHub closes an issue on the merge
+    commit's headline and body (its default body is the PR title). The gate reads the PR body, then
     each issue the PR settles (`look_issue_numbers`) with its comments, and asks the
     look check (`--look-bin`) whether every issue whose body carries a look marker
     has the owner's approval of the PR's head. A PR settling no issue passes with
@@ -5128,14 +5135,17 @@ def look_problem(context, number, pr_facts, head_commit):
     repository = context.repository
     pr_body, status = look_json(
         context, ["pr", "view", number, "--repo", repository, "--json",
-         "body,commits,closingIssuesReferences"],
+         "title,body,commits,closingIssuesReferences"],
         "PR body lookup timed out", "PR body lookup failed", "cannot read the PR body")
     if status is not None:
         return status
     texts, linked = look_pr_texts(pr_body, repository)
     if texts is None:
         return refuse("merge", "cannot read the PR body")
-    numbers = look_issue_numbers(pr_facts.get("headRefName"), texts, repository, linked)
+    head_ref = pr_facts.get("headRefName")
+    merge_commit = "\n".join(
+        part for part in (head_ref, subject) if isinstance(part, str))
+    numbers = look_issue_numbers(head_ref, f"{texts}\n{merge_commit}", repository, linked)
     if not numbers:
         return None
     issues = []
@@ -5279,7 +5289,7 @@ def merge_floor_problem(pr_facts, base, head_commit, required_checks):
 
 
 def validate_release_merge(
-        pr_facts, base, integration_base, head_commit, context, compiled, number):
+        pr_facts, base, integration_base, head_commit, context, compiled, number, subject=None):
     """The release arm: the integration branch promoted into the default branch.
 
     Its head is permanent, so the merge may omit `--delete-branch`, and in
@@ -5307,7 +5317,7 @@ def validate_release_merge(
     problem = mergeability_problem(pr_facts, base, head_commit)
     if problem is not None:
         return refuse("merge", problem)
-    status = look_problem(context, number, pr_facts, head_commit)
+    status = look_problem(context, number, pr_facts, head_commit, subject)
     if status is not None:
         return status
     try:
