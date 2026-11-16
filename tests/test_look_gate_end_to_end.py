@@ -9,9 +9,13 @@ is stale, and an approval of the new head posts and merges.
 
 Run: just agent-workflow-tests
 """
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
-from .look_gate_world import MARKED, REFUSAL, SLUG, LookGateWorld, play_scenario
+from .look_gate_world import (MARKED, REFUSAL, SLUG, LookGateWorld, StepFailure, mutant_guard,
+                              play_scenario)
 
 
 class LookGateEndToEndTest(unittest.TestCase):
@@ -45,6 +49,23 @@ class LookGateEndToEndTest(unittest.TestCase):
         self.assertIn(REFUSAL.format(issue=11, short=head[:7]), reply["notes"])
         self.assertEqual(world.origin_tip("main"), main0)
         self.assertEqual(world.pr_of(11)["state"], "OPEN")
+
+    def test_the_scenario_fails_when_the_look_refusal_is_removed(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        guard = mutant_guard(Path(tmp.name))
+        self.assertEqual(guard.read_text().count("return None  # mutant (#1142)"), 1)
+        with self.assertRaises(StepFailure) as caught:
+            play_scenario(self, guard_source=guard, through=3)
+        world = caught.exception.world
+        command, code, stderr = world.guard_log[-1]
+        self.assertEqual(caught.exception.step, 3)
+        self.assertTrue(str(caught.exception).startswith("step 3: "))
+        self.assertEqual(
+            command, f"gh pr merge 111 --repo {SLUG} --merge --match-head-commit "
+                     f"{world.pr_of(MARKED)['head']} --delete-branch")
+        self.assertEqual(code, 0, f"the mutant guard did not admit the step-3 merge: exit {code}: {stderr}")
+        sys.stderr.write(f"{caught.exception}\nexit {code}\n")
 
 
 if __name__ == "__main__":

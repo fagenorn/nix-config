@@ -451,6 +451,19 @@ class LookGateWorld:
         ]
 
 
+def mutant_guard(directory: Path) -> Path:
+    """Write a copy of the guard whose `look_problem` returns None first, and return its path."""
+    anchor = "def look_problem(context, number, pr_facts, head_commit, subject=None):\n"
+    inserted = "    return None  # mutant (#1142): the look refusal removed\n"
+    source = GUARD_SOURCE.read_text()
+    found = source.count(anchor)
+    if found != 1:
+        raise AssertionError(f"the look_problem anchor occurs {found} times in the guard, not once")
+    path = directory / "lifecycle_guard.py"
+    path.write_text(source.replace(anchor, anchor + inserted, 1))
+    return path
+
+
 def play_scenario(test_case: unittest.TestCase, guard_source: Path = GUARD_SOURCE,
                   through: int = 6) -> dict:
     """Play steps 1..`through`; a broken expectation of step k raises StepFailure(k, ...)."""
