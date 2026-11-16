@@ -200,17 +200,23 @@ class ConsoleHooksInstalledTest(unittest.TestCase):
         self.assertEqual(self.settings["allowedHttpHookUrls"], ["http://127.0.0.1:27184/*"])
         self.assertTrue(fnmatch.fnmatchcase(self.URL, "http://127.0.0.1:27184/*"))
 
-    def test_the_guard_hook_is_unchanged(self):
+    def test_the_guard_hooks_are_the_three_matchers(self):
         self.assertEqual(set(self.settings["hooks"]), {"PreToolUse", "SessionStart", *self.EVENTS})
         entries = self.settings["hooks"]["PreToolUse"]
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["matcher"], "Bash")
-        self.assertEqual(len(entries[0]["hooks"]), 1)
-        hook = entries[0]["hooks"][0]
-        self.assertEqual(set(hook), {"type", "command", "timeout"})
-        self.assertEqual(hook["type"], "command")
-        self.assertTrue(hook["command"].endswith("/bin/claude-bash-lifecycle-guard"))
-        self.assertEqual(hook["timeout"], 30)
+        self.assertEqual(
+            [entry["matcher"] for entry in entries],
+            ["Bash", "Edit|Write|MultiEdit|NotebookEdit", "^mcp__"],
+        )
+        commands = set()
+        for entry in entries:
+            self.assertEqual(len(entry["hooks"]), 1)
+            hook = entry["hooks"][0]
+            self.assertEqual(set(hook), {"type", "command", "timeout"})
+            self.assertEqual(hook["type"], "command")
+            self.assertTrue(hook["command"].endswith("/bin/claude-bash-lifecycle-guard"))
+            self.assertEqual(hook["timeout"], 30)
+            commands.add(hook["command"])
+        self.assertEqual(len(commands), 1)
 
 
 class LauncherSourceTest(unittest.TestCase):

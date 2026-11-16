@@ -64,7 +64,12 @@ class WebSocket { constructor(url) { REQUESTS.push(["WebSocket", String(url)]); 
 const navigator = {sendBeacon(url) { REQUESTS.push(["sendBeacon", String(url)]); return true; }};
 function setTimeout() { return 0; }
 function clearTimeout() {}
-const window = {addEventListener() {}};
+const location = {hash: (JSON.parse(process.argv[2])[0] || {}).start_hash || ""};
+const WINDOW_LISTENERS = {};
+const window = {
+  location,
+  addEventListener(name, fn) { (WINDOW_LISTENERS[name] = WINDOW_LISTENERS[name] || []).push(fn); },
+};
 """
 DRIVER = r"""
 const tree = (n) => ({
@@ -76,7 +81,12 @@ const tree = (n) => ({
 });
 const snapshots = [];
 for (const step of JSON.parse(process.argv[2])) {
-  if ("frame" in step) {
+  if (Object.keys(step).length === 1 && "start_hash" in step) {
+    continue;
+  } else if ("hash" in step) {
+    location.hash = step.hash;
+    for (const fn of WINDOW_LISTENERS.hashchange || []) fn({});
+  } else if ("frame" in step) {
     kept.view({data: JSON.stringify(step.frame)});
   } else if ("click" in step) {
     const buttons = ELEMENTS.spans.children.filter(
@@ -85,8 +95,8 @@ for (const step of JSON.parse(process.argv[2])) {
     for (const fn of buttons[0].listeners.click || []) fn({});
   } else if (step.snapshot) {
     const out = {};
-    for (const id of ["spans", "note", "summary", "trend", "breakdowns"]) {
-      out[id] = tree(ELEMENTS[id]);
+    for (const id of ["spans", "note", "item", "summary", "trend", "breakdowns"]) {
+      out[id] = tree(document.getElementById(id));
     }
     snapshots.push(out);
   }
@@ -136,6 +146,21 @@ SHARES = {
 FIRST_DAY = date(2026, 10, 18)
 
 
+def split_phases(item: dict, shares: list[tuple[str, float | None]]) -> dict:
+    """Split one wire entry into phases that sum exactly to it; the last phase takes the remainder."""
+    fields = ("input", "cache_write", "cache_read", "output")
+    phases: dict = {}
+    left = {**{f: item[f] for f in fields}, "dollars": item["dollars"]}
+    for name, share in shares[:-1]:
+        phase = {f: int(item[f] * share) for f in fields}
+        phase["dollars"] = item["dollars"] * share
+        for key in left:
+            left[key] -= phase[key]
+        phases[name] = {**phase, "approximate": item["approximate"]}
+    phases[shares[-1][0]] = {**left, "approximate": item["approximate"]}
+    return phases
+
+
 def spend_view_fixture() -> dict:
     """A desk view with the production entry shapes and 30 spend days (7 with breakdowns)."""
     quiet = [{"type": "project", "project_id": "owner/api", "sprints": [],
@@ -163,6 +188,14 @@ def spend_view_fixture() -> dict:
             for key, share, today_share in keys:
                 share = today_share if i == 29 else share
                 day[dimension][key] = tokens(share * (i + 1), share, base, approx)
+        day["run"], day["sprint_phase"], day["run_phase"] = {}, {}, {}
+        if i >= 23:
+            day["run"] = {"wf_1": tokens(.3 * (i + 1), .3, base, approx)}
+            day["sprint_phase"] = {"0123456789abcdef": split_phases(
+                day["sprint"]["0123456789abcdef"],
+                [("implement", .64), ("manager", .24), ("plan", None)])}
+            day["run_phase"] = {"wf_1": split_phases(
+                day["run"]["wf_1"], [("implement", .7), ("plan", None)])}
         days.append(day)
     return {"entries": entries, "spend": {"approximate": True, "days": days}}
 
@@ -374,6 +407,122 @@ class SpendRenderTest(unittest.TestCase):
             {"frame": fx}, {"click": "Today"}, {"click": "30 days"}, {"click": "7 days"},
             {"frame": quiet}, {"frame": fx}, {"snapshot": True}])
         self.assertEqual(result["requests"], [["EventSource", "/api/stream"]])
+
+
+class SpendItemTest(unittest.TestCase):
+    """A fragment opens one sprint or run with its phase breakdown (#1136)."""
+
+    @staticmethod
+    def item_rows(item: dict) -> list:
+        return [(find(r, "span", "row-name")[0]["text"], find(r, "span", "usd")[0]["text"],
+                 find(r, "span", "tokens")[0]["text"]) for r in find(item, "li", "row")]
+
+    @staticmethod
+    def item_figure(item: dict) -> dict:
+        (figure,) = find(item, "div", "figure")
+        return figure
+
+    def test_a_sprint_fragment_shows_its_total_and_phase_breakdown(self) -> None:
+        fx = spend_view_fixture()
+        first, second = render_spend([
+            {"start_hash": "#sprint=0123456789abcdef"}, {"frame": fx}, {"snapshot": True},
+            {"click": "Today"}, {"snapshot": True}])["snapshots"]
+        item = first["item"]
+        self.assertEqual(find(item, "h2", "")[0]["text"], "Add resumable uploads")
+        figure = self.item_figure(item)
+        self.assertEqual(find(figure, "span", "figure-label")[0]["text"], "So far, last 30 days")
+        self.assertEqual(find(figure, "span", "usd")[0]["text"], "~$94.50")
+        self.assertEqual([n["text"] for n in find(figure, "span", "approx")], ["approximate"])
+        self.assertEqual(
+            find(figure, "p", "tokens")[0]["text"],
+            "input 94.5k · cache writes 35 · cache reads 22.8M · output 1.8k")
+        self.assertEqual(self.item_rows(item), [
+            ("implement", "~$60.48", "input 60.5k · cache writes 21 · cache reads 14.6M · output 1.1k"),
+            ("Manager", "~$22.68", "input 22.7k · cache writes 7 · cache reads 5.5M · output 427"),
+            ("plan", "~$11.34", "input 11.3k · cache writes 7 · cache reads 2.7M · output 224"),
+        ])
+        self.assertEqual(second["item"], item)
+
+    def test_a_run_fragment_names_the_run_and_its_phases(self) -> None:
+        (snap,) = render_spend([
+            {"start_hash": "#run=wf_1"}, {"frame": spend_view_fixture()},
+            {"snapshot": True}])["snapshots"]
+        item = snap["item"]
+        self.assertEqual(find(item, "h2", "")[0]["text"], "Run wf_1")
+        figure = self.item_figure(item)
+        self.assertEqual(find(figure, "span", "usd")[0]["text"], "~$56.70")
+        self.assertEqual(
+            find(figure, "p", "tokens")[0]["text"],
+            "input 56.7k · cache writes 21 · cache reads 13.7M · output 1.1k")
+        self.assertEqual(self.item_rows(item), [
+            ("implement", "~$39.69", "input 39.7k · cache writes 14 · cache reads 9.6M · output 749"),
+            ("plan", "~$17.01", "input 17k · cache writes 7 · cache reads 4.1M · output 322"),
+        ])
+
+    def test_the_item_total_sums_its_own_entries_not_its_rounded_phases(self) -> None:
+        fx = spend_view_fixture()
+        sprint_id = "0123456789abcdef"
+        for day in fx["spend"]["days"]:
+            day["sprint"] = {sprint_id: {
+                "input": 4, "cache_write": 0, "cache_read": 0, "output": 0,
+                "dollars": 0.0002, "approximate": False}}
+            day["sprint_phase"] = {sprint_id: {
+                p: {"input": 1, "cache_write": 0, "cache_read": 0, "output": 0,
+                    "dollars": 0.0, "approximate": False}
+                for p in ("plan", "implement", "task review", "manager")}}
+        (snap,) = render_spend([
+            {"start_hash": "#sprint=" + sprint_id}, {"frame": fx}, {"snapshot": True}])["snapshots"]
+        figure = self.item_figure(snap["item"])
+        self.assertEqual(find(figure, "span", "usd")[0]["text"], "~$0.01")
+        self.assertEqual(
+            find(figure, "p", "tokens")[0]["text"],
+            "input 120 · cache writes 0 · cache reads 0 · output 0")
+        rows = self.item_rows(snap["item"])
+        self.assertEqual(len(rows), 4)
+        self.assertEqual({usd for _, usd, _ in rows}, {"~$0.00"})
+
+    def test_a_hash_change_redraws_the_item(self) -> None:
+        shots = render_spend([
+            {"frame": spend_view_fixture()}, {"snapshot": True}, {"hash": "#run=wf_1"},
+            {"snapshot": True}, {"hash": ""}, {"snapshot": True}])["snapshots"]
+        before, during, after = (s["item"] for s in shots)
+        self.assertEqual(before["children"], [])
+        self.assertEqual(find(during, "h2", "")[0]["text"], "Run wf_1")
+        self.assertEqual(after["children"], [])
+
+    def test_an_item_without_spend_reads_a_sentence(self) -> None:
+        (snap,) = render_spend([
+            {"start_hash": "#sprint=ffffffffffffffff"}, {"frame": spend_view_fixture()},
+            {"snapshot": True}])["snapshots"]
+        item = snap["item"]
+        self.assertEqual(find(item, "h2", "")[0]["text"], "sprint ffffffff")
+        self.assertEqual(
+            [n["text"] for n in find(item, "p", "empty")],
+            ["Nothing for this sprint in the last 30 days."])
+        self.assertEqual(find(item, "div", "figure"), [])
+        self.assertEqual(find(item, "ol", "rows"), [])
+
+    def test_an_item_named_like_an_inherited_member_reads_a_sentence(self) -> None:
+        for kind in ("sprint", "run"):
+            for name in ("constructor", "__proto__", "toString"):
+                with self.subTest(kind=kind, name=name):
+                    (snap,) = render_spend([
+                        {"start_hash": "#" + kind + "=" + name}, {"frame": spend_view_fixture()},
+                        {"snapshot": True}])["snapshots"]
+                    item = snap["item"]
+                    self.assertEqual(
+                        [n["text"] for n in find(item, "p", "empty")],
+                        ["Nothing for this " + kind + " in the last 30 days."])
+                    self.assertEqual(find(item, "div", "figure"), [])
+                    self.assertEqual(find(item, "ol", "rows"), [])
+
+    def test_a_fragment_of_another_form_opens_nothing(self) -> None:
+        for fragment in ("#sprint=%E0%A4%A", "#project=owner/web", "#sprint="):
+            with self.subTest(fragment=fragment):
+                (snap,) = render_spend([
+                    {"start_hash": fragment}, {"frame": spend_view_fixture()},
+                    {"snapshot": True}])["snapshots"]
+                self.assertEqual(snap["item"]["children"], [])
 
 
 class SpendStaticTest(unittest.TestCase):

@@ -56,10 +56,12 @@ they are deliberately not `deliveries.OWNER_LABELS`.
 The view: `spend_view(snapshot, today, project_of, profiles)` is the wire object
 `{"approximate": <bool>, "days": [<day>, ...]}`, `WINDOW_DAYS` days, `today` and the days before it
 (UTC), oldest first. A day is `{"day", "total", <dimension>: {<key>: <tokens>}}` for each of
-`DIMENSIONS`, every `<tokens>` a `Tokens.wire()`; a day with nothing has a zero `total` and empty
-maps, and a key dated outside the days is ignored. Each message has one key in `session`, `project`,
-`account` and `aspect`, so the sums over each equal `total`. `approximate` is true when any message
-counted is, per day in `total` and for the view. The keys, per message key:
+`DIMENSIONS`, every `<tokens>` a `Tokens.wire()`, plus `"sprint_phase": {<sprint id>: {<phase>:
+<tokens>}}` and `"run_phase": {<run id>: {<phase>: <tokens>}}`, always present; a day with nothing
+has a zero `total` and empty maps, and a key dated outside the days is ignored. Each message has
+one key in `session`, `project`, `account` and `aspect`, so the sums over each equal `total`.
+`approximate` is true when any message counted is, per day in `total` and for the view. The keys,
+per message key:
 
 - `session`: the key's session, else `UNATTRIBUTED`.
 - `project`: `project_of(repo)` of the session's repository (`Snapshot.repos`), `UNATTRIBUTED` when
@@ -72,6 +74,14 @@ counted is, per day in `total` and for the view. The keys, per message key:
 - `aspect`: `KEEPALIVE` for a ping; `DELIVERIES` for a workflow agent; for a session's own and
   subagent transcripts `MANAGERS` when the session is a sprint's, `OUTSIDE` otherwise, and
   `UNATTRIBUTED` when the session is unknown.
+
+The two item breakdowns cover attributed items only: a key whose `sprint` is a sprint id (not
+`UNATTRIBUTED`) is counted in `sprint_phase[sprint][p]`, and a key whose `run` is a run id in
+`run_phase[run][p]`, where `p` is the key's `phase` (`UNATTRIBUTED` for an agent without a journal
+label) and, for a key with no `phase` (a session's own or subagent transcript, only in
+`sprint_phase`), `MANAGER_PHASE`; an `UNATTRIBUTED` item has no entry. Per day and item the
+phase tokens sum to the item's entry in `sprint` or `run` (every count field; dollars to
+rounding, since each `Tokens.wire()` rounds on its own).
 
 The check (`python -m agent_tools.console.spend check-shares`): reads the transcripts under each
 `--projects` directory (default `~/.claude/projects`) from `--from` (default `2026-11-09`, the
@@ -119,6 +129,8 @@ from agent_tools.hosts import model_pricing
 
 UNATTRIBUTED = "unattributed"
 OTHER = "other"
+MANAGER_PHASE = "manager"
+ITEM_PHASES = ("sprint", "run")
 WINDOW_DAYS = 30
 PHASES = ("setup", "plan", "plan review", "plan revise", "implement", "task review",
           "final review", "fix wave", "verify", "land", "close-out")
@@ -508,19 +520,35 @@ def spend_view(
     totals: dict[str, Tokens] = {day: Tokens() for day in days}
     groups: dict[str, dict[str, dict[str, Tokens]]] = {
         day: {dimension: {} for dimension in DIMENSIONS} for day in days}
+    items: dict[str, dict[str, dict[str, dict[str, Tokens]]]] = {
+        day: {kind: {} for kind in ITEM_PHASES} for day in days}
     for key, tokens in snapshot.totals.items():
         if key.day not in totals:
             continue
         totals[key.day] += tokens
-        for dimension, name in _attribute(snapshot, key, project_of, profiles):
+        named = dict(_attribute(snapshot, key, project_of, profiles))
+        for dimension, name in named.items():
             bucket = groups[key.day][dimension]
             bucket[name] = bucket.get(name, Tokens()) + tokens
+        for kind in ITEM_PHASES:
+            item = named.get(kind, UNATTRIBUTED)
+            if item == UNATTRIBUTED:
+                continue
+            phase = named.get("phase", MANAGER_PHASE if kind == "sprint" else None)
+            if phase is None:
+                continue
+            bucket = items[key.day][kind].setdefault(item, {})
+            bucket[phase] = bucket.get(phase, Tokens()) + tokens
     return {
         "approximate": any(total.approximate for total in totals.values()),
         "days": [{"day": day, "total": totals[day].wire(),
                   **{dimension: {name: tokens.wire()
                                  for name, tokens in groups[day][dimension].items()}
-                     for dimension in DIMENSIONS}}
+                     for dimension in DIMENSIONS},
+                  **{kind + "_phase": {
+                      item: {phase: tokens.wire() for phase, tokens in phases.items()}
+                      for item, phases in items[day][kind].items()}
+                     for kind in ITEM_PHASES}}
                  for day in days],
     }
 
