@@ -35,8 +35,12 @@ and that has no live trusted runner prompt (the verification-item predicate abov
 section, outside fences (a fence closes only on a line of its own delimiter character, at least as
 long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end).
 A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
-`[evidence]`, `[human]` or `[note]` tag or None. `review_criteria` is the unticked `human` criteria
-when no unticked criterion has a kind other than `human` or `note`, else none; each raises one review
+`[evidence]`, `[human]` or `[note]` tag or None, and a checkbox line's bullet (`-`, `*` or `+`) may be
+followed by any run of spaces or tabs. `review_criteria` is the unticked `human` criteria when no unticked
+criterion has a kind outside `MET_KINDS` (`code`, `human`, `note`: an unticked `[code]` box of a held issue
+counts as met), else none, less the criteria the held verify block already asks: a criterion whose `ac_id`
+(`AC<index>`) equals, case-insensitively, the `ac` of a check of the newest block of a trusted comment
+(`verify_answer.held_acs`) is left to the runner, which asks it when due. Each remaining one raises one review
 item, keyed `<slug>#<issue>/ac<index>`, with `reason` `held-review`, `kind` `owner-review`, `question`
 the criterion's text, `answers` `["passed", "note"]`, `comment_id` None, `criterion` its index and
 `version` `criterion_version` (a digest of issue, index, kind and text, never the tick), plus the
@@ -112,7 +116,7 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 import os
 import re
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -215,7 +219,7 @@ def _comments(node: dict) -> list[dict]:
 _FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _AC_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+Acceptance criteria\s*#*\s*$", re.IGNORECASE)
-_CRITERION = re.compile(r"^\s*[-*+] \[( |x|X)\]\s+(.*)$")
+_CRITERION = re.compile(r"^\s*[-*+][ \t]+\[( |x|X)\][ \t]+(.*)$")
 _KIND = re.compile(r"\[(code|evidence|human|note)\]\s*(.*)$")
 
 
@@ -264,12 +268,30 @@ def criterion_version(issue: int, criterion: Criterion) -> str:
                              "text": criterion.text})
 
 
-def review_criteria(criteria: Sequence[Criterion]) -> list[Criterion]:
-    """The unticked `human` criteria, when no other unticked criterion still waits on the runner."""
+MET_KINDS = ("code", "human", "note")
+
+
+def ac_id(criterion: Criterion) -> str:
+    """The id a verify block's `ac` uses for the criterion: `AC` and its 1-based index."""
+    return f"AC{criterion.index}"
+
+
+def review_criteria(criteria: Sequence[Criterion], asked: Collection[str] = ()) -> list[Criterion]:
+    """The unticked `human` criteria the owner is asked about from the page.
+
+    None when an unticked criterion of another kind than `MET_KINDS` still waits on the runner (a `code` box of a
+    held issue counts as met). A criterion whose `ac_id` is in `asked`, the `ac` ids of the held verify block's
+    checks (upper-cased), is left to the runner, which asks it when due."""
     open_ = [c for c in criteria if not c.ticked]
-    if any(c.kind not in ("human", "note") for c in open_):
+    if any(c.kind not in MET_KINDS for c in open_):
         return []
-    return [c for c in open_ if c.kind == "human"]
+    return [c for c in open_ if c.kind == "human" and ac_id(c) not in asked]
+
+
+def live_prompts(markers: Sequence[fm.Marker]) -> list[fm.Marker]:
+    """The live runner prompts among `markers`, which are the trusted (OWNER, MEMBER) ones of one issue."""
+    return [m for m in markers
+            if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, markers)]
 
 
 def review_key(slug: str, issue: int, index: int) -> str:
@@ -415,10 +437,13 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
         raise _invalid("search node number is not an integer")
     markers = []
     runner_markers = []
+    runner_comments = []
     for comment in _comments(node):
         association = comment.get("authorAssociation")
         if association not in foa.TRUSTED:
             continue
+        if association in verify_answer.TRUSTED and isinstance(comment.get("body"), str):
+            runner_comments.append((_comment_id(comment.get("fullDatabaseId")), association, comment["body"]))
         marker = fm.parse({"id": _comment_id(comment.get("fullDatabaseId")), "body": comment.get("body"),
                            "updated_at": comment.get("updatedAt")})
         if marker is None:
@@ -430,13 +455,12 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
     runner_markers.sort(key=lambda m: m.comment_id)
     items = [_item(project_id, slug, number, held, m) for m in markers
              if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
-    prompts = [m for m in runner_markers
-               if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, runner_markers)]
+    prompts = live_prompts(runner_markers)
     items += [_verify_item(project_id, slug, number, held, m, runner_markers) for m in prompts]
     if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
             and node.get("authorAssociation") in verify_answer.TRUSTED and not prompts):
         items += [_review_item(project_id, slug, number, held, c)
-                  for c in review_criteria(acceptance_criteria(_body(node)))]
+                  for c in review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))]
     return sorted(items, key=lambda item: item["key"])
 
 

@@ -504,6 +504,7 @@ ALL_CHECKS = list(CHECKS.values())
 
 REVIEW_ISSUE = 1091
 R_STATE = ["api", f"repos/{SLUG}/issues/{REVIEW_ISSUE}"]
+R_COMMENTS = ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/{REVIEW_ISSUE}/comments?per_page=100"]
 HUMAN_LINE = "- [ ] [human] The card looks right"
 
 
@@ -759,11 +760,50 @@ class ReviewWriteTest(unittest.TestCase):
         self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
 
     def test_approve_ticks_exactly_that_criterion_as_the_owner(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
         self.reply(REVIEW_BODY)
         self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
         answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
-        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(REVIEW_TICKED)])
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
         self.assert_owner()
+
+    def test_an_open_code_criterion_of_a_held_issue_does_not_stop_the_approval(self):
+        body = review_body("- [ ] [code] A", "- [x] [code] B", HUMAN_LINE)
+        ticked = body.replace(HUMAN_LINE, "- [x] [human] The card looks right")
+        version = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(body)[2])
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.reply(body)
+        self.world.respond("gh", R_PATCH(ticked), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=version)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(ticked)])
+
+    def test_a_prompt_or_a_verify_check_that_arrived_after_the_card_stops_both_writes(self):
+        block = json.dumps({"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC3", "kind": "human"}]})
+        table = {
+            "a live runner prompt": [comment(C + 1, ask())],
+            "a verify block check for the criterion": [comment(C + 1, f"Held.\n\n```verify\n{block}\n```\n")],
+        }
+        for name, comments in table.items():
+            for word, note in (("passed", None), ("note", NOTE)):
+                with self.subTest(name, word=word):
+                    self.world.reset()
+                    self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
+                    self.reply(REVIEW_BODY)
+                    with self.assertRaises(answer.Refused) as caught:
+                        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, word, version=V3, note=note)
+                    self.assertEqual(str(caught.exception), answer.REVIEW_GONE)
+                    self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS])
+                    self.assertEqual(self.world.stored(), comments)
+
+    def test_a_stranger_comment_or_another_checks_block_does_not_stop_the_approval(self):
+        other = json.dumps({"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC9", "kind": "human"}]})
+        comments = [comment(C + 1, ask(), association="CONTRIBUTOR"),
+                    comment(C + 2, f"```verify\n{other}\n```\n")]
+        self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
+        self.reply(REVIEW_BODY)
+        self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
 
     def test_not_yet_posts_the_note_and_ticks_nothing(self):
         self.world.comment_store(SLUG, REVIEW_ISSUE, [])
@@ -814,10 +854,11 @@ class ReviewWriteTest(unittest.TestCase):
     def test_a_carriage_return_body_keeps_every_other_byte(self):
         crlf = REVIEW_BODY.replace("\n", "\r\n")
         ticked = REVIEW_TICKED.replace("\n", "\r\n")
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
         self.reply(crlf)
         self.world.respond("gh", R_PATCH(ticked), stdout="{}")
         answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
-        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(ticked)])
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(ticked)])
 
     def test_overlapping_approvals_of_different_criteria_both_stay_ticked(self):
         second = "- [ ] [human] The other card looks right"
@@ -841,7 +882,8 @@ class ReviewWriteTest(unittest.TestCase):
             current[0] = argv[-1][len("body="):]
 
         with mock.patch.object(answer.forge_api, "api_get", api_get), \
-                mock.patch.object(answer.forge_api, "run_gh", run_gh):
+                mock.patch.object(answer.forge_api, "run_gh", run_gh), \
+                mock.patch.object(answer.fm, "list_comments", lambda slug, issue: []):
             workers = [threading.Thread(target=answer.answer_criterion,
                                         args=(SLUG, REVIEW_ISSUE, i, "passed"), kwargs={"version": versions[i]})
                        for i in (2, 3)]
@@ -897,13 +939,25 @@ class ReviewAnswerRouteTest(unittest.TestCase):
         return [i["key"] for i in view_of(self.svc)["inbox"][section]]
 
     def test_approve_ticks_exactly_that_criterion_as_the_owner(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
         self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
         self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
         self.assertEqual(self.post(answer="passed"), (204, b""))
-        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(REVIEW_TICKED)])
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
         self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
         self.assertIn(self.item["key"], self.keys("answered"))
         self.assertEqual(view_of(self.svc)["statement"]["inbox_items"], 0)
+
+    def test_a_card_read_before_a_runner_prompt_arrived_writes_nothing(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [comment(C + 1, ask())])
+        self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
+        for extra in ({"answer": "passed"}, {"answer": "note", "note": NOTE}):
+            status, body = self.post(**extra)
+            self.assertEqual(status, 409)
+            self.assertIn(answer.REVIEW_GONE.encode(), body)
+        self.assertFalse(any("PATCH" in argv or "POST" in argv for argv in self.world.argvs("gh")))
+        self.assertEqual([c["id"] for c in self.world.stored()], [C + 1])
+        self.assertEqual(self.keys("open"), [self.item["key"]])
 
     def test_not_yet_posts_the_note_and_ticks_nothing(self):
         self.world.comment_store(SLUG, REVIEW_ISSUE, [])
