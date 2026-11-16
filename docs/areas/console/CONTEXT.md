@@ -113,6 +113,10 @@ _Avoid_: quota bar
 The one place that holds every account control and detail: opened from the capacity strip or the `a` key and closed with Escape, one row per account with its allowance details, the account it is signed in to, sign-in end and run status, and Exclude, Pin, Sign in and Remove, then Add account (ADR-console-002, ADR-console-023, ADR-console-024, ADR-console-025, ADR-console-026).
 _Avoid_: settings page, account menu
 
+**Activation line**:
+The one line at the head of the Work column when origin's integration branch carries a console change this host does not run, naming `just switch` and the checkout to run it in; it is not an inbox item and is not counted in the statement (ADR-console-043).
+_Avoid_: deploy banner, update notice
+
 **Sign-in state**:
 Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025). The reading also keeps the account name (address) the status command reports; the profile's row of the accounts panel shows it and flags two profiles on one account as "same account as <other>" (ADR-console-022, ADR-console-023).
 _Avoid_: login expiry

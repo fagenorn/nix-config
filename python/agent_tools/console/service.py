@@ -738,6 +738,17 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Activation (#1114): when the service is given an `activation_reader`, a thread, `ACTIVATION_THREAD`,
+started by `start()`, calls `poll_activation()` at once and then every `activation_seconds`
+(`ACTIVATION_SECONDS`, one minute). One poll calls the reader with the sorted roots of the registered
+projects, outside the ingest lock; the reading it returns (an `activation.Activation` or None) is kept
+in memory only, never logged, and handed to `derive_view` as `activation`; a reading equal to the last
+one publishes nothing. A reader that raises (the production reader raises `activation.ReadFailed` for
+a failed read) keeps the previous reading, publishes nothing and is one stderr line
+`console: activation_failed <Type>: <message>`; only a returned value replaces the reading. An
+exception escaping a poll is one stderr line `console: activation_poll_failed <Type>: <message>` and
+the loop goes on. Without a reader no thread starts and no line is shown.
+
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
 (`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_state(slug, number,
@@ -1154,7 +1165,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    activation, account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -1285,6 +1296,8 @@ SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
 TRACKER_THREAD = "console-tracker-poll"
+ACTIVATION_SECONDS = 60.0
+ACTIVATION_THREAD = "console-activation-poll"
 ADOPTION_SECONDS = 120.0
 ADOPTION_THREAD = "console-adoption-poll"
 RETENTION_SECONDS = 86400.0
@@ -2526,6 +2539,8 @@ class ConsoleService:
                  tracker: Callable[..., list[dict]] | None = None,
                  tracker_seconds: float = TRACKER_SECONDS,
                  adoption_seconds: float = ADOPTION_SECONDS,
+                 activation_reader: Callable[[Iterable[str]], activation.Activation | None] | None = None,
+                 activation_seconds: float = ACTIVATION_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
@@ -2656,6 +2671,10 @@ class ConsoleService:
         self._tracker_seconds = tracker_seconds
         self._adoption_seconds = adoption_seconds
         self._adoption_thread: threading.Thread | None = None
+        self._activation_reader = activation_reader
+        self._activation_seconds = activation_seconds
+        self._activation: activation.Activation | None = None
+        self._activation_thread: threading.Thread | None = None
         self._slug_of = slug_of
         self._branch_pattern_of = branch_pattern_of
         self._patterns: dict[str, str] = {}
@@ -2816,7 +2835,7 @@ class ConsoleService:
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
-            capacity=cap,
+            capacity=cap, activation=self._activation,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
@@ -5634,6 +5653,22 @@ class ConsoleService:
                     return
                 self._read_succeeded(project_id, items, generation)
 
+    def poll_activation(self) -> None:
+        """One activation reading over the registered roots; see the module docstring."""
+        if self._activation_reader is None:
+            return
+        with self._ingest:
+            roots = sorted(state.root for state in self._states.values())
+        try:
+            found = self._activation_reader(roots)
+        except Exception as error:
+            print(f"console: activation_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return
+        with self._ingest:
+            if found != self._activation:
+                self._activation = found
+                self._publish()
+
     def _read_failed(self, project_id: str, error: Exception) -> None:
         print(f"console: tracker_failed {project_id} {type(error).__name__}: {error}", file=sys.stderr)
         with self._ingest:
@@ -5836,6 +5871,16 @@ class ConsoleService:
             if self._stop.wait(self._tracker_seconds):
                 return
 
+    def _activate(self) -> None:
+        while True:
+            try:
+                self.poll_activation()
+            except Exception as error:
+                print(f"console: activation_poll_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            if self._stop.wait(self._activation_seconds):
+                return
+
     def _watch(self) -> None:
         while not self._stop.wait(self._poll_seconds):
             current = signature(self.registry)
@@ -5858,6 +5903,10 @@ class ConsoleService:
             self._tracker_thread = threading.Thread(
                 target=self._track, name=TRACKER_THREAD, daemon=True)
             self._tracker_thread.start()
+        if self._activation_reader is not None:
+            self._activation_thread = threading.Thread(
+                target=self._activate, name=ACTIVATION_THREAD, daemon=True)
+            self._activation_thread.start()
         if self._forge is not None:
             self._adoption_thread = threading.Thread(
                 target=self._adopt, name=ADOPTION_THREAD, daemon=True)
@@ -5894,6 +5943,8 @@ class ConsoleService:
             self._session_poller.join()
         if self._tracker_thread is not None:
             self._tracker_thread.join()
+        if self._activation_thread is not None:
+            self._activation_thread.join()
         if self._adoption_thread is not None:
             self._adoption_thread.join()
         if self._retention_thread is not None:
