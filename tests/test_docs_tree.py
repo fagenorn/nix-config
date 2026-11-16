@@ -394,6 +394,26 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, context)
 
+    def test_the_wait_signals_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/043-a-sprint-waiting-on-ci-a-committing-delivery-"
+                "or-a-release-step-reads-what-it-waits-for.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-043 — A sprint waiting on CI, a committing "
+                                "delivery or a release step reads what it waits for")
+        adr = self.doc(path)
+        for needle in ("#1110", "ADR-console-042", "ADR-console-032",
+                       "waiting for CI on its pull request", "a delivery is committing",
+                       "waiting for a release step", "attention_required",
+                       "movement_release_invalid"):
+            self.assertIn(needle, adr)
+        status = [line for line in (REPO_ROOT / "docs/areas/console/adr/042-a-sprint-reads-stuck-"
+                                    "only-when-nothing-it-reads-has-moved.md").read_text().splitlines()
+                  if line.startswith("- **Status:**")]
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-043"])
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("a delivery committing or a release step moves it", "ADR-console-043"):
+            self.assertIn(needle, context)
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
