@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1183: every registered project's folder trust reads true in ~/.claude.json and in every account profile.
+# verify-pending runs it from the repository root at the commit the block names, so
+# `python` below is that commit's agent_tools source. Exit 0 met, 1 not met.
+PYTHONPATH=python exec python3 -m agent_tools.console.folder_trust check-registered "$@"

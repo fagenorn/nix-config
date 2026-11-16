@@ -584,5 +584,84 @@ class CommandTest(unittest.TestCase):
             os.path.realpath(a)]["hasTrustDialogAccepted"], True)
 
 
+class CheckRegisteredTest(CommandTest):
+    """`folder-trust check-registered`: read-only, one JSON line, exit 0 only when all is trusted."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    WRAPPER = "home/common/verify-pending/checks/console-folder-trust"
+
+    def trusted(self, *keys: str) -> dict:
+        return {"projects": {key: {"hasTrustDialogAccepted": True} for key in keys}}
+
+    def snapshot(self, *paths: Path) -> dict:
+        found = {}
+        for path in paths:
+            status = path.stat()
+            found[path] = (status.st_ino, status.st_mtime_ns, path.read_bytes())
+        return found
+
+    def check(self) -> tuple[subprocess.CompletedProcess, dict]:
+        done = self.run_command("check-registered")
+        return done, (json.loads(done.stdout) if done.stdout else None)
+
+    def all_trusted(self) -> list[Path]:
+        keys = [os.path.realpath(self.repo("alpha")), os.path.realpath(self.repo("beta"))]
+        self.register(alpha=Path(keys[0]), beta=Path(keys[1]))
+        document = self.trusted(*keys)
+        (self.home / ".claude.json").write_text(json.dumps(document), encoding="utf-8")
+        return [self.home / ".claude.json", self.profile("solo", document),
+                self.profile("work", document)]
+
+    def test_check_registered_is_met_when_every_target_trusts_every_project(self):
+        files = self.all_trusted()
+        before = self.snapshot(*files)
+        done, report = self.check()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(report, {"status": "met", "projects": 2, "missing": []})
+        self.assertEqual(self.snapshot(*files), before)
+
+    def test_check_registered_names_each_missing_pair_and_writes_nothing(self):
+        alpha, beta = self.repo("alpha"), self.repo("beta")
+        self.register(alpha=alpha, beta=beta)
+        keys = [os.path.realpath(alpha), os.path.realpath(beta)]
+        solo = self.profile("solo", self.trusted(keys[1]))
+        work = self.profile("work", {"projects": {
+            keys[0]: {"hasTrustDialogAccepted": True},
+            keys[1]: {"hasTrustDialogAccepted": False}}})
+        (self.home / ".claude.json").unlink()
+        before = self.snapshot(solo, work)
+        done, report = self.check()
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(report, {"status": "not_met", "projects": 2, "missing": [
+            {"project": "alpha", "profile": "default"}, {"project": "alpha", "profile": "solo"},
+            {"project": "beta", "profile": "default"}, {"project": "beta", "profile": "work"}]})
+        self.assertFalse((self.home / ".claude.json").exists())
+        self.assertEqual(self.snapshot(solo, work), before)
+
+    def test_check_registered_fails_on_an_unreadable_or_absent_registry(self):
+        self.register(alpha=self.repo("alpha"))
+        path = self.home / ".agents/state/fleet/registry.json"
+        for label, damage in (("unreadable", lambda: path.write_text("{", encoding="utf-8")),
+                              ("absent", path.unlink)):
+            with self.subTest(label):
+                damage()
+                done, report = self.check()
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertEqual(report, {"status": "registry_unreadable", "projects": 0,
+                                          "missing": []})
+
+    def test_the_wrapper_is_committed_executable_and_runs_the_check(self):
+        self.all_trusted()
+        done = subprocess.run(
+            [str(self.ROOT / self.WRAPPER)], cwd=self.ROOT, env=self.env,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)["status"], "met")
+        staged = subprocess.run(
+            ["git", "-C", str(self.ROOT), "ls-files", "-s", self.WRAPPER],
+            capture_output=True, text=True, check=True).stdout
+        self.assertEqual(staged.split()[0], "100755")
+
+
 if __name__ == "__main__":
     unittest.main()
