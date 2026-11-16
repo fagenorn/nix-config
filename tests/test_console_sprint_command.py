@@ -11,18 +11,19 @@ import subprocess
 import sys
 import tomllib
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import manager, sprint, sprints
+from agent_tools.console import manager, service, sprint, sprints
 
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
 from .test_console_questions import Q0, Q1, ROUND_ANSWER
 from .test_console_reports import CHECKED, CLOSING, REPORT
+from .test_console_sprints import CLAIM, HEADS_UP
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -454,6 +455,221 @@ class SprintCommandTest(Case):
                 got = self.assert_unchanged(svc, lambda: self.withdraw(svc, sid, secret, *args))
                 self.assertEqual((got.returncode, got.stdout), (2, ""))
 
+    def secret_file(self, sid):
+        return self.store.parent / "sprint-secrets" / sid
+
+    def notice(self, svc, sid, notice):
+        return run_sprint("notice", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--notice-file", "-", "--port", self.port(svc),
+                          stdin=json.dumps(notice))
+
+    def notices(self, svc, sid):
+        return run_sprint("notices", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--port", self.port(svc))
+
+    def withdraw_notice(self, svc, sid, *args):
+        return run_sprint("withdraw-notice", "--sprint", sid,
+                          "--secret-file", self.secret_file(sid), *args, "--port", self.port(svc))
+
+    def notice_rows(self):
+        return [row for row in support.log_rows(self.store) if row[2] == "notice.posted"]
+
+    def test_notice_posts_and_another_sprint_of_the_project_lists_it(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        hand_off = {"kind": "hand-off", "text": "the exporter needs the new flag", "to": b}
+        for notice in (CLAIM, HEADS_UP, hand_off):
+            with self.subTest(kind=notice["kind"]):
+                got = self.notice(svc, a, notice)
+                seq = self.notice_rows()[-1][0]
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (0, f"sprint: notice {seq} posted\n", ""))
+        got = self.notices(svc, b)
+        self.assertEqual((got.returncode, got.stderr, got.stdout.count("\n")), (0, "", 1))
+        listed = json.loads(got.stdout)["notices"]
+        self.assertEqual([(n["kind"], n["text"]) for n in listed], [
+            ("claim", "the page fold"), ("heads-up", HEADS_UP["text"]),
+            ("hand-off", hand_off["text"])])
+        for n in listed:
+            self.assertEqual((n["sprint_id"], n["title"]), (a, "make the importer resumable"))
+
+    AGE = r"(just now|\d+ min ago)"
+    CLAIM_LINE = (r'- claim from "make the importer resumable", ' + AGE +
+                  r': the page fold \(what: python/agent_tools/console/page\.html; '
+                  r'until: the board fold lands\)')
+
+    def inbox(self, svc, sid):
+        return run_sprint("inbox", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--port", self.port(svc))
+
+    def status_with_secret(self, svc, sid):
+        return run_sprint("status", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--port", self.port(svc))
+
+    def test_inbox_and_status_print_another_sprints_open_claim(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        env = {manager.ID_ENV: b, manager.SECRET_ENV: self.secret_file(b).read_text()}
+        runs = {"inbox": self.inbox(svc, b), "status": self.status_with_secret(svc, b),
+                "status env": run_sprint("status", "--port", self.port(svc), env=env)}
+        for name, got in runs.items():
+            with self.subTest(name):
+                self.assertEqual((got.returncode, got.stderr), (0, ""))
+                lines = got.stdout.splitlines()
+                self.assertEqual(len(lines), 3)
+                self.assertEqual(lines[1], sprints.NOTICE_BLOCK_HEAD)
+                self.assertRegex(lines[2], self.CLAIM_LINE)
+                if name == "inbox":
+                    self.assertEqual(json.loads(lines[0]), {"messages": []})
+                else:
+                    self.assertEqual(json.loads(lines[0])["decision"], "none")
+
+    def test_inbox_and_status_print_no_block_without_another_sprints_notice(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        d = svc.state_goal("owner/p00", "make the importer resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        for sid in (a, d):
+            for got in (self.inbox(svc, sid), self.status_with_secret(svc, sid)):
+                self.assertEqual((got.returncode, len(got.stdout.splitlines())), (0, 1))
+        notice = self.notice_rows()[-1][0]
+        self.assertEqual(self.withdraw_notice(svc, a, "--notice", notice).returncode, 0)
+        for got in (self.inbox(svc, b), self.status_with_secret(svc, b)):
+            self.assertEqual((got.returncode, len(got.stdout.splitlines())), (0, 1))
+
+    def test_a_hand_off_is_for_you_in_its_addressees_block_and_plain_in_anothers(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        c = svc.state_goal("owner/p01", "make the checker resumable")
+        notice = {"kind": "hand-off", "text": "the exporter needs the new flag", "to": b}
+        self.assertEqual(self.notice(svc, a, notice).returncode, 0)
+        for read in (self.inbox, self.status_with_secret):
+            with self.subTest(read.__name__):
+                got = read(svc, b)
+                self.assertRegex(
+                    got.stdout.splitlines()[2],
+                    r'- hand-off for you from "make the importer resumable", ' + self.AGE
+                    + ": the exporter needs the new flag")
+                got = read(svc, c)
+                self.assertRegex(
+                    got.stdout.splitlines()[2],
+                    r'- hand-off from "make the importer resumable", ' + self.AGE
+                    + ": the exporter needs the new flag")
+                self.assertNotIn("for you", got.stdout)
+
+    def test_status_shows_the_block_only_with_the_sprints_own_secret(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        own = self.secret_file(b).read_text()
+        for env in (None, {manager.SECRET_ENV: own}, {manager.SECRET_ENV: "not the secret"}):
+            with self.subTest(env=env):
+                got = run_sprint("status", "--sprint", b, "--port", self.port(svc), env=env)
+                self.assertEqual((got.returncode, len(got.stdout.splitlines())), (0, 1))
+
+    def test_status_of_a_withdrawn_sprint_reads_no_secret_and_no_notices(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        text = self.secret_file(b).read_text()
+        svc.withdraw_goal("owner/p01", b)
+        port = self.port(svc)
+        for got in (run_sprint("status", "--port", port,
+                               env={manager.ID_ENV: b, manager.SECRET_ENV: text}),
+                    run_sprint("status", "--sprint", b, "--secret-file", self.secret_file(b),
+                               "--port", port)):
+            self.assertEqual((got.returncode, got.stderr), (0, ""))
+            self.assertEqual(len(got.stdout.splitlines()), 1)
+            self.assertEqual(json.loads(got.stdout)["decision"], "withdrawn")
+
+    def test_inbox_reads_the_notices_before_the_messages(self):
+        paths = []
+
+        def fake(port, method, path, body=None, headers=None):
+            paths.append(path)
+            if path == service.NOTICES_PATH:
+                raise sprint.Refused("sprint: refused 403: secret refused")
+            return '{"messages":[]}'
+
+        with mock.patch.object(sprint, "ask", side_effect=fake), \
+                mock.patch.dict(os.environ, {manager.ID_ENV: "a" * 16, manager.SECRET_ENV: "s"}), \
+                redirect_stderr(StringIO()):
+            code = sprint.main(["inbox"])
+        self.assertEqual((code, paths), (1, [service.NOTICES_PATH]))
+
+    def test_after_the_first_sprint_closes_notices_lists_nothing(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.sent(svc, a)
+        got = self.page(svc, APPROVE, {"project_id": "owner/p01", "sprint_id": a, "version": 1})
+        self.assertEqual(got[0], 204)
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        self.assertEqual(len(json.loads(self.notices(svc, b).stdout)["notices"]), 1)
+        got = run_sprint("close", "--sprint", a, "--secret-file", self.secret_file(a),
+                         "--closing-file", "-", "--port", self.port(svc),
+                         stdin=json.dumps(CLOSING))
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual(json.loads(self.notices(svc, b).stdout), {"notices": []})
+
+    def test_a_sprint_of_another_project_never_sees_the_notice(self):
+        svc = self.open()
+        a = self.goal(svc)
+        c = svc.state_goal("owner/p00", "make the importer resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        self.assertEqual(json.loads(self.notices(svc, c).stdout), {"notices": []})
+
+    def test_withdraw_notice_removes_its_own_and_refuses_anothers_or_an_ended_one(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        n1 = self.notice_rows()[-1][0]
+        self.assertEqual(self.notice(svc, b, HEADS_UP).returncode, 0)
+        n2 = self.notice_rows()[-1][0]
+        got = self.withdraw_notice(svc, a, "--notice", n1)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, f"sprint: notice {n1} withdrawn\n", ""))
+        self.assertEqual([n["id"] for n in json.loads(self.notices(svc, b).stdout)["notices"]],
+                         [n2])
+        got = self.assert_unchanged(svc, lambda: self.withdraw_notice(svc, a, "--notice", n1))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 409: this notice has ended\n"))
+        got = self.assert_unchanged(svc, lambda: self.withdraw_notice(svc, a, "--notice", n2))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 409: this notice belongs to another sprint\n"))
+        for args in (("--notice", "0"), ("--notice", "x"), ()):
+            with self.subTest(args=args):
+                got = self.assert_unchanged(svc, lambda: self.withdraw_notice(svc, a, *args))
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+
+    def test_notice_refusals_exit_1_and_bad_input_exits_2(self):
+        svc = self.open()
+        a = self.goal(svc)
+        got = self.assert_unchanged(svc, lambda: self.notice(
+            svc, a, {**HEADS_UP, "text": "x" * 281}))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: the notice's text is over 280 characters\n"))
+        port = self.port(svc)
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "notice", "--sprint", a, "--secret-file", self.secret_file(a),
+            "--notice-file", "-", "--port", port, stdin="[]"))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertTrue(got.stderr.startswith(
+            "sprint: cannot read -: the notice is not a JSON object"), got.stderr)
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "notice", "--sprint", a, "--notice-file", "-", "--port", port,
+            stdin=json.dumps(HEADS_UP)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", (
+            "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n")))
+
     def test_ask_sends_a_replaces_mark_and_the_owner_sees_one_card(self):
         svc = self.open()
         sid = self.goal(svc)
@@ -783,8 +999,65 @@ class ManagerContractTest(unittest.TestCase):
                 with self.subTest(heading=heading, needle=needle):
                     self.assertIn(needle, section)
 
+    def test_the_contract_says_a_refused_merge_goes_in_the_status_line_and_is_never_a_question(self):
+        text = run_sprint("contract").stdout
+        reporting = " ".join(text.partition("## Reporting\n")[2].partition("\n## ")[0].split())
+        questions = " ".join(text.partition("## Questions\n")[2].partition("\n## ")[0].split())
+        for needle in (
+            "send a report at once whose `status` starts with `merge refused: ` followed by"
+            " the guard's reason in plain words",
+            "Never send a `sprint ask` question about it and never list its issue in `inbox`",
+            "Keep that start on each later report while the merge stays refused, because a"
+            " report without it clears the line",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, reporting)
+        self.assertIn("A merge the guard refuses is not a real choice: report it as Reporting"
+                      " says and ask nothing about it.", questions)
+        self.assertEqual(
+            sprints.refused_reason("merge refused: required checks are not green"),
+            "required checks are not green")
+
     def test_the_report_help_names_its_optional_pictures(self):
         self.assertIn("pictures:", run_sprint("report", "--help").stdout)
+
+    def test_the_contract_says_how_to_post_list_and_withdraw_a_notice(self):
+        text = " ".join(CONTRACT.read_text().split())
+        self.assertIn("## Notices", text)
+        self.assertLess(text.index("## Questions"), text.index("## Notices"))
+        self.assertLess(text.index("## Notices"), text.index("## Ending"))
+        section = text.partition("## Notices")[2].partition(" ## ")[0]
+        for needle in ("sprint notice --notice-file -", "sprint notices",
+                       "sprint withdraw-notice --notice <id>", "`claim`", "`heads-up`",
+                       "`hand-off`", "280 characters", "200 characters", "140 characters",
+                       "at most 5 open notices", "never approval"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+
+    def test_the_contract_says_to_check_claims_ask_on_an_overlap_and_never_take_a_notice_as_permission(self):
+        text = " ".join(CONTRACT.read_text().split())
+
+        def section(name):
+            return text.partition("## " + name)[2].partition(" ## ")[0]
+
+        wanted = {
+            "Notices": ("Check each slice against the open claims of other sprints",
+                        "send the owner a question card with `sprint ask` naming the overlap",
+                        "never the owner's permission or approval",
+                        "Post a `claim`", "a `heads-up` before", "a `hand-off` when",
+                        "Withdraw a notice", "as soon as it no longer holds",
+                        "`hand-off for you`", "Your own notices are left out",
+                        "Open notices of the other sprints of this project"),
+            "Every turn": ("open notices",),
+            "After approval": ("open claim",),
+            "Drafting the brief": ("the text after the first `The goal: ` in your first prompt "
+                                   "that is not on a line beginning with `- `",),
+        }
+        for name, needles in wanted.items():
+            for needle in needles:
+                with self.subTest(name, needle=needle):
+                    self.assertIn(needle, section(name))
+        self.assertEqual(text.count("## Notices"), 1)
 
     def test_contract_sends_no_request(self):
         out = StringIO()
@@ -922,7 +1195,9 @@ class CommandContractTest(unittest.TestCase):
                      "POST /api/ask", "chosen", "round or reply file",
                      '"context": "<optional, at most 400 characters>"',
                      "six parts, `title` first", "sprint withdraw-question",
-                     "POST /api/withdraw-question", "--index", "replaces"):
+                     "POST /api/withdraw-question", "--index", "replaces",
+                     "sprints.notice_block",
+                     "sprint status [--sprint <id>] [--secret-file <path>] [--port N]"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 

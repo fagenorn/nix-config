@@ -1,19 +1,22 @@
 """The console's inbox reader (#859): owner-action markers into inbox items, and the local activity reading."""
 
 import copy
+import hashlib
 import json
 import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
-from agent_tools.console import inbox
+from agent_tools.console import inbox, pictures
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .console_test_support import JPEG, PIXEL, WIDE
 
 SLUG, PROJECT = "octo/widgets", "widgets"
 HOLDER = "h1/b1"
@@ -232,7 +235,7 @@ class VerifyPromptTableTest(unittest.TestCase):
                 self.assertEqual({k: v for k, v in item.items() if k != "version"},
                                  expected(n, C1 + n, reason, kind=kind, answers=answers, paid=paid,
                                           confirm=confirm, detail=detail, answered=answered,
-                                          question=question, check_id=check_id, held_work=1))
+                                          question=question, check_id=check_id, reading="", held_work=1))
         self.assertEqual(json.loads(json.dumps(items)), items)
 
     def test_an_issue_lists_the_open_issues_it_blocks_in_its_own_repository(self):
@@ -345,6 +348,47 @@ class AskHeadingTest(unittest.TestCase):
                 self.assertEqual(heading(body), want)
 
 
+def reading_item(body):
+    return read(page([issue_node(7, [comment_node(C1, body)])]))[0]
+
+
+class ReadingTest(unittest.TestCase):
+    def test_a_reading_check_carries_its_instruction_apart(self):
+        item = reading_item(asked("Is the idle draw under 40 W? Reading: the watts on the plug meter after five idle minutes."))
+        self.assertEqual(item["question"], "Is the idle draw under 40 W?")
+        self.assertEqual(item["check_id"], "AC1")
+        self.assertEqual(item["reading"], "the watts on the plug meter after five idle minutes.")
+        self.assertEqual(item["detail"], "")
+
+    def test_text_around_the_reading_stays_in_the_detail(self):
+        item = reading_item(asked("Is the idle draw under 40 W? Wait five minutes. Reading:   the  watts on the meter"))
+        self.assertEqual(item["reading"], "the watts on the meter")
+        self.assertEqual(item["detail"], "Wait five minutes.")
+
+    def test_an_ask_without_a_reading_reads_empty(self):
+        item = reading_item(ask())
+        self.assertEqual((item["reading"], item["detail"]), ("", ""))
+
+    def test_only_a_manual_check_is_read(self):
+        item = reading_item(decision(extra="Reading: the meter\n\n" + DECISION_BOXES))
+        self.assertEqual((item["reading"], item["detail"]), ("", "Reading: the meter"))
+
+    def test_a_reading_inside_a_fence_is_not_read(self):
+        body = verify_body("verify-ask", {"host": "mbp"}, SENTENCES["verify-ask"],
+                           "```\nReading: x\n```\n\n" + ASK_BOXES)
+        item = reading_item(body)
+        self.assertEqual(item["reading"], "")
+        self.assertIn("Reading: x", item["detail"])
+
+    def test_an_empty_reading_is_no_reading(self):
+        item = reading_item(asked("Is it on? Reading:"))
+        self.assertEqual((item["reading"], item["detail"]), ("", "Reading:"))
+
+    def test_only_the_first_reading_is_taken(self):
+        item = reading_item(asked("Is it on? Reading: the lamp\nReading: the fan"))
+        self.assertEqual((item["reading"], item["detail"]), ("the lamp", "Reading: the fan"))
+
+
 class NoVerifyItemTest(unittest.TestCase):
     def test_prompts_that_do_not_need_the_owner_raise_no_item(self):
         no_block = fm.render("owner-action", {"reason": "verify-ask", "check": "0"}, "x.", ASK_BOXES)
@@ -363,6 +407,162 @@ class NoVerifyItemTest(unittest.TestCase):
         comments = [comment_node(C1, ask()), comment_node(C1 + 1, fm.end_body(C1, "answered"), "COLLABORATOR")]
         items = read(page([issue_node(7, comments)]))
         self.assertEqual([i["kind"] for i in items], ["manual-check"])
+
+
+class PromptPictureTest(unittest.TestCase):
+    """The pictures a verification prompt names (#1112): anchored opening under the allowed roots."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(os.path.realpath(tmp.name))
+        self.root, self.screens, self.outside = base / "root", base / "screens", base / "outside"
+        for directory in (self.root, self.root / "shots", self.screens, self.outside):
+            directory.mkdir()
+        self.pictures_dir = base / "console" / "pictures"
+
+    def check(self, detail):
+        return {"question": "Do these read well?", "detail": detail, "reading": "", "check_id": "AC1",
+                "reason": "verify-ask", "version": "v"}
+
+    def ids(self, data):
+        return hashlib.sha256(data).hexdigest()
+
+    def attach(self, detail, roots=None):
+        roots = [self.root, self.screens] if roots is None else roots
+        return inbox.attach_pictures(self.check(detail), roots, self.pictures_dir, home=self.root)
+
+    def stored(self, data):
+        return pictures.read(self.pictures_dir, self.ids(data))
+
+    def test_named_pngs_in_a_named_folder_become_pictures_with_their_file_names(self):
+        (self.root / "shots" / "before.png").write_bytes(PIXEL)
+        (self.root / "shots" / "after.png").write_bytes(WIDE)
+        got = self.attach("Screenshots in shots/: before.png and after.png.")
+        self.assertEqual(got["pictures"], [{"id": self.ids(PIXEL), "line": "before.png", "pair": None},
+                                           {"id": self.ids(WIDE), "line": "after.png", "pair": None}])
+        self.assertEqual(got["missing_pictures"], [])
+        self.assertEqual(self.stored(PIXEL), PIXEL)
+
+    def test_an_absolute_and_a_home_path_resolve(self):
+        (self.root / "shots" / "before.png").write_bytes(PIXEL)
+        (self.root / "shots" / "after.png").write_bytes(WIDE)
+        got = self.attach(f"{self.root / 'shots' / 'before.png'} and `~/shots/after.png`")
+        self.assertEqual([p["id"] for p in got["pictures"]], [self.ids(PIXEL), self.ids(WIDE)])
+
+    def test_a_folder_named_alone_lists_its_pngs_by_name(self):
+        for name in ("b.png", "a.png", "c.PNG", "notes.txt"):
+            (self.root / "shots" / name).write_bytes(PIXEL)
+        got = self.attach("See shots/ for the pictures.")
+        self.assertEqual([p["line"] for p in got["pictures"]], ["a.png", "b.png", "c.PNG"])
+
+    def test_a_missing_named_png_is_a_missing_line(self):
+        got = self.attach("shots/ gone.png")
+        self.assertEqual(got["pictures"], [])
+        self.assertEqual(got["missing_pictures"], ["gone.png"])
+
+    def test_a_png_outside_the_roots_is_not_served(self):
+        (self.outside / "x.png").write_bytes(PIXEL)
+        got = self.attach(str(self.outside / "x.png"))
+        self.assertEqual(got["pictures"], [])
+        self.assertEqual(got["missing_pictures"], [])
+        self.assertIsNone(self.stored(PIXEL))
+
+    def test_a_symlink_out_of_a_root_is_not_served(self):
+        (self.outside / "x.png").write_bytes(PIXEL)
+        (self.root / "link.png").symlink_to(self.outside / "x.png")
+        got = self.attach("link.png")
+        self.assertEqual(got["pictures"], [])
+        self.assertEqual(got["missing_pictures"], [])
+        self.assertIsNone(self.stored(PIXEL))
+
+    def test_a_png_named_file_that_is_not_a_png_is_not_served(self):
+        (self.root / "fake.png").write_bytes(JPEG)
+        got = self.attach("fake.png")
+        self.assertEqual(got["pictures"], [])
+        self.assertIsNone(self.stored(JPEG))
+
+    def test_a_configured_screenshot_location_is_a_root(self):
+        (self.screens / "s.png").write_bytes(WIDE)
+        detail = str(self.screens / "s.png")
+        got = self.attach(detail)
+        self.assertEqual([p["line"] for p in got["pictures"]], ["s.png"])
+        self.assertEqual(self.attach(detail, roots=[self.root])["pictures"], [])
+
+    def test_a_file_over_the_size_limit_is_not_served(self):
+        (self.root / "big.png").write_bytes(PIXEL[:33] + b"\0" * pictures.MAX_BYTES)
+        self.assertEqual(self.attach("big.png")["pictures"], [])
+
+    def test_at_most_eight_pictures_and_eight_missing_lines(self):
+        for i in range(10):
+            (self.root / "shots" / f"p{i}.png").write_bytes(PIXEL[:33] + bytes([i]))
+        self.assertEqual(len(self.attach("shots/")["pictures"]), 8)
+        for i in range(10):
+            (self.root / "shots" / f"p{i}.png").unlink()
+        got = self.attach("shots/ " + " ".join(f"m{i}.png" for i in range(10)))
+        self.assertEqual(len(got["missing_pictures"]), 8)
+
+    def test_the_result_is_the_same_on_every_call_and_the_item_is_not_changed(self):
+        (self.root / "shots" / "before.png").write_bytes(PIXEL)
+        item = self.check("shots/ before.png gone.png")
+        roots = [self.root, self.screens]
+        first = inbox.attach_pictures(item, roots, self.pictures_dir, home=self.root)
+        second = inbox.attach_pictures(item, roots, self.pictures_dir, home=self.root)
+        self.assertEqual(first, second)
+        self.assertNotIn("pictures", item)
+
+    def test_a_url_is_not_a_folder(self):
+        (self.root / "shots" / "before.png").write_bytes(PIXEL)
+        got = self.attach("see https://github.com/octo/widgets/pull/1 and shots/before.png")
+        self.assertEqual(len(got["pictures"]), 1)
+        self.assertEqual(inbox.named_pictures("see https://x.org/a.png")[1], [])
+        self.assertEqual(inbox.named_pictures("see https://github.com/octo/widgets/pull/1"), ([], []))
+        self.assertEqual(inbox.named_pictures("see https://x.org/a.png"), ([], []))
+
+    def test_an_ancestor_swapped_for_a_symlink_after_the_check_is_not_followed(self):
+        (self.outside / "before.png").write_bytes(PIXEL)
+        (self.root / "shots").rmdir()
+        (self.root / "shots").symlink_to(self.outside)
+        with mock.patch("os.path.realpath",
+                        side_effect=lambda p, *a, **k: os.path.normpath(os.path.abspath(p))):
+            got = self.attach("shots/before.png")
+        self.assertEqual(got["pictures"], [])
+        self.assertEqual(got["missing_pictures"], [])
+        self.assertIsNone(self.stored(PIXEL))
+        self.assertEqual(list(self.pictures_dir.glob("*")) if self.pictures_dir.exists() else [], [])
+
+    def test_a_long_file_name_is_cut_to_140_characters(self):
+        name = "a" * 150 + ".png"
+        (self.root / "shots" / name).write_bytes(PIXEL)
+        self.assertEqual(self.attach("shots/")["pictures"][0]["line"], name[:140])
+
+    def test_a_path_is_listed_once(self):
+        (self.root / "shots" / "before.png").write_bytes(PIXEL)
+        got = self.attach("shots/before.png and ~/shots/before.png and shots/")
+        self.assertEqual(got["pictures"], [{"id": self.ids(PIXEL), "line": "before.png", "pair": None}])
+
+
+    def test_a_source_file_named_as_a_folder_does_not_hide_a_png_under_the_root(self):
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.py").write_text("x")
+        (self.root / "shot.png").write_bytes(PIXEL)
+        got = self.attach("Changed src/app.py; see shot.png")
+        self.assertEqual(got["pictures"], [{"id": self.ids(PIXEL), "line": "shot.png", "pair": None}])
+        self.assertEqual(got["missing_pictures"], [])
+
+    def test_a_png_under_a_source_file_and_nowhere_else_is_missing(self):
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.py").write_text("x")
+        got = self.attach("Changed src/app.py; see shot.png")
+        self.assertEqual(got["pictures"], [])
+        self.assertEqual(got["missing_pictures"], ["shot.png"])
+
+    def test_a_parent_folder_is_listed_after_a_listed_subfolder(self):
+        (self.root / "shots" / "sub").mkdir()
+        (self.root / "shots" / "sub" / "a.png").write_bytes(PIXEL)
+        (self.root / "shots" / "b.png").write_bytes(WIDE)
+        got = self.attach("shots/sub/ shots/")
+        self.assertEqual([p["line"] for p in got["pictures"]], ["a.png", "b.png"])
 
 
 class ReadTest(unittest.TestCase):

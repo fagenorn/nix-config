@@ -338,11 +338,16 @@ is `REGISTER_SENTENCE`. Without `trust_items` the view is unchanged.
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
-"sprints": [<sprint entry>, ...]}, "outside_sprints": <line>}`; a group entry is
+"sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
+"notices": [<notice entry>, ...]}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
+    <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
+                      "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
+                      "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
+                      "to_text": "<text>" | null, "at": "<time>"}
     <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
@@ -432,7 +437,7 @@ never from the `deliveries` mapping: a run leaves that mapping once its final re
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
 report's issues or its `inbox` numbers, plus the sprint's open questions. An open owner check (a
-verification prompt, ADR-console-044) whose `blocking` list meets none of the sprint's open issues
+verification prompt, ADR-console-049) whose `blocking` list meets none of the sprint's open issues
 (report issues not landed, held, dropped or closed out) is not counted and is listed in `checks`
 instead; a missing or malformed `blocking` counts as blocking. `checks` is ordered by
 `waiting_since` then `key`, and each check stays an inbox item.
@@ -464,13 +469,15 @@ a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owne
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else the stage phrase, `NOW_STAGE_TEXT`:
-the leading stage, its issue count, the total and the report's whole milestone (just the milestone
-when the report names no issue), prefixed by `NOW_QUIET_TEXT` when the ball is `nobody`. The
+wait, `NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+(`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
+`NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
+(just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
+ball is `nobody`. The
 leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
 `REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common
-remaining stage. The sentence is never the status line and never shortened (the page holds it to
-two lines).
+remaining stage. The sentence is never the status line but for a merge refusal, and never
+shortened (the page holds it to two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
@@ -521,6 +528,16 @@ the sprint's title with one and `NEW_REPLIES_TEXT` over the count with more. A r
 `statement`: it is not an inbox item, and a later look clears `new` with no other write.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
+Every project entry, quiet ones and those inside a quiet group too, carries `notices`: the open
+notices (`open_notices`, so never a withdrawn or an ended one) of every sprint the view is given for
+that project, its drafted and its finished sprints, newest first by descending `id` across all of
+them, `[]` when none is open. `poster` is the posting sprint's title, `kind_text` is
+`NOTICE_KIND_TEXT` of the kind, `what` is a claim's `what` and else null, `until_text` is
+`NOTICE_UNTIL_TEXT` over a claim's `until` and else null, and `to_text` is null unless the notice
+is a hand-off: then `NOTICE_OWNER_TEXT` when it is to the owner, `NOTICE_FOR_TEXT` over the title
+of the target when it is to a sprint in the given sprints, else `NOTICE_OTHER_TEXT`. `at` is the
+notice's own time, unchanged: the page ages it with its own clock. A notice is never an inbox item
+and changes no count, headline, sentence or `stale` (#1119).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -583,6 +600,7 @@ from agent_tools.console.sprints import (
     NO_PROGRESS_TEXT,
     NUDGE_ACTION_TEXT,
     NONE,
+    NOTICE_OWNER,
     NOT_PICKED_UP,
     NOT_PICKED_UP_TEXT,
     NOW_ANSWER_TEXT,
@@ -594,6 +612,7 @@ from agent_tools.console.sprints import (
     NOW_QUESTION_TEXT,
     NOW_QUIET_TEXT,
     NOW_QUOTA_TEXT,
+    NOW_REFUSED_TEXT,
     NOW_STAGE_TEXT,
     NOW_STALLED_TEXT,
     NOW_STARTING_TEXT,
@@ -641,8 +660,10 @@ from agent_tools.console.sprints import (
     ended_at,
     goal_title,
     manager_status,
+    merge_refused,
     message_state,
     open_questions,
+    open_notices,
     progress_text,
     sprint_title,
     unreachable,
@@ -660,6 +681,11 @@ OUTSIDE_LABEL = "Outside sprints"
 CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
 UNMANAGED_LABEL = "Not yet managed"
+NOTICE_KIND_TEXT = {"claim": "claims", "heads-up": "heads-up", "hand-off": "hand-off"}
+NOTICE_UNTIL_TEXT = "until {until}"
+NOTICE_OWNER_TEXT = "for you"
+NOTICE_FOR_TEXT = "for {title}"
+NOTICE_OTHER_TEXT = "for another sprint"
 
 _RANK = {state: rank for rank, state in enumerate(
     (WAITING_ANSWER, WAITING_PERMISSION, WORKING, LIMIT, IDLE))}
@@ -940,7 +966,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 
 def owner_check(item: Mapping) -> bool:
-    """Whether a tracker item is a verification owner prompt (ADR-console-044)."""
+    """Whether a tracker item is a verification owner prompt (ADR-console-049)."""
     return item.get("reason") in verify_owner.REASONS
 
 
@@ -960,7 +986,7 @@ def _sprint_named(state: SprintState, records: Iterable[InboxRecord]) -> list[In
 
 
 def sprint_checks(state: SprintState, records: Iterable[InboxRecord]) -> list[InboxRecord]:
-    """The sprint's open owner checks that block none of its open issues (ADR-console-044), ordered
+    """The sprint's open owner checks that block none of its open issues (ADR-console-049), ordered
     by `waiting_since` then `key`. A `blocking` that is missing or not a list counts as blocking."""
     open_issues = sprint_open_issues(state)
     checks = [r for r in _sprint_named(state, records)
@@ -1112,7 +1138,9 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_QUOTA_TEXT
     if report is None:
         return NOW_STARTING_TEXT
-    phrase = _stage_phrase(stages, report.milestone)
+    reason = merge_refused(state)
+    phrase = (NOW_REFUSED_TEXT.format(reason=reason) if reason is not None
+              else _stage_phrase(stages, report.milestone))
     return NOW_QUIET_TEXT.format(phrase=phrase) if ball == BALL_NOBODY else phrase
 
 
@@ -1262,7 +1290,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    records: Sequence[InboxRecord] = (),
                    finished: Sequence[SprintState] = (),
                    capacity: Mapping = EMPTY,
-                   nudges: bool = True, looked: str | None = None) -> dict:
+                   nudges: bool = True, looked: str | None = None,
+                   notices: Sequence[Mapping] = ()) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked) for s in group]
@@ -1279,7 +1308,33 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                              {"label": FINISHED_LABEL, "count": len(finished),
                               "sprints": entries(finished)}),
         "outside_sprints": _line(sessions, deliveries, now_ms),
+        "notices": [dict(n) for n in notices],
     }
+
+
+def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
+    if to == NOTICE_OWNER:
+        return NOTICE_OWNER_TEXT
+    if to in titles:
+        return NOTICE_FOR_TEXT.format(title=titles[to])
+    return NOTICE_OTHER_TEXT
+
+
+def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str]) -> list[dict]:
+    """The open notices of `group`'s sprints as page entries, newest first."""
+    found = [(n, s) for s in group for n in open_notices(s)]
+    return [{
+        "id": n.notice_id,
+        "sprint_id": s.sprint_id,
+        "poster": titles[s.sprint_id],
+        "kind": n.kind,
+        "kind_text": NOTICE_KIND_TEXT[n.kind],
+        "text": n.text,
+        "what": n.what if n.kind == "claim" else None,
+        "until_text": (NOTICE_UNTIL_TEXT.format(until=n.until) if n.kind == "claim" else None),
+        "to_text": (_notice_to_text(n.to, titles) if n.kind == "hand-off" else None),
+        "at": n.at,
+    } for n, s in sorted(found, key=lambda pair: -pair[0].notice_id)]
 
 
 def _sentence(count: int, adopting: bool = False) -> str:
@@ -1565,6 +1620,10 @@ def derive_view(
                 in_sprint[sprint.sprint_id] = mine
                 owned[project_id] = [s for s in owned[project_id] if s.name != name]
 
+    titles = {s.sprint_id: sprint_title(s) for s in (sprints or {}).values()}
+    notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles)
+               for pid in registered}
+
     def is_active(state: ProjectState) -> bool:
         return (state.open_work > 0 or bool(owned.get(state.project_id))
                 or state.project_id in drafted)
@@ -1577,11 +1636,13 @@ def derive_view(
     entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
                               drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()),
-                              finished.get(s.project_id, ()), capacity, nudges, looked)
+                              finished.get(s.project_id, ()), capacity, nudges, looked,
+                              notices=notices[s.project_id])
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
-                                    nudges=nudges, looked=looked)
+                                    nudges=nudges, looked=looked,
+                                    notices=notices[s.project_id])
                      for s in quiet]
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],

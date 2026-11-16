@@ -1,4 +1,4 @@
-# ADR-console-044 — An owner check that blocks none of a sprint's open issues is a check line, not waiting on you
+# ADR-console-049 — An owner check that blocks none of a sprint's open issues is a check line, not waiting on you
 
 - **Status:** accepted
 - **Decided in:** #1111

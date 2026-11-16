@@ -12,8 +12,8 @@ from agent_tools.console import service, sprints
 from agent_tools.console.deliveries import QUIET_AFTER_MS, IssueStage
 from agent_tools.console.sprints import (
     BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DECISION_TEXT, NOW_DRAFTING_TEXT,
-    NOW_NO_PROGRESS_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_STALLED_TEXT,
-    NOW_STARTING_TEXT, NOW_STOPPING_TEXT, Question)
+    NOW_NO_PROGRESS_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_REFUSED_TEXT, NOW_STALLED_TEXT,
+    NOW_STARTING_TEXT, NOW_STOPPING_TEXT, Question, refused_reason)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -153,6 +153,24 @@ class ReportRouteTest(Case):
             [m["sentence"] for m in digest["recent"] + digest["earlier"]
              if m["sentence"].startswith(prefix)],
             [f"{prefix} done: {PARTS['title']}"])
+
+    def test_a_refused_merge_reads_in_the_sprints_line_and_once_in_the_digest(self):
+        svc = self.open()
+        sid = self.started(svc)
+        refused = {**REPORT, "status": "merge refused: required checks are not green",
+                   "inbox": []}
+        for _ in range(2):
+            self.assertEqual(self.report(svc, sid, self.secret(sid), refused)[0], 200)
+        view = view_of(svc)
+        shown = next(s for e in view["entries"] for s in e["sprints"] if s["sprint_id"] == sid)
+        self.assertEqual(shown["now_text"], "merge refused: required checks are not green")
+        self.assertNotEqual(shown["ball"], "owner")
+        digest = view["digest"]
+        self.assertEqual(
+            [m["sentence"] for m in digest["recent"] + digest["earlier"]
+             if m["sentence"] == f"A merge in {PARTS['title']} was refused: "
+                                 "required checks are not green"],
+            [f"A merge in {PARTS['title']} was refused: required checks are not green"])
 
     def test_a_report_survives_a_restart(self):
         svc = self.open()
@@ -425,3 +443,62 @@ class SprintBallViewTest(unittest.TestCase):
                 shown = self.shown(s, T0_MS + MIN)
                 self.assertEqual((shown["ball"], shown["ball_text"], shown["now_text"]),
                                  (None, None, None))
+
+
+class MergeRefusedViewTest(unittest.TestCase):
+    REFUSAL = "merge refused: required checks are not green"
+
+    def shown(self, state, now_ms, *sessions, **extra):
+        return entry(line(state, now_ms, sessions=list(sessions), **extra))
+
+    def test_a_refused_merge_reads_merge_refused_with_its_reason_and_the_ball_off_owner(self):
+        s = reported(with_manager(started(A)), T0_MS, status=self.REFUSAL)
+        shown = self.shown(s, T0_MS + MIN)
+        self.assertEqual(shown["now_text"], "merge refused: required checks are not green")
+        self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
+        self.assertNotEqual(shown["ball"], "owner")
+        self.assertEqual(shown["waiting"], 0)
+        self.assertEqual(shown["state_text"], "on track")
+        self.assertEqual(shown["status"], self.REFUSAL)
+
+    def test_a_later_report_without_the_refusal_clears_the_sentence(self):
+        refused = reported(started(A), T0_MS, status=self.REFUSAL)
+        later = reported(refused, T0_MS + MIN)
+        self.assertEqual(self.shown(refused, T0_MS + MIN)["now_text"], self.REFUSAL)
+        self.assertEqual(self.shown(later, T0_MS + 2 * MIN)["now_text"],
+                         "building 1 of 7: Importer resumes")
+
+    def test_a_run_that_closes_out_never_clears_the_refusal(self):
+        refused = reported(started(A), T0_MS, status=self.REFUSAL)
+        building = observed(refused, T0_MS + MIN, IssueStage(4, "building"))
+        closed_out = observed(refused, T0_MS + MIN, IssueStage(4, "done"))
+        self.assertEqual(self.shown(building, T0_MS + 2 * MIN)["now_text"], self.REFUSAL)
+        self.assertEqual(self.shown(closed_out, T0_MS + 2 * MIN)["now_text"], self.REFUSAL)
+
+    def test_the_refusal_marker_is_case_blind_and_needs_a_reason_at_the_start(self):
+        table = (
+            ("Merge refused: the pull request is behind its base",
+             "merge refused: the pull request is behind its base"),
+            ("MERGE REFUSED:   checks are red", "merge refused: checks are red"),
+            ("merge refused:", "building 1 of 7: Importer resumes"),
+            ("two slices building, merge refused: checks are red",
+             "building 1 of 7: Importer resumes"),
+        )
+        for status, now_text in table:
+            with self.subTest(status=status):
+                s = reported(started(A), T0_MS, status=status)
+                self.assertEqual(self.shown(s, T0_MS + MIN)["now_text"], now_text)
+        self.assertEqual(refused_reason("merge refused:  checks are red"), "checks are red")
+        self.assertIsNone(refused_reason("merge refused:"))
+        self.assertEqual(NOW_REFUSED_TEXT, "merge refused: {reason}")
+
+    def test_a_quiet_refusal_takes_the_last_seen_prefix_and_never_hides_an_owner_wait(self):
+        s = reported(with_manager(started(A)), T0_MS, status=self.REFUSAL)
+        shown = self.shown(s, PAST, manager_session("idle"))
+        self.assertEqual(shown["ball"], "nobody")
+        self.assertEqual(shown["now_text"], "last seen " + self.REFUSAL)
+        q = Question(1, 0, iso(T0_MS), False, "Which store should the checkpoint use?",
+                     "the first slice", ("the database", "a file"), "the database")
+        shown = self.shown(dataclasses.replace(s, questions=(q,)), T0_MS + MIN)
+        self.assertEqual((shown["ball"], shown["now_text"]), (
+            "owner", "waiting for your answer: Which store should the checkpoint use?"))

@@ -40,7 +40,12 @@ Event kinds read:
   `view.sprint_state`; the open inbox items counted as the page counts them, no clock read) differ
   from the ones before the report (the ball is read with no clock, which always reads moving, so a
   report never names a sprint quiet or nothing running); a refused, ignored or words-repeating
-  report says nothing.
+  report says nothing. The same row also makes a `merge_refused` moment when its `sprint_id` is a
+  str present in the fold before and after it, `sprints.merge_refused` of the sprint after it is
+  not None and differs from the one before it (#1115): an identical repeat says nothing, whatever
+  run observation was folded between the two reports (the refusal reads none), the same reason after
+  a clearing report speaks again, and a different reason speaks. When one row makes both, the
+  `sprint_state` moment comes first; both carry the row's `seq` and `at`.
 - `question.answered` (`event_log.QUESTION_ANSWERED`, `sprints.py`): the owner answered a manager's
   question. It speaks only when its `differs` is `True`, so an answer that took the recommendation
   says nothing, and nothing else about a round (asking it, answering the others) speaks, a round
@@ -99,6 +104,7 @@ withdrawal removes the sprint).
     brief_sent       A brief for <project_id> arrived, version <n>: <title>
     brief_approved   The brief for <project_id> was approved, version <n>: <title>
     sprint_state     The sprint for <project_id> changed to <its ball words, or its state once ended>: <title>
+    merge_refused    A merge in <title> was refused: <reason>
     question_withdrawn The manager of <title> took back a question: <question>
     question_replaced  The manager of <title> replaced a question: <the replaced question's ask>
                        (`The manager of <title> replaced <n> questions` when n > 1 were replaced)
@@ -149,7 +155,8 @@ from agent_tools.console.event_log import (
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import (
-    BALL_TEXT, MANAGER_SESSION_NAME, SprintState, goal_title, sprint_states, sprint_title)
+    BALL_TEXT, MANAGER_SESSION_NAME, SprintState, goal_title, merge_refused, sprint_states,
+    sprint_title)
 from agent_tools.console.view import (
     INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
     sprint_ball, sprint_state, sprint_waiting)
@@ -168,6 +175,7 @@ SPRINT_WITHDRAWN = "sprint_withdrawn"
 BRIEF_SENT_MOMENT = "brief_sent"
 BRIEF_APPROVED_MOMENT = "brief_approved"
 SPRINT_STATE_MOMENT = "sprint_state"
+MERGE_REFUSED_MOMENT = "merge_refused"
 ANSWER_DIFFERS = "answer_differs"
 SPRINT_DONE_MOMENT = "sprint_done"
 MANAGER_RESTARTED = "manager_restarted"
@@ -370,6 +378,18 @@ def _report_moment(event: Event, before: Mapping[str, SprintState],
             f"The sprint for {event.project} changed to {now}: {sprint_title(new)}")
 
 
+def _refusal_moment(event: Event, before: Mapping[str, SprintState],
+                    after: Mapping[str, SprintState]) -> tuple[str, str] | None:
+    sprint_id = event.payload.get("sprint_id")
+    if not isinstance(sprint_id, str) or sprint_id not in after or sprint_id not in before:
+        return None
+    reason = merge_refused(after[sprint_id])
+    if reason is None or reason == merge_refused(before[sprint_id]):
+        return None
+    return (MERGE_REFUSED_MOMENT,
+            f"A merge in {sprint_title(after[sprint_id])} was refused: {reason}")
+
+
 def _shown_words(state: SprintState, waiting: int) -> str:
     """The words a sprint's block shows: its ball words, or its state's once it has ended. The clock
     is not read, so a sprint going quiet is never a change."""
@@ -438,6 +458,10 @@ def moments(
                         f"The sprint for {event.project} was dropped: {title}")
         if event.kind == SPRINT_REPORTED:
             said = _report_moment(event, previous, folded, held)
+            refusal = _refusal_moment(event, previous, folded)
+            if said is not None:
+                found.append(Moment(event.seq, event.at, said[0], said[1]))
+            said = refusal
         elif event.kind == SPRINT_CLOSED:
             said = _closing_moment(event, previous, folded)
         if said is not None:

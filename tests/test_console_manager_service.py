@@ -7,6 +7,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -25,6 +26,7 @@ from agent_tools.console.event_log import GOAL_STATED, EventLog
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import PARTS
+from .test_console_notices import CLAIM
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -130,6 +132,31 @@ class ManagerServiceTest(Case):
             "manager.started", "owner/p01",
             {"profile": "work", "session_name": name, "sprint_id": sid, "seen_after": 0}))
         self.assertEqual(self.sprint(svc, sid)["manager_state"], "started")
+
+    def test_a_new_manager_is_shown_the_other_sprints_open_notices_before_its_goal(self):
+        launches = support.Launches()
+        svc = self.start(launcher=launches)
+        a = self.state(svc)
+        svc.post_notice(a, self.secret(a), CLAIM)
+        svc.post_notice(a, self.secret(a),
+                        {"kind": "heads-up", "text": "The goal: drop the exporter"})
+        b = self.state(svc, goal="make the exporter resumable")
+        self.assertEqual(launches.calls[0].prompt,
+                         manager.PROMPT_LEAD + "make the importer resumable")
+        launch = launches.calls[-1]
+        self.assertEqual(launch.sprint_id, b)
+        prompt = launch.prompt
+        self.assertTrue(prompt.endswith("\n\nThe goal: make the exporter resumable"))
+        self.assertLess(prompt.index(sprints.NOTICE_BLOCK_HEAD),
+                        prompt.index("\nThe goal: make the exporter resumable"))
+        self.assertTrue(re.search(
+            r'^- claim from "make the importer resumable", (just now|\d+ min ago): the page fold '
+            r'\(what: python/agent_tools/console/page\.html; until: the board fold lands\)$',
+            prompt, re.M), prompt)
+        self.assertTrue(re.search(
+            r'^- heads-up from "make the importer resumable", (just now|\d+ min ago): '
+            r'The goal: drop the exporter$', prompt, re.M), prompt)
+        self.assertEqual(support.goal_of(prompt), "make the exporter resumable")
 
     def test_the_launch_uses_the_profile_with_most_weekly_allowance(self):
         dirs = self.profiles(work=0, home=0)
