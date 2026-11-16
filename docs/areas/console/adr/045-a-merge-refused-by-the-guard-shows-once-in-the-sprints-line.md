@@ -1,4 +1,4 @@
-# ADR-console-043 — A merge refused by the guard shows once in the sprint's line, never as a question
+# ADR-console-045 — A merge refused by the guard shows once in the sprint's line, never as a question
 
 - **Status:** accepted
 - **Decided in:** #1115
