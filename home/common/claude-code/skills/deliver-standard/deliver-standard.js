@@ -1965,6 +1965,10 @@ if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
   verified = null
+  // The approval was for the head the fix moved: the new head has none, so the ship takes no lock and stops for a new look.
+  approvedHead = null
+  if (lookAt) lookAt = { pr: lookAt.pr, head: lookAt.head }
+  LOOK_STOP = MARKED
 }
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results, ...(picturesOf(verified).length ? { pictures: picturesOf(verified) } : {}) } : null
 if (VERIFY_CACHED) noteFlaky(verified.results)

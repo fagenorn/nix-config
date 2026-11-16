@@ -10437,6 +10437,17 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual([c["agentType"] for c in calls if c["label"] == "look-fix-review"], ["reviewer"])
         self.assertNotIn("merge", got)
 
+    def test_changes_on_an_approved_cont_takes_no_lock_and_stops_at_the_new_head(self):
+        patch = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})
+        result, calls = run(args=dict(ARGS, cont=self.approved_cont(), look={"answer": "changes", "words": "make the label bold"}), patch=patch)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], F)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": F})
+        self.assertIn("look-pr", got)
+        for lock_step in ("pr", "land-unlock", "merge"):
+            self.assertNotIn(lock_step, got)
+
     def test_a_changes_round_whose_review_finds_a_defect_stops_without_a_second_round(self):
         patch = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})
         finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "still plain", "failing_input": "x"}]}
