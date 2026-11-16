@@ -294,7 +294,12 @@ over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `
 fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after
 stripping), `LINE_TOO_LONG` (over `MAX_PICTURE_LINE_CHARS`), `PICTURE_MEMBER` for `line` again (a
 line break, or over `MAX_LINE_CHARS`) and `PICTURE_MEMBER` for `pair` (present and not in `PAIRS`);
-after the loop `PAIR_TWICE` for the first `pair` given twice. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
+after the loop `PAIR_TWICE` for the first `pair` given twice, then (#1092) `LOOK_WITHOUT_PICTURE`
+for a question that has no picture while its ask or context matches `LOOK_WORDS` (the word
+screenshot or screenshots in any case, also written "screen shot", a `.png` file or a folder with a
+`screenshots` segment), naming the question's number and ask; a round read back from the log
+(`limits=False`) and a check with `files_withheld=True` (the service's dry run, whose round has its
+`file` members left out) skip it. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
 name the service's refusals of a picture it does not hold or another sprint sent. With
 `limits=False` the three limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a
 `question` or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a
@@ -549,6 +554,9 @@ PICTURE_SHAPE = "question {n} picture {m} is not an object of picture, line and 
 PICTURE_MEMBER = "question {n} picture {m} has no valid {member}"
 LINE_TOO_LONG = f"question {{n}} picture {{m}}'s line is over {MAX_PICTURE_LINE_CHARS} characters"
 PAIR_TWICE = "question {n} marks two pictures {pair}"
+LOOK_WITHOUT_PICTURE = ('question {n} "{ask}" names screenshots, a PNG file or a screenshots '
+                        "folder but attaches no picture: attach the pictures with pictures, or "
+                        "reword it")
 PICTURE_UNKNOWN = "question {n} picture {m} is not known"
 PICTURE_FOREIGN = "question {n} picture {m} was sent by another sprint"
 TITLE_TOO_LONG = f"the brief's title is at most {MAX_TITLE_CHARS} characters"
@@ -1015,7 +1023,13 @@ def checked_report(report: dict) -> dict:
             "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
 
 
-def _checked_question(n: int, question: object, limits: bool) -> dict:
+# A question about look or layout (#1092): the word screenshot or screenshots (also "screen shot"),
+# a `.png` file, or a folder with a `screenshots` segment, which the word's boundary also matches.
+LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/\\]|$)",
+                        re.IGNORECASE)
+
+
+def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
                                                                 "pictures"}:
@@ -1053,6 +1067,9 @@ def _checked_question(n: int, question: object, limits: bool) -> dict:
     if not isinstance(recommended, str) or recommended.strip() not in stripped:
         raise Refused(NO_RECOMMENDATION.format(n=n))
     pictures = _checked_pictures(n, question["pictures"], limits) if "pictures" in question else []
+    if (limits and not files_withheld and not pictures
+            and any(LOOK_WORDS.search(part) for part in (text, context) if part)):
+        raise Refused(LOOK_WITHOUT_PICTURE.format(n=n, ask=text.strip()))
     checked = {"question": text.strip(), "blocks": blocks.strip(), "options": stripped,
                "recommended": recommended.strip()}
     if "context" in question:
@@ -1104,7 +1121,7 @@ def round_pictures(checked: dict) -> list[str]:
     return ids
 
 
-def checked_round(round_: dict, *, limits: bool = True) -> dict:
+def checked_round(round_: dict, *, limits: bool = True, files_withheld: bool = False) -> dict:
     questions = round_.get("questions")
     if not isinstance(questions, list) or not questions:
         raise Refused(NO_QUESTIONS)
@@ -1114,7 +1131,7 @@ def checked_round(round_: dict, *, limits: bool = True) -> dict:
     if not isinstance(blocker, bool):
         raise Refused(BAD_BLOCKER)
     return {"blocker": blocker,
-            "questions": [_checked_question(n, question, limits)
+            "questions": [_checked_question(n, question, limits, files_withheld)
                           for n, question in enumerate(questions, 1)]}
 
 
