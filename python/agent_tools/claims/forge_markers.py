@@ -19,7 +19,7 @@ when it is not itself an `end` marker, carries no `released` field and no `end` 
 same listing names it, so a delayed edit that rewrites an older body can drop a field but can
 never bring an ended marker back.
 
-Ref primitives (issue 629): `read_ref`, `matching_refs`, `create_ref`, `commit_parent`, `repo_node_id`, `default_branch` and `cas_ref`, a
+Ref primitives (issue 629): `read_ref`, `matching_refs`, `create_ref`, `try_create_ref`, `commit_parent`, `repo_node_id`, `default_branch` and `cas_ref`, a
 compare-and-swap through the GraphQL `updateRefs` mutation with `force: true` (the oid pair is
 the guard; an `after` of `ZERO_OID` deletes). Any CAS error, timeout or lie is "not done": the
 caller re-reads the ref to learn what happened and keeps the returned `ForgeError` (its code and
@@ -300,6 +300,20 @@ def create_ref(slug: str, ref: str, sha: str) -> bool:
     status, _ = forge_api.run_gh(["api", "-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref={ref}",
                                   "-f", f"sha={sha}"], allow=(422,))
     return status == 0
+
+
+def try_create_ref(slug: str, ref: str, sha: str) -> ForgeError | None:
+    """Create the ref at `sha`: None when created, else the forge's failure (a refusal's reason kept).
+
+    Like `cas_ref`, a `gh_timeout` or `gh_failed` is returned, not raised, so the caller re-reads the
+    ref to learn whether the write applied; `gh_missing` raises."""
+    try:
+        forge_api.run_gh(["api", "-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref={ref}", "-f", f"sha={sha}"])
+    except ForgeError as error:
+        if error.code in ("gh_timeout", "gh_failed"):
+            return error
+        raise
+    return None
 
 
 def commit_parent(slug: str, sha: str) -> str | None:
