@@ -1960,6 +1960,12 @@ function checkPictures(node, item) {
 function readingLine(item) {
   return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
 }
+// ADR-console-046: the reading is the first thing under the question, before the pictures that illustrate it and the answer box.
+function checkHead(node, item) {
+  const reading = readingLine(item);
+  if (reading !== null) node.appendChild(reading);
+  checkPictures(node, item);
+}
 function headLine(item) {
   const line = el("p", "head meta");
   line.appendChild(kindWords(item));
@@ -2979,8 +2985,6 @@ function checkBox(item, state, lead) {
       box.appendChild(heldLine(item));
       act.appendChild(detailFold(item));
     }
-    const reading = readingLine(item);
-    if (reading !== null) box.appendChild(reading);
     box.appendChild(act);
     return box;
   };
@@ -3062,7 +3066,7 @@ function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
-  if (isOwnerCheck(item)) checkPictures(card, item);
+  if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -3104,7 +3108,7 @@ function itemLine(item) {
     head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
     line.appendChild(head);
   }
-  if (isOwnerCheck(item)) checkPictures(line, item);
+  if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);

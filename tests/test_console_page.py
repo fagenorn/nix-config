@@ -7995,16 +7995,6 @@ class PageCheckPictureTest(unittest.TestCase):
         self.assertEqual(full(line), "gone.png was not found on this host.")
         self.assertEqual(with_class(lead, "pic-img"), [])
 
-    def test_a_reading_shows_above_the_answers(self) -> None:
-        read = {**PIC_CHECK, "reading": "the watts on the plug meter"}
-        (snap,) = render([START, {"frame": frame([read])}, {"snapshot": True}])
-        (reading,) = with_class(lead_of(snap), "reading")
-        self.assertEqual(full(reading), "Reading: the watts on the plug meter")
-        (box,) = [n for n in nodes(snap["inbox"]) if has_class(n, "abox")]
-        kids = box["children"]
-        self.assertLess(next(i for i, c in enumerate(kids) if c is reading),
-                        next(i for i, c in enumerate(kids) if has_class(c, "act")))
-
     def test_an_open_viewer_closes_when_the_checks_picture_file_changes(self) -> None:
         swapped = {**PIC_CHECK, "pictures": [{"id": C, "line": "before-1440.png", "pair": None},
                                              {"id": B, "line": "after-1440.png", "pair": None}]}
@@ -8087,6 +8077,46 @@ class PageCheckCaptionTest(unittest.TestCase):
         (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
         self.assertEqual(with_class(lead_of(snap), "pic-pair"), [])
         self.assertEqual(with_class(lead_of(snap), "pic-label"), [])
+
+
+READ_CHECK = {**PIC_CHECK, "reading": "the watts on the plug meter", "missing_pictures": ["gone.png"]}
+
+
+def index_of(kids: list, cls: str) -> int:
+    return next(i for i, c in enumerate(kids) if has_class(c, cls))
+
+
+class PageCheckReadingTest(unittest.TestCase):
+    def test_the_reading_sits_directly_under_the_question_on_the_lead_card(self) -> None:
+        (snap,) = render([START, {"frame": frame([READ_CHECK])}, {"snapshot": True}])
+        kids = lead_of(snap)["children"]
+        q = index_of(kids, "q")
+        self.assertTrue(has_class(kids[q + 1], "reading"))
+        self.assertEqual(full(kids[q + 1]), "Reading: the watts on the plug meter")
+        self.assertLess(q + 1, index_of(kids, "pics"))
+        self.assertLess(index_of(kids, "pics"), index_of(kids, "pic-missing"))
+        self.assertLess(index_of(kids, "pic-missing"), index_of(kids, "abox"))
+        self.assertEqual(len(with_class(lead_of(snap), "reading")), 1)
+        box = kids[index_of(kids, "abox")]
+        self.assertEqual(with_class(box, "reading"), [])
+        self.assertTrue(with_class(box, "note-text"))
+
+    def test_a_reading_without_pictures_still_follows_the_question(self) -> None:
+        bare = {**READ_CHECK, "pictures": [], "missing_pictures": []}
+        (snap,) = render([START, {"frame": frame([bare])}, {"snapshot": True}])
+        kids = lead_of(snap)["children"]
+        q = index_of(kids, "q")
+        self.assertTrue(has_class(kids[q + 1], "reading"))
+        self.assertLess(q + 1, index_of(kids, "abox"))
+
+    def test_a_check_row_reads_its_reading_right_after_its_head(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE, READ_CHECK])}, {"snapshot": True}])
+        (row,) = [r for r in rows_of(snap) if with_class(r, "reading")]
+        kids = row["children"]
+        h = index_of(kids, "row-head")
+        self.assertTrue(has_class(kids[h + 1], "reading"))
+        self.assertLess(h + 1, index_of(kids, "pics"))
+        self.assertEqual(with_class(kids[index_of(kids, "abox")], "reading"), [])
 
 
 class LapsedResetPageTest(unittest.TestCase):
