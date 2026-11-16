@@ -84,6 +84,8 @@ for exactly that payload (`plan_id` null for a registration with none, a failed 
 #1030) is not in `KEPT_KINDS`.
 `TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved, #1078, `folder_trust.granted_row`)
 is not in `KEPT_KINDS`.
+`PICTURE_STORED` (`picture.stored`, one per picture a manager sent that the console accepted, #1089)
+is not in `KEPT_KINDS`.
 
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
@@ -158,6 +160,7 @@ REGISTRATION_CANCELLED = "registration.cancelled"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
+PICTURE_STORED = "picture.stored"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the two question kinds, the closing kind, the

@@ -1353,7 +1353,7 @@ class TrustGrantTest(ApproveCase):
 
 
 class CancelAfterApplyTest(CancelChecks, ApproveCase):
-    """Cancel registration of a plan ready to apply, or whose apply failed (#1088, ADR-console-036)."""
+    """Cancel registration of a plan ready to apply, or whose apply failed (#1088, ADR-console-037)."""
 
     CHECK = "/api/trust-check"
 

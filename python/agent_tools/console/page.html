@@ -393,7 +393,7 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-036). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
+// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
 function pathWords(node, text) {
   const value = String(text);
   if (!value.includes("/")) {

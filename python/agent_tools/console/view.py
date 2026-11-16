@@ -186,7 +186,7 @@ contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row h
 null; `draft_more` is the counted line for the shown settings outside the main ones
 (`contract_draft.more_line`), null when there are none or no draft. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
 page offers (`approve`, `retry` or null); with an adoption the `lines` are `[]`, `draft` and `draft_more` are
-null, and the `line` is the adoption's headline, then its note (ADR-console-036).
+null, and the `line` is the adoption's headline, then its note (ADR-console-037).
 The member is the entry given, copied, under three rules (#1085, ADR-console-035). It is null when
 the given entry is null, or is `done` and its `root` is the root of a registered project: the
 project's entry and the digest say so, and a finished result of a root now registered has nothing

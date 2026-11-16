@@ -821,7 +821,7 @@ class CancelChecks:
 
 
 class RegisterCancelTest(CancelChecks, Case):
-    """Cancel registration of a plan or a failure that was never applied (#1088, ADR-console-036)."""
+    """Cancel registration of a plan or a failure that was never applied (#1088, ADR-console-037)."""
 
     FAILED = RegisterFailureCardTest.FAILED
 

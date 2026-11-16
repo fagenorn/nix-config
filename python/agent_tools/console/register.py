@@ -110,7 +110,7 @@ the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, va
 `parse_confirm_request` takes `TRY_VALUE` as a third choice. `NOT_WAITING` is the text of
 a confirmation for a root that is not the waiting one.
 
-Cancel (#1088, ADR-console-036). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
+Cancel (#1088, ADR-console-037). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
 plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
 None when a valid cancel row names the folded row's root and plan id (a cancel naming another, or
 malformed, changes nothing; a later `registration.ended` row starts a new registration).
