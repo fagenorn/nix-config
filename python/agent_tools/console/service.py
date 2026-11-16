@@ -625,7 +625,7 @@ folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_spr
 nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
 writer; a refusal appends and publishes nothing.
 
-Owner notice nudges (#1120, ADR-console-051, D6): with a nudger, `post_owner_notice` records, still under the
+Owner notice nudges (#1120, ADR-console-052, D6): with a nudger, `post_owner_notice` records, still under the
 lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
 and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
 dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
@@ -643,7 +643,7 @@ nothing folds it. A notice nudge is never retried after its own attempt, counts 
 `last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
 reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
 
-Owner notices (#1120, ADR-console-051): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
+Owner notices (#1120, ADR-console-052): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
 `MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
 `MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
 read (no or a foreign `Origin` is 403 `origin refused`, a missing or wrong token 403 `token refused`,

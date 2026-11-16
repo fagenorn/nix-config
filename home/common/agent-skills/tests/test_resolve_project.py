@@ -408,11 +408,13 @@ class SchemaTwoContractTest(ResolverTestCase):
 
 
 class SnapshotShapeTest(ResolverTestCase):
-    def test_resolve_returns_exactly_five_top_level_members(self):
+    def test_resolve_returns_exactly_six_top_level_members(self):
         code, snap, err = self.resolve(self.make_root())
         self.assertEqual(code, 0, err)
         self.assertEqual(
-            sorted(snap), ["bindings", "capabilities", "project", "release", "schema_version"])
+            sorted(snap),
+            ["bindings", "capabilities", "production", "project", "release", "schema_version"])
+        self.assertEqual(snap["production"], {"status": "not_declared"})
         self.assertEqual(sorted(snap["release"]), ["targets"])
         self.assertEqual(snap["schema_version"], 2)
         self.assertEqual(sorted(snap["project"]), ["id", "name", "root"])
@@ -1037,6 +1039,17 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(orchestration["attempt_budget_minutes"], 240)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
+    def test_the_repositorys_own_contract_declares_its_production_rules(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out)["production"], {
+            "status": "declared",
+            "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+            "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+            "release_profile": "github-release",
+        })
+
     def test_nix_activate_is_exact_and_the_snapshot_has_no_deploy(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
         code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
@@ -1371,8 +1384,8 @@ class ReleaseMemberTest(ResolverTestCase):
             "profile": "forge-target", "adapter": "github-forge",
             "target": self.REPOSITORY, "operations": []}]})
         self.assertEqual(snap["capabilities"]["release"], self.UNSUPPORTED)
-        self.assertEqual(sorted(snap), ["bindings", "capabilities", "project", "release",
-                                        "schema_version"])
+        self.assertEqual(sorted(snap), ["bindings", "capabilities", "production", "project",
+                                        "release", "schema_version"])
 
     def test_a_publication_free_profile_needs_no_adapter_executable(self):
         snap = self.snapshot(self.declaring(forge_target=publication_free_profile()),
@@ -2301,6 +2314,142 @@ class RequiredChecksTest(ResolverTestCase):
         self.assertEqual(error["repair_id"], "contract.vcs.member_unexpected")
         self.assertEqual([v["pointer"] for v in error["violations"]],
                          ["/bindings/vcs/merge/required_check"])
+
+
+class ProductionRulesTest(ResolverTestCase):
+    """#1148: the optional `production` member and the snapshot's derived one."""
+
+    VALID = {
+        "none": False,
+        "changes": {"commands": ["nix-activate"],
+                    "key_files": ["hosts/*", "flake.lock"],
+                    "mcp_tools": ["mcp__deploy__promote"]},
+        "read_only": {"commands": ["nix-build"],
+                      "mcp_tools": ["mcp__deploy__status"]},
+        "release_profile": "github-release",
+    }
+
+    def contract_with(self, production):
+        contract = source_contract()
+        contract["production"] = copy.deepcopy(production)
+        return contract
+
+    def test_an_absent_section_resolves_as_not_declared(self):
+        code, snap, err = self.resolve(self.make_root(source_contract()))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["production"], {"status": "not_declared"})
+
+    def test_a_no_production_declaration_resolves_as_none(self):
+        code, snap, err = self.resolve(self.make_root(self.contract_with({"none": True})))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["production"], {"status": "none"})
+        self.assertNotEqual(snap["production"], {"status": "not_declared"})
+
+    def test_a_declared_section_resolves_and_the_snapshot_carries_it_verbatim(self):
+        code, snap, err = self.resolve(self.make_root(self.contract_with(self.VALID)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["production"], {
+            "status": "declared",
+            "changes": self.VALID["changes"],
+            "read_only": self.VALID["read_only"],
+            "release_profile": "github-release"})
+
+    def test_no_production_beside_rules_is_refused(self):
+        production = {"none": True, "changes": self.VALID["changes"],
+                      "release_profile": "github-release"}
+        code, payload, _ = self.resolve(self.make_root(self.contract_with(production)))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/production/changes", "/production/release_profile"])
+        self.assertEqual(error["repair_id"], "contract.production.none_with_rules")
+
+    def valid_with(self, mutate):
+        production = copy.deepcopy(self.VALID)
+        replaced = mutate(production)
+        return production if replaced is None else replaced
+
+    def refusals(self):
+        def set_path(path, value):
+            def mutate(production):
+                target = production
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+            return mutate
+
+        def delete(path):
+            def mutate(production):
+                target = production
+                for key in path[:-1]:
+                    target = target[key]
+                del target[path[-1]]
+            return mutate
+
+        empty = {"commands": [], "key_files": [], "mcp_tools": []}
+        return (
+            (lambda p: [], "/production", "contract.production.not_object"),
+            (delete(("none",)), "/production/none", "contract.production.member_missing"),
+            (set_path(("none",), "no"), "/production/none",
+             "contract.production.not_boolean"),
+            (delete(("read_only",)), "/production/read_only",
+             "contract.production.member_missing"),
+            (set_path(("owner",), "x"), "/production/owner",
+             "contract.production.member_unexpected"),
+            (set_path(("changes", "commands"), ["nix-deploy"]),
+             "/production/changes/commands/0", "contract.production.unknown_command_id"),
+            (set_path(("changes",), empty), "/production/changes",
+             "contract.production.no_change_route"),
+            (set_path(("changes", "key_files"), "hosts/*"),
+             "/production/changes/key_files", "contract.production.not_list"),
+            (set_path(("changes", "key_files"), ["../etc/*"]),
+             "/production/changes/key_files/0", "contract.production.unsafe_path"),
+            (set_path(("changes", "key_files"), ["hosts//*"]),
+             "/production/changes/key_files/0", "contract.production.noncanonical_path"),
+            (set_path(("changes", "mcp_tools"), ["deploy.promote"]),
+             "/production/changes/mcp_tools/0", "contract.production.not_mcp_tool"),
+            (set_path(("changes", "mcp_tools"), ["mcp__claude_ai_Claude_Docs"]),
+             "/production/changes/mcp_tools/0", "contract.production.not_mcp_tool"),
+            (set_path(("changes", "mcp_tools"), ["mcp__deploy__promote\n"]),
+             "/production/changes/mcp_tools/0", "contract.production.not_mcp_tool"),
+            (set_path(("read_only", "mcp_tools"), ["mcp__deploy__promote\n"]),
+             "/production/read_only/mcp_tools/0", "contract.production.not_mcp_tool"),
+            (set_path(("read_only", "commands"), ["nix-activate"]),
+             "/production/read_only/commands/0", "contract.production.route_both_ways"),
+            (set_path(("read_only", "mcp_tools"), ["mcp__deploy__promote"]),
+             "/production/read_only/mcp_tools/0", "contract.production.route_both_ways"),
+            (set_path(("read_only", "commands"), ["status"]),
+             "/production/read_only/commands/0", "contract.production.unknown_command_id"),
+            (set_path(("release_profile",), "fly-deploy"), "/production/release_profile",
+             "contract.production.unknown_release_profile"),
+            (set_path(("release_profile",), ""), "/production/release_profile",
+             "contract.production.not_string"),
+        )
+
+    def test_each_malformed_section_is_refused_with_its_named_violation(self):
+        for mutate, pointer, repair_id in self.refusals():
+            with self.subTest(pointer=pointer, repair_id=repair_id):
+                contract = self.contract_with(self.valid_with(mutate))
+                code, payload, _ = self.resolve(self.make_root(contract))
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertIn(pointer, [v["pointer"] for v in error["violations"]])
+                self.assertEqual(error["repair_id"], repair_id)
+        with self.subTest(release="unsupported"):
+            contract = self.contract_with(self.VALID)
+            contract["release"] = "unsupported"
+            code, payload, _ = self.resolve(self.make_root(contract))
+            error = self.assert_refusal(code, payload, "invalid_contract")
+            self.assertIn("/production/release_profile",
+                          [v["pointer"] for v in error["violations"]])
+            self.assertEqual(error["repair_id"],
+                             "contract.production.unknown_release_profile")
+
+    def test_a_malformed_release_adds_no_release_profile_violation(self):
+        contract = self.contract_with(self.VALID)
+        contract["release"] = {"profiles": []}
+        code, payload, _ = self.resolve(self.make_root(contract))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertNotIn("/production/release_profile",
+                         [v["pointer"] for v in error["violations"]])
 
 
 class PublicResolveTest(InProcessTestCase):

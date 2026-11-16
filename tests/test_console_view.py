@@ -861,6 +861,7 @@ def decision_prompt(extra):
 
 def held_node(number, comments):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": 0},
+            "blocking": {"totalCount": 0, "nodes": []},
             "comments": {"totalCount": len(comments), "nodes": comments}}
 
 
@@ -1277,6 +1278,18 @@ def open_item(pid, key, issue, answered=False):
     return InboxRecord({**item(pid, key, answered=answered), "issue": issue}, "t1", "u1")
 
 
+CHECK_Q = "Do the before and after pictures read well?"
+MISSING = object()
+HELD_SPRINT = reported(started(A), R, issues=((12, "building"), (13, "landed"), (30, "held")))
+
+
+def check_item(pid, key, issue, blocking=(), answered=False):
+    return InboxRecord({
+        **item(pid, key, answered=answered), "issue": issue, "reason": "verify-ask",
+        "kind": "manual-check", "question": CHECK_Q, "answers": ["passed", "failed", "note"],
+        **({} if blocking is MISSING else {"blocking": blocking})}, "t1", "u1")
+
+
 NAME = "p00 sprint " + A
 U = "2026-11-13T09:30:00+00:00"
 
@@ -1414,6 +1427,76 @@ class SprintReportViewTest(unittest.TestCase):
         shown = entry(line(it, R + 4 * MIN, records, [state("p00", 1), state("p01", 2)]))
         self.assertEqual((shown["state"], shown["state_text"]), ("waiting", "waiting on you (2)"))
         self.assertEqual(shown["waiting"], 2)
+
+    def test_a_held_check_that_blocks_no_open_issue_leaves_the_ball_with_the_manager(self):
+        for blocking in ([], [99], [13], [30]):
+            with self.subTest(blocking=blocking):
+                records = {("p00", "k1"): check_item("p00", "k1", 30, blocking)}
+                shown = entry(line(HELD_SPRINT, R + 4 * MIN, records))
+                self.assertEqual((shown["ball"], shown["ball_text"]),
+                                 ("manager", "manager working"))
+                self.assertEqual(shown["now_text"], "building 1 of 3: Importer resumes")
+                self.assertEqual(shown["waiting"], 0)
+                self.assertEqual(shown["state"], "on_track")
+
+    def test_a_held_check_is_a_check_line_and_still_an_inbox_item(self):
+        records = {("p00", "k1"): check_item("p00", "k1", 30, [])}
+        view = line(HELD_SPRINT, R + 4 * MIN, records)
+        self.assertEqual(entry(view)["checks"], [{
+            "project_id": "p00", "key": "k1", "issue": 30, "question": CHECK_Q,
+            "text": "Your check: " + CHECK_Q}])
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        self.assertEqual(view["statement"]["headline"], "1 thing needs you")
+        self.assertEqual([e["key"] for e in view["inbox"]["open"]], ["k1"])
+
+    def test_a_check_whose_issue_blocks_an_open_issue_of_the_sprint_keeps_the_ball_with_the_owner(
+            self):
+        queued = reported(started(A), R, issues=((12, "building"), (14, "queued"), (30, "held")))
+        for sprint_state, blocking in ((HELD_SPRINT, [12]), (queued, [14])):
+            with self.subTest(blocking=blocking):
+                records = {("p00", "k1"): check_item("p00", "k1", 30, blocking)}
+                shown = entry(line(sprint_state, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["now_text"], "waiting for your decision on the tracker")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["state"], "waiting")
+                self.assertEqual(shown["checks"], [])
+
+    def test_a_check_on_an_open_issue_of_the_sprint_keeps_the_ball_with_the_owner(self):
+        for stage in ("building", "verifying", "queued"):
+            with self.subTest(stage=stage):
+                sprint_state = reported(started(A), R, issues=((12, stage),))
+                records = {("p00", "k1"): check_item("p00", "k1", 12, [])}
+                shown = entry(line(sprint_state, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["now_text"], "waiting for your decision on the tracker")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["state"], "waiting")
+                self.assertEqual(shown["checks"], [])
+
+    def test_a_check_with_no_blocking_list_counts_as_waiting(self):
+        for blocking in (MISSING, "12"):
+            with self.subTest(blocking=blocking):
+                records = {("p00", "k1"): check_item("p00", "k1", 30, blocking)}
+                shown = entry(line(HELD_SPRINT, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["checks"], [])
+
+    def test_only_an_owner_check_becomes_a_check_line(self):
+        record = InboxRecord(
+            {**item("p00", "k1"), "issue": 30, "reason": "decision", "blocking": []}, "t1", "u1")
+        shown = entry(line(HELD_SPRINT, R + 4 * MIN, {("p00", "k1"): record}))
+        self.assertEqual(shown["ball"], "owner")
+        self.assertEqual(shown["waiting"], 1)
+        self.assertEqual(shown["checks"], [])
+
+    def test_checks_are_ordered_by_waiting_since_then_key(self):
+        later = dataclasses.replace(check_item("p00", "k1", 30, []), waiting_since="t2")
+        earlier = dataclasses.replace(check_item("p00", "k2", 30, []), waiting_since="t1")
+        shown = entry(line(HELD_SPRINT, R + 4 * MIN,
+                           {("p00", "k1"): later, ("p00", "k2"): earlier}))
+        self.assertEqual([c["key"] for c in shown["checks"]], ["k2", "k1"])
 
     def test_state_quiet_may_be_stuck(self):
         view = line(reported(started(A), R), R + 16 * MIN)
@@ -1998,6 +2081,7 @@ class SprintViewTest(unittest.TestCase):
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
+            "checks": [],
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,

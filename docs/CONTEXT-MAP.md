@@ -67,6 +67,8 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Look approval | Delivery |
+| Look marker | Delivery |
 | Manager | Console |
 | Marker | Claims |
 | Message | Console |
@@ -86,6 +88,7 @@
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
+| Production rules | Project contract |
 | Project contract | Project contract |
 | Projection | Project contract |
 | Publication-free profile | Release |

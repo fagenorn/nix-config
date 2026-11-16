@@ -40,9 +40,9 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twelve_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 12)
-        self.assertEqual(shots.STATES[-2:], ("notices-fold", "notice-post-open"))
+    def test_the_set_is_thirteen_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 13)
+        self.assertEqual(shots.STATES[-3:], ("owner-check", "notices-fold", "notice-post-open"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -221,6 +221,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 elif state == "finished-list":
                     self.assertGreaterEqual(len(ended), 2)
                     self.assertTrue(any(s["closing"] for s in ended))
+                elif state == "owner-check":
+                    self.assertEqual([s["ball"] for s in running], ["manager"])
+                    self.assertEqual(running[0]["now_text"], "building 1 of 3: the upload form")
+                    self.assertEqual(
+                        [c["text"] for c in running[0]["checks"]],
+                        ["Your check: Do the before and after pictures read well?"])
+                    self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
                 elif state in ("notices-fold", "notice-post-open"):
