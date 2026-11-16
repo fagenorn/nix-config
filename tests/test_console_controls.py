@@ -1,11 +1,14 @@
 """The console's one control system: every desk control carries exactly one kind (#1137)."""
 
+import html
+import json
 import re
 import unittest
 from datetime import timedelta
 from pathlib import Path
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
     ADD_STEPS, ADDED, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
@@ -932,3 +935,167 @@ class ControlLabelTest(unittest.TestCase):
     def test_contrast_matches_the_wcag_formula(self) -> None:
         self.assertEqual(round(contrast("#939ab7", "#1e2030"), 2), 5.79)
         self.assertEqual(round(contrast("#181926", "#f5a97f"), 2), 9.01)
+
+
+VOID_TAGS = frozenset({"input", "br", "hr", "img"})
+SPEND_TREES = ("spans", "note", "item", "summary", "trend", "breakdowns")
+CONTROL_HEIGHTS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
+  (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
+  (n) => [(n.getAttribute("class") || "").split(/\\s+/)[0], n.getBoundingClientRect().height,
+          getComputedStyle(n).display])"""
+CONTROL_BORDERS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
+  (n) => n.matches(':disabled, [aria-disabled="true"], [aria-busy="true"]')).map((n) => {{
+  const s = getComputedStyle(n);
+  return [(n.getAttribute("class") || "").split(/\\s+/)[0], s.borderTopWidth, s.borderTopStyle,
+          s.borderTopColor, n.getAttribute("aria-busy") === "true"];
+}})"""
+
+
+def tree_html(node: dict) -> str:
+    """A desk harness snapshot node written back as markup: no `src` and no `href`."""
+    attrs = {"class": node["cls"] or None, "hidden": node["hidden"] or None,
+             "open": node["open"] is True and node["tag"] == "details" or None,
+             "disabled": node["disabled"] or None, "placeholder": node["placeholder"],
+             "aria-label": node["label"], "aria-pressed": node["pressed"],
+             "aria-busy": node["busy"], "aria-disabled": node["aria_disabled"]}
+    if node["tag"] == "input" and node["value"] is not None:
+        attrs["value"] = node["value"]
+    open_tag = "".join(
+        f" {name}" if value is True else f' {name}="{html.escape(str(value), quote=True)}"'
+        for name, value in attrs.items() if value is not None and value is not False)
+    if node["tag"] in VOID_TAGS:
+        return f"<{node['tag']}{open_tag}>"
+    text = node["value"] if node["tag"] == "textarea" and node["value"] is not None else node["text"]
+    inner = html.escape(text or "") + "".join(tree_html(child) for child in node["children"])
+    return f"<{node['tag']}{open_tag}>{inner}</{node['tag']}>"
+
+
+def spend_tree_html(node: dict) -> str:
+    """A Spend snapshot node written back as markup: its attributes but `data-*`, then its text."""
+    attrs = {"class": node["cls"] or None,
+             **{k: v for k, v in node["attrs"].items()
+                if not k.startswith("data-") and k != "class"}}
+    open_tag = "".join(f' {name}="{html.escape(str(value), quote=True)}"'
+                       for name, value in attrs.items() if value is not None)
+    tag = node["tag"].lower()
+    if tag in VOID_TAGS:
+        return f"<{tag}{open_tag}>"
+    inner = (html.escape(node["text"] or "") if not node["children"]
+             else "".join(spend_tree_html(child) for child in node["children"]))
+    return f"<{tag}{open_tag}>{inner}</{tag}>"
+
+
+def specimen(style: str, body: str) -> str:
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><style>{style}</style>'
+            f"</head><body>{body}</body></html>")
+
+
+def desk_specimens() -> list:
+    """One page per `desk_scenarios()` snapshot: its trees under ids, under the desk `<style>`."""
+    style = page_style()
+    pages = []
+    for snap in snapshots_of(desk_scenarios()):
+        body = "".join(f'<div id="{tree.replace("_", "-")}">{tree_html(snap[tree])}</div>'
+                       for tree in TREES if snap.get(tree) is not None)
+        pages.append(specimen(style, body))
+    return pages
+
+
+def spend_specimens() -> list:
+    (snap,) = render_spend([{"frame": spend_view_fixture()}, {"snapshot": True}])["snapshots"]
+    body = "".join(f'<div id="{tree}">{spend_tree_html(snap[tree])}</div>' for tree in SPEND_TREES)
+    return [specimen(spend_style(), body)]
+
+
+def held_specimens() -> list:
+    """The held snapshot of every busy scenario, under the desk `<style>`."""
+    style = page_style()
+    pages = []
+    for _name, setup, act, _settle, _roles, _where, _exceptions in BUSY_SCENARIOS:
+        held_snap = render([*setup, *act])[-1]
+        body = "".join(f'<div id="{tree.replace("_", "-")}">{tree_html(held_snap[tree])}</div>'
+                       for tree in TREES if held_snap.get(tree) is not None)
+        pages.append(specimen(style, body))
+    return pages
+
+
+KIND_SPECIMENS = (
+    '<button class="btn-primary">p</button>', '<button class="btn-quiet">q</button>',
+    '<button class="btn-danger">d</button>', '<button class="btn-option">o</button>',
+    '<input class="field-line">', '<textarea class="field-area"></textarea>',
+    '<input class="field-code">')
+BARE_SPECIMENS = (
+    '<button class="cap btn-quiet btn-bare">c</button>',
+    '<button class="pic-thumb btn-quiet btn-bare">t</button>',
+    '<button class="sprint-check btn-quiet btn-bare">s</button>',
+    '<div class="register"><button class="draft-pick btn-quiet btn-bare">k</button></div>',
+    '<div class="goal-bar open"><div class="goal-in">'
+    '<textarea class="goal-text field-line field-bare"></textarea></div></div>')
+
+
+def state_specimen() -> str:
+    """Every kind and every bare role three times: disabled, aria-disabled and busy."""
+    states = ("disabled", 'aria-disabled="true"', 'aria-busy="true" aria-disabled="true"')
+    cells = []
+    for state in states:
+        for markup in (*KIND_SPECIMENS, *BARE_SPECIMENS):
+            cells.append(re.sub(r"<(button|input|textarea)", rf"<\1 {state}", markup))
+    return specimen(page_style(), "<div>" + "".join(cells) + "</div>")
+
+
+class ControlTargetTest(unittest.TestCase):
+    def read_widths(self, pages: list, widths: tuple, expression: str) -> dict:
+        """Load each markup at each width in Chromium: width -> one reading list per page."""
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                found = {}
+                for width in widths:
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    found[width] = []
+                    for markup in pages:
+                        page.set_content(markup)
+                        found[width].append(page.evaluate(expression))
+                    page.close()
+                return found
+            finally:
+                browser.close()
+
+    def test_every_listed_control_is_at_least_32_px_tall_in_chromium(self) -> None:
+        desk, spend = desk_specimens(), spend_specimens()
+        pages = [(name, markup) for name, group in (("desk", desk), ("spend", spend))
+                 for markup in group]
+        by_width = self.read_widths([m for _n, m in pages], (1440, 480), CONTROL_HEIGHTS)
+        for width, readings in by_width.items():
+            measured = {"desk": set(), "spend": set()}
+            for (name, _markup), rows in zip(pages, readings):
+                for cls, height, display in rows:
+                    key = role_key(cls)
+                    measured[name].add(key)
+                    with self.subTest(page=name, width=width, role=key):
+                        self.assertGreaterEqual(height, 32, f"{name} {key} {height}")
+                        if key == "opt":
+                            self.assertEqual(display, "grid", f"{name} {key} {display}")
+            with self.subTest(width=width, completeness=True):
+                self.assertEqual(sorted(set(DESK_CONTROLS) - measured["desk"]), [])
+                self.assertEqual(sorted(set(SPEND_CONTROLS) - measured["spend"]), [])
+
+    def test_a_disabled_or_busy_control_shows_its_border_in_chromium(self) -> None:
+        pages = [*held_specimens(), state_specimen()]
+        (readings,) = self.read_widths(pages, (1440,), CONTROL_BORDERS).values()
+        rows = [row for page in readings for row in page]
+        self.assertTrue(rows)
+        for cls, width, style, colour, busy in rows:
+            with self.subTest(role=cls, busy=busy):
+                message = f"{cls} {width} {style} {colour}"
+                self.assertEqual(width, "1px", message)
+                self.assertEqual(style, "dotted" if busy else "dashed", message)
+                self.assertNotEqual(colour, "rgba(0, 0, 0, 0)", message)
+        self.assertEqual(sorted(BARE_ROLES - {role(row[0]) for row in rows}), [])
