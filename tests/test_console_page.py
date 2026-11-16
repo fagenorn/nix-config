@@ -3098,6 +3098,19 @@ class PageMessageLifeTest(unittest.TestCase):
         self.assertEqual(full(hint), HINT_TEXT)
         self.assertEqual([p for p in snap["posts"] if p["url"] == "/api/message"], [])
 
+    def test_the_tell_hint_sits_right_under_the_field(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([LIFE_SPRINT])}, {"click": "tell-open"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        (box,) = of_class(line, "div", "sprint-tell")
+        self.assertEqual([c["cls"] for c in box["children"]], ["tell-label", "tell-hint", "tell-send"])
+        label, hint, _send = box["children"]
+        words, area = label["children"]
+        self.assertEqual((words["tag"], full(words)), ("span", "Tell the manager"))
+        self.assertEqual((area["tag"], area["cls"]), ("textarea", "tell"))
+        self.assertEqual(full(hint), HINT_TEXT)
+
     def test_a_new_reply_is_announced_under_the_statement_and_not_counted(self) -> None:
         said = "New reply from the manager of " + TITLE
         statement = {"inbox_items": 1, "headline": "1 thing needs you",
@@ -3987,6 +4000,50 @@ class PageSprintBlockTest(unittest.TestCase):
                             self.assertGreater(row["scrollHeight"], row["clientHeight"] + 1, at)
                         else:
                             self.assertLessEqual(row["scrollHeight"], row["clientHeight"] + 1, at)
+                    page.close()
+            finally:
+                browser.close()
+
+    def test_the_open_tell_box_label_hint_and_field_do_not_overlap_and_the_field_spans_the_block(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        frame = with_sprints([{**LIFE_SPRINT, "messages": [], "reach_text": None}])
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const li = document.querySelector('#projects li.sprint');
+          const box = (e) => e.getBoundingClientRect().toJSON();
+          const style = getComputedStyle(li);
+          return {words: box(li.querySelector('.tell-label > span')),
+                  field: box(li.querySelector('textarea.tell')),
+                  hint: box(li.querySelector('p.tell-hint')),
+                  inner: li.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)};
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                for width in (480, 1440):
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    page.add_init_script(fakes)
+                    page.route("http://console.test/", lambda route: route.fulfill(
+                        body=html, content_type="text/html"))
+                    page.goto("http://console.test/")
+                    page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", frame)
+                    page.click("button.tell-open")
+                    got = page.evaluate(measure)
+                    words, field, hint = got["words"], got["field"], got["hint"]
+                    self.assertLessEqual(words["bottom"], field["top"] + 1, width)
+                    self.assertLessEqual(field["bottom"], hint["top"] + 1, width)
+                    self.assertGreaterEqual(field["width"], got["inner"] - 1, width)
+                    self.assertLessEqual(hint["top"] - field["bottom"], 12, width)
                     page.close()
             finally:
                 browser.close()

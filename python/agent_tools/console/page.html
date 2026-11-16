@@ -223,14 +223,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
-.sprint-tell { flex: 1 0 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
-.sprint-tell label { color: var(--ov2); }
+.sprint-tell { flex: 1 0 100%; display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.sprint-tell label { display: flex; flex-direction: column; gap: 4px; color: var(--ov2); }
+.sprint-tell .tell-send { align-self: flex-start; }
 .sprint-acts { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
-.sprint-acts .sprint-tell { flex: 1 1 auto; }
+.sprint-acts .sprint-tell { flex: 1 0 100%; }
 .sprint-more { margin-left: auto; font-size: .8125rem; }
 .sprint-more summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
 .sprint-more summary::-webkit-details-marker { display: none; }
-.tell { width: 100%; max-width: 40rem; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
+.tell { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail, .stop-fail, .unstopped { color: var(--red); }
 .stop-ask { color: var(--text); }
@@ -649,11 +650,12 @@ function tellBox(item, entry, sprint) {
     return opener;
   }
   const box = el("div", "sprint-tell");
-  if (typeof sprint.tell_text === "string") box.appendChild(el("p", "tell-hint", sprint.tell_text));
   const label = el("label", "tell-label");
   label.appendChild(el("span", "", "Tell the manager"));
   const area = el("textarea", "tell");
   area.dataset.tell = id;
+  const hasHint = typeof sprint.tell_text === "string";
+  if (hasHint) area.setAttribute("aria-describedby", "tell-hint-" + id);
   if (draft !== undefined) area.value = draft.value;
   area.addEventListener("input", () => {
     tellDrafts.set(id, { value: area.value, start: area.selectionStart, end: area.selectionEnd });
@@ -671,6 +673,11 @@ function tellBox(item, entry, sprint) {
   });
   label.appendChild(area);
   box.appendChild(label);
+  if (hasHint) {
+    const hint = el("p", "tell-hint", sprint.tell_text);
+    hint.setAttribute("id", "tell-hint-" + id);
+    box.appendChild(hint);
+  }
   const send = actionButton("tell-send", "Send", () => tell(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") send.setAttribute("disabled", "");
   box.appendChild(send);
