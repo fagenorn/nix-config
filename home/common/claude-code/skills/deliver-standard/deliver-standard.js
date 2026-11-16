@@ -1959,16 +1959,20 @@ const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_di
 // #1139: the owner looked and asked for changes: one fix round on their words, then a fresh verify; a review that finds a defect stops.
 if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
   const asked = [{ severity: 'important', source: 'owner', summary: LOOK_ANSWER.words, failing_input: `the owner's look at head ${lookAt ? lookAt.head : setup.head}` }]
+  // The owner rejected the approved head: the approval is revoked before the fix is tried and stays revoked on every stop below, so a resume
+  // with no look cannot land the head the owner asked to change.
+  approvedHead = null
+  if (lookAt) lookAt = { pr: lookAt.pr, head: lookAt.head }
+  LOOK_STOP = MARKED
+  // The fix edits and commits on the branch, so the claim is renewed first: a holder that lost it stops before any edit.
+  const lostClaim = await renew('look-fix', 'Verify')
+  if (lostClaim) return lostClaim
   const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(lookFix) || sameSha(lookFix.commit, lookFix.start_head)) return stop('look-fix', { fix: lookFix })
   const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span(lookFix)}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
   verified = null
-  // The approval was for the head the fix moved: the new head has none, so the ship takes no lock and stops for a new look.
-  approvedHead = null
-  if (lookAt) lookAt = { pr: lookAt.pr, head: lookAt.head }
-  LOOK_STOP = MARKED
 }
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results, ...(picturesOf(verified).length ? { pictures: picturesOf(verified) } : {}) } : null
 if (VERIFY_CACHED) noteFlaky(verified.results)
