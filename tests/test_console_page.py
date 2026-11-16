@@ -2049,7 +2049,7 @@ class PageViewerTest(unittest.TestCase):
         text = PAGE.read_text(encoding="utf-8")
         for needle in ("function pictureGallery(", "function openViewer(", 'id="viewer"'):
             self.assertEqual(text.count(needle), 1, needle)
-        for name in ("leadItem", "itemLine"):
+        for name in ("leadItem", "itemLine", "drawBrief", "sprintDetail"):
             start = text.index("function " + name + "(")
             body = text[start:text.index("\nfunction ", start + 1)]
             self.assertIn("pictureGallery(", body, name)
@@ -8699,3 +8699,162 @@ class RegisterAnswerTransitionTest(unittest.TestCase):
         options = [n for n in nodes(snap["inbox"]) if has_class(n, "opt")]
         self.assertEqual(len(options), 2)
         self.assertFalse(any(n["disabled"] for n in options))
+
+
+BRIEF_PICTURED = {**BRIEF, "pictures": [
+    {"id": A, "line": "the mock-up before", "pair": "before"},
+    {"id": B, "line": "the mock-up after", "pair": "after"},
+    {"id": C, "line": "the header at 1440", "pair": None}]}
+BRIEF_KEY = "owner/p01#brief/" + "a" * 16 + "@2"
+REPORT_PICTURED = {**REPORTED, "pictures": [
+    {"id": A, "line": "the landed card", "pair": None},
+    {"id": B, "line": "the landed header", "pair": None}]}
+REPORT_KEY = "report/" + "a" * 16 + "@" + REPORTED["status_at"]
+SPRINT_START = {"start": {"focused": False, "clock": NOW_MS}}
+
+
+class PageBriefPictureTest(unittest.TestCase):
+    opened = [START, {"frame": frame([BRIEF_PICTURED])}, {"click": "pic-thumb", "nth": 0}]
+
+    def test_a_brief_card_draws_its_pictures_with_their_lines(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF_PICTURED])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertTrue(has_class(lead, "brief"))
+        (parts,) = with_class(lead, "parts")
+        self.assertTrue(has_class(parts["children"][-1], "pics"))
+        thumbs = with_class(lead, "pic-thumb")
+        self.assertEqual(len(thumbs), 3)
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
+                         ["the mock-up before", "the mock-up after", "the header at 1440"])
+        self.assertEqual([n["key"] for n in thumbs], [BRIEF_KEY + "/" + str(i) for i in range(3)])
+        (pair,) = with_class(lead, "pic-pair")
+        self.assertEqual([full(n) for n in with_class(pair, "pic-label")], ["Before", "After"])
+
+    def test_a_folded_brief_row_draws_its_pictures_too(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF_B, BRIEF_PICTURED])}, {"snapshot": True}])
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == "brief:" + "a" * 16]
+        self.assertEqual(len(with_class(row, "pic-thumb")), 3)
+
+    def test_a_brief_without_pictures_draws_no_gallery(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF])}, {"snapshot": True}])
+        self.assertEqual(with_class(snap["inbox"], "pics"), [])
+
+    def test_a_brief_thumbnail_opens_the_shared_viewer(self) -> None:
+        opened, closed = render([
+            START, {"frame": frame([BRIEF_PICTURED])}, {"click": "pic-thumb", "nth": 2},
+            {"snapshot": True}, {"key": "Escape", "follow": True}, {"snapshot": True}])
+        self.assertFalse(opened["viewer"]["hidden"])
+        (count,) = with_class(opened["viewer"], "viewer-count")
+        self.assertEqual(full(count), "3 of 3")
+        (img,) = with_class(opened["viewer"], "viewer-img")
+        made = {m["picture"]: m["url"] for m in opened["object_urls"]["made"]}
+        self.assertEqual(img["alt"], "the header at 1440")
+        self.assertEqual(img["src"], made[C])
+        self.assertEqual(opened["active"], "viewer")
+        self.assertTrue(closed["viewer"]["hidden"])
+        self.assertEqual(closed["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(closed["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertTrue(focused["key"].endswith("/2"), focused["key"])
+
+    def test_the_viewer_closes_when_a_newer_brief_replaces_its_card(self) -> None:
+        (snap,) = render(self.opened + [
+            {"frame": frame([{**BRIEF_PICTURED, "version": 3}])}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+        self.assertFalse(snap["inbox"]["inert"])
+
+    def test_a_focused_brief_thumbnail_keeps_focus_through_a_frame(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF_PICTURED])}, {"focus_on": "pic-thumb", "nth": 1},
+            {"frame": frame([BRIEF_PICTURED])}, {"snapshot": True}])
+        self.assertEqual(snap["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertTrue(focused["key"].endswith("/1"), focused["key"])
+
+    def test_page_keys_do_nothing_while_a_brief_picture_is_open(self) -> None:
+        (snap,) = render(self.opened + [
+            {"key": "Enter", "target": "BODY"}, {"clock": 5000}, {"snapshot": True}])
+        self.assertEqual(approvals(snap), [])
+        self.assertFalse(snap["viewer"]["hidden"])
+
+
+class PageReportPictureTest(unittest.TestCase):
+    def pictured(self) -> list:
+        return [SPRINT_START, {"frame": with_sprints([REPORT_PICTURED])}]
+
+    def test_a_reports_pictures_sit_in_its_detail_fold_after_the_next_step(self) -> None:
+        (snap,) = render(self.pictured() + [{"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        fold = detail(line)
+        classes = [c["cls"] for c in fold["children"]]
+        self.assertEqual(classes.index("pics"), classes.index("next") + 1)
+        self.assertEqual([n["key"] for n in with_class(fold, "pic-thumb")],
+                         [REPORT_KEY + "/0", REPORT_KEY + "/1"])
+        self.assertEqual([full(n) for n in with_class(fold, "pic-line")],
+                         ["the landed card", "the landed header"])
+
+    def test_a_reports_pictures_add_nothing_else_to_its_sprint_line(self) -> None:
+        (plain,) = render([SPRINT_START, {"frame": with_sprints([REPORTED])}, {"snapshot": True}])
+        (shown,) = render(self.pictured() + [{"snapshot": True}])
+        (plain_line,) = sprint_lines(plain)
+        (shown_line,) = sprint_lines(shown)
+        self.assertEqual([c["cls"] for c in shown_line["children"]],
+                         [c["cls"] for c in plain_line["children"]])
+        wanted = [c["cls"] for c in detail(shown_line)["children"]]
+        self.assertEqual(wanted.count("pics"), 1)
+        wanted.remove("pics")
+        self.assertEqual(wanted, [c["cls"] for c in detail(plain_line)["children"]])
+
+    def test_a_report_thumbnail_opens_the_shared_viewer_and_escape_returns_focus(self) -> None:
+        opened, closed = render(self.pictured() + [
+            {"open": DETAIL_KEY}, {"click": "pic-thumb", "in": DETAIL_KEY, "nth": 1},
+            {"snapshot": True}, {"key": "Escape", "follow": True}, {"snapshot": True}])
+        (count,) = with_class(opened["viewer"], "viewer-count")
+        self.assertEqual(full(count), "2 of 2")
+        (img,) = with_class(opened["viewer"], "viewer-img")
+        self.assertEqual(img["alt"], "the landed header")
+        self.assertTrue(closed["viewer"]["hidden"])
+        self.assertEqual(closed["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(closed["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertTrue(focused["key"].endswith("/1"), focused["key"])
+
+    def test_a_focused_report_thumbnail_keeps_focus_through_a_frame(self) -> None:
+        (snap,) = render(self.pictured() + [
+            {"open": DETAIL_KEY}, {"focus_on": "pic-thumb", "in": DETAIL_KEY, "nth": 1},
+            {"frame": with_sprints([REPORT_PICTURED])}, {"snapshot": True}])
+        self.assertEqual(snap["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertEqual(focused["key"], REPORT_KEY + "/1")
+
+    def test_the_viewer_closes_when_a_newer_report_replaces_its_pictures(self) -> None:
+        (snap,) = render(self.pictured() + [
+            {"open": DETAIL_KEY}, {"click": "pic-thumb", "in": DETAIL_KEY, "nth": 0},
+            {"frame": with_sprints([{**REPORT_PICTURED, "status_at": utc(60000)}])},
+            {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+        self.assertFalse(snap["inbox"]["inert"])
+
+    def test_a_report_picture_is_fetched_once_and_revoked_when_its_report_has_none(self) -> None:
+        first, second, third = render(self.pictured() + [
+            {"snapshot": True}, {"frame": with_sprints([REPORT_PICTURED])}, {"snapshot": True},
+            {"frame": with_sprints([REPORTED])}, {"snapshot": True}])
+        posts = picture_posts(second)
+        self.assertEqual([p["url"] for p in posts], ["/api/picture/" + A, "/api/picture/" + B])
+        for post in posts:
+            self.assertEqual(post["method"], "GET")
+            self.assertEqual(post["headers"], {"X-Console-Token": "__CONSOLE_TOKEN__"})
+        self.assertEqual(second["object_urls"]["revoked"], [])
+        made = [m["url"] for m in third["object_urls"]["made"]]
+        self.assertEqual(len(made), 2)
+        self.assertEqual(sorted(third["object_urls"]["revoked"]), sorted(made))
+
+    def test_a_focused_report_thumbnail_keeps_focus_through_a_message_response(self) -> None:
+        (snap,) = render([
+            SPRINT_START, {"frame": with_sprints([REPORT_PICTURED])}, {"open": DETAIL_KEY},
+            {"click": "tell-open"}, {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"hold": True}, {"click": "tell-send"},
+            {"focus_on": "pic-thumb", "in": DETAIL_KEY, "nth": 1},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
+        self.assertEqual(snap["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertEqual(focused["key"], REPORT_KEY + "/1")
+        self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/message"]), 1)
