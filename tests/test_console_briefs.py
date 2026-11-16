@@ -96,7 +96,7 @@ class BriefRouteTest(Case):
         self.assertEqual(current["inbox"]["open"], [{
             "type": "inbox_item", "reason": "brief", "key": f"brief/{sid}",
             "project_id": "owner/p01", "sprint_id": sid, "title": PARTS["title"], "version": 1,
-            "brief": PARTS, "answered": False, "waiting_since": at}])
+            "brief": PARTS, "pictures": [], "answered": False, "waiting_since": at}])
 
     def test_a_brief_with_empty_excluded_risks_or_asks_is_recorded(self):
         svc = self.open()

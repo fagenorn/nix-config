@@ -18,7 +18,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED,
                                            MANAGER_WAITING, SPRINT_CLOSED,
                                            SPRINT_STOP_REQUESTED, SPRINT_REPORTED, Event)
-from agent_tools.console.sprints import Closing, Observed, PendingStop, Report
+from agent_tools.console.sprints import Closing, Observed, PendingStop, QuestionPicture, Report
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
@@ -67,9 +67,10 @@ class ParseBriefTest(unittest.TestCase):
         body = json.dumps({"sprint_id": SID, "secret": "s3cret",
                            "brief": {"done": "x", "slices": ["a"]}}).encode()
         self.assertEqual(sprints.parse_brief_request(body),
-                         (SID, "s3cret", {"done": "x", "slices": ["a"]}))
+                         (SID, "s3cret", {"done": "x", "slices": ["a"]}, False))
         good = {"sprint_id": SID, "secret": "s", "brief": {}}
-        self.assertEqual(sprints.parse_brief_request(json.dumps(good).encode()), (SID, "s", {}))
+        self.assertEqual(sprints.parse_brief_request(json.dumps(good).encode()),
+                         (SID, "s", {}, False))
         bad = [b"not json", b"[1]",
                json.dumps({**good, "extra": 1}).encode(),
                json.dumps({"sprint_id": SID, "brief": {}}).encode(),
@@ -88,7 +89,30 @@ class ParseBriefTest(unittest.TestCase):
     def test_a_title_key_is_accepted(self):
         brief = {"title": "x", "done": "x", "slices": ["a"]}
         body = json.dumps({"sprint_id": SID, "secret": "s", "brief": brief}).encode()
-        self.assertEqual(sprints.parse_brief_request(body), (SID, "s", brief))
+        self.assertEqual(sprints.parse_brief_request(body), (SID, "s", brief, False))
+
+    def test_a_brief_or_report_request_may_carry_pictures_and_a_dry_run(self):
+        brief = {"done": "x", "pictures": []}
+        body = {"sprint_id": SID, "secret": "s", "brief": brief}
+        self.assertEqual(sprints.parse_brief_request(json.dumps(body).encode()),
+                         (SID, "s", brief, False))
+        self.assertEqual(
+            sprints.parse_brief_request(json.dumps({**body, "dry_run": True}).encode()),
+            (SID, "s", brief, True))
+        report = {**REPORT, "pictures": []}
+        body = {"sprint_id": SID, "secret": "s", "report": report}
+        self.assertEqual(sprints.parse_report_request(json.dumps(body).encode()),
+                         (SID, "s", report, False))
+        self.assertEqual(
+            sprints.parse_report_request(json.dumps({**body, "dry_run": True}).encode()),
+            (SID, "s", report, True))
+        for parse, request in ((sprints.parse_brief_request,
+                                {"sprint_id": SID, "secret": "s", "brief": brief}),
+                               (sprints.parse_report_request, body)):
+            for dry_run in (False, "yes"):
+                with self.subTest(parse=parse.__name__, dry_run=dry_run):
+                    with self.assertRaises(ValueError):
+                        parse(json.dumps({**request, "dry_run": dry_run}).encode())
 
     def test_approve_and_reply_bodies(self):
         self.assertEqual(
@@ -191,6 +215,94 @@ class CheckedBriefTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), "a reply is at most 2000 characters")
 
 
+class PartPicturesTest(unittest.TestCase):
+    def test_the_part_reasons_read_plainly(self):
+        self.assertEqual(sprints.PART_PICTURES_SHAPE.format(owner="brief"),
+                         "the brief's pictures are not a list")
+        self.assertEqual(sprints.PART_TOO_MANY_PICTURES.format(owner="report"),
+                         "the report has more than 8 pictures")
+        self.assertEqual(sprints.PART_PICTURE_SHAPE.format(owner="brief", m=2),
+                         "the brief's picture 2 is not an object of picture, line and pair")
+        self.assertEqual(sprints.PART_PICTURE_MEMBER.format(owner="brief", m=1, member="line"),
+                         "the brief's picture 1 has no valid line")
+        self.assertEqual(sprints.PART_LINE_TOO_LONG.format(owner="report", m=3),
+                         "the report's picture 3's line is over 140 characters")
+        self.assertEqual(sprints.PART_PAIR_TWICE.format(owner="brief", pair="after"),
+                         "the brief marks two pictures after")
+        self.assertEqual(sprints.PART_PICTURE_UNKNOWN.format(owner="report", m=1),
+                         "the report's picture 1 is not known")
+        self.assertEqual(sprints.PART_PICTURE_FOREIGN.format(owner="brief", m=4),
+                         "the brief's picture 4 was sent by another sprint")
+        self.assertEqual(sprints.PICTURE_UNKNOWN.format(n=2, m=3),
+                         "question 2 picture 3 is not known")
+        self.assertEqual(sprints.PICTURES_SHAPE.format(n=1),
+                         "question 1's pictures are not a list")
+
+    def test_a_brief_and_a_report_keep_their_checked_pictures(self):
+        members = [{"picture": A, "line": "  the mock-up  ", "pair": "before"},
+                   {"picture": B, "line": "the header"}]
+        want = [{"picture": A, "line": "the mock-up", "pair": "before"},
+                {"picture": B, "line": "the header"}]
+        self.assertEqual(sprints.checked_brief({**PARTS, "pictures": members})["pictures"], want)
+        self.assertEqual(sprints.checked_report({**REPORT, "pictures": members})["pictures"], want)
+        for base, check in ((PARTS, sprints.checked_brief), (REPORT, sprints.checked_report)):
+            with self.subTest(check=check.__name__):
+                self.assertEqual(check({**base, "pictures": []}), check(base))
+                self.assertNotIn("pictures", check({**base, "pictures": []}))
+
+    def test_each_bad_picture_list_is_refused_with_its_reason(self):
+        mine = {"picture": A, "line": "one"}
+        for owner, base, check in (("brief", PARTS, sprints.checked_brief),
+                                   ("report", REPORT, sprints.checked_report)):
+            def member(m, name):
+                return sprints.PART_PICTURE_MEMBER.format(owner=owner, m=m, member=name)
+            shape = sprints.PART_PICTURE_SHAPE.format(owner=owner, m=1)
+            cases = [
+                ("x", sprints.PART_PICTURES_SHAPE.format(owner=owner)),
+                ([mine] * 9, sprints.PART_TOO_MANY_PICTURES.format(owner=owner)),
+                ([{**mine, "file": "x"}], shape),
+                ([{"picture": A}], shape),
+                ([{**mine, "picture": "A" * 64}], member(1, "picture")),
+                ([{**mine, "line": "  "}], member(1, "line")),
+                ([{**mine, "line": "a\nb"}], member(1, "line")),
+                ([{**mine, "line": "l" * 141}],
+                 sprints.PART_LINE_TOO_LONG.format(owner=owner, m=1)),
+                ([{**mine, "pair": "middle"}], member(1, "pair")),
+                ([{**mine, "pair": "before"}, {**mine, "pair": "before"}],
+                 sprints.PART_PAIR_TWICE.format(owner=owner, pair="before")),
+                ([mine, {"picture": A}], sprints.PART_PICTURE_SHAPE.format(owner=owner, m=2)),
+            ]
+            for listed, reason in cases:
+                with self.subTest(owner=owner, reason=reason):
+                    with self.assertRaises(sprints.Refused) as caught:
+                        check({**base, "pictures": listed})
+                    self.assertEqual(str(caught.exception), reason)
+            full = [{"picture": A, "line": "l" * 140}] * 8
+            self.assertEqual(len(check({**base, "pictures": full})["pictures"]), 8)
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_brief({**PARTS, "done": "", "pictures": "x"})
+        self.assertEqual(str(caught.exception), "the brief has no done")
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_report({**REPORT, "next": "", "pictures": "x"})
+        self.assertEqual(str(caught.exception), sprints.REPORT_MEMBER.format(member="next"))
+
+    def test_checked_pictures_reads_back_a_logged_line_up_to_the_log_limit(self):
+        self.assertEqual(
+            sprints.checked_pictures("brief", [{"picture": A, "line": "l" * 400}], limits=False),
+            [{"picture": A, "line": "l" * 400}])
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_pictures("brief", [{"picture": A, "line": "l" * 501}], limits=False)
+        self.assertEqual(str(caught.exception),
+                         sprints.PART_PICTURE_MEMBER.format(owner="brief", m=1, member="line"))
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_pictures("brief", [{"picture": A, "line": "l"}] * 9, limits=False)
+        self.assertEqual(str(caught.exception),
+                         sprints.PART_TOO_MANY_PICTURES.format(owner="brief"))
+        self.assertEqual(
+            sprints.picture_ids([{"picture": A, "line": "x"}, {"picture": B, "line": "y"},
+                                 {"picture": A, "line": "z"}]), [A, B])
+
+
 class GoalRuleTest(unittest.TestCase):
     def test_the_goal_rules(self):
         self.assertEqual(sprints.checked_goal("  make it  \n"), "make it")
@@ -276,6 +388,41 @@ class BriefFoldTest(unittest.TestCase):
         self.assertEqual(state.state, "starting")
         self.assertIsNone(sprints.sprint_states([goal])[SID].brief)
         self.assertEqual(sprints.sprint_states([goal])[SID].state, "drafting")
+
+    def test_a_brief_rows_pictures_fold_beside_its_parts(self):
+        rows = [stated(1, "owner/p00", SID, "one"),
+                Event(2, at(2), BRIEF_SENT, "owner/p00",
+                      {"sprint_id": SID, "version": 1, "goal": "one",
+                       "brief": {**PARTS, "pictures": [{"picture": A, "line": "the mock-up",
+                                                        "pair": "before"}]},
+                       "pictures": [A]})]
+        state = sprints.sprint_states(rows)[SID]
+        self.assertEqual(state.brief.parts, PARTS)
+        self.assertEqual(state.brief.pictures, (QuestionPicture(A, "the mock-up", "before"),))
+        self.assertIn(A, state.pictures)
+        plain = sprints.sprint_states([stated(1, "owner/p00", SID, "one"),
+                                       sent(2, SID, 1, PARTS)])[SID]
+        self.assertEqual(plain.brief.pictures, ())
+
+    def test_a_logged_row_whose_pictures_fail_the_read_back_folds_without_them(self):
+        goal = stated(1, "owner/p00", SID, "one")
+        bad = Event(2, at(2), BRIEF_SENT, "owner/p00",
+                    {"sprint_id": SID, "version": 1, "goal": "one",
+                     "brief": {**PARTS, "pictures": [{"picture": A}]}})
+        state = sprints.sprint_states([goal, bad])[SID]
+        self.assertEqual(state.brief.parts, PARTS)
+        self.assertEqual(state.brief.pictures, ())
+        base = [goal, sent(2, SID, 1, PARTS), approved(3, SID, 1)]
+
+        def report_row(pictures):
+            return Event(4, at(4), SPRINT_REPORTED, "owner/p00",
+                         {"sprint_id": SID, "goal": "g", "report": {**REPORT, "pictures": pictures}})
+        state = sprints.sprint_states([*base, report_row("x")])[SID]
+        self.assertIsNotNone(state.report)
+        self.assertEqual(state.report.status, "two slices are building")
+        self.assertEqual(state.report.pictures, ())
+        state = sprints.sprint_states([*base, report_row([{"picture": A, "line": "l" * 400}])])[SID]
+        self.assertEqual(state.report.pictures, (QuestionPicture(A, "l" * 400),))
 
     def test_a_newer_brief_replaces_and_stale_decisions_change_nothing(self):
         goal = stated(1, "owner/p00", SID, "one")
@@ -561,7 +708,7 @@ def reported(seq, sprint_id, report):
 class ReportParseTest(unittest.TestCase):
     def test_a_report_request_is_a_sprint_a_secret_and_a_report(self):
         body = json.dumps({"sprint_id": SID, "secret": "s", "report": REPORT}).encode()
-        self.assertEqual(sprints.parse_report_request(body), (SID, "s", REPORT))
+        self.assertEqual(sprints.parse_report_request(body), (SID, "s", REPORT, False))
 
         def bodies(**changes):
             return json.dumps({"sprint_id": SID, "secret": "s", "report": REPORT,
@@ -674,6 +821,34 @@ class ReportFoldTest(unittest.TestCase):
             with self.subTest(bad=str(bad)[:30]):
                 self.assertEqual(
                     sprints.sprint_states([reported(7, SID, bad)], folded)[SID].report, expected)
+
+    def test_a_report_rows_pictures_fold_into_its_report(self):
+        rows = [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1),
+                Event(4, at(4), SPRINT_REPORTED, "o/a",
+                      {"sprint_id": SID, "goal": "g",
+                       "report": {**REPORT, "pictures": [{"picture": B,
+                                                          "line": "the landed card"}]},
+                       "pictures": [B]})]
+        state = sprints.sprint_states(rows)[SID]
+        self.assertEqual(state.report.pictures, (QuestionPicture(B, "the landed card"),))
+        self.assertIn(B, state.pictures)
+        self.assertEqual(state.report.next_step, "start the resume slice")
+
+    def test_kept_brief_and_report_rows_keep_their_pictures_the_sprints(self):
+        other = "fedcba9876543210"
+        rows = [stated(1, "owner/p00", SID, "one"),
+                Event(2, at(2), BRIEF_SENT, "owner/p00",
+                      {"sprint_id": SID, "version": 1, "goal": "one", "brief": PARTS,
+                       "pictures": [A]}),
+                approved(3, SID, 1),
+                Event(4, at(4), SPRINT_REPORTED, "owner/p00",
+                      {"sprint_id": SID, "goal": "g", "report": REPORT, "pictures": [B]}),
+                Event(5, at(5), BRIEF_SENT, "owner/p00",
+                      {"sprint_id": other, "version": 1, "goal": "one", "brief": PARTS,
+                       "pictures": [C]})]
+        folded = sprints.sprint_states(rows)
+        self.assertEqual(folded[SID].pictures, frozenset({A, B}))
+        self.assertEqual(set(folded), {SID})
 
     def test_a_later_report_replaces_the_earlier(self):
         rows = BASE[:3] + [reported(4, SID, REPORT), reported(5, SID, {**REPORT, "phase": "closing"})]
@@ -1569,7 +1744,7 @@ def refusal(round_):
     return str(caught.exception)
 
 
-A, B = "a" * 64, "b" * 64
+A, B, C = "a" * 64, "b" * 64, "c" * 64
 
 
 class RoundPictureTest(unittest.TestCase):

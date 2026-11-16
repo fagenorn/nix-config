@@ -1,6 +1,6 @@
 # ADR-console-038 — A manager's question shows its pictures on the card and full size in a viewer
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-041
 - **Decided in:** #1090
 
 ## Context
