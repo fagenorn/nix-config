@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 
+import ast
 import contextlib
 import hashlib
 import http.client
@@ -16,13 +17,15 @@ import time
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import event_log, pictures, write_guard
+from agent_tools.console import event_log, pictures, sprint, write_guard
 from agent_tools.console.event_log import PICTURE_STORED, Event
 from agent_tools.console.pictures import SIGNATURE
 
 from . import accounts_sandbox
 from . import console_test_support as support
+from .test_console_sprint_command import run_sprint
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -531,6 +534,100 @@ class PictureReadTest(PictureCase):
                 status, headers, _ = support.request(
                     svc.address, method, f"{PICTURE}/{picture_id}")
                 self.assertEqual((status, headers["Allow"]), (405, "GET"))
+
+
+class PictureCommandTest(PictureCase):
+    def write(self, name, data):
+        path = self.store.parent / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def secret_file(self, sid, text=None):
+        return self.write("mine-secret", (text or self.secret(sid)).encode())
+
+    def run_picture(self, svc, sid, file, secret_file, **kwargs):
+        return run_sprint("picture", "--sprint", sid, "--secret-file", secret_file, "--file", file,
+                          "--port", svc.address[1], **kwargs)
+
+    def test_picture_prints_the_id_and_the_console_keeps_the_bytes(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        shot = self.write("shot.png", PIXEL)
+        result = self.run_picture(svc, sid, shot, self.secret_file(sid))
+        expected = hashlib.sha256(PIXEL).hexdigest()
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, expected + "\n", ""))
+        status, _, body = get(svc.address, f"{PICTURE}/{expected}", {"X-Console-Token": self.token()})
+        self.assertEqual((status, body), (200, PIXEL))
+        self.assertNotIn(self.secret(sid), result.stdout + result.stderr)
+
+    def test_picture_takes_the_identity_from_the_environment(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        shot = self.write("shot.png", PIXEL)
+        result = run_sprint("picture", "--file", shot, "--port", svc.address[1],
+                            env={"CONSOLE_SPRINT_ID": sid, "CONSOLE_SPRINT_SECRET": self.secret(sid)})
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, hashlib.sha256(PIXEL).hexdigest() + "\n", ""))
+
+    def test_picture_refusals_exit_1_with_the_console_reason(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        shot = self.write("shot.png", PIXEL)
+        renamed = self.write("renamed.png", JPEG)
+        good, wrong = self.secret_file(sid), self.write("wrong-secret", b"A" * 43)
+
+        def refusals():
+            return [self.run_picture(svc, sid, renamed, good),
+                    self.run_picture(svc, sid, shot, wrong),
+                    self.run_picture(svc, "e" * 16, shot, good)]
+        results = self.assert_unchanged(svc, refusals)
+        self.assertEqual(
+            [(r.returncode, r.stdout, r.stderr) for r in results],
+            [(1, "", "sprint: refused 400: " + pictures.SIGNATURE_WRONG + "\n"),
+             (1, "", "sprint: refused 403: secret refused\n"),
+             (1, "", "sprint: refused 409: this sprint is not open\n")])
+        self.assertEqual(self.entries(), [])
+
+    def test_picture_bad_input_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good = self.secret_file(sid)
+        missing = self.store.parent / "none.png"
+        big = self.write("big.png", padded(3 * 1024 * 1024))
+
+        def attempts():
+            return [self.run_picture(svc, sid, missing, good),
+                    self.run_picture(svc, sid, big, good),
+                    run_sprint("picture", "--sprint", sid, "--file", self.write("shot.png", PIXEL),
+                               "--port", svc.address[1])]
+        gone, large, nosecret = self.assert_unchanged(svc, attempts)
+        self.assertEqual((gone.returncode, gone.stdout), (2, ""))
+        self.assertTrue(gone.stderr.startswith("sprint: cannot read "), gone.stderr)
+        self.assertEqual((large.returncode, large.stdout, large.stderr),
+                         (2, "", f"sprint: cannot send {big}: it is larger than 2 MiB\n"))
+        self.assertEqual((nosecret.returncode, nosecret.stdout, nosecret.stderr),
+                         (2, "", "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n"))
+        self.assertEqual(self.entries(), [])
+
+    def test_an_unreadable_answer_exits_1(self):
+        shot = self.write("shot.png", PIXEL)
+        secret = self.write("secret", b"s" * 43)
+        err = io.StringIO()
+        with mock.patch.object(sprint, "ask", return_value='{"picture":"X"}'), \
+                contextlib.redirect_stderr(err):
+            code = sprint.main(["picture", "--sprint", "a" * 16, "--secret-file", str(secret),
+                                "--file", str(shot)])
+        self.assertEqual(code, 1)
+        self.assertTrue(err.getvalue().startswith("sprint: refused 200: unreadable answer: "),
+                        err.getvalue())
+
+    def test_the_docstring_states_the_picture_contract(self):
+        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
+        for needle in ("sprint picture", "--file", "POST /api/picture", "X-Console-Sprint",
+                       "X-Console-Secret", "image/png", "larger than 2 MiB"):
+            with self.subTest(needle):
+                self.assertIn(needle, doc)
 
 
 class PictureDocsTest(unittest.TestCase):
