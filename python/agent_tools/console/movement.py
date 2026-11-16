@@ -59,7 +59,10 @@ the table, the pid or the pid's entry is missing.
 
 The session fold. `merged` also folds `local.sessions` into one `SessionMovement` per association of
 a session with a sprint, at `sessions_ms` (the time the caller started the read) or else `now_ms`.
-`output_ms` is the larger of the read and the last one, never moving back. `check_ms` is that time
+`output_ms` is the larger of the read and the last one, never moving back. A reading of a manager session carries `replies`, the `(sprint, idle-nudge time)` of
+the sprints it manages that were nudged: an output or a CPU reading for such a sprint that falls from the
+nudge to `NUDGE_REPLY_MS` (five minutes) after it is the manager's reply, so it is never folded and the
+last qualifying time stays (a reply never erases earlier movement; ADR-console-057 D6). `check_ms` is that time
 when the CPU used since the last reading, summed per process key `(pid, start)` (a process new since
 then counts all of its CPU), is at least `CHECK_CPU_MS` (one second: a watcher loop idling at a few
 milliseconds per poll must not read as a running check), and with no earlier table to compare (the
@@ -115,6 +118,9 @@ RUNNING_STATUSES = frozenset({"PENDING"})
 HELD_FOR_A_PERSON = "attention_required"
 REFLOG_TAIL_BYTES = 4096
 CHECK_CPU_MS = 1000
+# A nudged idle manager answers the nudge; the answer is not the sprint moving. Equal to
+# `idle.IDLE_AFTER_MS`, defined here because `idle` imports `view`, which imports this module (#1185).
+NUDGE_REPLY_MS = 300_000
 
 _BODY_ISSUE = re.compile(r"(?<![\w/])#(\d+)\b")
 _REFLOG_TIME = re.compile(r"(\d+) [+-]\d{4}$")
@@ -169,6 +175,7 @@ class SessionTarget:
     session_id: str
     pid: int | None
     sprints: frozenset[str]
+    replies: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,6 +184,7 @@ class SessionReading:
     sprints: frozenset[str]
     output_ms: int | None
     cpu: Cpu | None
+    replies: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -446,7 +454,8 @@ def read_sessions(projects_dirs: Iterable[Path], targets: Iterable[SessionTarget
         alive = table is not None and target.pid is not None and target.pid in table
         cpu = descendant_cpu(table, target.pid) if alive else None
         readings.append(SessionReading(target.session_id, target.sprints,
-                                       session_output_ms(projects, target.session_id), cpu))
+                                       session_output_ms(projects, target.session_id), cpu,
+                                       target.replies))
     return tuple(readings)
 
 
@@ -457,12 +466,18 @@ def _fold_sessions(previous: tuple[SessionMovement, ...], readings: tuple[Sessio
     for reading in readings:
         for sprint in reading.sprints:
             seen = old.get((reading.session_id, sprint))
-            outputs = [m for m in (reading.output_ms, seen and seen.output_ms) if m is not None]
+            nudged = dict(reading.replies).get(sprint)
+
+            def reply(ms: int | None) -> bool:
+                return ms is not None and nudged is not None and nudged <= ms < nudged + NUDGE_REPLY_MS
+
+            outputs = [m for m in (None if reply(reading.output_ms) else reading.output_ms,
+                                   seen and seen.output_ms) if m is not None]
             check = seen.check_ms if seen else None
             if reading.cpu is not None and seen is not None and seen.cpu is not None:
                 prev = dict(seen.cpu)
                 used = sum(max(0, ms - prev.get(key, 0)) for key, ms in reading.cpu)
-                if used >= CHECK_CPU_MS:
+                if used >= CHECK_CPU_MS and not reply(at):
                     check = at
             fresh[(reading.session_id, sprint)] = SessionMovement(
                 reading.session_id, sprint, max(outputs) if outputs else None, check,

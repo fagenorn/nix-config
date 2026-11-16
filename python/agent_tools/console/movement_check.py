@@ -12,22 +12,28 @@ associations (the manager by name or by `manager_session`, and the deliveries on
 or `inbox` issue). The check never rebuilds membership from `sessions[]` or `outside_sprints`: they
 miss a manager known only by `manager_session` and a delivery on an inbox issue.
 
-Output. For each association `W = movement.session_output_ms(projects(), session_id)`. W counts
-when W is not None, `now_ms - W < FRESH_MS`, and it is not the case that the association is the
-manager, `nudged_at` is set and `nudged <= W < nudged + view.NUDGE_REPLY_MS` (a manager's reply to
-an idle nudge, which the console leaves out too). W is seen when it counts, the association's
-`read_at` is not null and `W <= read_at`: a session read that started after the write has completed.
-A write newer than the console's last read is never judged.
+Output. For each association `W = movement.session_output_ms(projects(), session_id)`. W qualifies
+when W is not None and it is not the case that the association is the manager, `nudged_at` is set and
+`nudged <= W < nudged + movement.NUDGE_REPLY_MS` (a manager's reply to an idle nudge, which the
+console leaves out too). A qualifying W is seen when the association's `read_at` is not null and
+`W <= read_at`: a session read that started after the write has completed. A write newer than the
+console's last read is never judged. Two windows apply to a seen W. A failure is judged on a W under
+`QUIET_AFTER_MS` (the console's own quiet window, fifteen minutes) old: the view that shows the sprint
+is never newer than the check, so a W inside the window moves a sprint that reads quiet. Positive
+evidence needs a W under `FRESH_MS` old (the window less three minutes for the age of the published
+view).
 
 Exits, one JSON line with sorted keys.
-- 1 not met: some running sprint has a seen association and reads `state == "quiet"` or `ball ==
+- 1 not met: some running sprint has a seen association inside `QUIET_AFTER_MS` and reads `state == "quiet"` or `ball ==
   "nobody"`: `{"status": "not_met", "stuck": [{"output_age_s", "project_id", "session_id",
   "sprint_id"}]}`.
-- 0 met: no sprint is stuck and some running sprint has a counted association, `state != "quiet"`
-  and `ball == "manager"`, a `status_at` and a `movement.base_at` both older than `OLD_MS` (so the
-  goal, approval, report and run movement would not move it), a `now_text` that is not one of
-  `WAIT_TEXTS`, no `sessions[]` entry in state `working`, and no delivery entry with a `moved_at`
-  younger than `OLD_MS`. That covers every delivery entry of a session entry of the project (the
+- 0 met: no sprint is stuck and some running sprint has a seen association inside `FRESH_MS`,
+  `state != "quiet"` and `ball == "manager"`, a `status_at` and a `movement.base_at` both older than
+  `OLD_MS` (so the goal, approval, report and run movement would not move it), a `movement.waits`
+  object whose `ci_at`, `commit_at` and `release_at` are each null or older than `OLD_MS` (the
+  console's own wait signals, read as published and never inferred from the now-sentence, which a
+  moving session hides), no `sessions[]` entry in state `working`, and no delivery entry with a
+  `moved_at` younger than `OLD_MS`. That covers every delivery entry of a session entry of the project (the
   sprint's `sessions[]` and `outside_sprints.sessions[]`) whose `session_id` is one of the sprint's
   associations or whose `issues[].issue` meets the sprint's `issues[].issue`. Only the session
   signals of this change can then be moving it: `{"status": "met", "moving": [<same members>]}`.
@@ -44,13 +50,12 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools.console import manager_check, movement, service, view
+from agent_tools.console import manager_check, movement, service
 from agent_tools.console.deliveries import QUIET_AFTER_MS
-from agent_tools.console.sprints import NOW_CI_TEXT, NOW_COMMITTING_TEXT, NOW_RELEASE_TEXT
 
 FRESH_MS = QUIET_AFTER_MS - 3 * 60_000
 OLD_MS = QUIET_AFTER_MS
-WAIT_TEXTS = (NOW_CI_TEXT, NOW_COMMITTING_TEXT, NOW_RELEASE_TEXT)
+WAITS = ("ci_at", "commit_at", "release_at")
 NOT_YET = manager_check.NOT_YET
 
 
@@ -109,13 +114,16 @@ def _associations(sprint: dict, now_ms: int, dirs: list[Path]) -> list[dict]:
         if not isinstance(session_id, str):
             continue
         written = movement.session_output_ms(dirs, session_id)
-        counts = (written is not None and now_ms - written < FRESH_MS
+        counts = (written is not None
                   and not (assoc.get("manager") is True and nudged is not None
-                           and nudged <= written < nudged + view.NUDGE_REPLY_MS))
+                           and nudged <= written < nudged + movement.NUDGE_REPLY_MS))
         read = _ms(assoc.get("read_at"))
-        found.append({"session_id": session_id, "counts": counts,
-                      "seen": counts and read is not None and written <= read,
-                      "output_age_s": 0 if written is None else (now_ms - written) // 1000})
+        seen = counts and read is not None and written <= read
+        age = None if written is None else now_ms - written
+        found.append({"session_id": session_id,
+                      "seen": seen and age < QUIET_AFTER_MS,
+                      "fresh": seen and age < FRESH_MS,
+                      "output_age_s": 0 if age is None else age // 1000})
     return found
 
 
@@ -130,11 +138,14 @@ def _old(text, now_ms: int) -> bool:
 
 
 def _reads_moving(project: dict, sprint: dict, found: list[dict], now_ms: int) -> bool:
-    if not (any(a["counts"] for a in found) and sprint.get("state") != "quiet"
+    moved = _dict(sprint.get("movement"))
+    waits = moved.get("waits")
+    if not (any(a["fresh"] for a in found) and sprint.get("state") != "quiet"
             and sprint.get("ball") == "manager"
             and _old(sprint.get("status_at"), now_ms)
-            and _old(_dict(sprint.get("movement")).get("base_at"), now_ms)
-            and sprint.get("now_text") not in WAIT_TEXTS):
+            and _old(moved.get("base_at"), now_ms)
+            and isinstance(waits, dict)
+            and all(waits.get(key) is None or _old(waits.get(key), now_ms) for key in WAITS)):
         return False
     own = [_dict(s) for s in _list(sprint.get("sessions"))]
     if any(s.get("state") == "working" for s in own):
@@ -175,7 +186,7 @@ def main(argv=None, *, state: Callable[[], dict | None] | None = None,
         if sprint.get("state") == "quiet" or sprint.get("ball") == "nobody":
             stuck += [_report(project, sprint, a) for a in found if a["seen"]]
         elif _reads_moving(project, sprint, found, now_ms):
-            moving += [_report(project, sprint, a) for a in found if a["counts"]]
+            moving += [_report(project, sprint, a) for a in found if a["fresh"]]
     if stuck:
         manager_check._print({"status": "not_met", "stuck": stuck})
         return 1

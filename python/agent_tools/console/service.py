@@ -889,7 +889,8 @@ The sessions half (#1185): under the same lock the poll computes, per running pr
 such session, outside the lock, it reads the session registry once per poll for the pids, takes
 `at = clock()` in milliseconds and calls `session_reader(projects_dirs, targets)` (default
 `movement.read_sessions`: the newest transcript write and the CPU of the session's descendants),
-and merges the readings with `sessions_ms=at`, so a write after the read began is never counted as
+(each target carries `replies`, the idle nudges of the sprints the session manages, so the fold leaves
+the manager's reply out and keeps earlier movement) and merges the readings with `sessions_ms=at`, so a write after the read began is never counted as
 seen. A project with no such session calls neither the registry nor the reader. A reader that
 raises prints `console: movement_sessions_failed <project_id> <Type>: <message>` and the project
 merges with no session reading (the kept associations are not refreshed and age out; the forge
@@ -1307,7 +1308,8 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, project_for, project_states, read_states, registry_changes, sprint_sessions_of, sprint_waiting)
+    is_waiting, project_for, project_states, read_states, registry_changes, sprint_nudge_replies,
+    sprint_sessions_of, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -6454,6 +6456,9 @@ class ConsoleService:
             belonging = {project_id: sprint_sessions_of(
                 project_id, self._sprints.values(), self._sessions.values(), self._deliveries,
                 self._states) for project_id in roots}
+            nudged = {project_id: sprint_nudge_replies(
+                project_id, self._sprints.values(), self._sessions.values(), self._states)
+                for project_id in roots}
             dropped = [project_id for project_id in self._movement if project_id not in roots]
             for project_id in dropped:
                 del self._movement[project_id]
@@ -6477,7 +6482,8 @@ class ConsoleService:
                         registry = sessions.read_session_registry(self._session_dirs())
                     targets = tuple(
                         movement.SessionTarget(
-                            sid, registry[sid].pid if sid in registry else None, belong[sid])
+                            sid, registry[sid].pid if sid in registry else None, belong[sid],
+                            nudged[project_id].get(sid, ()))
                         for sid in sorted(belong))
                     at = int(self._clock() * 1000)
                     readings = self._session_reader(self._projects_dirs(), targets)

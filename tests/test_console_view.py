@@ -2024,8 +2024,24 @@ class SessionSignalViewTest(unittest.TestCase):
                          {"session_id": "m2", "manager": True, "read_at": utc(now - MIN)},
                          {"session_id": "s1", "manager": True, "read_at": None}],
             "nudged_at": iso(now - 30 * MIN),
-            "base_at": utc(R)})
+            "base_at": utc(R),
+            "waits": {"ci_at": None, "commit_at": None, "release_at": None}})
         self.assertEqual(self.shown(None, sprint_state=s)["movement"]["sessions"], [])
+
+    def test_the_sprint_entry_publishes_its_wait_signal_times_whatever_it_says_now(self):
+        now = self.now
+
+        def utc(ms):
+            return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+
+        shown = self.shown(moving(
+            pulls=(PullMovement(1, frozenset({4}), now - 3 * MIN, now - 5 * MIN),),
+            release_ms=now - 7 * MIN,
+            sessions=(SessionMovement("s1", A, now - 5 * MIN, None, None),)))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        self.assertEqual(shown["movement"]["waits"], {
+            "ci_at": utc(now - 3 * MIN), "commit_at": utc(now - 5 * MIN),
+            "release_at": utc(now - 7 * MIN)})
 
     def test_sprint_sessions_of_names_the_manager_and_the_sessions_delivering_its_issues(self):
         sprint_a = dataclasses.replace(
@@ -2044,6 +2060,18 @@ class SessionSignalViewTest(unittest.TestCase):
                                         {"p00": state("p00", 1)})
         self.assertEqual(found, {"m1": frozenset({A}), "m2": frozenset({A}),
                                  "d1": frozenset({A}), "d2": frozenset({A})})
+
+    def test_sprint_nudge_replies_names_the_nudged_managers_of_running_sprints(self):
+        nudged = iso(R + MIN)
+        sprint_a = dataclasses.replace(started(A), manager_session="m2", idle_nudged_at=nudged)
+        B = "b" * 16
+        sprint_b = dataclasses.replace(started(B), idle_nudged_at=None)
+        sessions = [session("m1", "idle", name=NAME), session("m2", "idle"),
+                    session("d1", "idle"), session("e1", ENDED, name=NAME),
+                    session("y1", "idle", name=session_name("p00", B))]
+        found = view.sprint_nudge_replies("p00", [sprint_a, sprint_b], sessions,
+                                          {"p00": state("p00", 1)})
+        self.assertEqual(found, {"m1": ((A, R + MIN),), "m2": ((A, R + MIN),)})
 
 
 class SprintEndViewTest(unittest.TestCase):
@@ -2207,7 +2235,8 @@ class SprintViewTest(unittest.TestCase):
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None, "pictures": [],
         "movement": {"sessions": [], "nudged_at": None,
-                     "base_at": "2026-11-12T10:00:00+00:00"}}])
+                     "base_at": "2026-11-12T10:00:00+00:00",
+                     "waits": {"ci_at": None, "commit_at": None, "release_at": None}}}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),

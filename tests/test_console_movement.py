@@ -6,6 +6,7 @@ Run: just agent-workflow-tests
 import copy
 import json
 import os
+import dataclasses
 import tempfile
 import time
 import unittest
@@ -19,7 +20,8 @@ from agent_tools.console.movement import (
     SessionReading, SessionTarget, descendant_cpu, process_table, read_sessions, session_output_ms)
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .test_console_view import A, MIN, R, entry, line, idle_session, reported, started, with_manager
+from .test_console_view import (
+    A, MIN, R, entry, iso, line, idle_session, reported, started, with_manager)
 
 PATTERN = "issue-<num>-<slug>"
 FIXTURE = Path(__file__).parent / "fixtures" / "console" / "forge-pulls.json"
@@ -353,8 +355,8 @@ class ProcessTableTest(unittest.TestCase):
             self.assertEqual([r.cpu for r in bare], [None, None, None])
 
 
-def reading(cpu, sprints=("a",), output=None, sid="s1"):
-    return SessionReading(sid, frozenset(sprints), output, cpu)
+def reading(cpu, sprints=("a",), output=None, sid="s1", replies=()):
+    return SessionReading(sid, frozenset(sprints), output, cpu, replies)
 
 
 def local_of(*readings, at=None):
@@ -405,6 +407,22 @@ class SessionFoldTest(unittest.TestCase):
         self.assertEqual(movement.merged(None, None, 1, local_of(
             reading(None, (), 5, "s9"))).sessions, ())
 
+    def test_a_managers_reply_to_a_nudge_never_replaces_earlier_movement(self):
+        nudge = (("a", 5000 + 100),)
+        prev = movement.merged(None, None, 5000, local_of(reading((((200, "2000"), 0),), output=1000)))
+        for now, output, cpu_ms, want_output, want_check in (
+                (6000, 5000 + 150, 2000, 1000, None),
+                (7000, 5000 + 200, 4000, 1000, None),
+                (5000 + 100 + movement.NUDGE_REPLY_MS, 5000 + 100 + movement.NUDGE_REPLY_MS + 50,
+                 6000, 5000 + 100 + movement.NUDGE_REPLY_MS + 50,
+                 5000 + 100 + movement.NUDGE_REPLY_MS)):
+            prev = movement.merged(prev, None, now, local_of(reading(
+                (((200, "2000"), cpu_ms),), output=output, replies=nudge)))
+            got = prev.sessions[0]
+            self.assertEqual((got.output_ms, got.check_ms), (want_output, want_check), now)
+        other = movement.merged(None, None, 6000, local_of(reading(None, output=5200, replies=(("b", 5100),))))
+        self.assertEqual(other.sessions[0].output_ms, 5200)
+
     def test_a_session_that_left_a_sprint_keeps_its_last_times_there(self):
         prev = None
         for t, sprints, c in ((1000, ("a",), 0), (2000, ("a",), 5000),
@@ -448,6 +466,17 @@ class SessionSignalReadingTest(unittest.TestCase):
             self.assertEqual((shown["state"], shown["state_text"]),
                              ("quiet", "quiet for 16 min \u2014 may be stuck"))
             self.assertEqual(shown["ball"], "nobody")
+
+    def test_a_nudge_reply_leaves_the_earlier_output_moving_the_sprint(self):
+        t0 = self.t0
+        nudged = t0 + 5 * MIN
+        base = dataclasses.replace(self.base, idle_nudges=1, idle_nudged_at=iso(nudged))
+        pm = movement.merged(None, None, t0, local_of(reading(None, (A,), t0 - 1000), at=t0))
+        pm = movement.merged(pm, None, t0 + 6 * MIN, local_of(reading(
+            None, (A,), t0 + 6 * MIN - 1000, replies=((A, nudged),)), at=t0 + 6 * MIN))
+        self.assertEqual(pm.sessions[0].output_ms, t0 - 1000)
+        shown = entry(line(base, t0 + 8 * MIN, sessions=[idle_session], movement={"p00": pm}))
+        self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
 
     def test_a_child_whose_cpu_grew_moves_the_sprint_and_a_frozen_one_lets_it_read_may_be_stuck(self):
         t0 = self.t0

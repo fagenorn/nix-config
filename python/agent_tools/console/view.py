@@ -403,7 +403,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "pictures": [{"id", "line", "pair"}, ...],
                       "movement": {"sessions": [{"session_id", "manager": <bool>,
                                                  "read_at": "<ISO time>" | null}, ...],
-                                   "nudged_at": "<time>" | null, "base_at": "<ISO time>"}}
+                                   "nudged_at": "<time>" | null, "base_at": "<ISO time>",
+                                   "waits": {"ci_at", "commit_at", "release_at": "<ISO time>" | null}}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
@@ -616,7 +617,7 @@ from agent_tools.console.deliveries import (
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, quota_wait, session_name
-from agent_tools.console.movement import ProjectMovement, SessionMovement
+from agent_tools.console.movement import NUDGE_REPLY_MS, ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
     ENDED,
     IDLE,
@@ -1104,10 +1105,6 @@ class WaitSignals:
 
 NO_WAITS = WaitSignals()
 
-# A manager that was nudged for being idle answers it; the answer is not the sprint moving. Equal
-# to `idle.IDLE_AFTER_MS`, defined here because `idle` imports this module (#1185).
-NUDGE_REPLY_MS = 300_000
-
 
 def sprint_sessions_of(project_id: str, sprints: Iterable[SprintState],
                        sessions: Iterable[SessionState],
@@ -1138,6 +1135,31 @@ def sprint_sessions_of(project_id: str, sprints: Iterable[SprintState],
         if mine:
             found[session.session_id] = frozenset(mine)
     return found
+
+
+def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
+                         sessions: Iterable[SessionState],
+                         states: Mapping[str, ProjectState]) -> dict[str, tuple[tuple[str, int], ...]]:
+    """For each live session of `project_id` that manages a running sprint which was nudged for being
+    idle (`idle_nudged_at`), the `(sprint_id, nudge time in ms)` pairs. A session manages a sprint
+    when it carries the sprint's manager name or is its `manager_session`. The movement fold leaves
+    the manager's reply to that nudge out (#1185)."""
+    running = [s for s in sprints if s.project_id == project_id and ended_at(s) is None
+               and s.idle_nudged_at is not None]
+    found: dict[str, list[tuple[str, int]]] = {}
+    for session in sessions:
+        if (session.state == ENDED or session.repo is None
+                or project_for(session.repo, states) != project_id):
+            continue
+        for sprint in running:
+            if (session.name == session_name(project_id, sprint.sprint_id)
+                    or session.session_id == sprint.manager_session):
+                try:
+                    found.setdefault(session.session_id, []).append(
+                        (sprint.sprint_id, _millis(sprint.idle_nudged_at)))
+                except (TypeError, ValueError):
+                    continue
+    return {sid: tuple(sorted(pairs)) for sid, pairs in found.items()}
 
 
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
@@ -1512,6 +1534,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                           "read_at": None if m.read_ms is None else _utc(m.read_ms)}
                          for m in own],
             "nudged_at": state.idle_nudged_at,
+            "waits": {"ci_at": None if waits.ci_ms is None else _utc(waits.ci_ms),
+                      "commit_at": None if waits.commit_ms is None else _utc(waits.commit_ms),
+                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms)},
             "base_at": _utc(_base_ms(state)),
         },
     }

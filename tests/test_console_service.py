@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import dataclasses
 import shutil
 import http.client
 import inspect
@@ -2188,6 +2189,21 @@ class MovementTest(Case):
         shown = sprint_entry(svc)
         self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
         self.assertNotIn("may be stuck", json.dumps(shown))
+
+    def test_a_nudged_managers_target_carries_the_nudge_for_the_fold(self):
+        reader = self.session_reader()
+        svc = self.open(Script(()), session_reader=reader)
+        t = self.running_sprint(svc)
+        sid = next(iter(svc._sprints))
+        stamp = datetime.fromtimestamp(t + 60, timezone.utc).isoformat()
+        svc._sprints[sid] = dataclasses.replace(svc._sprints[sid], idle_nudged_at=stamp)
+        support.write_session(self.sessions, pid=os.getpid(), session_id="mgr-1", cwd="/srv/p00",
+                              status="idle", name=f"owner/p00 sprint {sid}")
+        svc.poll_sessions()
+        self.now = t + 20 * 60
+        self.poll(svc)
+        self.assertEqual(reader.calls[0][1], (movement.SessionTarget(
+            "mgr-1", os.getpid(), frozenset({sid}), ((sid, int((t + 60) * 1000)),)),))
 
     def test_a_session_read_that_fails_is_reported_and_moves_nothing(self):
         reader = self.session_reader(OSError("gone"))

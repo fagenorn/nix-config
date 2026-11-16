@@ -27,7 +27,7 @@ def iso(seconds):
 
 def sprint(sid, *, state="on_track", ball="manager", status_age=40 * MIN, base_age=40 * MIN,
            now_text="building 1 of 7: Importer resumes", sessions=(), issues=(4,), assoc=(),
-           nudged_at=None, ended_at=None):
+           nudged_at=None, ended_at=None, waits=None):
     return {
         "type": "sprint", "sprint_id": sid, "state": state, "ball": ball, "now_text": now_text,
         "status_at": iso(NOW - status_age), "ended_at": ended_at,
@@ -37,7 +37,9 @@ def sprint(sid, *, state="on_track", ball="manager", status_age=40 * MIN, base_a
             "sessions": [{"session_id": s, "manager": m,
                           "read_at": None if r is None else iso(r)} for s, m, r in assoc],
             "nudged_at": None if nudged_at is None else iso(nudged_at),
-            "base_at": iso(NOW - base_age)},
+            "base_at": iso(NOW - base_age),
+            "waits": {"ci_at": None, "commit_at": None, "release_at": None,
+                      **{k: iso(NOW - v) for k, v in (waits or {}).items()}}},
     }
 
 
@@ -107,12 +109,37 @@ class MovementCheckTest(unittest.TestCase):
         unread = sprint("a", state="quiet", ball="nobody", assoc=[("s1", True, None)])
         self.assertEqual(75, self.check(view(project(unread)))[0])
 
-    def test_output_older_than_twelve_minutes_is_not_fresh(self):
+    def test_a_failure_is_judged_inside_the_quiet_window_and_evidence_inside_twelve_minutes(self):
         quiet = sprint("a", state="quiet", ball="nobody", assoc=[("s1", True, NOW)])
-        self.write("s1.jsonl", 13 * MIN)
-        self.assertEqual(75, self.check(view(project(quiet)))[0])
-        self.write("s1.jsonl", 11 * MIN)
-        self.assertEqual(1, self.check(view(project(quiet)))[0])
+        for age, code in ((11 * MIN, 1), (14 * MIN, 1), (16 * MIN, 75)):
+            with self.subTest(age=age):
+                self.write("s1.jsonl", age)
+                self.assertEqual(code, self.check(view(project(quiet)))[0])
+        for age, code in ((11 * MIN, 0), (13 * MIN, 75)):
+            with self.subTest(met=age):
+                self.write("s1.jsonl", age)
+                moving = sprint("a", sessions=[session("s1")], assoc=[("s1", True, NOW)])
+                self.assertEqual(code, self.check(view(project(moving)))[0])
+
+    def test_met_needs_output_the_console_has_read(self):
+        self.write("s1.jsonl", 5 * MIN)
+        for read_at in (None, NOW - 6 * MIN):
+            with self.subTest(read_at=read_at):
+                moving = sprint("a", sessions=[session("s1")], assoc=[("s1", True, read_at)])
+                code, out = self.check(view(project(moving)))
+                self.assertEqual((75, "waiting"), (code, out["status"]))
+
+    def test_a_wait_signal_the_console_publishes_keeps_met_away_whatever_the_sentence_says(self):
+        for key in ("ci_at", "commit_at", "release_at"):
+            with self.subTest(key):
+                kw = dict(waits={key: 5 * MIN}, now_text="building 1 of 7: Importer resumes")
+                code, out = self.check(view(project(self.moving(**kw))))
+                self.assertEqual((75, "waiting"), (code, out["status"]))
+        old = dict(waits={"ci_at": 20 * MIN, "commit_at": 20 * MIN, "release_at": 20 * MIN})
+        self.assertEqual(0, self.check(view(project(self.moving(**old))))[0])
+        bare = self.moving()
+        del bare["movement"]["waits"]
+        self.assertEqual(75, self.check(view(project(bare)))[0])
 
     def test_a_managers_reply_to_a_nudge_is_not_counted(self):
         self.write("s1.jsonl", 5 * MIN)
@@ -127,7 +154,6 @@ class MovementCheckTest(unittest.TestCase):
         cases = {
             "base": dict(base_age=5 * MIN),
             "status": dict(status_age=5 * MIN),
-            "wait": dict(now_text="waiting for CI on its pull request"),
             "working": dict(sessions=[session("s1", "working")]),
             "inbox delivery": dict(sessions=[session("s1")]),
             "own delivery": dict(sessions=[session("s1", deliveries=[delivery(4, 5 * MIN)])]),
