@@ -27,8 +27,12 @@ _Avoid_: upgrade script
 **Platform manifest**:
 The versioned JSON file the platform ships, listing its deprecations and migrations. A project's contract schema version is checked against it.
 
+**Production rules**:
+The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production.
+_Avoid_: deploy rules, production config
+
 **Project contract**:
-The authored `.agents/project.json` of a repository: its tracker, branches, commands, paths and release profiles. Policy lives here and is never defaulted.
+The authored `.agents/project.json` of a repository: its tracker, branches, commands, paths, release profiles and production rules. Policy lives here and is never defaulted.
 _Avoid_: project config, settings
 
 **Projection**:

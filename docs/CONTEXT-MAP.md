@@ -88,6 +88,7 @@
 | Prefix reorder | Hosts |
 | Production rule | Guard |
 | Probe | Verification |
+| Production rules | Project contract |
 | Project contract | Project contract |
 | Projection | Project contract |
 | Publication-free profile | Release |
