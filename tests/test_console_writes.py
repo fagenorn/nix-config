@@ -560,7 +560,7 @@ class GoalRouteTest(Case):
             "manager_state": "unavailable", "manager_until": None, "retry": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "sessions": [], "messages": [],
+            "sessions": [], "messages": [], "approval": None,
             "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None}])
