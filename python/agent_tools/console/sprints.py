@@ -575,9 +575,9 @@ SENT_ENDED_TEXT = "sent"
 REPLIED_TEXT = "replied"
 NOT_PICKED_UP_TEXT = "not picked up after 5 min"
 RETRY_ACTION_TEXT = "Press Retry to start a new manager."
-NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint under More."
+NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint."
 TURN_ACTION_TEXT = ("It waits for the manager's next turn; "
-                    "withdraw the sprint under More if none comes.")
+                    "withdraw the sprint if none comes.")
 MANAGER_SESSION_NAME = re.compile(r"(?P<project>.+) sprint (?P<sprint>[0-9a-f]{16})")
 
 _MINUTE_MS = 60_000

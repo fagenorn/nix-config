@@ -468,14 +468,15 @@ a session waiting for an answer or a permission reads "waiting for an answer" or
 permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`)
 and every older one whose reply is `new`, oldest first (so a reply to an old message is never
-cut). `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
+cut); an approval the manager picked up without a reply is left out and takes no slot, while one
+it replied to stays, its reply `new` until a later look and listed in `new_replies`. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
 sent, else `sent`; a nudge never changes it. The pick-up is the minute form (`PICKUP_MINUTE_TEXT`)
 exactly when `derive_view(..., nudges=True)` (default; the service passes whether it has a nudger)
 and the sprint's manager is a `started` row, else the turn form (`PICKUP_TURN_TEXT`). `state_text` is
 `"sent, "` and the pick-up for `sent`, else `PICKED_UP_TEXT`, `REPLIED_TEXT` or
 `NOT_PICKED_UP_TEXT`; on an ended sprint a `sent` message reads `SENT_ENDED_TEXT` alone, with no
 pick-up promise. `action_text` is null unless the message is `not_picked_up` on a sprint that has
-not ended (an ended one has no Tell box and no More fold to point at); then
+not ended (an ended one has no Tell box and no stop or withdraw control to point at); then
 `RETRY_ACTION_TEXT` when the sprint's `retry` is true, else `NUDGE_ACTION_TEXT` with the minute
 pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
 `TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
@@ -544,6 +545,7 @@ from agent_tools.console.sprints import (
     MAX_ASK_CHARS,
     MAX_CONTEXT_CHARS,
     MAX_OPTION_CHARS,
+    MESSAGE_APPROVED,
     NO_PROGRESS_TEXT,
     NUDGE_ACTION_TEXT,
     NONE,
@@ -1035,9 +1037,12 @@ def _is_new(message: Message, looked: str | None) -> bool:
 
 
 def _shown_messages(messages: Sequence[Message], looked: str | None) -> list[Message]:
-    """The `SHOWN_MESSAGES` newest messages, plus any older one whose reply is new (#1086)."""
-    first = len(messages) - SHOWN_MESSAGES
-    return [m for i, m in enumerate(messages) if i >= first or _is_new(m, looked)]
+    """The `SHOWN_MESSAGES` newest messages, plus any older one whose reply is new (#1086), once
+    every approval the manager picked up without a reply is left out: it takes no slot."""
+    kept = [m for m in messages
+            if not (m.kind == MESSAGE_APPROVED and m.read_at is not None and m.reply is None)]
+    first = len(kept) - SHOWN_MESSAGES
+    return [m for i, m in enumerate(kept) if i >= first or _is_new(m, looked)]
 
 
 def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bool,

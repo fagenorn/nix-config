@@ -2973,7 +2973,7 @@ class PageMessageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(back["projects"]) if has_class(n, "tell")], [])
 
 
-NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint under More."
+NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint."
 HINT_TEXT = "The manager picks it up within a minute."
 EARLIER_KEY = "earlier:" + "a" * 16
 LIFE_SPRINT = {**REPORTED, "tell_text": HINT_TEXT, "stoppable": True}

@@ -19,7 +19,8 @@ from .test_console_view import (
     MESSAGE_SID, message_at, message_row, message_rows, messaged_row, nudged_row, state)
 from .test_console_writes import Case
 from agent_tools.console import event_log
-from agent_tools.console.sprints import sprint_states
+from agent_tools.console.sprints import (
+    NUDGE_ACTION_TEXT, RETRY_ACTION_TEXT, TURN_ACTION_TEXT, sprint_states)
 from agent_tools.console.view import derive_view
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -742,6 +743,12 @@ MINUTE_TEXT = "the manager picks it up within a minute"
 TURN_TEXT = "the manager picks it up at its next turn"
 
 
+def approval(*more):
+    return message_rows(
+        message_row(3, event_log.BRIEF_SENT, {"version": 1, "goal": "g", "brief": PARTS}),
+        message_row(4, event_log.BRIEF_APPROVED, {"version": 1, "goal": "g"}), *more)
+
+
 def life(rows, now_ms, nudges=True):
     return derive_view([state("p00", 1)], sprints=sprint_states(rows), now_ms=now_ms,
                        nudges=nudges)["entries"][0]["sprints"][0]
@@ -785,11 +792,13 @@ class MessageLifeViewTest(unittest.TestCase):
         late = life(rows, AT + FIVE_MIN)["messages"][0]
         self.assertEqual((late["state"], late["state_text"], late["action_text"]),
                          ("not_picked_up", "not picked up after 5 min",
-                          "Tell the manager again to nudge it, or withdraw the sprint under More."))
+                          "Tell the manager again to nudge it, or withdraw the sprint."))
         turn = life(rows, AT + FIVE_MIN, nudges=False)["messages"][0]
         self.assertEqual(
             turn["action_text"],
-            "It waits for the manager's next turn; withdraw the sprint under More if none comes.")
+            "It waits for the manager's next turn; withdraw the sprint if none comes.")
+        for text in (NUDGE_ACTION_TEXT, TURN_ACTION_TEXT, RETRY_ACTION_TEXT):
+            self.assertNotIn("More", text)
         failed = [message_row(1, event_log.GOAL_STATED, {"goal": "make the importer resumable"}),
                   message_row(2, event_log.MANAGER_FAILED, {"reason": "boom"}),
                   messaged_row(3, TEXT)]
@@ -801,6 +810,34 @@ class MessageLifeViewTest(unittest.TestCase):
                             message_row(4, event_log.SPRINT_READ, {"through": 3}))
         picked = life(read, AT + 2 * FIVE_MIN)["messages"][0]
         self.assertEqual((picked["state"], picked["action_text"]), ("picked_up", None))
+
+    def test_a_picked_up_approval_is_not_shown_as_a_message(self):
+        def shown(*more):
+            return [(m["kind"], m["state"])
+                    for m in life(approval(*more), AT + 60_000)["messages"]]
+        self.assertEqual(shown(), [("approved", "sent")])
+        read = message_row(5, event_log.SPRINT_READ, {"through": 4})
+        self.assertEqual(shown(read), [])
+        self.assertEqual(shown(messaged_row(6, TEXT),
+                               message_row(7, event_log.SPRINT_READ, {"through": 6})),
+                         [("text", "picked_up")])
+
+    def test_a_picked_up_change_request_still_shows(self):
+        rows = message_rows(
+            message_row(3, event_log.BRIEF_SENT, {"version": 1, "goal": "g", "brief": PARTS}),
+            message_row(4, event_log.BRIEF_REPLIED,
+                        {"version": 1, "goal": "g", "reply": "smaller slices"}),
+            message_row(5, event_log.SPRINT_READ, {"through": 4}))
+        self.assertEqual([(m["kind"], m["state"]) for m in life(rows, AT + 60_000)["messages"]],
+                         [("changes", "picked_up")])
+
+    def test_a_replied_approval_keeps_its_reply(self):
+        rows = approval(message_row(5, event_log.SPRINT_READ, {"through": 4}),
+                        message_row(6, event_log.SPRINT_ANSWERED,
+                                    {"message": 4, "reply": ANSWER}))
+        self.assertEqual([(m["kind"], m["state"], m["reply"])
+                          for m in life(rows, AT + 60_000)["messages"]],
+                         [("approved", "replied", ANSWER)])
 
     def test_a_nudged_but_unread_message_never_reads_delivered(self):
         nudged = message_rows(messaged_row(3, TEXT), nudged_row(4, 3, True))
@@ -878,6 +915,19 @@ class MessageWindowViewTest(unittest.TestCase):
         self.assertEqual(view["new_replies"], [])
 
 
+    def test_a_picked_up_approval_takes_no_window_slot(self):
+        brief = {"version": 1, "goal": "g", "brief": PARTS}
+        rows = message_rows(
+            messaged_row(3, "note 3"), message_row(4, event_log.BRIEF_SENT, brief),
+            message_row(5, event_log.BRIEF_APPROVED, {"version": 1, "goal": "g"}),
+            message_row(6, event_log.SPRINT_READ, {"through": 5}),
+            *[messaged_row(seq, "note %d" % seq) for seq in range(7, 16)])
+        view = derive_view([state("p00", 1)], sprints=sprint_states(rows),
+                           now_ms=AT + 20 * 60_000, looked=None)
+        shown = view["entries"][0]["sprints"][0]["messages"]
+        self.assertEqual([m["id"] for m in shown], [3, *range(7, 16)])
+
+
 class MessagePickupServiceTest(MessageRouteTest):
     def test_the_service_words_the_pickup_by_whether_it_has_a_nudger(self):
         svc = self.open()
@@ -930,6 +980,22 @@ class NewReplyViewTest(unittest.TestCase):
                          "New reply from the manager of make the importer resumable")
         self.assertEqual(view["statement"]["inbox_items"], 0)
         self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+
+    def test_a_reply_to_an_approval_is_new_until_a_later_look(self):
+        rows = approval(message_row(5, event_log.SPRINT_READ, {"through": 4}),
+                        message_row(6, event_log.SPRINT_ANSWERED,
+                                    {"message": 4, "reply": ANSWER}))
+        view = self.view(rows, message_at(5))
+        (message,) = self.messages(view)
+        self.assertEqual((message["kind"], message["state"]), ("approved", "replied"))
+        self.assertIs(message["new"], True)
+        self.assertEqual([r["message_id"] for r in view["new_replies"]], [4])
+        self.assertIsInstance(view["new_replies_text"], str)
+        view = self.view(rows, message_at(7))
+        (message,) = self.messages(view)
+        self.assertEqual((message["kind"], message["state"]), ("approved", "replied"))
+        self.assertIs(message["new"], False)
+        self.assertEqual(view["new_replies"], [])
 
     def test_a_reply_at_or_before_the_last_look_is_not_new(self):
         for looked in (message_at(4), message_at(5)):
