@@ -1,6 +1,6 @@
 # ADR-console-044 — A manager posts, lists and withdraws short notices for its project
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-053
 - **Decided in:** #1117
 
 ## Context

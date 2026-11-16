@@ -7558,3 +7558,72 @@ class SyncRerunTest(unittest.TestCase):
         self.assertEqual((got["outcome"], got["stage"], got["head"]), ("stopped", "head-moved", M1))
         self.assertEqual(self.landing(bad), ["land-pr-1", "land-sync-1-1", "land-unlock-1"])
         self.assertEqual(land_release_shas(bad["calls"]), [SHA])
+
+
+def marked_ready(n):
+    return dict(ready(n), look={"verdict": "marked", "covers": ["the page"]})
+
+
+def awaiting(n, pr=41):
+    return {"stage": "awaiting-look", "issue": n, "pr": pr, "head": SHA, "reason": f"issue {n} needs the owner's look before merge",
+            "covers": ["the page"], "ways": "w", "cont": dict(ready(n)["cont"], look={"pr": pr, "head": SHA})}
+
+
+LANDING = ("land-", "close-out-")
+
+
+class AwaitingLookBatchTest(unittest.TestCase):
+    """#1139: a marked issue's ready child is resumed once in ship mode; its awaiting-look result is reported, never landed, never relaunched."""
+
+    def test_a_marked_and_an_unmarked_issue_land_only_the_unmarked_one(self):
+        d = direct_lane(1, 2)
+        out = run_full(args=dict(ARGS, issues=[1, 2]), replies=d["replies"], patch=d["patch"], children={"1": [marked_ready(1), awaiting(1)]})
+        result, calls = out["result"], out["calls"]
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["pr"], got["head"]), ("awaiting-look", 41, SHA))
+        self.assertIn("issue 1 needs the owner's look before merge", got["reason"])
+        self.assertEqual(row(result, 2)["outcome"], "landed")
+        ships = children_of(calls, 1, "ship")
+        self.assertEqual(len(ships), 1)
+        self.assertEqual(ships[0]["args"]["cont"], marked_ready(1)["cont"])
+        self.assertEqual(children_of(calls, 2, "ship"), [])
+        self.assertEqual([x for x in labels(calls) if x.startswith(LANDING) and x.endswith("-1")], [])
+        self.assertEqual([a["reason"] for a in result["owner_actions"]], ["awaiting-look"])
+        self.assertEqual(result["owner_actions"][0], {"issue": 1, "reason": "awaiting-look", "pr": 41, "head": SHA, "claim": "held",
+                                                      "holder": HOLDER, "cont": slim(awaiting(1)["cont"])})
+        self.assertIsNone(result["relaunch"])
+
+    def test_a_marked_issue_never_rides_a_train(self):
+        result, calls, _ = train_run(issues=(1, 2, 3), patch={"land-pr-2": BEHIND["land-pr-1"]}, children={"1": [planned(1), marked_ready(1), awaiting(1)]})
+        self.assertEqual(row(result, 1)["outcome"], "awaiting-look")
+        # train-pr-<issue> names an issue; the other train labels carry the train's number, which is 1 here.
+        named = [x for x in labels(calls) if x.startswith(("train-pr-",) + LANDING)]
+        self.assertEqual([x for x in named if x.endswith("-1")], [])
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [2, 3])
+
+    def test_a_readoptable_marked_issue_goes_through_its_child(self):
+        patch = {"facts-1": {"open_pr": {"number": 41, "head_branch": "issue-1-x"}, "look": {"verdict": "marked"}}}
+        result, calls, _ = run(patch=patch, children={"1": [marked_ready(1), awaiting(1)]})
+        self.assertIn("readopt-1", labels(calls))
+        self.assertNotIn("land-pr-1", labels(calls))
+        self.assertEqual(len(children_of(calls, 1, "ready")), 1)
+        self.assertEqual(len(children_of(calls, 1, "ship")), 1)
+        self.assertEqual(row(result, 1)["outcome"], "awaiting-look")
+
+    def test_an_unread_look_on_a_readoptable_issue_goes_through_its_child(self):
+        patch = {"facts-1": {"open_pr": {"number": 41, "head_branch": "issue-1-x"}, "look": {"verdict": "error"}}}
+        result, calls, _ = run(patch=patch)
+        self.assertEqual(len(children_of(calls, 1, "ready")), 1)
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_the_facts_step_reads_the_look_marker(self):
+        _, calls, _ = run()
+        self.assertIn("look-approval marked --repo owner/repo --issue 1", prompt(calls, "facts-1"))
+
+    def test_an_awaiting_look_row_is_not_relaunched(self):
+        d = direct_lane(1, 2)
+        children = {"1": [marked_ready(1), awaiting(1)],
+                    "2": {"stage": "verify", "reason": "verify: build failed", "cont": ready(2)["cont"]}}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), replies=d["replies"], patch=d["patch"], children=children)
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        self.assertNotIn("1", result["relaunch"].get("conts", {}))

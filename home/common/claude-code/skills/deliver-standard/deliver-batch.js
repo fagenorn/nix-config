@@ -44,6 +44,12 @@ export const meta = {
 // holder and the child's cont (slimmed), the claim held and the row left stopped. The owner decides the approach and relaunches with that
 // cont in conts and the decision: the cont keeps the marker, the child's first fix wave and its re-review get the decision as binding,
 // and a relaunch that brings none stops in the child before any agent and is this owner action again. A stop also marked diverging is the not-converging row below instead.
+// #1139: an issue marked as needing the owner's look (its facts carry look {verdict}, read by look-approval marked) is never landed by the batch: its ready
+// child (look {verdict, covers}) is resumed once in mode ship with the ready cont, inside the same slot, and stops at awaiting-look. That row is
+// {issue, outcome: awaiting-look, pr, head, reason}; it is reported in owner_actions with reason awaiting-look, the pr, the head, the pictures when
+// the child made any, the claim holder and the child's cont (slimmed), the claim held, and it is not relaunched: the owner's answer resumes it through
+// deliver-standard with that cont and this batch id. A re-adopted PR lands as it stands only when its facts read look unmarked; marked, or a marker
+// that could not be read, it goes through its child.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
@@ -255,6 +261,7 @@ const FACTS_SCHEMA = {
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
     lane: { type: 'string', enum: LANES }, why: { type: 'string' },
+    look: { type: 'object', properties: { verdict: { type: 'string' } }, required: ['verdict'] },
   },
   required: ['state', 'labels', 'claim', 'native', 'blockers', 'lane'],
 }
@@ -303,6 +310,7 @@ const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git 
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
 8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
+9. look: run alone and exactly look-approval marked --repo ${SLUG} --issue ${n} and return its verdict (marked or unmarked) as look; on a non-zero exit return look with verdict error.
 ${RULES_FOR(REPO, '<branch>')}`
 const releaseClosedPrompt = n => `Issue #${n} of ${SLUG} (the git repository at ${REPO}) is closed and this batch still holds its claim. Release it.
 Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed
@@ -528,6 +536,7 @@ const READY = {}
 const FLAKY = {} // #972: by issue, the checks its child saw fail and pass on the one rerun
 const RULES_CONFLICT = {} // #988: by issue, the criterion and the rules a plan-review stop reported as conflicting
 const PARKED = {} // #996: by issue, the owner action of a stop a relaunch cannot change: a blocked task, a Codex usage limit
+const AWAITING = {} // #1139: by issue, the PR, head and cont of a marked issue's delivery that waits for the owner's look
 const UNRELATED = {} // #972: by issue, the failing test its child's verification fix found no cause for, with the evidence
 const OUTSIDE = {} // #972: by issue, the files outside the branch's diff its child's verification fix edited, each with its cause
 const readyOf = n => READY[n]
@@ -2070,7 +2079,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       }
       // #811: an accepted PR still goes through the child when an amend is pending for it: landing as it stands would drop the amend.
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
-      if (ro.ok === true && !amendPending) {
+      // #1139: nor does a PR land as it stands unless its issue's look marker was read and found absent (fail closed): a marked issue, or one whose marker was not read, goes through its child.
+      const lookPending = !(isObj(f.look) && f.look.verdict === 'unmarked')
+      if (ro.ok === true && !amendPending && !lookPending) {
         if (!readoptUsable(ro)) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
@@ -2081,6 +2092,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         rows[n] = await landReady(n, READY[n])
         return
       }
+      if (ro.ok === true && lookPending && !amendPending) log(`readopt-${n}: the issue needs the owner's look (or its marker was not read); it goes through its child`)
       if (ro.ok !== true && ro.reason !== 'unaccepted') {
         rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
         return
@@ -2128,6 +2140,11 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           r = await child('ready')
         }
       }
+      // #1139: a marked issue's ready child is resumed once in ship mode, inside this slot: the push and the PR, then the stop at awaiting-look.
+      if (r && r.stage === 'ready' && !terminalChild(r) && isObj(r.look) && r.look.verdict === 'marked' && isObj(r.cont)) {
+        CONTS[n] = r.cont
+        r = await child('ship')
+      }
       if (terminalChild(r)) trip(`child-${n}`)
     } finally {
       release()
@@ -2149,6 +2166,11 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `recover-end-${n}`, phase: 'Deliver', ag
       // The hold step may close the issue (its once-run passed, or every row moved to a child issue): read the state it left, never the criterion kinds.
       const heldOpen = !(r.close_out && r.close_out.issue_state === 'CLOSED')
       rows[n] = { issue: n, outcome: heldOpen ? 'landed-held' : 'landed', ...(r.pr ? { pr: r.pr } : {}) }
+      return
+    }
+    if (r.stage === 'awaiting-look') {
+      AWAITING[n] = { pr: r.pr, head: r.head, ...(Array.isArray(r.pictures) && r.pictures.length ? { pictures: r.pictures } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
+      rows[n] = { issue: n, outcome: 'awaiting-look', pr: r.pr, head: r.head, reason: oneLine(r.reason) }
       return
     }
     if (r.stage === 'ready') {
@@ -2285,7 +2307,9 @@ const parked = table.filter(r => r.outcome === 'stopped' && PARKED[r.issue] && r
 const conflicted = table.filter(r => r.outcome === 'stopped' && r.stage === 'plan-review' && RULES_CONFLICT[r.issue]).map(r => r.issue)
 // #1000: nor can a file two fixes in a row each drew a new finding in: the owner decides the approach.
 const oscillating = table.filter(r => r.outcome === 'stopped' && r.stage === 'fix-wave-review' && OSCILLATING[r.issue]).map(r => r.issue)
-const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
+// #1139: nor can a marked issue's delivery waiting for the owner's look: the owner's answer resumes it.
+const awaiting = table.filter(r => r.outcome === 'awaiting-look' && AWAITING[r.issue]).map(r => r.issue)
+const open = table.filter(r => !FINAL.includes(r.outcome) && !awaiting.includes(r.issue) && !cycle.includes(r.issue) && !oscillating.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 // The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
 // step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
@@ -2327,7 +2351,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...oscillating.map(n => ({ issue: n, reason: 'fix-oscillating', ...OSCILLATING[n], cont: slimCont(OSCILLATING[n].cont) })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...awaiting.map(n => ({ issue: n, reason: 'awaiting-look', ...AWAITING[n], cont: slimCont(AWAITING[n].cont) })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...oscillating.map(n => ({ issue: n, reason: 'fix-oscillating', ...OSCILLATING[n], cont: slimCont(OSCILLATING[n].cont) })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

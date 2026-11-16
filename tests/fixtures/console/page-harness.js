@@ -27,7 +27,10 @@
 // first attached element with that class (none throws); {input} also puts the
 // caret at the end of the value. Elem.focus() sets state.active, counts in
 // state.focusCount and, only when the element was not already active, fires its
-// own focus listeners with {type: "focus", target}; Elem.blur() clears
+// own focus listeners with {type: "focus", target}; after its disabled and inert
+// checks Elem.focus() also adds 1 to state.hiddenFocus (the snapshot's
+// hidden_focus, starting at 0) when an ancestor DETAILS is not open and the
+// element is not inside that details' own SUMMARY child, and focuses all the same; Elem.blur() clears
 // state.active when it is that element and fires nothing; removing a node (replaceChildren dropping it, appendChild
 // moving it, the textContent setter, Elem.remove()) clears state.active when it
 // is that node or inside its subtree, as a browser blurs a removed element, and
@@ -142,6 +145,13 @@ class Elem {
   focus() {
     if (this.disabled === true) return; // a browser does not focus a disabled control
     for (let n = this; n; n = n.parentNode) if (n.inert === true) return; // nor inside an inert subtree
+    for (let n = this; n.parentNode; n = n.parentNode) {
+      const up = n.parentNode;
+      if (up.tagName === "DETAILS" && up.open !== true && n.tagName !== "SUMMARY") {
+        state.hiddenFocus += 1; // a browser does not focus a control in a closed details
+        break;
+      }
+    }
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
@@ -282,7 +292,7 @@ for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[
 
 const steps = JSON.parse(fs.readFileSync(0, "utf8"));
 const state = {
-  focused: false, visibility: "visible", clock: null, active: null, focusCount: 0, keyPrevented: null,
+  focused: false, visibility: "visible", clock: null, active: null, focusCount: 0, hiddenFocus: 0, keyPrevented: null,
 };
 if (steps.length > 0 && "start" in steps[0]) {
   state.focused = steps[0].start.focused;
@@ -575,6 +585,7 @@ async function run() {
           end: field.selectionEnd,
         },
         focus_count: state.focusCount,
+        hidden_focus: state.hiddenFocus,
         scroll_y: window.scrollY,
         key_prevented: state.keyPrevented,
         posts: posts.slice(),

@@ -3,16 +3,19 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirteen screens the sprint block, the finished list, the message life and
-  the Spend page must read well on (`tell-box-open` is the sprint block with its Tell box opened;
-  `owner-check` is the sprint block with a held issue's owner check beside it; `spend-page` is
-  the `/spend` page over seeded transcripts: a running sprint's manager session, an
-  outside-sprint session and one workflow run, with spend on at least four of the last seven
-  days; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
+- `STATES` names the fifteen screens the sprint block, the finished list, the message life, the
+  Spend page, the notices fold and the desk's spend figures must read well on (`tell-box-open` is
+  the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
+  issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
+  running sprint's manager session, an outside-sprint session and one workflow run, with spend on
+  at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold;
+  `notice-post-open` is that fold with the owner's post control opened, and shot against a page
+  that has no such control it is the same fold, which is how the before pictures are made;
+  `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show); `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 26 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 30 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -58,7 +61,8 @@ from .console_test_support import write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "owner-check", "spend-page", "desk-spend")
+          "nothing-running", "owner-check", "spend-page", "notices-fold", "notice-post-open",
+          "desk-spend")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -236,6 +240,15 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
                     held=True)
         seed.check(web, 11, 3 * MINUTE)
+    elif state in ("notices-fold", "notice-post-open"):
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
+        sid, goal = seed.sprint(web, "Fix the settings page", started=20 * MINUTE,
+                                report=2 * MINUTE)
+        seed.put(90, "notice.posted", web, {"sprint_id": sid, "goal": goal, "notice": {
+            "kind": "claim", "text": "reworking the settings form",
+            "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
+        seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
+            "kind": "heads-up", "text": "routes are frozen until Friday"}})
     elif state == "spend-page":
         return (seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
                             report=2 * MINUTE)[0],)
@@ -459,7 +472,9 @@ JARGON_COUNT = r"""(() => {
   }).length;
   const phrases = document.body.innerText.match(
     /\bon track\b|\bstated (just now|\d)|\bwithdraw|\bnudge|\bstop or\b|would do differently/gi);
-  return folds + rows + (phrases ? phrases.length : 0);
+  const owners = Array.from(document.querySelectorAll('#projects button.notice-withdraw')).filter(
+    (button) => button.innerText.trim() === 'Withdraw').length;
+  return folds + rows + Math.max(0, (phrases ? phrases.length : 0) - owners);
 })()"""
 
 
@@ -477,6 +492,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
                 page.click('details[data-key="line:owner/web"] > summary')
             page.click('details[data-key="finished"] > summary')
             page.click('details[data-key^="ended:"] > summary')
+        if state in ("notices-fold", "notice-post-open"):
+            page.click('details[data-key^="notices:"] > summary')
+            if state == "notice-post-open" and page.query_selector("button.notice-open"):
+                page.click("button.notice-open")
         tell = None
         if state == "tell-box-open":
             page.click("button.tell-open")
