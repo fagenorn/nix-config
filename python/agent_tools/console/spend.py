@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -93,6 +94,7 @@ from agent_tools.console.deliveries import (
     Chunk,
     Unreadable,
 )
+from agent_tools.console.event_log import Event
 from agent_tools.console.sprints import MANAGER_SESSION_NAME
 from agent_tools.hosts import model_pricing
 
@@ -489,3 +491,23 @@ def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | N
         yield "aspect", UNATTRIBUTED
     else:
         yield "aspect", MANAGERS if sprint is not None else OUTSIDE
+
+
+def default_ping_log() -> Path | None:
+    """The keepalive proxy's log file: `~/Library/Logs/claude-cache-proxy.log` on darwin, else None."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Logs/claude-cache-proxy.log"
+    return None
+
+
+def session_profiles(events: Iterable[Event],
+                     profiles: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Session id -> the account of its latest `SEEN` or `PROFILE` row; `GONE` forgets nothing."""
+    found = dict(profiles) if profiles else {}
+    for event in events:
+        if event.kind not in (sessions.SEEN, sessions.PROFILE):
+            continue
+        session_id, profile = event.payload.get("session_id"), event.payload.get("profile")
+        if isinstance(session_id, str) and isinstance(profile, str):
+            found[session_id] = profile
+    return found

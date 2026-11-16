@@ -7,7 +7,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools.console import spend
+from agent_tools.console import sessions, spend
+from agent_tools.console.event_log import Event
 from agent_tools.console.spend import AGENT, BATCH, OTHER, PING, SESSION, STANDARD, Key, Tokens
 from agent_tools.hosts import model_pricing
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -472,6 +473,29 @@ class UnattributedTest(ViewCase):
                    b'{"type":"started","agentId":"a1","label":"recover-end-3","phase":"Plan"}\n')
         self.write(self.run / "agent-a1.jsonl", assistant("A", TODAY, input=8))
         self.assertEqual(set(self.today()["phase"]), {"other"})
+
+
+class SessionProfilesTest(unittest.TestCase):
+    @staticmethod
+    def event(seq, kind, **payload):
+        return Event(seq, "2026-11-16T10:00:00+00:00", kind, None, payload)
+
+    def test_gone_keeps_the_profile(self):
+        events = [self.event(1, sessions.SEEN, session_id="s1", profile="p1"),
+                  self.event(2, sessions.GONE, session_id="s1")]
+        self.assertEqual(spend.session_profiles(events), {"s1": "p1"})
+
+    def test_latest_profile_wins_and_folds_incrementally(self):
+        known = {"s1": "p1"}
+        self.assertEqual(
+            spend.session_profiles([self.event(1, sessions.PROFILE, session_id="s1", profile="p2")],
+                                   known),
+            {"s1": "p2"})
+        self.assertEqual(known, {"s1": "p1"})
+        ignored = [self.event(2, sessions.SEEN, session_id="s1"),
+                   self.event(3, sessions.SEEN, session_id=7, profile="p3"),
+                   self.event(4, sessions.HOOK, session_id="s1", profile="p4")]
+        self.assertEqual(spend.session_profiles(ignored, known), {"s1": "p1"})
 
 
 if __name__ == "__main__":
