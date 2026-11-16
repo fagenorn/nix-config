@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import activation, view
+from agent_tools.console import activation, console, service, view
 from agent_tools.console.activation import (
     Activation, blob_id, console_files, origin_files, reader_for, reading)
 from agent_tools.project_contract import resolve_project
 
 from . import accounts_sandbox
+from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -253,6 +257,127 @@ class ActivationViewTest(Trees):
                 lines[i] == attribute and lines[i + 1].startswith("switch ")
                 for i in range(len(lines) - 1)), attribute)
         self.assertEqual(view.ACTIVATE_COMMAND, "just switch")
+
+
+CHANGED = Activation("/srv/p00", ("python/agent_tools/console/view.py",))
+
+
+class Fake:
+    """A reader answering each call from a list: an Activation or None is returned, an exception raised."""
+
+    def __init__(self, *steps):
+        self.steps = list(steps)
+        self.calls = []
+        self.called = threading.Event()
+
+    def __call__(self, roots):
+        self.calls.append(list(roots))
+        self.called.set()
+        step = self.steps.pop(0) if len(self.steps) > 1 else self.steps[0]
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+
+def shown(svc):
+    return json.loads(svc.view_bytes)["activation"]
+
+
+class ActivationServiceTest(Trees):
+    def setUp(self):
+        super().setUp()
+        self.store = self.tmp / "console" / "events.sqlite3"
+        self.registry = self.tmp / "fleet" / "registry.json"
+        support.write_registry(self.registry, support.entries(2))
+
+    def opened(self, reader):
+        svc = service.ConsoleService(
+            self.store, self.registry, port=0, session_dirs=lambda: [], repo_of=lambda cwd: cwd,
+            activation_reader=reader, activation_seconds=3600)
+        self.addCleanup(svc.close)
+        return svc
+
+    def test_a_reading_with_changes_shows_the_line(self):
+        svc = self.opened(Fake(CHANGED))
+        svc.poll_activation()
+        self.assertEqual(shown(svc), {
+            "text": "A console change merged and is not active on this host: run just switch in /srv/p00.",
+            "command": "just switch", "root": "/srv/p00"})
+
+    def test_the_reader_is_given_the_registered_roots(self):
+        reader = Fake(CHANGED)
+        self.opened(reader).poll_activation()
+        self.assertEqual(reader.calls[-1], ["/srv/p00", "/srv/p01"])
+
+    def test_a_matching_reading_clears_the_line(self):
+        svc = self.opened(Fake(CHANGED, CHANGED, Activation("/srv/p00", ())))
+        svc.poll_activation()
+        rows, version = support.log_rows(self.store), svc.version
+        svc.poll_activation()
+        self.assertEqual(svc.version, version)
+        svc.poll_activation()
+        self.assertIsNone(shown(svc))
+        self.assertEqual(svc.version, version + 1)
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_a_failing_read_keeps_the_last_line_and_says_so(self):
+        svc = self.opened(Fake(CHANGED, RuntimeError("boom")))
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc.poll_activation()
+            svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], "/srv/p00")
+        self.assertEqual(captured.getvalue().splitlines(), ["console: activation_failed RuntimeError: boom"])
+
+    def test_no_reader_starts_no_thread_and_shows_no_line(self):
+        svc = support.service(self, self.store, self.registry)
+        self.assertIsNone(shown(svc))
+        self.assertNotIn(service.ACTIVATION_THREAD, [t.name for t in threading.enumerate()])
+
+    def test_the_thread_reads_at_start_and_stops_on_close(self):
+        reader = Fake(CHANGED)
+        svc = support.service(
+            self, self.store, self.registry, activation_reader=reader, activation_seconds=3600)
+        self.assertTrue(reader.called.wait(5))
+        self.assertEqual(len(reader.calls), 1)
+        threads = [t for t in threading.enumerate() if t.name == service.ACTIVATION_THREAD]
+        self.assertEqual(len(threads), 1)
+        self.assertTrue(threads[0].is_alive())
+        svc.close()
+        self.assertFalse(threads[0].is_alive())
+
+    def test_console_main_gives_the_service_an_activation_reader(self):
+        recorded = {}
+
+        def recorder(*args, **kwargs):
+            recorded.update(kwargs)
+            raise OSError("stop here")
+
+        with mock.patch.object(console.service, "ConsoleService", recorder), \
+                contextlib.redirect_stderr(io.StringIO()):
+            console.main(["--port", "0"])
+        self.assertTrue(callable(recorded["activation_reader"]))
+
+    def test_a_failed_production_read_keeps_the_line(self):
+        for patcher in (mock.patch.object(activation, "integration_branch", lambda root: "main"),
+                        mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        support.write_registry(self.registry, [{"project_id": "owner/cfg", "root": str(self.checkout)}])
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        svc = self.opened(reader_for(self.package_root))
+        svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], str(self.checkout))
+        version = svc.version
+        (self.checkout / ".git").rename(self.checkout / ".git-away")
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], str(self.checkout))
+        self.assertEqual(svc.version, version)
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("console: activation_failed ReadFailed: "), lines[0])
 
 
 if __name__ == "__main__":
