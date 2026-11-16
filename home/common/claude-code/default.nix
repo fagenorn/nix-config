@@ -218,7 +218,8 @@ let
   # `--derive-bin` the row check. The check runs the wrapper on a payload with no
   # repository-bound verb: the guard loads the base policy, so the build refuses
   # a guard source or a base policy that cannot load, and never opens the
-  # compiled path or runs the row check.
+  # compiled path or runs the row check. The check also runs one harmless Edit
+  # and one harmless MCP payload, which the guard must let through.
   lifecycleGuard = pkgs.writeTextFile {
     name = "claude-bash-lifecycle-guard";
     executable = true;
@@ -234,8 +235,26 @@ let
         echo "claude-bash-lifecycle-guard: refused a harmless Bash payload" >&2
         exit 1
       fi
+      if ! printf '%s' '{"tool_name":"Edit","tool_input":{"file_path":"/nonexistent/claude-guard-check"}}' \
+        | "$target"; then
+        echo "claude-bash-lifecycle-guard: refused a harmless Edit payload" >&2
+        exit 1
+      fi
+      if ! printf '%s' '{"tool_name":"mcp__check__noop","tool_input":{}}' \
+        | "$target"; then
+        echo "claude-bash-lifecycle-guard: refused a harmless MCP payload" >&2
+        exit 1
+      fi
     '';
   };
+
+  lifecycleGuardHooks = [
+    {
+      type = "command";
+      command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
+      timeout = 30;
+    }
+  ];
 
   # The managed global git hooks (issue 672). `core.hooksPath` replaces every
   # per-repository hook directory, so the directory holds the authoritative
@@ -365,16 +384,23 @@ let
       command = "${agentTools.launchers.owner-actions} statusline";
     };
 
+    # The same guard serves Bash and, since issue 1150 (ADR-guard-012), file
+    # edits and MCP tools: it refuses a write to a declared production key file
+    # and a call to a declared production MCP tool, and nothing else. MultiEdit
+    # is listed because the pinned Claude Code still names it among its
+    # file-write tools.
     hooks.PreToolUse = [
       {
         matcher = "Bash";
-        hooks = [
-          {
-            type = "command";
-            command = "${lifecycleGuard}/bin/claude-bash-lifecycle-guard";
-            timeout = 30;
-          }
-        ];
+        hooks = lifecycleGuardHooks;
+      }
+      {
+        matcher = "Edit|Write|MultiEdit|NotebookEdit";
+        hooks = lifecycleGuardHooks;
+      }
+      {
+        matcher = "^mcp__";
+        hooks = lifecycleGuardHooks;
       }
     ];
 

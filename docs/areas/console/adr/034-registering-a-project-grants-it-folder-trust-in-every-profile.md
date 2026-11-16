@@ -1,7 +1,7 @@
 # ADR-console-034 — Registering a project grants it folder trust in every profile
 
-- **Status:** accepted; amended by ADR-console-035
-- **Decided in:** #1078
+- **Status:** accepted; amended by ADR-console-035; amended in place by #1183 (D9)
+- **Decided in:** #1078; D9 in #1183
 
 ## Context
 
@@ -9,27 +9,29 @@ A background launch (`claude --bg`) and a wake of a parked session refuse a fold
 
 ## Decision
 
-**D1. Which approvals grant.** Only the owner's Register approval grants, and only once for a repository: the `Apply it` answer of the `Apply this adoption?` card (ADR-console-030), and, for an already-adopted repository, the `Register it` answer of the `Register <name>` card (ADR-console-028 D5, amended). The grant runs at the approval, before the apply or the register check, whatever they then do. `Apply it again`, `Try again`, `Retry`, both `Not now` answers, the registry watcher and the auto-registration of a merged adoption (ADR-console-028 D10) grant nothing. Both cards say what registering allows, verbatim: `Registering lets agents run in this folder with the folder's own settings and hooks.`
+**D1. Which approvals grant.** Only the owner's Register approval grants, and only once for a repository: the `Apply it` answer of the `Apply this adoption?` card (ADR-console-030), and, for an already-adopted repository, the `Register it` answer of the `Register <name>` card (ADR-console-028 D5, amended). The grant runs at the approval, before the apply or the register check, whatever they then do. `Apply it again`, `Try again`, `Retry`, both `Not now` answers, the registry watcher and the auto-registration of a merged adoption (ADR-console-028 D10) grant nothing, except the start-up sweep of D9, which grants only registered projects. Both cards say what registering allows, verbatim: `Registering lets agents run in this folder with the folder's own settings and hooks.`
 
 **D2. The key.** The write sets `projects[<key>].hasTrustDialogAccepted` to `true` and nothing else. `<key>` is the real path of the main checkout's git root: `git rev-parse --path-format=absolute --git-common-dir`, its parent when its last segment is `.git`, resolved with `os.path.realpath`, the same value the launcher's `project_key` computes. Every other member of the document (`oauthAccount` included) and every other member of an existing project entry is kept.
 
 **D3. The write.** The targets are every account profile's `.claude.json` and `~/.claude.json`. The merge is written to a temporary file in the same directory, with the original file's mode (0600 for a new file), and replaces the file by an exchanging rename: `renameat2` with `RENAME_EXCHANGE` on Linux, `renamex_np` with `RENAME_SWAP` on Darwin. The document the exchange displaced is always in hand and is compared with the one the merge was based on; a changed one is merged again and swapped again, so a client write in the window between the last read and the replacement is never overwritten unseen. After a bounded number of displacements the newest one is put back unchanged and the result is `failed`; a document displaced by that put-back is kept beside the file as `.claude.json.trust-kept-<n>`. A host with no exchanging rename gets `failed` with nothing written, never a plain-rename fallback. The result is read back. A file that does not exist is created (mode 0600); a file that is not a JSON object, whose `projects` or project entry is not an object, or that is a symbolic link, is never written and reads `failed`.
 
-**D4. The row.** Each grant appends one owner-action row `trust.granted` with `{by, cause, project, root, profiles}`, where `profiles` names each profile and its result. It is not a kept kind (ADR-console-015) and carries no file content: rows and stderr name profiles, the project, the key and results only. A grant that has written files always logs its row, even when `close` has begun, and `close` waits for running grants before it closes the log; a grant that starts after `close` began writes nothing.
+**D4. The row.** Each grant appends one owner-action row `trust.granted` with `{by, cause, project, root, profiles}`, where `cause` is `apply`, `register`, `account`, `check` or `console-start`, and `profiles` names each profile and its result. It is not a kept kind (ADR-console-015) and carries no file content: rows and stderr name profiles, the project, the key and results only. A grant that has written files always logs its row, even when `close` has begun, and `close` waits for running grants before it closes the log; a grant that starts after `close` began writes nothing.
 
 **D5. A failed read-back.** A (root, profile) pair whose read-back failed is an inbox question card with the single option `Check again`, which grants that one pair again, logs it and goes when a later row reads `granted` or `already` for the pair. The card gives the terminal route in plain words: `cd <root> && CLAUDE_ACCOUNT=<profile> claude`, then accept the prompt and type `/exit`. It is offered only for a pair a logged grant named.
 
 **D6. A profile added later.** A profile added on the page is granted every project in the fleet registry by the console, after the launcher's add and before the sign-in, read back and logged. The console's `Adder` sets `CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST=1`, so the launcher's thirty-second creation deadline covers creation only. A profile added by `claude-account add` in a terminal is granted the same projects by the launcher through `folder-trust grant-registered`, one implementation for both, before its first session.
 
-**D7. Nothing else grants.** Trust is set only by writing the documented key. No undocumented route is used, such as the `CLAUDE_CODE_SANDBOXED` environment variable, and no flag, environment variable or settings key marks a folder trusted; `CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST` withholds only the launcher's own grant (D6). No grant is made for a project the owner did not approve.
+**D7. Nothing else grants.** Trust is set only by writing the documented key. No undocumented route is used, such as the `CLAUDE_CODE_SANDBOXED` environment variable, and no flag, environment variable or settings key marks a folder trusted; `CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST` withholds only the launcher's own grant (D6). No grant is made for a project the owner did not approve or register.
 
 **D8. The host check.** The host check `console-register` of #1052 keeps exercising registration end to end: it answers the `Register <name>` card, expects `registered`, and its restore removes the trust entry its throwaway root caused from every target, so it still leaves no trace.
+
+**D9. The console's start.** When the console service starts, it grants every project in the fleet registry in every target of D3, with the grant of D2 and D3 and its read-back, on a thread of its own. It reads the registry and writes each trust file outside the service's ingest lock, so the page and the hooks are never delayed; the folder-trust module's own writer lock still serialises its writes with every other grant, as before. Each project logs one `trust.granted` row of cause `console-start` naming each profile and its result; a pair already trusted reads `already` and nothing is written; a failed read-back is the card of D5. Registration remains the owner's approval of the project, so the sweep grants nothing the owner did not register. It stops between projects once the console closes.
 
 ## Consequences
 
 - A first goal in a registered project starts without the interactive prompt, in every profile that existed at the approval or was added after.
 - Tests sandbox HOME, the profile directories and the repositories; none touches the real `~/.claude.json`, the real profiles or the real fleet registry.
-- A project registered before this change is not granted until a profile is added or the owner runs `folder-trust grant-registered`; nothing sweeps the registry on its own.
+- A project registered before this decision, or whose trust a client write dropped, is granted again at the next console start (D9).
 - A residual remains: no lock is shared with the client, so a client that reads the console's interim merge in the instant between two swaps and later writes from it can drop the key; the next grant restores it.
 - The Darwin swap (`RENAME_SWAP`) is tested only by a local run on a Mac, since CI is Linux only.
 - Related: ADR-console-015, ADR-console-025, ADR-console-028, ADR-console-030, ADR-hosts-005.

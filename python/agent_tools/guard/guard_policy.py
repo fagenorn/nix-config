@@ -67,8 +67,10 @@ The compiled policy. A row is `{default_branch, integration_branch,
 required_checks, evidence}` plus, for a contract whose snapshot declares
 production rules (ADR-project-contract-007), `production`: each changing and
 read-only command id resolved to its argv as authored, and the release profile;
-it is absent when the contract declares none or no production, and key files and
-MCP tools are not carried. `required_checks` is the contract's
+it is absent when the contract declares none or no production. The member also
+carries the changing key-file globs and MCP tool names as authored (`key_files`,
+`mcp_tools`, always present, possibly `[]`); read-only MCP tools are left out
+because only a changing name refuses (issue 1150). `required_checks` is the contract's
 `bindings.vcs.merge.required_checks`, read from the resolved snapshot of the
 pinned contract as the two branches are, sorted, or `[]` when the contract
 declares none; the guard's loader accepts exactly the entries the resolver
@@ -79,7 +81,8 @@ blob id at that commit, the provider's `full_name` and each compiled profile's
 `id`, `version` and `digest`. No resolved snapshot and no contract body is
 persisted. The written document has exactly two members, the rows under
 `derived_repositories` and `derivation`: `{schema_version, platform_version,
-registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (4) and
+registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (5; rows from schema 5 carry `key_files` and
+`mcp_tools`) and
 the digest is `null` when no registry file exists. The base policy is only
 validated and consulted for `literal_conflict`, and none of its members is
 copied into the output. The lifecycle guard reads its trusted members
@@ -208,7 +211,7 @@ from agent_tools.system import github_remote
 
 REPORT_SCHEMA_VERSION = 1
 DERIVE_REPORT_SCHEMA_VERSION = 2
-DERIVATION_SCHEMA_VERSION = 4
+DERIVATION_SCHEMA_VERSION = 5
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
 POLICY_MEMBERS = ("derived_repositories", "derivation")
@@ -440,7 +443,9 @@ def production_row(snapshot: dict) -> dict | None:
 
     return {"changes": resolved(production["changes"]["commands"]),
             "read_only": resolved(production["read_only"]["commands"]),
-            "release_profile": production["release_profile"]}
+            "release_profile": production["release_profile"],
+            "key_files": list(production["changes"]["key_files"]),
+            "mcp_tools": list(production["changes"]["mcp_tools"])}
 
 
 def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.VerificationSource) -> dict:
