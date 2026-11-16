@@ -4,8 +4,10 @@ Run: just agent-workflow-tests
 """
 import contextlib
 import functools
+import hashlib
 import io
 import json
+import os
 import tempfile
 import threading
 import time
@@ -13,10 +15,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, inbox, service, view
+from agent_tools.console import console, inbox, pictures, service, view
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
+from .console_test_support import JPEG, PIXEL, WIDE
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SLUGS = {"/srv/p00": "octo/p00", "/srv/p01": "octo/p01"}
@@ -302,6 +305,168 @@ class PollThreadTest(Case):
         self.assertEqual(support.log_rows(self.store), rows)
 
 
+CHECK = {"key": "octo/p00#7/6803141410", "project_id": "owner/p00", "repo": "octo/p00", "issue": 7,
+         "comment_id": 6803141410, "url": "https://github.com/octo/p00/issues/7#issuecomment-6803141410",
+         "reason": "verify-ask", "kind": "manual-check", "check_id": "AC5", "reading": "",
+         "answers": ["passed", "failed", "note"], "version": "sha256:" + "0" * 64,
+         "question": "Do the two screenshots read well?", "detail": "", "questions": [], "items": [],
+         "paid": False, "confirm": "", "answered": False, "held_work": 1}
+
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+class OwnerCheckPictureTest(Case):
+    def setUp(self):
+        super().setUp()
+        base = self.store.parent.parent
+        self.project = base / "project"
+        (self.project / "shots").mkdir(parents=True)
+        (self.project / "shots" / "before.png").write_bytes(PIXEL)
+        (self.project / "shots" / "after.png").write_bytes(WIDE)
+        (self.project / "fake.png").write_bytes(JPEG)
+        self.outside = base / "outside" / "x.png"
+        self.outside.parent.mkdir()
+        self.other = PIXEL[:33] + b"other"
+        self.outside.write_bytes(self.other)
+        self.screens = base / "screens"
+        self.screens.mkdir()
+        (self.screens / "s.png").write_bytes(PIXEL[:33] + b"screen")
+        self.check = dict(CHECK, detail=f"In shots/: before.png and after.png. Also fake.png and {self.outside}.")
+
+    def opened(self, tracker, **kwargs):
+        support.write_registry(self.registry, [{"project_id": "owner/p00", "root": str(self.project)}])
+        kwargs.setdefault("activity", lambda root: time.time())
+        kwargs.setdefault("slug_of", lambda root: "octo/p00")
+        kwargs.setdefault("session_dirs", lambda: [])
+        kwargs.setdefault("repo_of", lambda cwd: cwd)
+        svc = service.ConsoleService(self.store, self.registry, port=0, tracker=tracker, **kwargs)
+        self.addCleanup(svc.close)
+        return svc
+
+    def served(self, tracker, **kwargs):
+        svc = self.opened(tracker, **kwargs)
+        svc.start()
+        seen = svc.version
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if "pictures" in (self.the_check(svc) or {}):
+                return svc
+            change = svc.wait_for_change(seen, 0.1)
+            seen = change[0] if change else seen
+        self.fail("condition not reached: the check carries no pictures")
+
+    def the_check(self, svc):
+        return next((i for i in view_of(svc)["inbox"]["open"] if i["key"] == CHECK["key"]), None)
+
+    def fetch(self, svc, picture_id):
+        token = (self.store.parent / "page-token").read_text().strip()
+        return support.get_page(svc.address, "/api/picture/" + picture_id, {"X-Console-Token": token})
+
+    def test_a_polled_check_lists_its_pictures_and_the_page_reads_them(self):
+        svc = self.served(Scripted([self.check]))
+        card = self.the_check(svc)
+        self.assertEqual([p["line"] for p in card["pictures"]], ["before.png", "after.png"])
+        self.assertEqual(card["missing_pictures"], [])
+        status, _, body = self.fetch(svc, sha256(PIXEL))
+        self.assertEqual((status, body), (200, PIXEL))
+
+    def test_a_non_png_or_outside_path_is_neither_listed_nor_served(self):
+        svc = self.served(Scripted([self.check]))
+        lines = [p["line"] for p in self.the_check(svc)["pictures"]]
+        self.assertNotIn("fake.png", lines)
+        self.assertNotIn("x.png", lines)
+        self.assertEqual(self.fetch(svc, sha256(JPEG))[0], 404)
+        self.assertEqual(self.fetch(svc, sha256(self.other))[0], 404)
+        self.assertIsNone(pictures.read(svc.pictures_dir, sha256(self.other)))
+
+    def test_a_configured_screenshot_location_is_served(self):
+        check = dict(CHECK, detail=f"{self.screens}/s.png")
+        svc = self.opened(Scripted([check]), screenshot_dirs=[self.screens])
+        svc.poll_tracker()
+        self.assertEqual([p["line"] for p in self.the_check(svc)["pictures"]], ["s.png"])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = Path(tmp.name) / "console" / "events.sqlite3"
+        fresh = self.opened(Scripted([check]))
+        fresh.poll_tracker()
+        self.assertEqual(self.the_check(fresh)["pictures"], [])
+
+    def test_a_second_poll_with_unchanged_files_appends_no_row(self):
+        svc = self.opened(Scripted([self.check]))
+        svc.poll_tracker()
+        rows = support.log_rows(self.store)
+        svc.poll_tracker()
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_a_checks_picture_outlives_the_sweep(self):
+        now = [time.time()]
+        svc = self.opened(Scripted([self.check]), clock=lambda: now[0])
+        svc.poll_tracker()
+        old = now[0] - 2 * DAY
+        os.utime(svc.pictures_dir / sha256(PIXEL), (old, old))
+        svc.retain()
+        self.assertEqual(pictures.read(svc.pictures_dir, sha256(PIXEL)), PIXEL)
+
+    def test_a_sweep_waits_while_a_check_picture_is_being_stored(self):
+        now = [time.time()]
+        svc = self.opened(Scripted([self.check]), clock=lambda: now[0])
+        svc.poll_tracker()
+        old = now[0] - 2 * DAY
+        stored = svc.pictures_dir / sha256(PIXEL)
+        os.utime(stored, (old, old))
+        swept = threading.Event()
+        real_sweep, real_store = pictures.sweep, pictures.store
+        sweeper = threading.Thread(target=svc.retain)
+        raced = []
+
+        def sweep(*args):
+            try:
+                return real_sweep(*args)
+            finally:
+                swept.set()
+
+        def store(directory, data):
+            if data == PIXEL and not sweeper.is_alive() and not swept.is_set():
+                sweeper.start()
+                raced.append(swept.wait(0.3))
+            return real_store(directory, data)
+
+        with mock.patch.object(pictures, "sweep", sweep), mock.patch.object(pictures, "store", store):
+            svc.poll_tracker()
+            sweeper.join(5)
+        self.assertEqual(raced, [False], "the sweep ran while a picture was being stored")
+        self.assertTrue(swept.is_set())
+        self.assertEqual(pictures.read(svc.pictures_dir, sha256(PIXEL)), PIXEL)
+
+    def test_other_items_gain_no_picture_members(self):
+        svc = self.opened(Scripted([A]))
+        svc.poll_tracker()
+        card = next(i for i in view_of(svc)["inbox"]["open"] if i["key"] == A["key"])
+        self.assertNotIn("pictures", card)
+        self.assertNotIn("missing_pictures", card)
+
+    def test_a_failed_attach_is_one_line_and_keeps_the_item(self):
+        svc = self.opened(Scripted([self.check]))
+        errors = io.StringIO()
+        with mock.patch.object(inbox, "attach_pictures", side_effect=RuntimeError("boom")), \
+                contextlib.redirect_stderr(errors):
+            svc.poll_tracker()
+        self.assertEqual(errors.getvalue(), "console: picture_attach_failed owner/p00 RuntimeError: boom\n")
+        card = self.the_check(svc)
+        self.assertIsNotNone(card)
+        self.assertNotIn("pictures", card)
+
+    def test_a_stop_during_the_attach_appends_nothing(self):
+        svc = self.opened(Scripted([self.check]))
+        rows = support.log_rows(self.store)
+        with mock.patch.object(inbox, "attach_pictures",
+                               side_effect=lambda item, *a, **k: (svc._stop.set(), item)[1]):
+            svc.poll_tracker()
+        self.assertEqual(support.log_rows(self.store), rows)
+
+
 class CommandTest(unittest.TestCase):
     def test_the_command_reads_the_tracker(self):
         recorded = {}
@@ -316,6 +481,22 @@ class CommandTest(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(console.main(["--port", "0"]), 1)
         self.assertIs(recorded["tracker"], inbox.read_items)
+
+    def test_the_command_passes_the_screenshot_locations(self):
+        for argv, expected in ((["--port", "0", "--screenshots", "/a", "--screenshots", "/b"],
+                                [Path("/a"), Path("/b")]), (["--port", "0"], [])):
+            recorded = {}
+
+            def refuse(*args, **kwargs):
+                recorded.update(kwargs)
+                raise OSError("taken")
+
+            with mock.patch.object(service, "ConsoleService", side_effect=refuse), \
+                    mock.patch.object(service, "default_store", return_value=Path("/nonexistent/store")), \
+                    mock.patch.object(service, "default_registry", return_value=Path("/nonexistent/registry")), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(console.main(argv), 1)
+            self.assertEqual(recorded["screenshot_dirs"], expected)
 
 
 if __name__ == "__main__":

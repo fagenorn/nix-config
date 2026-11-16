@@ -8158,6 +8158,75 @@ class PageCheckHeadingTest(unittest.TestCase):
         (heading,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "h2" and has_class(n, "q")]
         self.assertEqual(full(heading), "Which host?")
 
+PIC_CHECK = check_item("P", "manual-check", headline=DEMO_QUESTION, check_id="A3", pictures=[
+    {"id": A, "line": "before-1440.png", "pair": None},
+    {"id": B, "line": "after-1440.png", "pair": None}], missing_pictures=[], reading="")
+
+
+class PageCheckPictureTest(unittest.TestCase):
+    def test_a_check_card_draws_one_thumbnail_per_picture_with_its_file_name(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual(len(with_class(lead, "pics")), 1)
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
+                         ["before-1440.png", "after-1440.png"])
+        keys = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(keys, [f"owner/p00#{PIC_CHECK['key']}/{i}" for i in range(2)])
+
+    def test_a_check_thumbnail_opens_the_shared_viewer(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+        (count,) = with_class(snap["viewer"], "viewer-count")
+        self.assertEqual(full(count), "1 of 2")
+        (img,) = with_class(snap["viewer"], "viewer-img")
+        made = {m["picture"]: m["url"] for m in snap["object_urls"]["made"]}
+        self.assertEqual(img["src"], made[A])
+
+    def test_a_check_row_shows_its_pictures_too(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE, PIC_CHECK])}, {"snapshot": True}])
+        rows = [r for r in rows_of(snap) if with_class(r, "pic-thumb")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(with_class(rows[0], "pic-thumb")), 2)
+
+    def test_a_missing_picture_is_one_plain_line(self) -> None:
+        gone = {**PIC_CHECK, "pictures": [], "missing_pictures": ["gone.png"]}
+        (snap,) = render([START, {"frame": frame([gone])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        (line,) = with_class(lead, "pic-missing")
+        self.assertEqual(full(line), "gone.png was not found on this host.")
+        self.assertEqual(with_class(lead, "pic-img"), [])
+
+    def test_a_reading_shows_above_the_answers(self) -> None:
+        read = {**PIC_CHECK, "reading": "the watts on the plug meter"}
+        (snap,) = render([START, {"frame": frame([read])}, {"snapshot": True}])
+        (reading,) = with_class(lead_of(snap), "reading")
+        self.assertEqual(full(reading), "Reading: the watts on the plug meter")
+        (box,) = [n for n in nodes(snap["inbox"]) if has_class(n, "abox")]
+        kids = box["children"]
+        self.assertLess(next(i for i, c in enumerate(kids) if c is reading),
+                        next(i for i, c in enumerate(kids) if has_class(c, "act")))
+
+    def test_an_open_viewer_closes_when_the_checks_picture_file_changes(self) -> None:
+        swapped = {**PIC_CHECK, "pictures": [{"id": C, "line": "before-1440.png", "pair": None},
+                                             {"id": B, "line": "after-1440.png", "pair": None}]}
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"frame": frame([swapped])}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+
+    def test_an_open_viewer_stays_when_the_checks_pictures_are_unchanged(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"frame": frame([dict(PIC_CHECK)])}, {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+
+    def test_a_check_without_the_new_members_draws_none(self) -> None:
+        old = check_item("Q", "manual-check", headline=DEMO_QUESTION, check_id="A4")
+        (snap,) = render([START, {"frame": frame([old])}, {"snapshot": True}])
+        for name in ("pics", "pic-missing", "reading"):
+            self.assertEqual(with_class(snap["inbox"], name), [], name)
+
+
 
 class LapsedResetPageTest(unittest.TestCase):
     """#1045: a frame drawn before a reset passed does not keep naming that reset."""
