@@ -644,10 +644,12 @@ class MergeTest(unittest.TestCase):
 class FailureTest(unittest.TestCase):
     def test_a_failed_status_read_is_unknown_with_its_detail(self):
         world = RailwayWorld(self)
-        world.respond("railway", ["status", "--json"], None, exit=1, stderr="Unauthorized")
+        world.respond("railway", ["status", "--json"], None, exit=1,
+                      stderr="Error: connection refused")
         observation = adapter.inspect(request())
         self.assertEqual((observation["outcome"], observation["reason"]), ("unknown", "lookup_failed"))
-        self.assertIn("Unauthorized", observation["facts"]["detail"])
+        self.assertIn("connection refused", observation["facts"]["detail"])
+        self.assertFalse(any(r.startswith("next-step:") for r in observation["references"]))
 
     def test_a_missing_cli_is_executable_missing(self):
         RailwayWorld(self)
@@ -657,6 +659,84 @@ class FailureTest(unittest.TestCase):
             observation = adapter.inspect(request())
         self.assertEqual((observation["outcome"], observation["reason"]),
                          ("unknown", "executable_missing"))
+
+    def test_a_missing_cli_names_where_the_project_provides_railway(self):
+        RailwayWorld(self)
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        with mock.patch.dict(os.environ, {"PATH": empty.name}):
+            observation = adapter.inspect(request())
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("unknown", "executable_missing"))
+        text = adapter.NEXT_STEPS["executable_missing"]
+        self.assertEqual(observation["references"][-1], text)
+        self.assertIn("no railway command was found", text)
+        self.assertIn("dev shell", text)
+        self.assertIn("no railway command was found", release_adapter.reference_text(observation))
+
+    def unauthorized_status(self):
+        world = RailwayWorld(self)
+        world.respond("railway", ["status", "--json"], None, exit=1,
+                      stderr="Unauthorized. Please login with `railway login`")
+        return world
+
+    def test_an_unauthorized_status_read_names_railway_login(self):
+        world = self.unauthorized_status()
+        observation = adapter.inspect(request())
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("unknown", "railway_unauthorized"))
+        self.assertIn("Unauthorized", observation["facts"]["detail"])
+        self.assertEqual(observation["references"][-1], adapter.NEXT_STEPS["railway_unauthorized"])
+        self.assertIn("`railway login`", observation["references"][-1])
+        self.assertEqual([c["argv"] for c in world.calls("railway")], [["status", "--json"]])
+
+    def test_every_railway_auth_marker_is_unauthorized(self):
+        for label, stdout, stderr in (
+                ("stderr", "", "Unauthorized. Please run `railway login` again."),
+                ("not authenticated", "", "Not authenticated"),
+                ("stdout only", "Unauthorized", "")):
+            with self.subTest(label):
+                world = RailwayWorld(self)
+                world._answer("railway", ["status", "--json"], stdout, 1, stderr, 0)
+                observation = adapter.inspect(request())
+                self.assertEqual(observation["reason"], "railway_unauthorized")
+
+    def test_a_zero_exit_is_never_unauthorized(self):
+        world = RailwayWorld(self)
+        world._answer("railway", ["status", "--json"], json.dumps({
+            "name": "nodo-prod",
+            "environments": {"edges": [{"node": {"name": "production"}}]}}), 0, "Unauthorized", 0)
+        world.deployments("api", deployment("d1", MERGE))
+        observation = adapter.inspect(request(services=["api"]))
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("satisfied", "deployed"))
+        self.assertFalse(any(r.startswith("next-step:") for r in observation["references"]))
+
+    def test_an_unauthorized_service_read_ends_the_references_once(self):
+        world = RailwayWorld(self)
+        world.status()
+        world.deployments("api", deployment("d1", MERGE))
+        refused = "Unauthorized. Please run `railway login` again."
+        admin = ["deployment", "list", "--service", "admin", "--environment", "production",
+                 "--json"]
+        world.respond("railway", admin, None, exit=1, stderr=refused)
+        observation = adapter.inspect(request())
+        text = adapter.NEXT_STEPS["railway_unauthorized"]
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("unknown", "railway_unauthorized"))
+        self.assertEqual(observation["facts"]["services"][1]["reason"], "railway_unauthorized")
+        self.assertEqual(observation["references"][-2], "railway:nodo-prod/production/api/d1")
+        self.assertEqual(observation["references"][-1], text)
+        world.respond("railway", ["deployment", "list", "--service", "api", "--environment",
+                                  "production", "--json"], None, exit=1, stderr=refused)
+        observation = adapter.inspect(request())
+        self.assertEqual(
+            [r for r in observation["references"] if r.startswith("next-step:")], [text])
+
+    def test_the_docstring_documents_the_next_step(self):
+        for needle in ("railway_unauthorized", "next-step:", "railway login", "dev shell"):
+            with self.subTest(needle):
+                self.assertIn(needle, adapter.__doc__)
 
     def test_one_budget_bounds_every_read(self):
         world = RailwayWorld(self)
@@ -716,6 +796,14 @@ class RunningIdentityTest(unittest.TestCase):
                                        deployment("d3", MERGE, "SKIPPED", "2026-11-08T11:00:00Z"),
                                        *older)
                 self.assertEqual(self.answer(predicate()), ("unknown", "identity_unobservable"))
+
+    def test_an_unauthorized_read_is_unobservable_with_its_next_step(self):
+        self.world.respond("railway", ["status", "--json"], None, exit=1,
+                           stderr="Unauthorized. Please login with `railway login`")
+        observation = adapter.inspect(predicate())
+        self.assertEqual((observation["outcome"], observation["reason"]),
+                         ("unknown", "identity_unobservable"))
+        self.assertEqual(observation["references"][-1], adapter.NEXT_STEPS["railway_unauthorized"])
 
     def test_an_unreadable_service_is_unobservable_and_other_predicates_unsupported(self):
         self.world.deployments("api", deployment("d1", MERGE))
