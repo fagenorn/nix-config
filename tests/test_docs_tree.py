@@ -1251,6 +1251,25 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-044", notice)
 
+    def test_the_notice_board_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "046-the-notice-board-shows-each-manager-its-projects-open-notices-and-never-"
+                "approves-anything.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-046 \u2014 The notice board shows each manager its "
+                                "project's open notices and never approves anything")
+        adr = self.doc(path)
+        for needle in ("#1118", "ADR-console-044", "ADR-console-015", "ADR-console-019",
+                       "only in the console's log", "never approval", "first prompt",
+                       "sprint inbox", "sprint status", "for you", "question card",
+                       "POST /api/notices", "not on a line beginning with"):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn("ADR-console-046", notice)
+        self.assertIn("ADR-console-044", notice)
+
     def test_the_notices_fold_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
         self.assertIn('"Notices (n)"', adr)

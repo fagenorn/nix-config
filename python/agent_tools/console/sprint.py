@@ -12,7 +12,7 @@
     sprint withdraw-notice [--sprint <id>] [--secret-file <path>] --notice <id> [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
-    sprint status [--sprint <id>] [--port N]
+    sprint status [--sprint <id>] [--secret-file <path>] [--port N]
     sprint contract
 
 `--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
@@ -140,7 +140,10 @@ member of the closing report: the console decides, in one place.
 not read, in id order, each once, and exit 0. An answer to one of the manager's questions (kind
 `answer`) also carries `"question"` (the question's text), `"round"` (the round id) and `"chosen"`
 (the option's text, or null for the owner's own words). An inbox with nothing unread is
-`{"messages": []}`.
+`{"messages": []}`. Before the inbox request the command sends `POST /api/notices` with the same body
+and, after the JSON line, prints `sprints.notice_block` of that answer: the open notices of the
+project's other sprints, the head line and then one line each, and nothing when there are none, so
+the JSON line stays line 1. A refused notices request is the command's refusal and no message is read.
 
 `sprint recap` reads the secret the same way and sends `POST /api/recap` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as one line of JSON, `{"sprint_id", "goal",
@@ -166,7 +169,12 @@ command checks nothing about the PNG: the console decides, in one place.
 
 `sprint status` sends `GET /api/sprint-status?sprint_id=<id>` and prints the console's answer as one
 line of JSON, `{"decision", "reply", "sprint_id", "version"}`, and exit 0. `decision` is `none`
-(no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`.
+(no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`. The
+secret is `--secret-file`'s file, else `$CONSOLE_SPRINT_SECRET` only when the sprint id also comes
+from `$CONSOLE_SPRINT_ID` (not beside `--sprint`), else none; with none, or when `decision` is
+`withdrawn`, the line is all it prints and no secret is read. With a secret it also sends `POST
+/api/notices` as `sprint inbox` does and prints the same `sprints.notice_block` after the line;
+a refused notices request is exit 1. A status with no secret is not an error.
 
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
 beside this module, to stdout exactly as packaged and exit 0. It takes no sprint id, secret or
@@ -193,6 +201,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
@@ -321,10 +330,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help=f"the sprint id (default: ${manager.ID_ENV})")
         each.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,
                           help="the console's loopback port (default: %(default)s)")
+        each.add_argument("--secret-file", type=Path, default=None,
+                          help="the file holding the sprint's secret "
+                               f"(default: ${manager.SECRET_ENV})")
         if name != "status":
-            each.add_argument("--secret-file", type=Path, default=None,
-                              help="the file holding the sprint's secret "
-                                   f"(default: ${manager.SECRET_ENV})")
             if name in ("brief", "report", "ask"):
                 flag, what = (("--round-file", "round") if name == "ask"
                               else (f"--{name}-file", name))
@@ -622,10 +631,45 @@ def send_closing(args: argparse.Namespace, sprint: str) -> str:
     return "sprint: closing report sent"
 
 
+def read_notice_block(port: int, sprint: str, secret: str) -> str:
+    """The open-notice block of the sprint's project, or `""` when no other sprint has a notice."""
+    body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
+    text = ask(port, "POST", service.NOTICES_PATH, body)
+    try:
+        entries = json.loads(text)["notices"]
+        if not isinstance(entries, list):
+            raise TypeError("notices is not a list")
+        return sprints.notice_block(entries, sprint, int(time.time() * 1000))
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+
+
+def with_block(line: str, block: str) -> str:
+    return line if block == "" else f"{line}\n{block}"
+
+
 def read_inbox(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
+    block = read_notice_block(args.port, sprint, secret)
     body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
-    return ask(args.port, "POST", service.INBOX_PATH, body)
+    return with_block(ask(args.port, "POST", service.INBOX_PATH, body), block)
+
+
+def read_status(args: argparse.Namespace, sprint: str) -> str:
+    line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={sprint}")
+    try:
+        decision = json.loads(line)["decision"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    if decision == "withdrawn":
+        return line
+    if args.secret_file is not None:
+        secret = read_secret(args.secret_file)
+    elif args.sprint is None and manager.SECRET_ENV in os.environ:
+        secret = os.environ[manager.SECRET_ENV].removesuffix("\n")
+    else:
+        return line
+    return with_block(line, read_notice_block(args.port, sprint, secret))
 
 
 def read_recap(args: argparse.Namespace, sprint: str) -> str:
@@ -713,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "picture":
             line = send_picture(args, sprint)
         else:
-            line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={sprint}")
+            line = read_status(args, sprint)
     except Unreadable as error:
         print(error, file=sys.stderr)
         return 2
