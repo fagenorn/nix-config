@@ -709,7 +709,9 @@ project) and the store paths of `git`, `gh` and `jq`. The compiled policy is
 the user state file `~/.agents/state/guard/policy.json`: an object with exactly
 `derived_repositories` and `derivation`. A derived row is an entry of the
 compiled policy's `derived_repositories`, keyed by the exact repository slug,
-`{default_branch, integration_branch, required_checks, evidence}`, where
+`{default_branch, integration_branch, required_checks, evidence}` with an
+optional `production` member (issue 1149: `{changes, read_only, release_profile}`,
+the project's declared production rules as command `{id, argv}` lists), where
 `required_checks` is the sorted list of check names the project's contract
 declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
 The row check is the store script `claude-guard-row-check`, which the wrapper
@@ -834,16 +836,20 @@ that is missing, unreadable, not a regular file, over that size or outside its
 schema still blocks every Bash call with `invalid policy`, because it is a
 store file the build check loaded and a bad one is an installation defect.
 
-Required checks and the schema-3 transition (issue 552). The loader demands
+Required checks and the schema transition (issues 552, 1149). The loader demands
 that a row's `required_checks` be a list of distinct non-empty strings, the
 resolver's own rule for the contract member, so a contract that resolves always
 yields a row the guard loads; any other value is a malformed row, and the whole
-compiled policy contributes no row. The compiler writes `derivation.schema_version`
-3, whose rows carry the member. A schema-2 file lacks it, so this guard reads
-that file as contributing no row; the activation step recompiles on every
-switch, so the switch that installs this guard also writes a schema-3 file. Only
-a repository that relies on a derived row for its authorization is refused,
-until the recompile this section asks for after an agent_tools change; a
+compiled policy contributes no row. The same holds for the optional
+`production` member: an object with exactly `changes`, `read_only` and
+`release_profile`, the two lists holding `{id, argv}` objects with a non-empty
+`id` and a non-empty `argv` of non-empty strings, and a non-empty
+`release_profile`; any other value drops the whole file. The compiler writes
+`derivation.schema_version` 4, whose rows may carry `production` (issue 1149);
+this guard reads a schema-3 file as before (`production` is optional). A guard
+from before issue 1149, in a session started before the switch, reads a row
+carrying `production` as malformed and drops the whole file, so a repository
+that relies on a derived row is refused until that session restarts; a
 repository authorized by an owner literal keeps its authorization.
 
 Literal and derived rows. `guard-policy compile` refuses a project whose slug is
@@ -893,6 +899,10 @@ COMPILED_POLICY_KEYS = frozenset({"derived_repositories", "derivation"})
 DERIVED_ROW_KEYS = frozenset(
     {"default_branch", "integration_branch", "required_checks", "evidence"}
 )
+# A row may also carry the project's declared production rules (issue 1149).
+DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
+PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
+PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
 POLICY_MAX_BYTES = 1 << 20
@@ -3461,12 +3471,48 @@ def load_base_policy(path):
     return BasePolicy(document), None
 
 
+def production_problem(production):
+    """Why a row's `production` value is malformed, else None.
+
+    An object with exactly PRODUCTION_KEYS: `changes` and `read_only` are lists
+    (possibly empty) of objects with exactly PRODUCTION_COMMAND_KEYS, each a
+    non-empty `id` and a non-empty `argv` list of non-empty strings, and
+    `release_profile` is a non-empty string.
+    """
+    if not isinstance(production, dict) or set(production) != PRODUCTION_KEYS:
+        keys = ", ".join(sorted(PRODUCTION_KEYS))
+        return f"must be an object with exactly the keys {keys}"
+    for member in ("changes", "read_only"):
+        commands = production[member]
+        if not isinstance(commands, list):
+            return f"{member} must be a list"
+        for command in commands:
+            if not isinstance(command, dict) or set(command) != PRODUCTION_COMMAND_KEYS:
+                keys = ", ".join(sorted(PRODUCTION_COMMAND_KEYS))
+                return f"{member} entries must be objects with exactly the keys {keys}"
+            if not isinstance(command["id"], str) or not command["id"]:
+                return f"{member} entry id must be a non-empty string"
+            argv = command["argv"]
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or not all(isinstance(word, str) and word for word in argv)
+            ):
+                return f"{member} entry argv must be a non-empty list of non-empty strings"
+    profile = production["release_profile"]
+    if not isinstance(profile, str) or not profile:
+        return "release_profile must be a non-empty string"
+    return None
+
+
 def load_compiled_policy(path):
     """(rows, None) for a well-formed compiled policy at `path`, else ({}, reason).
 
     The file supplies derived rows alone: `derived_repositories` maps a repository
     slug to its row, and the guard reads a row's two branches and its required checks and leaves
-    `evidence` and `derivation` to the compiler that wrote them. The path is read
+    `evidence` and `derivation` to the compiler that wrote them. A row may also carry
+    `production`, the project's declared production rules, validated by
+    `production_problem`; a row without it loads as before. The path is read
     without blocking and only when it is a regular file of at most
     POLICY_MAX_BYTES (`_read_policy_bytes`). A file that is anything else, cannot
     be read or carries any malformed row contributes no row at all, so it is never
@@ -3481,11 +3527,14 @@ def load_compiled_policy(path):
     for repository, row in derived.items():
         if not isinstance(repository, str) or SLUG_PATTERN.fullmatch(repository) is None:
             return {}, f"{path}: derived_repositories key {repository!r} is not an owner/name slug"
-        if not isinstance(row, dict) or set(row) != DERIVED_ROW_KEYS:
+        if (
+            not isinstance(row, dict)
+            or not DERIVED_ROW_KEYS <= set(row) <= DERIVED_ROW_KEYS | DERIVED_ROW_OPTIONAL_KEYS
+        ):
             keys = ", ".join(sorted(DERIVED_ROW_KEYS))
             return {}, (
                 f"{path}: derived_repositories {repository} must be an object "
-                f"with exactly the keys {keys}"
+                f"with exactly the keys {keys} and optionally production"
             )
         for key in ("default_branch", "integration_branch"):
             branch = row[key]
@@ -3503,6 +3552,10 @@ def load_compiled_policy(path):
             )
         if not isinstance(row["evidence"], dict):
             return {}, f"{path}: derived_repositories {repository} evidence must be an object"
+        if "production" in row:
+            reason = production_problem(row["production"])
+            if reason is not None:
+                return {}, f"{path}: derived_repositories {repository} production {reason}"
     if document["derivation"] is not None and not isinstance(document["derivation"], dict):
         return {}, f"{path}: derivation must be null or an object"
     return dict(derived), None

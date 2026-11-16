@@ -27,6 +27,17 @@ NODO = "elevenyellow/nodocom"
 GRAMMAR = "a lifecycle verb runs only alone"
 NODO_ROW = {"default_branch": "main", "integration_branch": "dev", "required_checks": [],
             "evidence": {}}
+PROD = "acme/deployer"
+PRODUCTION = {
+    "changes": [{"id": "deploy", "argv": ["just", "switch"]},
+                {"id": "kube-apply", "argv": ["/usr/local/bin/kubectl"]},
+                {"id": "deploy-script", "argv": ["./scripts/deploy.sh"]}],
+    "read_only": [{"id": "check", "argv": ["just", "build"]},
+                  {"id": "kube-read", "argv": ["kubectl", "get"]}],
+    "release_profile": "forge-main",
+}
+PROD_ROW = {"default_branch": "main", "integration_branch": "main", "required_checks": [],
+            "evidence": {}, "production": PRODUCTION}
 ABSENT = object()
 EXPECTED_ALLOW = [
     "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
@@ -4169,6 +4180,39 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         "a required check repeats": {"derived_repositories": {
             NODO: {**NODO_ROW, "required_checks": ["CI", "CI"]}}},
         "derivation is a list": {"derived_repositories": {NODO: NODO_ROW}, "derivation": []},
+        "production is null": {"derived_repositories": {NODO: {**NODO_ROW, "production": None}}},
+        "production is a list": {"derived_repositories": {NODO: {**NODO_ROW, "production": []}}},
+        "production lacks release_profile": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {"changes": [], "read_only": []}}}},
+        "production has an extra member": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "key_files": []}}}},
+        "production changes is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "changes": {}}}}},
+        "production read_only is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "read_only": "just build"}}}},
+        "a production command lacks argv": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "changes": [{"id": "deploy"}]}}}},
+        "a production command has an extra member": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION,
+                "changes": [{"id": "deploy", "argv": ["just"], "cwd": "."}]}}}},
+        "a production id is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "changes": [{"id": "", "argv": ["just", "switch"]}]}}}},
+        "a production argv is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "changes": [{"id": "deploy", "argv": []}]}}}},
+        "a production argv is a string": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "changes": [{"id": "deploy", "argv": "just switch"}]}}}},
+        "a production argv word is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "read_only": [{"id": "check", "argv": ["just", ""]}]}}}},
+        "a production argv word is not a string": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "read_only": [{"id": "check", "argv": ["just", 7]}]}}}},
+        "release_profile is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "release_profile": ""}}}},
         "missing derivation": {"derived_repositories": {NODO: NODO_ROW}, "derivation": ABSENT},
         "an extra member": {"derived_repositories": {NODO: NODO_ROW}, "grants": []},
     }
@@ -4280,6 +4324,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         literal_only = self.run_guard("git push -u origin topic", cwd=repo, guard_args=(
             "--gh-bin", str(self.fake_gh), "--base-policy", str(base)))
         self.assertEqual(0, literal_only.returncode, literal_only.stderr)
+
+    def test_a_row_carrying_production_rules_loads_and_the_row_check_ignores_them(self):
+        """Issue 1149 D2: a derived row may carry `production`; the row check compares the
+        branches and required checks only, so a row check answering without it still agrees."""
+        policy = self.write_policy(
+            derived_repositories={NODO: {**NODO_ROW, "production": PRODUCTION}}, derivation={})
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        result = self.run_guard("git push -u origin topic", cwd=nodo, guard_args=(
+            "--gh-bin", str(self.fake_gh), "--policy", str(policy)))
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_a_bad_compiled_policy_contributes_no_row(self):
         """Issue 377 D4, R4: the whole file is dropped and nothing the base allows is blocked."""
