@@ -410,6 +410,21 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn("ADR-console-045", self.doc(path))
 
+    def test_the_owner_check_caption_decision_is_recorded(self):
+        adr = self.doc(
+            "docs/areas/console/adr/047-an-owner-check-card-captions-its-pictures-and-reads-its-reading-under-the-question.md"
+        )
+        for needle in (
+            "#1131", "Before, 1440 px", "Owner check viewer, 480 px", "OWNER-CHECK-VIEWER-480.png",
+            "sentence case", "Picture", "Reading:", "note box", "full file name",
+            "ADR-console-038", "ADR-console-045", "1440", "480",
+        ):
+            self.assertIn(needle, adr)
+        self.assertIn(
+            "ADR-console-047",
+            self.doc("docs/areas/console/adr/045-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"),
+        )
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
