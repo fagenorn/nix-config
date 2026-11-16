@@ -1,6 +1,6 @@
 # ADR-console-001 — The console's truth is an append-only event log, served on loopback
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-052
 - **Decided in:** #838, #855, #886
 
 ## Context

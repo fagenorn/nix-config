@@ -35,6 +35,7 @@ from .test_console_briefs import PARTS
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PAGE_FILE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
+SPEND_PAGE_FILE = PAGE_FILE.with_name("spend.html")
 
 ARMED = threading.Event()
 HITS: list[tuple[str, str]] = []
@@ -321,6 +322,28 @@ class PageRouteTest(Case):
         self.assertEqual(int(headers["Content-Length"]), len(body))
         self.assertEqual(support.request(svc.address, "GET", "/missing")[0], 404)
 
+    def test_the_spend_page_is_served_from_memory_with_its_policy(self):
+        svc = self.start()
+        for path in ("/spend", "/spend?span=7"):
+            with self.subTest(path=path):
+                status, headers, body = support.request(svc.address, "GET", path)
+                self.assertEqual(status, 200)
+                self.assertEqual(body, SPEND_PAGE_FILE.read_bytes())
+                self.assertEqual(headers["Content-Type"], "text/html; charset=utf-8")
+                self.assertEqual(headers["Content-Security-Policy"], service.CSP)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+                self.assertEqual(int(headers["Content-Length"]), len(body))
+                self.assertNotIn(b"__CONSOLE_TOKEN__", body)
+                self.assertNotIn(svc.page_token.encode(), body)
+
+    def test_the_spend_page_is_loopback_only(self):
+        svc = self.start()
+        status, _, body = support.request(
+            svc.address, "GET", "/spend", host="attacker.example")
+        self.assertEqual(status, 403)
+        self.assertEqual(body, b"loopback only\n")
+
     def test_the_policy_admits_object_url_images_and_nothing_else_new(self):
         svc = self.start()
         _, headers, _ = support.request(svc.address, "GET", "/")
@@ -339,6 +362,15 @@ class PageRouteTest(Case):
 
 
 class MethodTest(Case):
+    def test_the_spend_page_takes_no_write(self):
+        svc = self.start(support.entries(1))
+        rows = support.log_rows(self.store)
+        for method in ("POST", "PUT", "DELETE", "PATCH"):
+            status, headers, _ = support.request(svc.address, method, "/spend")
+            self.assertEqual((method, status), (method, 405))
+            self.assertEqual(headers["Allow"], "GET")
+        self.assertEqual(support.log_rows(self.store), rows)
+
     def test_only_the_hook_route_takes_a_write(self):
         svc = self.start(support.entries(1))
         rows = support.log_rows(self.store)

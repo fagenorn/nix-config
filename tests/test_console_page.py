@@ -206,6 +206,26 @@ class PageTest(unittest.TestCase):
         self.assertEqual(rule(".goal-filter").get("min-width"), "0")
         self.assertEqual(rule(".goal-act").get("flex"), "none")
 
+    def test_the_top_bar_carries_one_spend_link(self) -> None:
+        header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
+        self.assertEqual(self.text.count('href="/spend"'), 1)
+        self.assertEqual(header.count('<a class="nav" href="/spend">Spend</a>'), 1)
+        self.assertIn('<span class="brand">Console</span><a class="nav" href="/spend">Spend</a>', header)
+        self.assertEqual(re.findall(r'\shref="([^"]*)"', header), ["/spend"])
+        self.assertEqual(
+            re.findall(r'\shref="([^"]*)"', self.text[:self.text.index("<script>")]),
+            ["data:,", "/spend"],
+        )
+
+    def test_the_spend_link_is_quiet(self) -> None:
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        base = style[:style.index("@media")]
+        (nav,) = [d for s, d in style_rules(base) if s == ".nav"]
+        self.assertEqual(nav.get("color"), "var(--sub0)")
+        self.assertEqual(nav.get("white-space"), "nowrap")
+        self.assertNotIn("width", nav)
+        self.assertNotIn("min-width", nav)
+
     def test_the_top_bar_fits_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
         base, at = "", 0
@@ -235,7 +255,7 @@ class PageTest(unittest.TestCase):
             return bool(found) and float(found.group(1)) * (16 if found.group(2) == "rem" else 1) <= 448
 
         for selector, decls in rules:
-            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter")):
+            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter", ".nav")):
                 continue
             values = [decls[n] for n in ("width", "min-width", "flex-basis") if n in decls]
             parts = decls.get("flex", "").split()
@@ -259,11 +279,11 @@ class PageTest(unittest.TestCase):
         self.assertEqual(acct.get("max-width"), "100%")
         unwrapped = {
             selector for selector, decls in style_rules(base)
-            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
+            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter", ".nav"))
             and decls.get("white-space") == "nowrap"
         }
         self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b",
-                                    ".goal-in .goal-text::placeholder"})
+                                    ".goal-in .goal-text::placeholder", ".nav"})
         (long_name,) = render([
             START,
             {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
@@ -288,7 +308,8 @@ class PageTest(unittest.TestCase):
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
-             "/api/trust-check", "/api/register-cancel", "/api/picture/"},
+             "/api/trust-check", "/api/register-cancel", "/api/picture/",
+             "/api/owner-notice", "/api/owner-notice-withdraw"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -297,7 +318,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 35)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 37)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -1277,6 +1298,15 @@ class PageNoticeTest(unittest.TestCase):
         self.assertTrue(some(".notice code", background="var(--mantle)",
                              **{"white-space": "nowrap"}))
 
+    def test_the_post_control_stands_a_notice_gap_below_the_last_notice(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE_TEXT)
+        for width in (1440, 480):
+            between = margin_top_at(style, width, ".notice", ".notice + .notice")
+            for control in (".notice-open", ".notice-post"):
+                gap = margin_top_at(style, width, control, ".notice-list + " + control)
+                self.assertGreaterEqual(gap, 12, (width, control))
+                self.assertGreaterEqual(gap, between, (width, control))
+
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"snapshot": True}])
@@ -1424,6 +1454,152 @@ class PageNoticeTest(unittest.TestCase):
                          if d.get("overflow-wrap") == "anywhere" and d.get("min-width") == "0"])
         self.assertTrue([d for d in decls(".notices-project")
                          if d.get("overflow-wrap") == "anywhere"])
+
+
+OWNER_W = {
+    "id": 11, "sprint_id": None, "poster": "You", "kind": "heads-up", "kind_text": "Heads-up",
+    "text": "routes are frozen until Friday", "what": None, "until_text": None, "to_text": None,
+    "at": utc(60000), "owner": True,
+}
+
+
+def postable(entry: dict) -> dict:
+    return {**entry, "notice_post": True}
+
+
+class PageOwnerNoticeTest(unittest.TestCase):
+    begin = {"start": {"focused": False, "clock": NOW_MS}}
+    key = "notices:owner/p00"
+
+    def opened(self, entry: dict | None = None) -> list:
+        p0 = postable(with_notices(project(0, []))) if entry is None else entry
+        return [self.begin, {"frame": view([p0])}, {"open": self.key}]
+
+    def typed(self, text: str) -> list:
+        return [*self.opened(), {"click": "notice-open"},
+                {"type": {"class": "notice-text", "text": text}}]
+
+    @staticmethod
+    def found(snap: dict, cls: str) -> list:
+        return [n for n in nodes(snap["projects"]) if has_class(n, cls)]
+
+    def test_a_project_with_a_running_sprint_shows_the_fold_with_no_notice(self) -> None:
+        p0 = postable(with_notices(project(0, [])))
+        p1 = with_notices(project(1, []))
+        shut, opened = render([self.begin, {"frame": view([p0, p1])}, {"snapshot": True},
+                               {"open": self.key}, {"snapshot": True}])
+        (fold,) = folds(shut["projects"])
+        self.assertEqual(fold["key"], self.key)
+        self.assertFalse(fold["open"])
+        summary = next(c for c in fold["children"] if c["tag"] == "summary")
+        self.assertEqual([full(c) for c in summary["children"]], ["Notices (0)", "owner/p00"])
+        self.assertEqual([f["key"] for f in folds(opened["projects"])], [self.key])
+        (button,) = self.found(opened, "notice-open")
+        self.assertEqual(full(button), "Post a notice")
+        self.assertEqual(self.found(opened, "notice-text"), [])
+
+    def test_post_a_notice_opens_a_one_line_field_with_send_and_cancel(self) -> None:
+        opened, typed, cancelled = render([
+            *self.opened(), {"click": "notice-open"}, {"snapshot": True},
+            {"type": {"class": "notice-text", "text": "routes"}}, {"snapshot": True},
+            {"click": "notice-cancel"}, {"snapshot": True}])
+        (field,) = self.found(opened, "notice-text")
+        self.assertEqual((field["tag"], field["label"]), ("input", "Notice"))
+        self.assertEqual(field["placeholder"], "One line for every manager of this project")
+        self.assertEqual(opened["active"], "notice-text")
+        (send,) = self.found(opened, "notice-send")
+        self.assertEqual(full(send), "Send")
+        self.assertIs(send["disabled"], True)
+        self.assertEqual(full(self.found(opened, "notice-cancel")[0]), "Cancel")
+        self.assertIs(self.found(typed, "notice-send")[0]["disabled"], False)
+        self.assertEqual(self.found(cancelled, "notice-text"), [])
+        self.assertEqual(len(self.found(cancelled, "notice-open")), 1)
+
+    def test_send_posts_the_owners_notice_and_closes_the_field(self) -> None:
+        text = "routes are frozen until Friday"
+        (snap,) = render([*self.typed(text), {"click": "notice-send"}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/owner-notice")
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p00", "text": text})
+        self.assertIn("X-Console-Token", post["headers"])
+        self.assertEqual(self.found(snap, "notice-text"), [])
+        self.assertEqual(len(self.found(snap, "notice-open")), 1)
+
+    def test_a_refused_post_shows_its_reason_and_keeps_the_draft(self) -> None:
+        cases = [
+            ({"respond": {"status": 409, "text": "a project has at most 5 open notices of yours: withdraw one first\n"}},
+             "a project has at most 5 open notices of yours: withdraw one first"),
+            ({"respond": {"status": 409, "text": "the notice's text is over 280 characters\n"}},
+             "the notice's text is over 280 characters"),
+            ({"respond": {"status": 403, "text": "token refused\n"}}, "token refused"),
+            ({"fail_fetch": True}, "the console did not answer"),
+        ]
+        for answer, reason in cases:
+            with self.subTest(reason=reason):
+                (snap,) = render([*self.typed("routes"), answer, {"click": "notice-send"},
+                                  {"snapshot": True}])
+                (shown,) = self.found(snap, "notice-post-reason")
+                self.assertEqual(full(shown), reason)
+                self.assertEqual(self.found(snap, "notice-text")[0]["value"], "routes")
+
+    def test_a_typed_draft_its_selection_and_focus_survive_a_streamed_frame(self) -> None:
+        again = postable(with_notices(project(0, []), HEADSUP_W))
+        (snap,) = render([
+            *self.typed("routes are frozen"),
+            {"select": {"cls": "notice-text", "start": 2, "end": 6}},
+            {"frame": view([again])}, {"snapshot": True}])
+        self.assertEqual(snap["field"],
+                         {"cls": "notice-text", "value": "routes are frozen", "start": 2, "end": 6})
+        (fold,) = folds(snap["projects"])
+        self.assertTrue(fold["open"])
+        self.assertEqual(snap["hidden_focus"], 0)
+
+    def test_a_project_that_stops_offering_the_post_loses_its_draft(self) -> None:
+        offered = postable(with_notices(project(0, [])))
+        (snap,) = render([
+            *self.typed("routes"), {"frame": view([with_notices(project(0, []))])},
+            {"frame": view([offered])}, {"click": "notice-open"}, {"snapshot": True}])
+        self.assertEqual(self.found(snap, "notice-text")[0]["value"], "")
+
+    def test_a_view_with_no_project_loses_every_notice_draft(self) -> None:
+        offered = postable(with_notices(project(0, [])))
+        (snap,) = render([
+            *self.typed("routes"), {"frame": view([])},
+            {"frame": view([offered])}, {"open": self.key}, {"snapshot": True}])
+        self.assertEqual(self.found(snap, "notice-text"), [])
+        self.assertEqual(len(self.found(snap, "notice-open")), 1)
+
+    def test_the_harness_counts_a_focus_inside_a_closed_fold(self) -> None:
+        shown, hidden = render([
+            *self.opened(), {"click": "notice-open"}, {"snapshot": True},
+            {"close": self.key}, {"focus_on": "notice-text"}, {"snapshot": True}])
+        self.assertEqual(shown["hidden_focus"], 0)
+        self.assertEqual(hidden["hidden_focus"], 1)
+
+    def test_only_the_owners_notice_has_a_withdraw_beside_it(self) -> None:
+        entry = postable(with_notices(project(0, []), OWNER_W, HEADSUP_W))
+        shown, refused = render([
+            *self.opened(entry), {"snapshot": True},
+            {"respond": {"status": 409, "text": "this notice has ended\n"}},
+            {"click": "notice-withdraw"}, {"snapshot": True}])
+        blocks = [n for n in nodes(shown["projects"]) if n["tag"] == "li" and has_class(n, "notice")]
+        (owner,) = [b for b in blocks if "routes are frozen" in full(b)]
+        (manager,) = [b for b in blocks if "take the reader" in full(b)]
+        head = owner["children"][0]
+        self.assertEqual([(c["tag"], c["cls"]) for c in head["children"]],
+                         [("span", "notice-who"), ("button", "notice-withdraw"),
+                          ("time", "notice-age")])
+        self.assertEqual(full(head["children"][0]), "Heads-up, from You")
+        self.assertEqual(full(head["children"][1]), "Withdraw")
+        self.assertEqual([(c["tag"], c["cls"]) for c in manager["children"][0]["children"]],
+                         [("span", "notice-who"), ("time", "notice-age")])
+        (post,) = refused["posts"]
+        self.assertEqual(post["url"], "/api/owner-notice-withdraw")
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p00", "notice": 11})
+        self.assertIn("X-Console-Token", post["headers"])
+        (reason,) = self.found(refused, "notice-reason")
+        self.assertEqual(full(reason), "this notice has ended")
+        self.assertEqual(reason["tag"], "p")
 
 
 class PageTimeTest(unittest.TestCase):
@@ -6269,6 +6445,28 @@ def media_block(style: str, query: str) -> str:
     return style[start:at - 1]
 
 
+def margin_top_at(style: str, width: int, *selectors: str) -> float:
+    """The px margin-top the page's cascade gives an element matched by `selectors` at a viewport width.
+
+    Top-level rules apply at every width; a max-width media block applies only at or below its width.
+    The highest specificity (class count) wins, the later rule on a tie.
+    """
+    top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+    layers = [style_rules(top)]
+    for limit in re.findall(r"@media \(max-width: (\d+)px\) \{", style):
+        if width <= int(limit):
+            layers.append(style_rules(media_block(style, f"(max-width: {limit}px)")))
+    best = None
+    for layer in layers:
+        for selector, decls in layer:
+            if selector in selectors and "margin-top" in decls:
+                rank = selector.count(".")
+                if best is None or rank >= best[0]:
+                    best = (rank, decls["margin-top"])
+    assert best is not None, (width, selectors)
+    return float(re.fullmatch(r"([\d.]+)px", best[1]).group(1))
+
+
 class PageAnsweredRowTest(unittest.TestCase):
     def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
@@ -8482,6 +8680,79 @@ class PageCheckPictureTest(unittest.TestCase):
             self.assertEqual(with_class(snap["inbox"], name), [], name)
 
 
+def review_item(key: str, **fields) -> dict:
+    return item(key, reason="held-review", kind="owner-review", answers=["passed", "note"],
+                detail="", paid=False, confirm="", version="v1-" + key, check_id="", reading="",
+                pictures=PIC_CHECK["pictures"], missing_pictures=[],
+                headline="The card looks right at 1440 and 480 px", **fields)
+
+
+class PageReviewTest(unittest.TestCase):
+    def test_a_review_card_offers_approve_and_not_yet_and_shows_its_pictures(self) -> None:
+        first, second = render([
+            START, {"frame": frame([review_item("A"), check_item("B", "manual-check")])},
+            {"snapshot": True}, {"click": "ans-passed"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        lead = lead_of(first)
+        (approve,) = with_class(lead, "ans-passed")
+        (not_yet,) = with_class(lead, "ans-note")
+        self.assertEqual(full(approve), "Approve")
+        self.assertEqual(full(not_yet), "Not yet")
+        self.assertEqual(field(first, "note-text")["placeholder"], "What is not right yet")
+        self.assertEqual(with_class(lead, "confirm-text"), [])
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
+        self.assertIn("The card looks right at 1440 and 480 px", full(lead))
+        for cls, texts in (("ans-passed", ["Approve", "Passed"]), ("ans-failed", ["Failed"]),
+                           ("ans-note", ["Not yet", "Send note"])):
+            self.assertEqual([full(n) for n in with_class(first["inbox"], cls)], texts, cls)
+        (post,) = checks(second)
+        self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A",
+                                        "answer": "passed", "version": "v1-A"})
+
+    def test_a_before_picture_reads_ahead_of_the_after_picture_of_its_width(self) -> None:
+        pics = [{"id": f"{n + 1:064x}", "line": line, "pair": None} for n, line in enumerate(
+            ["after-480.png", "after-1440.png", "before-1440.png", "notes.png", "before-480.png"])]
+        (snap,) = render([START, {"frame": frame([{**review_item("A"), "pictures": pics}])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
+                         ["Before, 480 px", "After, 480 px", "Before, 1440 px", "After, 1440 px", "Notes"])
+        shown = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(shown, [f"owner/p00#A/{i}" for i in range(5)])
+        in_order = [{"id": A, "line": "before-1440.png", "pair": None}, {"id": B, "line": "after-1440.png", "pair": None}]
+        (kept,) = render([START, {"frame": frame([{**review_item("A"), "pictures": in_order}])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(kept), "pic-line")],
+                         ["Before, 1440 px", "After, 1440 px"])
+
+    def test_a_review_cards_detail_shows_the_measured_tail_only_when_its_fold_is_opened(self) -> None:
+        tail = "the owner judges the PNG screenshots"
+        card = {**review_item("A"), "detail": f"The card looks right - measured: {tail}"}
+        closed, opened = render([START, {"frame": frame([card])}, {"snapshot": True},
+                                 {"open": "check:owner/p00#A"}, {"snapshot": True}])
+        self.assertIn("Show the check", visible_text(closed["inbox"]))
+        self.assertNotIn(tail, visible_text(closed["inbox"]))
+        self.assertIn(tail, visible_text(opened["inbox"]))
+
+    def test_a_manual_check_keeps_passed_failed_and_send_note(self) -> None:
+        (snap,) = render([START, {"frame": frame([check_item("B", "manual-check")])},
+                          {"snapshot": True}])
+        self.assertEqual(ans_buttons(snap), {"ans-passed": "Passed", "ans-failed": "Failed",
+                                             "ans-note": "Send note"})
+        self.assertEqual(field(snap, "note-text")["placeholder"], "Write a note")
+
+    def test_not_yet_sends_the_note_and_keeps_the_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([review_item("A")])},
+            {"type": {"class": "note-text", "text": "The 480 px card cuts the text."}},
+            {"click": "ans-note"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        (post,) = checks(snap)
+        self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A", "answer": "note",
+                                        "version": "v1-A", "note": "The 480 px card cuts the text."})
+        self.assertIn("Note sent.", full(snap["inbox"]))
+        (not_yet,) = with_class(snap["inbox"], "ans-note")
+        self.assertEqual(full(not_yet), "Not yet")
+
+
 
 def captioned(lines: list) -> dict:
     return {**PIC_CHECK, "pictures": [{"id": f"{n + 1:064x}", "line": line, "pair": None}
@@ -8492,6 +8763,8 @@ class PageCheckCaptionTest(unittest.TestCase):
     def test_each_file_name_reads_as_its_caption(self) -> None:
         table = [
             ("before-1440.png", "Before, 1440 px"),
+            ("before-after-1440.png", "Before, 1440 px"),
+            ("card-(before)-1440.png", "Before, 1440 px"),
             ("after-1440.png", "After, 1440 px"),
             ("owner-check-viewer-480.png", "Owner check viewer, 480 px"),
             ("OWNER-CHECK-VIEWER-480.png", "Owner check viewer, 480 px"),
@@ -8499,7 +8772,6 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("Settings-PAGE.Wide.PNG", "Settings page wide"),
             ("AFTER_480PX.PNG", "After, 480 px"),
             ("card-before.png", "Before"),
-            ("before-after-1440.png", "Before, 1440 px"),
             ("shots/after-480.png", "After, 480 px"),
             ("C:\\shots\\Card-1440.png", "Card, 1440 px"),
             ("settings__page--wide.png", "Settings page wide"),
@@ -8508,7 +8780,6 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("beforehand-1440.png", "Beforehand, 1440 px"),
             ("480.png", "Picture, 480 px"),
             ("__.png", "Picture"),
-            ("card-(before)-1440.png", "Before, 1440 px"),
             ("[After] card (480px).png", "After, 480 px"),
             ("(owner) check,.png", "Owner check"),
             ("(--).png", "Picture"),
@@ -10286,6 +10557,20 @@ class PageReportPictureTest(unittest.TestCase):
         made = [m["url"] for m in third["object_urls"]["made"]]
         self.assertEqual(len(made), 2)
         self.assertEqual(sorted(third["object_urls"]["revoked"]), sorted(made))
+
+    def test_an_owner_notice_response_keeps_the_open_viewer_and_the_pictures_it_needs(self) -> None:
+        notices_key = "notices:owner/p00"
+        pictured = view([postable(with_notices({**project(0, []), "sprints": [REPORT_PICTURED]}))])
+        before, after = render([
+            SPRINT_START, {"frame": pictured}, {"open": notices_key}, {"click": "notice-open"},
+            {"type": {"class": "notice-text", "text": "routes are frozen"}},
+            {"open": DETAIL_KEY}, {"click": "pic-thumb", "in": DETAIL_KEY, "nth": 0},
+            {"snapshot": True}, {"click": "notice-send"}, {"snapshot": True}])
+        self.assertFalse(before["viewer"]["hidden"])
+        self.assertFalse(after["viewer"]["hidden"])
+        self.assertEqual(after["object_urls"]["revoked"], [])
+        self.assertEqual(
+            [p["url"] for p in picture_posts(after)], ["/api/picture/" + A, "/api/picture/" + B])
 
     def test_a_focused_report_thumbnail_keeps_focus_through_a_message_response(self) -> None:
         (snap,) = render([

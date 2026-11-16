@@ -10,6 +10,7 @@ carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and eve
 stream `Content-Length`):
 
     GET /           200 text/html; charset=utf-8, the page, with `Content-Security-Policy: CSP`
+    GET /spend      200 text/html; charset=utf-8, the Spend page, with `Content-Security-Policy: CSP`
     GET /api/state  200 application/json, the encoded view (see `view.py`)
     GET /api/stream 200 text/event-stream; charset=utf-8, the update stream (below)
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
@@ -81,7 +82,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm` and `POST /api/trust-check`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
+`POST /api/owner-notice` and `POST /api/owner-notice-withdraw`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -624,6 +626,43 @@ folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_spr
 nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
 writer; a refusal appends and publishes nothing.
 
+Owner notice nudges (#1120, ADR-console-053, D6): with a nudger, `post_owner_notice` records, still under the
+lock, in `_notice_due[sprint_id]` the new row's seq for each sprint of the project with `sprints.takes_notices`
+and `_reachable` (every `_nudgeable` condition but the unread message), and reserves in `_nudging` and
+dispatches `_dispatch_notice_nudge` after the lock each of them not already reserved; a reserved sprint keeps
+the due notice for later. `_nudge` and `_notice_nudge` pop the due id (`covered`) in their first lock block, so
+a nudge started after the post covers it: one relay carries a queued message and a notice together, and a
+notice posted after that start is due again. A failed message send puts `covered` back. Wherever either ends a
+reservation without scheduling a message re-nudge, `_notice_follow` reserves the sprint again when a notice is
+still due (and drops it for a stopping service, no nudger or a sprint no longer reachable), and the notice
+nudge is dispatched; `renudge` drains `_notice_due` the same way for a sprint another holder (a wake, an idle
+nudge, a takeover) released without looking. `_notice_nudge` sends the same fixed sentence through `_reach`,
+the routing `_nudge` shares (listing, wake settings, quota recheck, relay or wake, `UNKNOWN_SESSION`), then
+appends one `notice.nudged {sprint_id, notice, route, ok[, reason][, listing_failed]}` row for the sprint's
+project (a failure also prints `console: notice_nudge_failed <sprint_id> <reason>`); the row is not kept and
+nothing folds it. A notice nudge is never retried after its own attempt, counts no `failed_nudges`, sets no
+`last_nudge_at` and delivers no message; one that cannot be dispatched is the same row with route null and the
+reason `the nudge could not start: <Type>: <message>`, and the post still answers 204.
+
+Owner notices (#1120, ADR-console-053): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
+`MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
+`MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
+read (no or a foreign `Origin` is 403 `origin refused`, a missing or wrong token 403 `token refused`,
+nothing appended). A body `sprints.parse_owner_notice` or `sprints.parse_owner_notice_withdrawal` does not
+accept is 400 `bad owner notice` or `bad owner notice withdrawal`; a `sprints.Refused` is `console:
+owner_notice_refused <project_id> <reason>` (`owner_notice_withdraw_refused` for the withdrawal) and 409 with
+the reason; any other exception is `console: owner_notice_failed <Type>: <message>` and 500 `owner notice
+failed` (`owner_notice_withdraw_failed`, `owner notice withdrawal failed`). No stderr line carries the text
+or the token; success is 204. `post_owner_notice(project_id, text)`, under the ingest lock, is
+`sprints.postable_owner_notice` (registered, a running sprint, a checked heads-up, at most five open),
+then exactly one `notice.posted` row (project the project) `{"poster": "owner", "notice": {"kind":
+"heads-up", "text": <checked>}}`, folded and published; it returns the row's `seq` and nudges each running manager of the project once (below).
+`withdraw_owner_notice(project_id, notice_id)` is `sprints.withdrawable_owner_notice`, then exactly one
+`notice.withdrawn` row `{"poster": "owner", "notice": <id>}` and nudges nobody. The rows are folded per project into
+`_owner_notices` (`sprints.owner_notices`, at start and in `_fold`) and touch no sprint. `list_notices`
+and a new manager's launch prompt add `sprints.open_owner_notices` to `sprints.project_notices` (`owner`
+entries), and a manager's `withdraw_notice` of an owner notice is refused (`owner_ids`).
+
 Pictures (#1089, ADR-console-036): `POST /api/picture` is a manager write dispatched like `/api/brief`,
 before `PAGE_WRITES`, whose body is one PNG and whose identity travels in headers. The checks run in
 this order and each refusal appends nothing and writes no file: any `Origin` (the console's own
@@ -705,6 +744,8 @@ registry read, no derivation, no file, no filesystem metadata call, no
 subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
 the page itself is read once, at import and given its token at construction.
+`GET /spend` serves the Spend page (`spend.html`) from memory with the page's CSP and no token;
+it writes nothing and reads its data from `/api/stream` (#1135, ADR-console-052).
 
 The stream carries `Connection: close` and no `Content-Length`. Its first frame is
 the current view (the page takes its view from the stream alone, never from a
@@ -876,6 +917,8 @@ still exists, is unanswered and names the same comment. `owner_path` runs throug
 `answer.with_retries` as the tick, with the same deadline, `monotonic` clock, `write_sleep` and `SENDING` slot, except
 that a note is tried once: posting it again would post the text twice. A failure of `owner_path`
 propagates, only after the retries when it is a transport failure, and appends nothing.
+A review item (#1113) is answered through `criterion_path` (default `answer.answer_criterion`) with the same
+refusals, retries and marking.
 
 Goals (#886, ADR-console-011): `state_goal(project_id, goal)`, under the ingest lock, raises
 `sprints.Refused` with `UNREGISTERED` when the project is not in the folded states, then applies
@@ -1242,7 +1285,7 @@ from agent_tools.console import (
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
-    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_POSTED, NOTICE_WITHDRAWN,
+    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
@@ -1267,10 +1310,12 @@ CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
 PAGE: bytes = Path(__file__).with_name("page.html").read_bytes()
+SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
+SPEND_PAGE_PATH = "/spend"
 HOOK_PATH = "/api/hooks"
 LOOKED_PATH = "/api/looked"
 ANSWER_PATH = "/api/answer"
@@ -1297,6 +1342,8 @@ WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
 NOTICES_PATH = "/api/notices"
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
+OWNER_NOTICE_PATH = "/api/owner-notice"
+OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
@@ -1319,7 +1366,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH})
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1357,6 +1404,8 @@ MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
 MAX_NOTICES_BYTES = 4096
 MAX_WITHDRAW_NOTICE_BYTES = 4096
+MAX_OWNER_NOTICE_BYTES = 4096
+MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -2326,6 +2375,53 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _owner_notice_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's heads-up for a project; False when it was refused."""
+        body = self._json_body(MAX_OWNER_NOTICE_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, text = sprints.parse_owner_notice(body)
+        except ValueError:
+            self._refuse(400, "bad owner notice")
+            return False
+        try:
+            console.post_owner_notice(project_id, text)
+        except sprints.Refused as error:
+            print(f"console: owner_notice_refused {project_id} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: owner_notice_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "owner notice failed")
+            return False
+        return True
+
+    def _owner_notice_withdraw_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's withdrawal of a heads-up; False when it was refused."""
+        body = self._json_body(MAX_OWNER_NOTICE_WITHDRAW_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, notice_id = sprints.parse_owner_notice_withdrawal(body)
+        except ValueError:
+            self._refuse(400, "bad owner notice withdrawal")
+            return False
+        try:
+            console.withdraw_owner_notice(project_id, notice_id)
+        except sprints.Refused as error:
+            print(f"console: owner_notice_withdraw_refused {project_id} {error}",
+                  file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: owner_notice_withdraw_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "owner notice withdrawal failed")
+            return False
+        return True
+
     def _decision_request(self, console: "ConsoleService", route: str) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
         name = "approve" if route == APPROVE_PATH else "reply"
@@ -2572,6 +2668,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._register_cancel_request(console):
                 return
+        elif route == OWNER_NOTICE_PATH:
+            self.close_connection = True
+            if not self._owner_notice_request(console):
+                return
+        elif route == OWNER_NOTICE_WITHDRAW_PATH:
+            self.close_connection = True
+            if not self._owner_notice_withdraw_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2598,6 +2702,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         route = self.path.split("?", 1)[0]
         if route == "/":
             self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
+                       ("Content-Security-Policy", CSP))
+        elif route == SPEND_PAGE_PATH:
+            self._send(200, "text/html; charset=utf-8", SPEND_PAGE,
                        ("Content-Security-Policy", CSP))
         elif route == "/api/state":
             self._send(200, "application/json", self.server.console.view_bytes)
@@ -2722,6 +2829,7 @@ class ConsoleService:
                  sprint_secrets: Path | None = None,
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
+                 criterion_path: Callable[..., None] = answer.answer_criterion,
                  write_sleep: Callable[[float], object] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  launcher: Callable[[manager.Launch], None] | None = None,
@@ -2799,6 +2907,7 @@ class ConsoleService:
             if listing is None else listing)
         self._nudging: set[str] = set()
         self._nudge_again: set[str] = set()
+        self._notice_due: dict[str, int] = {}
         self._launcher = launcher
         self._dispatch = self._on_new_thread if dispatch is None else dispatch
         self._launching: dict[str, object] = {}
@@ -2806,6 +2915,7 @@ class ConsoleService:
         self._tick = tick
         self._store = store
         self._owner_path = owner_path
+        self._criterion_path = criterion_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
                                 if sprint_secrets is None else Path(sprint_secrets))
         self._sending: set[tuple[str, str]] = set()
@@ -2921,6 +3031,7 @@ class ConsoleService:
             self._moved = idle.last_moved(events)
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
+            self._owner_notices = sprints.owner_notices(events)
             self._pending = sprints.pending_stops(events)
             self._settle_stops()
             self._publish()
@@ -3020,6 +3131,7 @@ class ConsoleService:
             self._states.values(), self._inbox, self._health,
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
+            owner_notices=self._owner_notices,
             digest=digest.digest(self._moments, self._looked, self._now()),
             spend=self._spend_view,
             capacity=cap, activation=self._activation,
@@ -3169,6 +3281,10 @@ class ConsoleService:
         sent = False
         try:
             def write():
+                if item.get("kind") == inbox.REVIEW_KIND:
+                    self._criterion_path(item["repo"], item["issue"], item["criterion"], answer_word,
+                                         version=version, note=note)
+                    return
                 self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
                                  version=version, note=note, paid=bool(item.get("paid")))
 
@@ -4459,7 +4575,9 @@ class ConsoleService:
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
             return None
         notices = sprints.notice_block(
-            sprints.project_notices(self._sprints.values(), project_id), sprint_id,
+            sprints.project_notices(self._sprints.values(), project_id,
+                                    owner=sprints.open_owner_notices(self._owner_notices,
+                                                                     project_id)), sprint_id,
             int(self._clock() * 1000))
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
@@ -4702,10 +4820,10 @@ class ConsoleService:
             self._dispatch_nudge(sprint_id)
         return appended[-1].seq
 
-    def _nudgeable(self, sprint_id: str) -> tuple[sprints.SprintState, tuple[sprints.Message, ...]] | None:
-        """Under the ingest lock: the open sprint and its unread messages when its manager can be nudged.
+    def _reachable(self, sprint_id: str) -> sprints.SprintState | None:
+        """Under the ingest lock: the open sprint when its manager can be nudged, unread or not.
 
-        A sprint with a launch reserved is not nudgeable: a wake would resume the manager the launch replaces.
+        A sprint with a launch reserved is not reachable: a wake would resume the manager the launch replaces.
         Nor is one whose session stop is reserved or whose manager is stopped (#892): a wake would resume it.
         Nor is one ended by a closing report (#980): its manager is stopped, and stays stopped.
         Nor is one whose manager's account is out of quota (#929): the message waits for the reset.
@@ -4716,6 +4834,13 @@ class ConsoleService:
                 or sprint.manager.state != sprints.STARTED
                 or (sprint.closing is not None and sprint.stop_at is None)
                 or self._quota_wait(sprint) is not None):
+            return None
+        return sprint
+
+    def _nudgeable(self, sprint_id: str) -> tuple[sprints.SprintState, tuple[sprints.Message, ...]] | None:
+        """Under the ingest lock: the reachable sprint and its unread messages when there are any."""
+        sprint = self._reachable(sprint_id)
+        if sprint is None:
             return None
         unread = sprints.unread(sprint)
         return (sprint, unread) if unread else None
@@ -4816,19 +4941,9 @@ class ConsoleService:
         """Off the ingest lock: the session ids the running listing shows under `name`, lowest first."""
         return sorted(o.session_id for o in self._listing().values() if o.name == name)
 
-    def _nudge(self, sprint_id: str) -> None:
-        """Tell the sprint's manager to read its inbox, then record the attempt; the reservation ends here."""
-        with self._ingest:
-            found = self._nudgeable(sprint_id)
-            project = None if found is None else self._states.get(found[0].project_id)
-            if found is None or project is None:
-                self._nudging.discard(sprint_id)
-                self._nudge_again.discard(sprint_id)
-                return
-            sprint, unread = found
-            through = unread[-1].message_id
-            name = manager.session_name(sprint.project_id, sprint_id)
-            profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+    def _reach(self, sprint_id: str, name: str, profile: str, known: str | None,
+               cwd: str) -> tuple[str | None, str | None, str | None] | None:
+        """Off the ingest lock: send the one nudge; `(route, reason, listing_failed)`, None when held for quota."""
         route, reason, listing_failed = None, None, None
         try:
             listed, settings = self._listed_ids(name), None
@@ -4837,9 +4952,7 @@ class ConsoleService:
                 listed = self._listed_ids(name)  # the full listing is slow: the manager may be running now
             with self._ingest:
                 if self._held_for_quota(sprint_id):
-                    self._nudging.discard(sprint_id)
-                    self._nudge_again.discard(sprint_id)
-                    return
+                    return None
             if listed:
                 route, listing_failed = nudge.RELAY, None
                 self._send_nudge(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
@@ -4852,6 +4965,38 @@ class ConsoleService:
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")
+        return route, reason, listing_failed
+
+    def _nudge(self, sprint_id: str) -> None:
+        """Tell the sprint's manager to read its inbox, then record the attempt; the reservation ends here."""
+        with self._ingest:
+            found = self._nudgeable(sprint_id)
+            project = None if found is None else self._states.get(found[0].project_id)
+            if found is None or project is None:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                follow = self._notice_follow(sprint_id)
+            else:
+                follow = False
+                sprint, unread = found
+                covered = self._notice_due.pop(sprint_id, None)
+                through = unread[-1].message_id
+                name = manager.session_name(sprint.project_id, sprint_id)
+                profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+        if found is None or project is None:
+            if follow:
+                self._dispatch_notice_nudge(sprint_id)
+            return
+        reached = self._reach(sprint_id, name, profile, known, cwd)
+        if reached is None:
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                follow = self._notice_follow(sprint_id)
+            if follow:
+                self._dispatch_notice_nudge(sprint_id)
+            return
+        route, reason, listing_failed = reached
         again = False
         with self._ingest:
             self._nudging.discard(sprint_id)
@@ -4859,21 +5004,124 @@ class ConsoleService:
             wanted = sprint_id in self._nudge_again
             self._nudge_again.discard(sprint_id)
             self._record_nudge(sprint_id, through, route, reason, listing_failed)
+            if covered is not None and reason is not None:
+                self._notice_due[sprint_id] = max(covered, self._notice_due.get(sprint_id, 0))
             found = self._nudgeable(sprint_id)
             if wanted and found is not None and found[1][-1].message_id > through \
                     and not self._stop.is_set():
                 self._nudging.add(sprint_id)
                 again = True
+            else:
+                follow = self._notice_follow(sprint_id)
         if again:
             self._dispatch_nudge(sprint_id)
+        elif follow:
+            self._dispatch_notice_nudge(sprint_id)
+
+    def _notice_follow(self, sprint_id: str) -> bool:
+        """Under the ingest lock: reserve the sprint for the nudge of a notice still due; whether it did.
+
+        A stopping service, no nudger, an unreachable sprint or one whose project left the registry drops the
+        due notice: no nudge can carry it.
+        """
+        sprint = None if self._stop.is_set() or self._nudger is None else self._reachable(sprint_id)
+        if sprint is None or sprint.project_id not in self._states:
+            self._notice_due.pop(sprint_id, None)
+            return False
+        if sprint_id in self._notice_due and sprint_id not in self._nudging:
+            self._nudging.add(sprint_id)
+            return True
+        return False
+
+    def _dispatch_notice_nudge(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's notice nudge to the dispatcher; one that cannot start is a failed nudge."""
+        try:
+            self._dispatch(lambda: self._notice_nudge(sprint_id))
+        except Exception as error:
+            reason = f"the nudge could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                self._settled[sprint_id] = int(self._clock() * 1000)
+                self._record_notice_nudge(
+                    sprint_id, self._notice_due.pop(sprint_id, None), None, reason)
+
+    def _record_notice_nudge(self, sprint_id: str, covered: int | None, route: str | None,
+                             reason: str | None, listing_failed: str | None = None) -> None:
+        """Under the ingest lock: append one `notice.nudged` row for the open sprint and fold it."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or covered is None or self._stop.is_set():
+            return
+        payload = {"sprint_id": sprint_id, "notice": covered, "route": route, "ok": reason is None}
+        if reason is not None:
+            payload["reason"] = reason
+        if listing_failed is not None:
+            payload["listing_failed"] = listing_failed
+        self._apply(self.log.append([(NOTICE_NUDGED, sprint.project_id, payload)]))
+        if reason is not None:
+            print(f"console: notice_nudge_failed {sprint_id} {reason}", file=sys.stderr)
+        if listing_failed is not None:
+            print(f"console: listing_failed {sprint_id} {listing_failed}", file=sys.stderr)
+
+    def _notice_nudge(self, sprint_id: str) -> None:
+        """Tell the sprint's manager to read its inbox for the owner's notice; the reservation ends here."""
+        with self._ingest:
+            sprint = self._reachable(sprint_id)
+            project = None if sprint is None else self._states.get(sprint.project_id)
+            if sprint is None or project is None:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                covered = None
+            else:
+                covered = self._notice_due.pop(sprint_id, None)
+                if covered is None:
+                    self._nudging.discard(sprint_id)
+            if covered is None:
+                follow = self._notice_follow(sprint_id)
+            else:
+                name = manager.session_name(sprint.project_id, sprint_id)
+                profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+        if covered is None:
+            if follow:
+                self._dispatch_notice_nudge(sprint_id)
+            return
+        reached = self._reach(sprint_id, name, profile, known, cwd)
+        if reached is None:
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                follow = self._notice_follow(sprint_id)
+            if follow:
+                self._dispatch_notice_nudge(sprint_id)
+            return
+        route, reason, listing_failed = reached
+        again = False
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            self._settled[sprint_id] = int(self._clock() * 1000)
+            wanted = sprint_id in self._nudge_again
+            self._nudge_again.discard(sprint_id)
+            self._record_notice_nudge(sprint_id, covered, route, reason, listing_failed)
+            if wanted and self._nudgeable(sprint_id) is not None and not self._stop.is_set():
+                self._nudging.add(sprint_id)
+                again = True
+            else:
+                follow = self._notice_follow(sprint_id)
+        if again:
+            self._dispatch_nudge(sprint_id)
+        elif follow:
+            self._dispatch_notice_nudge(sprint_id)
 
     def renudge(self) -> None:
         """Nudge again the managers whose message went unread and undelivered for a minute."""
         if self._nudger is None:
             return
-        due = []
+        due, noticed = [], []
         with self._ingest:
             now = int(self._clock() * 1000)
+            for sprint_id in list(self._notice_due):
+                if sprint_id not in self._nudging and self._notice_follow(sprint_id):
+                    noticed.append(sprint_id)
             for sprint_id, sprint in self._sprints.items():
                 found = self._nudgeable(sprint_id)
                 if (found is None or sprint_id in self._nudging
@@ -4888,6 +5136,8 @@ class ConsoleService:
                     continue
                 self._nudging.add(sprint_id)
                 due.append(sprint_id)
+        for sprint_id in noticed:
+            self._dispatch_notice_nudge(sprint_id)
         for sprint_id in due:
             self._dispatch_nudge(sprint_id)
 
@@ -5419,18 +5669,55 @@ class ConsoleService:
             self._apply(appended)
             return appended[-1].seq
 
+    def post_owner_notice(self, project_id: str, text: str) -> int:
+        """Append one owner `notice.posted` event for the project; its seq, the notice's id."""
+        with self._ingest:
+            checked = sprints.postable_owner_notice(
+                project_id, text, project_id in self._states, self._sprints.values(),
+                self._owner_notices)
+            appended = self.log.append([(NOTICE_POSTED, project_id, {
+                "poster": sprints.NOTICE_OWNER, "notice": checked})])
+            self._apply(appended)
+            seq = appended[-1].seq
+            reserved = []
+            if self._nudger is not None:
+                for sprint_id, sprint in self._sprints.items():
+                    if (sprint.project_id == project_id and sprints.takes_notices(sprint)
+                            and self._reachable(sprint_id) is not None):
+                        self._notice_due[sprint_id] = seq
+                        if sprint_id not in self._nudging:
+                            self._nudging.add(sprint_id)
+                            reserved.append(sprint_id)
+        for sprint_id in reserved:
+            self._dispatch_notice_nudge(sprint_id)
+        return seq
+
+    def withdraw_owner_notice(self, project_id: str, notice_id: int) -> int:
+        """Append one owner `notice.withdrawn` event for an open owner notice; the notice's id."""
+        with self._ingest:
+            sprints.withdrawable_owner_notice(
+                project_id, notice_id, self._owner_notices, self._sprints.values())
+            appended = self.log.append([(NOTICE_WITHDRAWN, project_id, {
+                "poster": sprints.NOTICE_OWNER, "notice": notice_id})])
+            self._apply(appended)
+            return notice_id
+
     def list_notices(self, sprint_id: str, secret: str) -> list[dict]:
         """The open notices of the sprint's project in id order; appends and publishes nothing."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
-            return sprints.project_notices(self._sprints.values(), sprint.project_id)
+            return sprints.project_notices(
+                self._sprints.values(), sprint.project_id,
+                owner=sprints.open_owner_notices(self._owner_notices, sprint.project_id))
 
     def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
         """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
             others = [other for key, other in self._sprints.items() if key != sprint_id]
-            sprints.withdrawable_notice(sprint, notice_id, others)
+            sprints.withdrawable_notice(
+                sprint, notice_id, others,
+                owner_ids={n.notice_id for ns in self._owner_notices.values() for n in ns})
             appended = self.log.append([(NOTICE_WITHDRAWN, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": notice_id})])
             self._apply(appended)
@@ -5788,6 +6075,7 @@ class ConsoleService:
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
+        self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
         self._pending = sprints.pending_stops(appended, self._pending)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))

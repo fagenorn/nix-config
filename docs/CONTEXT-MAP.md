@@ -28,6 +28,7 @@
 | Approved release path | Guard |
 | Answered item | Console |
 | Approved adoption | Console |
+| Awaiting look | Delivery |
 | Base policy | Guard |
 | Blocking edge | Claims |
 | Cache proxy | Hosts |
@@ -106,6 +107,7 @@
 | Session | Console |
 | Sign-in state | Console |
 | Spend | Console |
+| Spend page | Console |
 | Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |

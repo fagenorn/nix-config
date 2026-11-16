@@ -9,6 +9,10 @@ Delivery turns one tracker issue into a merged change through the agent skills, 
 
 ## Language
 
+**Awaiting look**:
+The stage a delivery of a marked issue stops at after verify, with its branch up to date with the integration branch, pushed and its pull request open, holding no land lock and merging nothing; the owner's approve or changes answer resumes it (issue 1139).
+_Avoid_: hold (a hold is the post-merge verification hold)
+
 **Code map**:
 A navigation hint a design or planning agent leaves for the next agent: the modules, seams and contracts a task touches, each with its code and tests. It is a lead to check against the tree, never an authority, and it lives outside the working tree so it is never committed.
 _Avoid_: context file, index
@@ -27,7 +31,7 @@ The project-declared reduced route for changes that a project's contract names a
 The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved` or `changes`, and the console message it came from (issue 1138). It covers exactly that head; the latest one for a head decides.
 
 **Look marker**:
-An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. An ordinary `[human]` criterion or a hold in prose is not one.
+An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a criterion line that is a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
 
 **Suite member**:
 One test file or script named in the project's declared agent-workflow test recipe. The suite runner schedules the members by recorded duration, and the last member is pinned.

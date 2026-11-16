@@ -49,6 +49,32 @@ retries. When the retries end, the last `ForgeError` itself is raised.
 
 No sentence carries raw tracker text.
 
+`answer_criterion(slug, issue, index, answer, version=, note=)` (#1113) answers one review item of a held
+issue, as the owner (`forge_api.run_gh` drops the tokens). `answer` is `passed` (tick the criterion) or
+`note` (post `review_note_body(slug, issue, index, note)` and tick nothing); `version` is the
+`inbox.criterion_version` the owner read. The checks run in this order, each refusal before any write:
+
+1. The arguments: `answer` is in `inbox.REVIEW_ANSWERS`, a note is given exactly when `answer` is `note`,
+   a note is a non-blank string of at most `verify_answer.MAX_NOTE_CHARS` characters (else `ValueError`),
+   and a note matching `verify_answer.FENCE` is `Refused(verify_answer.NOTE_BLOCK)`. No call is made yet.
+2. From here to the write the read-modify-write of the issue body is serialized per repository and issue in
+   this process (an approval PATCHes the whole body, so two approvals of different criteria that read the
+   same body would erase each other). The issue is read with `forge_api.api_get`; a reply without a
+   string `state`, a `body` that is neither a string nor null, or `labels` that are not a list of objects is `ForgeError("payload_invalid", ...)`;
+   a `state` other than `open` is `Refused(CLOSED)`.
+3. The issue must carry `inbox.HELD_LABEL` and its `author_association` must be in `verify_answer.TRUSTED`,
+   else `Refused(REVIEW_GONE)`.
+4. The criterion `index` of `inbox.acceptance_criteria` must exist and be `human`, else `REVIEW_GONE`.
+5. Its `inbox.criterion_version` must equal `version`, else `Refused(REVIEW_EDITED)`.
+6. A criterion already ticked: `passed` returns with no write, `note` is `Refused(REVIEW_ALREADY)`.
+7. Another unticked criterion whose kind is outside `inbox.MET_KINDS` is `Refused(REVIEW_GONE)`.
+8. The comments of the issue are read again (`forge_markers.list_comments`), because the card was built at the
+   inbox poll and a runner may have posted since: a live runner prompt (`inbox.live_prompts` of the trusted
+   markers) or a verify block check for the criterion (`verify_answer.held_acs`) is `Refused(REVIEW_GONE)`,
+   so the inbox's rule that a runner prompt or a block check keeps its own card holds at the write too.
+9. `passed` writes one PATCH of the issue body in which only that line's first `[ ]` became `[x]` (the body
+   is split and rejoined on `\n`, so every other byte, a `\r` included, is kept); `note` posts one comment.
+
 `parse_request(body)` reads the page's request body, the one body of `POST /api/answer`
 (`service.py`), sent as `Content-Type: application/json` and at most `service.MAX_ANSWER_BYTES`
 long:
@@ -75,12 +101,14 @@ characters. Anything else, a repeated key included, raises `ValueError`.
 """
 
 import json
+import threading
 from collections.abc import Callable, Sequence
 from typing import TypeVar
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
+from agent_tools.console import inbox
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer
 
@@ -93,6 +121,9 @@ CHANGED = "the prompt changed on the tracker"
 ALREADY = "the prompt is already answered on the tracker"
 NOT_AN_ANSWER = "this item does not take that answer"
 CONFIRM = "type the issue reference exactly to approve this check"
+REVIEW_GONE = "this criterion is no longer an open owner review on the tracker"
+REVIEW_EDITED = "the criterion changed on the tracker since you read it"
+REVIEW_ALREADY = "the criterion is already ticked on the tracker"
 CHECK_ANSWERS = ("passed", "failed", "note", "approve", "keep", "drop")
 MAX_CONFIRM_CHARS = 200
 T = TypeVar("T")
@@ -224,3 +255,69 @@ def tick_on_tracker(slug: str, issue: int, comment_id: int, questions: list[dict
             return
         raise Refused(ALREADY)
     fm.edit(slug, comment_id, foa.tick_body(marker.body, choices))
+
+
+def review_note_body(slug: str, issue: int, index: int, note: str) -> str:
+    """The comment that carries an owner's note on criterion `index` of `issue`."""
+    return (f"Owner's note on acceptance criterion {index} of https://github.com/{slug}/issues/{issue}, "
+            f"not yet approved, sent from the console:\n\n{note}")
+
+
+_CRITERION_LOCKS: dict[tuple[str, int], threading.Lock] = {}
+_CRITERION_LOCKS_GUARD = threading.Lock()
+
+
+def _criterion_lock(slug: str, issue: int) -> threading.Lock:
+    """The lock that serializes every body edit of one issue of one repository in this process."""
+    with _CRITERION_LOCKS_GUARD:
+        return _CRITERION_LOCKS.setdefault((slug, issue), threading.Lock())
+
+
+def answer_criterion(slug: str, issue: int, index: int, answer: str, *, version: str,
+                     note: str | None = None) -> None:
+    if answer not in inbox.REVIEW_ANSWERS or (answer == "note") != (note is not None):
+        raise ValueError("answer is passed, or note with a note")
+    if note is not None:
+        if (not isinstance(note, str) or not note.strip()
+                or len(note) > verify_answer.MAX_NOTE_CHARS):
+            raise ValueError(f"note must be a non-blank string of at most {verify_answer.MAX_NOTE_CHARS} characters")
+        if verify_answer.FENCE.search(note.replace("\r\n", "\n")):
+            raise Refused(verify_answer.NOTE_BLOCK)
+    with _criterion_lock(slug, issue):
+        parent = forge_api.api_get(f"repos/{slug}/issues/{issue}")
+        if (not isinstance(parent, dict) or not isinstance(parent.get("state"), str)
+                or not isinstance(parent.get("body"), (str, type(None)))
+                or not isinstance(parent.get("labels"), list)
+                or not all(isinstance(label, dict) for label in parent["labels"])):
+            raise forge_api.ForgeError("payload_invalid", f"issue {issue} has no readable state, body or labels")
+        if parent["state"] != "open":
+            raise Refused(CLOSED)
+        if (inbox.HELD_LABEL not in [label.get("name") for label in parent["labels"]]
+                or parent.get("author_association") not in verify_answer.TRUSTED):
+            raise Refused(REVIEW_GONE)
+        body = parent["body"] or ""
+        criteria = inbox.acceptance_criteria(body)
+        criterion = next((c for c in criteria if c.index == index), None)
+        if criterion is None or criterion.kind != "human":
+            raise Refused(REVIEW_GONE)
+        if inbox.criterion_version(issue, criterion) != version:
+            raise Refused(REVIEW_EDITED)
+        if criterion.ticked:
+            if answer == "passed":
+                return
+            raise Refused(REVIEW_ALREADY)
+        if criterion not in inbox.review_criteria(criteria):
+            raise Refused(REVIEW_GONE)
+        trusted = [c for c in fm.list_comments(slug, issue)
+                   if c.get("author_association") in verify_answer.TRUSTED]
+        markers = [m for m in (fm.parse(c) for c in trusted) if m is not None]
+        asked = verify_answer.held_acs([(c["id"], c["author_association"], c["body"]) for c in trusted
+                                        if isinstance(c.get("id"), int) and isinstance(c.get("body"), str)])
+        if inbox.live_prompts(markers) or criterion not in inbox.review_criteria(criteria, asked):
+            raise Refused(REVIEW_GONE)
+        if answer == "passed":
+            lines = body.split("\n")
+            lines[criterion.line] = lines[criterion.line].replace("[ ]", "[x]", 1)
+            forge_api.run_gh(["api", "-X", "PATCH", f"repos/{slug}/issues/{issue}", "-f", "body=" + "\n".join(lines)])
+        else:
+            fm.post(slug, issue, review_note_body(slug, issue, index, note))

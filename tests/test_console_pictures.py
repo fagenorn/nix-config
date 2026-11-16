@@ -1603,9 +1603,9 @@ class PictureDocsTest(unittest.TestCase):
         self.assertEqual(
             status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                    "ADR-console-037")
+                    "ADR-console-037, ADR-console-053")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089"))
+        self.assertTrue(decided.endswith("#1089, #1120"))
         text = self.doc(adr008)
         for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
                        "ADR-console-036"):
@@ -1641,7 +1641,7 @@ class PictureDocsTest(unittest.TestCase):
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
         lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
         status = next(r for r in lines if r.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038"), status)
+        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052"), status)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
