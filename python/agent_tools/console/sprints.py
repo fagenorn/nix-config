@@ -203,17 +203,20 @@ next_step, pictures)`. `sprint.reported` changes an open sprint only when its br
 (`STARTING`) and `checked_report` accepts the dict `report` without its `pictures` key; the report
 is then replaced (`at` is the event's `at`, `issues` a tuple of `(issue, stage)`, `inbox` a tuple,
 `next_step` the `next` member, `pictures` the read-back below) and the sprint's observations are
-cleared. Every other report row changes nothing.
+cleared; its movement (`moved_ms`) is kept (#1109). Every other report row changes nothing.
 
-Observations: a `delivery.seen` row carries no sprint id and is read as the delivery fold reads it
-(`deliveries.delivery_states` on that one row; a row that parses to nothing changes nothing). For
-every open sprint of the row's project that has a report, a run that moved after the report
-(`moved_ms` greater than the report's `at` in milliseconds) and carries a reported issue sets the
-sprint's `moved_ms` to the larger of the kept one and the run's, and each of the run's stages for a
-reported issue becomes that issue's `Observed(issue, moved_ms, session_id, run_id, stage)` when
-`(moved_ms, session_id, run_id)` is at least the kept one's. `delivery.gone` changes nothing: the
-last stage and movement outlive the run. `SprintState.observed` is ordered by issue. Folding `a + b`
-equals folding `b` onto the fold of `a`.
+Movement and observations (#1109): a `delivery.seen` row carries no sprint id and is read as the
+delivery fold reads it (`deliveries.delivery_states` on that one row; a row that parses to nothing
+changes nothing). A run belongs to a sprint of the row's project, open or ended, when its
+`session_id` is the sprint's manager session, or when the sprint has a report and the run carries an
+issue of the report's `issues` or `inbox`; any other run changes nothing. A belonging run sets the
+sprint's `moved_ms` to the larger of the kept one and the run's, whether it moved before or after the
+report, and a report never clears it. Observations are narrower: only when the sprint has a report
+and the run moved after it (`moved_ms` greater than the report's `at` in milliseconds), each of the
+run's stages for an issue in the report's `issues` becomes that issue's `Observed(issue, moved_ms,
+session_id, run_id, stage)` when `(moved_ms, session_id, run_id)` is at least the kept one's.
+`delivery.gone` changes nothing: the last stage and movement outlive the run.
+`SprintState.observed` is ordered by issue. Folding `a + b` equals folding `b` onto the fold of `a`.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
 a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
@@ -1869,7 +1872,7 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
         checked = checked_report(members)
     except Refused:
         return state
-    return replace(state, observed=(), moved_ms=None, idle_nudges=0, no_progress_at=None,
+    return replace(state, observed=(), idle_nudges=0, no_progress_at=None,
                    report=Report(event.at, checked["status"], checked["phase"],
                                  checked["milestone"], checked["tracker_url"],
                                  tuple((row["issue"], row["stage"]) for row in checked["issues"]),
@@ -1921,25 +1924,30 @@ def _observed(folded: dict[str, SprintState], event: Event) -> None:
     runs = deliveries.delivery_states([event])
     for run in runs.values():
         for sprint_id, state in folded.items():
+            if state.project_id != event.project:
+                continue
             report = state.report
-            if state.project_id != event.project or report is None:
+            named = ({issue for issue, _ in report.issues} | set(report.inbox)
+                     if report is not None else set())
+            own = state.manager_session is not None and run.session_id == state.manager_session
+            if not own and not any(stage.issue in named for stage in run.issues):
                 continue
-            if run.moved_ms <= int(datetime.fromisoformat(report.at).timestamp() * 1000):
-                continue
-            reported = {issue for issue, _ in report.issues}
-            stages = [stage for stage in run.issues if stage.issue in reported]
-            if not stages:
-                continue
-            kept = {item.issue: item for item in state.observed}
-            for stage in stages:
-                old = kept.get(stage.issue)
-                if old is None or ((run.moved_ms, run.session_id, run.run_id)
-                                   >= (old.moved_ms, old.session_id, old.run_id)):
-                    kept[stage.issue] = Observed(stage.issue, run.moved_ms, run.session_id,
-                                                 run.run_id, stage)
-            folded[sprint_id] = replace(
-                state, moved_ms=max(state.moved_ms or 0, run.moved_ms),
-                observed=tuple(kept[issue] for issue in sorted(kept)))
+            moved = max(state.moved_ms or 0, run.moved_ms)
+            observed = state.observed
+            if report is not None and run.moved_ms > int(
+                    datetime.fromisoformat(report.at).timestamp() * 1000):
+                reported = {issue for issue, _ in report.issues}
+                kept = {item.issue: item for item in state.observed}
+                for stage in run.issues:
+                    if stage.issue not in reported:
+                        continue
+                    old = kept.get(stage.issue)
+                    if old is None or ((run.moved_ms, run.session_id, run.run_id)
+                                       >= (old.moved_ms, old.session_id, old.run_id)):
+                        kept[stage.issue] = Observed(stage.issue, run.moved_ms, run.session_id,
+                                                     run.run_id, stage)
+                observed = tuple(kept[issue] for issue in sorted(kept))
+            folded[sprint_id] = replace(state, moved_ms=moved, observed=observed)
 
 
 def sprint_states(events: Iterable[Event],

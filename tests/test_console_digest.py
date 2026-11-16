@@ -476,6 +476,40 @@ class DigestTest(unittest.TestCase):
             self.assertNotIn(" is now ", m.sentence)
 
 
+    def test_the_digest_never_names_a_sprint_quiet_or_nothing_running_while_it_moved(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+
+        def reported(seq, phase, issue, inbox):
+            return Event(seq, at(seq), SPRINT_REPORTED, "owner/p00", {
+                "sprint_id": sid, "goal": goal, "report": {
+                    "status": "one slice is building", "phase": phase,
+                    "milestone": "Importer resumes",
+                    "tracker_url": "https://github.com/owner/p00/milestone/3",
+                    "issues": [{"issue": issue, "stage": "building"}], "inbox": inbox,
+                    "next": "start the resume slice"}})
+
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1}),
+            Event(4, at(4), MANAGER_FAILED, "owner/p00", {**row, "reason": "r"}),
+            reported(5, "running", 12, [12]), reported(6, "running", 13, [])]
+        open_item = InboxRecord(
+            {"project_id": "owner/p00", "issue": 12, "key": "k", "answered": False},
+            at(0), at(0))
+        found = moments(rows, {}, {("owner/p00", "k"): open_item})
+        self.assertEqual([(m.seq, m.sentence) for m in found if m.kind == SPRINT_STATE_MOMENT], [
+            (5, f"The sprint for owner/p00 changed to waiting on you: {goal}"),
+            (6, f"The sprint for owner/p00 changed to manager working: {goal}")])
+        for m in found:
+            self.assertNotIn("nothing running", m.sentence)
+            self.assertNotIn("quiet", m.sentence)
+
+
 class QuestionDigestTest(unittest.TestCase):
     ROW = {"sprint_id": "a" * 16, "goal": "make the importer resumable", "round": 41, "index": 0,
            "question": "Which store keeps the checkpoints?", "answer": "sqlite",
