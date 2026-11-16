@@ -1141,7 +1141,11 @@ class DocsTreeTest(unittest.TestCase):
                        "attach the pictures with pictures, or reword it", "ADR-console-015",
                        "ADR-console-019", "ADR-console-038"):
             self.assertIn(needle, adr)
-        self.assertIn("ADR-console-039", self.doc("docs/areas/console/CONTEXT.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        entry = context.split("**Question round**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn("A question whose ask or context names screenshots, a `.png` file or a "
+                      "screenshots folder must carry a picture, or the round is refused with "
+                      "the question named (ADR-console-039).", entry)
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
