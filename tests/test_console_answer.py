@@ -767,38 +767,23 @@ class ReviewWriteTest(unittest.TestCase):
         self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
         self.assert_owner()
 
-    def test_an_open_code_criterion_of_a_held_issue_does_not_stop_the_approval(self):
-        body = review_body("- [ ] [code] A", "- [x] [code] B", HUMAN_LINE)
-        ticked = body.replace(HUMAN_LINE, "- [x] [human] The card looks right")
-        version = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(body)[2])
-        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
-        self.reply(body)
-        self.world.respond("gh", R_PATCH(ticked), stdout="{}")
-        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=version)
-        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(ticked)])
+    def test_a_prompt_that_arrived_after_the_card_stops_both_writes(self):
+        comments = [comment(C + 1, ask())]
+        for word, note in (("passed", None), ("note", NOTE)):
+            with self.subTest(word=word):
+                self.world.reset()
+                self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
+                self.reply(REVIEW_BODY)
+                with self.assertRaises(answer.Refused) as caught:
+                    answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, word, version=V3, note=note)
+                self.assertEqual(str(caught.exception), answer.REVIEW_GONE)
+                self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS])
+                self.assertEqual(self.world.stored(), comments)
 
-    def test_a_prompt_or_a_verify_check_that_arrived_after_the_card_stops_both_writes(self):
+    def test_a_stranger_prompt_or_a_verify_block_does_not_stop_the_approval(self):
         block = json.dumps({"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC3", "kind": "human"}]})
-        table = {
-            "a live runner prompt": [comment(C + 1, ask())],
-            "a verify block check for the criterion": [comment(C + 1, f"Held.\n\n```verify\n{block}\n```\n")],
-        }
-        for name, comments in table.items():
-            for word, note in (("passed", None), ("note", NOTE)):
-                with self.subTest(name, word=word):
-                    self.world.reset()
-                    self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
-                    self.reply(REVIEW_BODY)
-                    with self.assertRaises(answer.Refused) as caught:
-                        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, word, version=V3, note=note)
-                    self.assertEqual(str(caught.exception), answer.REVIEW_GONE)
-                    self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS])
-                    self.assertEqual(self.world.stored(), comments)
-
-    def test_a_stranger_comment_or_another_checks_block_does_not_stop_the_approval(self):
-        other = json.dumps({"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC9", "kind": "human"}]})
         comments = [comment(C + 1, ask(), association="CONTRIBUTOR"),
-                    comment(C + 2, f"```verify\n{other}\n```\n")]
+                    comment(C + 2, f"```verify\n{block}\n```\n")]
         self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
         self.reply(REVIEW_BODY)
         self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
@@ -818,6 +803,10 @@ class ReviewWriteTest(unittest.TestCase):
         code2 = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(REVIEW_BODY)[1])
         with_evidence = review_body("- [x] [code] A", "- [x] [code] B", HUMAN_LINE, "- [ ] [evidence] E")
         v_evidence = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(with_evidence)[2])
+        with_code = review_body("- [ ] [code] A", "- [x] [code] B", HUMAN_LINE)
+        v_code = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(with_code)[2])
+        nested = review_body(HUMAN_LINE, "    ```", "    - [ ] [human] Example only", "    ```")
+        v_nested = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(2, False, "human", "Example only", 0))
         table = {
             "closed": ({"state": "closed"}, REVIEW_BODY, 3, V3, answer.CLOSED),
             "label gone": ({"labels": ("owner-action",)}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
@@ -825,6 +814,8 @@ class ReviewWriteTest(unittest.TestCase):
             "not human": ({}, REVIEW_BODY, 2, code2, answer.REVIEW_GONE),
             "missing index": ({}, REVIEW_BODY, 9, V3, answer.REVIEW_GONE),
             "another open kind": ({}, with_evidence, 3, v_evidence, answer.REVIEW_GONE),
+            "another open code box": ({}, with_code, 3, v_code, answer.REVIEW_GONE),
+            "a fenced example": ({}, nested, 2, v_nested, answer.REVIEW_GONE),
         }
         for name, (kwargs, body, index, version, reason) in table.items():
             with self.subTest(name):

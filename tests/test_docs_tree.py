@@ -433,12 +433,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-049", self.doc("docs/areas/console/CONTEXT.md"))
 
     def test_the_held_review_decision_is_recorded(self):
-        path = ("docs/areas/console/adr/050-a-held-issue-whose-only-open-criterion-is-an-owner-"
+        path = ("docs/areas/console/adr/051-a-held-issue-whose-only-open-criterion-is-an-owner-"
                 "review-gets-an-owner-check-card.md")
         first = (REPO_ROOT / path).read_text().splitlines()[0]
         self.assertEqual(
             first,
-            "# ADR-console-050 \u2014 A held issue whose only open criterion is an owner review "
+            "# ADR-console-051 \u2014 A held issue whose only open criterion is an owner review "
             "gets an owner check card")
         adr = self.doc(path)
         for needle in (
@@ -450,15 +450,15 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         for older, status in (
             ("003-the-inbox-is-read-from-the-tracker.md",
-             "- **Status:** accepted; amended by ADR-console-050"),
+             "- **Status:** accepted; amended by ADR-console-051"),
             ("012-the-page-answers-owner-prompts-through-the-runners-owner-path.md",
-             "- **Status:** accepted; amended by ADR-console-032, ADR-console-050"),
+             "- **Status:** accepted; amended by ADR-console-032, ADR-console-051"),
         ):
             line = next(row for row in (REPO_ROOT / "docs/areas/console/adr" / older)
                         .read_text().splitlines() if row.startswith("- **Status:**"))
             self.assertEqual(line, status)
         entry = self.doc("docs/areas/console/CONTEXT.md").split("**Inbox item**:")[1].split("_Avoid_:")[0]
-        self.assertIn("ADR-console-050", entry)
+        self.assertIn("ADR-console-051", entry)
 
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
@@ -919,7 +919,7 @@ class DocsTreeTest(unittest.TestCase):
             ("docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md",
              "- **Status:** accepted; amended by ADR-console-032"),
             ("docs/areas/console/adr/012-the-page-answers-owner-prompts-through-the-runners-owner-path.md",
-             "- **Status:** accepted; amended by ADR-console-032, ADR-console-050"),
+             "- **Status:** accepted; amended by ADR-console-032, ADR-console-051"),
         ):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))

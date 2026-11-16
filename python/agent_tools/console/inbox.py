@@ -28,23 +28,26 @@ that whitespace or the line end follows, else the whole line, whitespace collaps
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
 detail with `check_id` `""` (#1046).
 
-Held reviews (#1113, ADR-console-050). A held issue with no live runner prompt raises review items
+Held reviews (#1113, ADR-console-051). A held issue with no live runner prompt raises review items
 instead. An Issue node labelled `HELD_LABEL` whose `authorAssociation` is in `verify_answer.TRUSTED`
 and that has no live trusted runner prompt (the verification-item predicate above) is read through
 `acceptance_criteria` of its body: the checkbox lines of its first `Acceptance criteria` heading
 section, outside fences (a fence closes only on a line of its own delimiter character, at least as
-long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end).
+long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end;
+a fence opens and closes with up to three spaces of indent beyond the content column of the list item
+enclosing it, so a fenced example nested under a checkbox is no criterion).
 A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
 `[evidence]`, `[human]` or `[note]` tag or None, and a checkbox line's bullet (`-`, `*` or `+`) may be
 followed by any run of spaces or tabs. `review_criteria` is the unticked `human` criteria when no unticked
-criterion has a kind outside `MET_KINDS` (`code`, `human`, `note`: an unticked `[code]` box of a held issue
-counts as met), else none, less the criteria the held verify block already asks: a criterion whose `ac_id`
-(`AC<index>`) equals, case-insensitively, the `ac` of a check of the newest block of a trusted comment
-(`verify_answer.held_acs`) is left to the runner, which asks it when due. Each remaining one raises one review
-item, keyed `<slug>#<issue>/ac<index>`, with `reason` `held-review`, `kind` `owner-review`, `question`
-the criterion's text, `answers` `["passed", "note"]`, `comment_id` None, `criterion` its index and
-`version` `criterion_version` (a digest of issue, index, kind and text, never the tick), plus the
-`check_id` `""`, `reading` `""` and `detail` `""` of an owner check, so it gets pictures like one.
+criterion has a kind other than `human` or `note`, else none (an unticked `code`, `evidence` or untagged
+criterion keeps the issue with the runner). Each raises one review item, keyed `<slug>#<issue>/ac<index>`,
+with `reason` `held-review`, `kind` `owner-review`, `answers` `["passed", "note"]`, `comment_id` None,
+`criterion` its index and `version` `criterion_version` (a digest of issue, index, kind and text, never the
+tick), plus the `check_id` `""`, `reading` `""` and `detail` `""` of an owner check. Its `question`, the card's
+heading and the digest line, is the criterion's text without any word that names a PNG file or a folder (a
+word with a `/` and no `://`, `heading_text`), and without a connecting word (`in`, `under`, `and`...) left
+dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
+from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`.
 
 A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
 its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
@@ -116,7 +119,7 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 import os
 import re
 import stat
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -216,7 +219,8 @@ def _comments(node: dict) -> list[dict]:
     return nodes
 
 
-_FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_FENCE_OPEN = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
+_LIST_ITEM = re.compile(r"^([ \t]*)(?:[-*+]|\d{1,9}[.)])([ \t]+)")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _AC_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+Acceptance criteria\s*#*\s*$", re.IGNORECASE)
 _CRITERION = re.compile(r"^\s*[-*+][ \t]+\[( |x|X)\][ \t]+(.*)$")
@@ -236,18 +240,29 @@ def acceptance_criteria(body: str) -> list[Criterion]:
     """The checkbox lines of the first `Acceptance criteria` section of an issue body, outside fences."""
     criteria: list[Criterion] = []
     inside = False
-    fence: re.Pattern | None = None
+    fence: tuple[re.Pattern, int] | None = None
+    containers: list[int] = []
     for number, raw in enumerate(body.split("\n")):
         line = raw.removesuffix("\r")
+        indent = len(re.match(r"[ \t]*", line).group().expandtabs(4))
         if fence is not None:
-            if fence.match(line):
+            closer, limit = fence
+            closing = closer.match(line)
+            if closing and len(closing.group(1).expandtabs(4)) <= limit:
                 fence = None
             continue
+        if line.strip():
+            while containers and indent < containers[-1]:
+                containers.pop()
+        base = containers[-1] if containers else 0
         opened = _FENCE_OPEN.match(line)
-        if opened:
-            run = opened.group(1)
-            fence = re.compile(r"^\s{0,3}" + re.escape(run[0]) + "{" + str(len(run)) + r",}\s*$")
+        if opened and indent - base <= 3:
+            run = opened.group(2)
+            fence = (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), base + 3)
             continue
+        item = _LIST_ITEM.match(line)
+        if item:
+            containers.append(len(line[:item.end()].expandtabs(4)))
         if not inside:
             inside = bool(_AC_HEADING.match(line))
             continue
@@ -268,24 +283,12 @@ def criterion_version(issue: int, criterion: Criterion) -> str:
                              "text": criterion.text})
 
 
-MET_KINDS = ("code", "human", "note")
-
-
-def ac_id(criterion: Criterion) -> str:
-    """The id a verify block's `ac` uses for the criterion: `AC` and its 1-based index."""
-    return f"AC{criterion.index}"
-
-
-def review_criteria(criteria: Sequence[Criterion], asked: Collection[str] = ()) -> list[Criterion]:
-    """The unticked `human` criteria the owner is asked about from the page.
-
-    None when an unticked criterion of another kind than `MET_KINDS` still waits on the runner (a `code` box of a
-    held issue counts as met). A criterion whose `ac_id` is in `asked`, the `ac` ids of the held verify block's
-    checks (upper-cased), is left to the runner, which asks it when due."""
+def review_criteria(criteria: Sequence[Criterion]) -> list[Criterion]:
+    """The unticked `human` criteria, when no other unticked criterion still waits on the runner."""
     open_ = [c for c in criteria if not c.ticked]
-    if any(c.kind not in MET_KINDS for c in open_):
+    if any(c.kind not in ("human", "note") for c in open_):
         return []
-    return [c for c in open_ if c.kind == "human" and ac_id(c) not in asked]
+    return [c for c in open_ if c.kind == "human"]
 
 
 def live_prompts(markers: Sequence[fm.Marker]) -> list[fm.Marker]:
@@ -302,7 +305,8 @@ def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: C
     return {
         "key": review_key(slug, issue, criterion.index), "project_id": project_id, "repo": slug,
         "issue": issue, "comment_id": None, "url": f"https://github.com/{slug}/issues/{issue}",
-        "reason": REVIEW_REASON, "kind": REVIEW_KIND, "question": criterion.text, "detail": "",
+        "reason": REVIEW_REASON, "kind": REVIEW_KIND, "question": heading_text(criterion.text),
+        "criterion_text": criterion.text, "detail": "",
         "check_id": "", "reading": "", "questions": [], "items": [], "answers": list(REVIEW_ANSWERS),
         "paid": False, "confirm": "", "answered": False, "held_work": held,
         "version": criterion_version(issue, criterion), "criterion": criterion.index,
@@ -437,13 +441,10 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
         raise _invalid("search node number is not an integer")
     markers = []
     runner_markers = []
-    runner_comments = []
     for comment in _comments(node):
         association = comment.get("authorAssociation")
         if association not in foa.TRUSTED:
             continue
-        if association in verify_answer.TRUSTED and isinstance(comment.get("body"), str):
-            runner_comments.append((_comment_id(comment.get("fullDatabaseId")), association, comment["body"]))
         marker = fm.parse({"id": _comment_id(comment.get("fullDatabaseId")), "body": comment.get("body"),
                            "updated_at": comment.get("updatedAt")})
         if marker is None:
@@ -460,7 +461,7 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
     if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
             and node.get("authorAssociation") in verify_answer.TRUSTED and not prompts):
         items += [_review_item(project_id, slug, number, held, c)
-                  for c in review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))]
+                  for c in review_criteria(acceptance_criteria(_body(node)))]
     return sorted(items, key=lambda item: item["key"])
 
 
@@ -509,17 +510,47 @@ _CLOSE_TRAILING = "\"`'.,;:!?)]}>"
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
+def _core(raw: str) -> str:
+    """The word `raw` without the quotes, brackets and punctuation around it."""
+    token = raw
+    while True:
+        stripped = token.lstrip(_OPEN_LEADING).rstrip(_CLOSE_TRAILING)
+        if stripped == token:
+            return token
+        token = stripped
+
+
+def _names_a_path(token: str) -> bool:
+    return bool(token) and "://" not in token and ((token.lower().endswith(".png") and len(token) > 4)
+                                                    or "/" in token)
+
+
+_CONNECTORS = frozenset(("in", "under", "at", "on", "from", "of", "into", "by", "to", "and", "or"))
+REVIEW_HEADING = "Review what this issue asks you to check."
+
+
+def heading_text(text: str) -> str:
+    """`text` without the words that name a PNG file or a folder and the connecting words left before them."""
+    kept: list[str] = []
+    for raw in text.split():
+        core = _core(raw)
+        if not _names_a_path(core):
+            kept.append(raw)
+            continue
+        while kept and _core(kept[-1]).lower() in _CONNECTORS and kept[-1] == _core(kept[-1]):
+            kept.pop()
+        punctuation = "".join(c for c in raw[raw.rfind(core) + len(core):] if c in ".,;:!?")
+        if kept and punctuation and kept[-1][-1] not in ".,;:!?":
+            kept[-1] += punctuation[0]
+    return " ".join(kept) or REVIEW_HEADING
+
+
 def named_pictures(text: str) -> tuple[list[str], list[str]]:
     """The PNG names and the folders a prompt's text mentions, first-seen order, no repeats."""
     names: list[str] = []
     folders: list[str] = []
     for raw in text.split():
-        token = raw
-        while True:
-            stripped = token.lstrip(_OPEN_LEADING).rstrip(_CLOSE_TRAILING)
-            if stripped == token:
-                break
-            token = stripped
+        token = _core(raw)
         if not token or "://" in token:
             continue
         if token.lower().endswith(".png") and len(token) > 4:
@@ -610,7 +641,8 @@ def _serve(fd: int, pictures_dir: Path) -> str | None:
 def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
                     home: Path | None = None) -> dict:
     """`item` with the pictures its text names stored and listed (module docstring, Pictures)."""
-    names, folders = named_pictures("\n".join((item["question"], item["detail"], item.get("reading", ""))))
+    names, folders = named_pictures("\n".join((item["question"], item.get("criterion_text", ""), item["detail"],
+                                                item.get("reading", ""))))
     allowed = _spellings(roots)
     home_dir = str(home if home is not None else Path.home())
     project = os.path.abspath(roots[0]) if roots else os.getcwd()

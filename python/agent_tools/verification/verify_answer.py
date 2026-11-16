@@ -22,12 +22,6 @@ runner never asks that stale identity again. A note is posted as a plain owner c
 is the fixed sentence of `note_body`, never a marker and, because a trusted non-marker comment holding a
 `verify` fence becomes the held block, never one that matches `verify_block.FENCE`.
 
-`held_acs(comments)` (#1113) is the set of `ac` ids, upper-cased, of the checks of the held verify block of an
-issue: `comments` are `(comment id, author association, body)` triples, the block is the one
-`verify_issues.select` chooses (the newest trusted block, so an untrusted comment is never one), and an
-unparsable block, one without a `checks` list and a check without a string `ac` add nothing. The console reads
-it so that a human criterion the runner will ask itself raises no review card of its own.
-
 A prompt that already carries exactly the answer asked for is left alone and the call returns without a write:
 the same box ticked, or for `keep` a `kept` end of it (checked before `GONE`, since the end makes the prompt
 no longer live). Another answer is still `ALREADY`, and an `end` of another reason is still `GONE`. The
@@ -122,18 +116,6 @@ def ask_check_id(sentence: str) -> str:
     if candidate and not any(ch.isspace() for ch in candidate) and sentence == verify_owner.ask_sentence(candidate):
         return candidate
     return ""
-
-
-def held_acs(comments: Sequence[tuple[int, str, str]]) -> frozenset[str]:
-    """The upper-cased `ac` ids of the checks of the issue's held verify block, else none."""
-    held = verify_issues.select([verify_issues.Comment(cid, association, body, "1970-01-01T00:00:00Z")
-                                 for cid, association, body in comments])
-    block = held.block if held is not None else None
-    checks = block.get("checks") if isinstance(block, dict) else None
-    if not isinstance(checks, list):
-        return frozenset()
-    return frozenset(check["ac"].upper() for check in checks
-                     if isinstance(check, dict) and isinstance(check.get("ac"), str))
 
 
 def ambiguous(marker: Marker) -> bool:

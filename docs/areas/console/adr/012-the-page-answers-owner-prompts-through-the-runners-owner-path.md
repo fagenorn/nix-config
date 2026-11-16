@@ -1,6 +1,6 @@
 # ADR-console-012 — The page answers owner prompts through the runner's owner path
 
-- **Status:** accepted; amended by ADR-console-032, ADR-console-050
+- **Status:** accepted; amended by ADR-console-032, ADR-console-051
 - **Decided in:** #836, #837, #863, #895
 
 ## Context
@@ -15,7 +15,7 @@ A held verification waits on the owner through an owner prompt, a live `owner-ac
 4. **Keep and drop.** `drop` ticks the prompt's only box, "Accept without <host>". `keep` ends the stale prompt as `kept`: the check keeps waiting on its host and the runner never asks that stale identity again.
 5. **A typed confirmation for every approval.** Every approval, live or paid, keeps its full detail and the line `Type <owner>/<repo>#<issue> to approve.` with a single-line field in one fold, "Review and approve", that the owner opens; Approve stays disabled until the field equals that text exactly, and the post carries it. A paid approval adds the line "This check costs money." The runner path refuses an approval without the confirmation, and refuses a paid one unless the console says it is paid. #863 names the confirmation only for paid checks; the stricter rule of #836 item 5 is the one kept.
 6. **The console has no multi-item action.** The page and the console answer one item per request, so a live approval is never sent behind another item's confirmation and no preview goes unseen. The runner's `approve --all-live` stays the only bulk path, and it never ticks a paid prompt (ADR-verification-009).
-7. **Need and trust.** A prompt is an item only from an owner or member comment, only while live within that trusted set, and only when it names its block and check. A prompt with both boxes ticked is not answered, so its item stays open and the answer is refused until one box is unticked. A held issue with no live prompt raises no item. ADR-console-050 adds one exception: a held issue whose only open criteria are owner reviews raises one card per such criterion.
+7. **Need and trust.** A prompt is an item only from an owner or member comment, only while live within that trusted set, and only when it names its block and check. A prompt with both boxes ticked is not answered, so its item stays open and the answer is refused until one box is unticked. A held issue with no live prompt raises no item. ADR-console-051 adds one exception: a held issue whose only open criteria are owner reviews raises one card per such criterion.
 8. **The same undo and the keys.** Every answer goes through the five-second undo of ADR-console-010 and then the existing states: waiting, sending, answered, "Could not send: <reason>", with Try again when a repeat may succeed (ADR-console-032). A sent note returns the box to choosing with the field cleared and "Note sent.". Number keys and Enter keep acting on decision items only, and are ignored while an input, textarea, select or contenteditable element has focus; Escape still undoes.
 9. **Typed text survives a frame.** The page keeps each field's unsent text and selection in a draft keyed by item and field, restores them and the focus after every streamed frame, and drops the draft when the item is no longer open (and not waiting or sending) or its answer is sent.
 

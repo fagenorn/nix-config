@@ -534,7 +534,8 @@ class HeldReviewTest(unittest.TestCase):
     def review(self, issue, index, text, held_work=1):
         return {"key": f"{SLUG}#{issue}/ac{index}", "project_id": PROJECT, "repo": SLUG, "issue": issue,
                 "comment_id": None, "url": f"https://github.com/{SLUG}/issues/{issue}",
-                "reason": "held-review", "kind": "owner-review", "question": text, "detail": "",
+                "reason": "held-review", "kind": "owner-review", "question": text, "criterion_text": text,
+                "detail": "",
                 "check_id": "", "reading": "", "questions": [], "items": [], "answers": ["passed", "note"],
                 "paid": False, "confirm": "", "answered": False, "held_work": held_work,
                 "version": canonical.telemetry_digest({"issue": issue, "index": index, "kind": "human",
@@ -549,18 +550,13 @@ class HeldReviewTest(unittest.TestCase):
         self.assertIsNone(result[0]["comment_id"])
         self.assertEqual(json.loads(json.dumps(result)), result)
 
-    def test_an_open_evidence_or_untagged_criterion_raises_no_review_item(self):
+    def test_an_open_code_evidence_or_untagged_criterion_raises_no_review_item(self):
         control = inbox.items_from_node(PROJECT, SLUG, held_issue(7, ac_body("- [x] [code] A", HUMAN)))
         self.assertEqual([i["reason"] for i in control], ["held-review"])
-        for extra in ("- [ ] [evidence] E", "- [ ] U"):
+        for extra in ("- [ ] [code] C", "- [ ] [evidence] E", "- [ ] U"):
             with self.subTest(extra):
                 node = held_issue(7, ac_body("- [x] [code] A", extra, HUMAN))
                 self.assertEqual(inbox.items_from_node(PROJECT, SLUG, node), [])
-
-    def test_an_open_code_criterion_of_a_held_issue_counts_as_met(self):
-        node = held_issue(7, ac_body("- [ ] [code] Unmeasured", "- [ ] [code] Other", HUMAN))
-        items = inbox.items_from_node(PROJECT, SLUG, node)
-        self.assertEqual([i["key"] for i in items], [f"{SLUG}#7/ac3"])
 
     def test_any_list_marker_spacing_still_reads_the_criterion(self):
         for bullet in ("-  ", "-\t", "*   ", "+  "):
@@ -571,27 +567,45 @@ class HeldReviewTest(unittest.TestCase):
         spaced = ac_body(HUMAN, "-  [x] [evidence] Done")
         self.assertEqual([i["criterion"] for i in inbox.items_from_node(PROJECT, SLUG, held_issue(7, spaced))], [1])
 
-    def test_a_verify_block_check_for_the_criterion_suppresses_its_item(self):
-        def block(*acs, assoc="OWNER", fenced=True):
-            checks = [{"ac": ac, "kind": "human", "host": "any", "when": {"not_before": "2026-11-16T00:00:00Z"},
-                       "run": {"ask": "Does it look right?"}} for ac in acs]
-            text = json.dumps({"v": 1, "merge": "a" * 40, "checks": checks})
-            return comment_node(C2, f"Held.\n\n```verify\n{text}\n```\n" if fenced else text, assoc)
+    def test_a_held_verify_block_naming_the_criterion_suppresses_nothing(self):
+        checks = [{"ac": "AC3", "kind": "human", "host": "any", "when": {"not_before": "2026-11-16T00:00:00Z"},
+                   "run": {"ask": "Does it look right?"}}]
+        text = json.dumps({"v": 1, "merge": "a" * 40, "checks": checks})
+        held = comment_node(C2, f"Held.\n\n```verify\n{text}\n```\n")
+        node = held_issue(7, ac_body("- [x] [code] A", HUMAN), comments=[held])
+        self.assertEqual([i["key"] for i in inbox.items_from_node(PROJECT, SLUG, node)], [f"{SLUG}#7/ac2"])
 
-        body = ac_body("- [x] [code] A", "- [ ] [human] One", "- [ ] [human] Two")
+    def test_a_card_heading_names_no_file_or_folder_and_the_whole_text_stays_beside_it(self):
+        table = {
+            "The brief and report cards look right at 1440 and 480 px \u2014 measured: the owner judges the PNG "
+            "screenshots under /tmp/held-review-screenshots":
+                "The brief and report cards look right at 1440 and 480 px \u2014 measured: the owner judges the PNG "
+                "screenshots",
+            "The card looks right in shots/before.png and shots/after.png": "The card looks right",
+            "Look at ~/shots/a.png.": "Look.",
+            "See https://example.org/a/b": "See https://example.org/a/b",
+            "shots/a.png": inbox.REVIEW_HEADING,
+        }
+        for text, heading in table.items():
+            with self.subTest(text):
+                node = held_issue(7, ac_body(f"- [ ] [human] {text}"))
+                item, = inbox.items_from_node(PROJECT, SLUG, node)
+                self.assertEqual((item["question"], item["criterion_text"]), (heading, text))
 
-        def keys(*comments):
-            return [i["key"] for i in inbox.items_from_node(PROJECT, SLUG, held_issue(7, body, comments=comments))]
-
-        self.assertEqual(keys(), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
-        self.assertEqual(keys(block("AC2")), [f"{SLUG}#7/ac3"])
-        self.assertEqual(keys(block("AC2", "AC3")), [])
-        self.assertEqual(keys(block("ac3")), [f"{SLUG}#7/ac2"])
-        self.assertEqual(keys(block("AC1")), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
-        self.assertEqual(keys(block("AC2", "AC3", assoc="CONTRIBUTOR")), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
-        self.assertEqual(keys(block("AC2", "AC3", fenced=False)), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
-        newer = comment_node(C3, f"Held again.\n\n```verify\n{json.dumps({'v': 1, 'merge': 'a' * 40, 'checks': []})}\n```\n")
-        self.assertEqual(keys(block("AC2", "AC3"), newer), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
+    def test_a_fenced_example_nested_under_a_checkbox_is_no_criterion(self):
+        for indent in ("    ", "  ", "\t"):
+            with self.subTest(indent=repr(indent)):
+                body = ac_body("- [ ] [human] Real one", f"{indent}```", f"{indent}- [ ] [human] Example only",
+                               f"{indent}```", "- [ ] [human] Second")
+                self.assertEqual([c.text for c in inbox.acceptance_criteria(body)], ["Real one", "Second"])
+                items = inbox.items_from_node(PROJECT, SLUG, held_issue(7, body))
+                self.assertEqual([i["question"] for i in items], ["Real one", "Second"])
+        nested = ac_body("- [ ] [human] Real one", "    ```", "    - [ ] [code] Hidden example", "    ```")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(nested)], ["Real one"])
+        deep = ac_body("1. Step", "   - [ ] [human] Inner", "      ~~~", "      - [ ] [code] Example", "      ~~~")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(deep)], ["Inner"])
+        open_fence = ac_body("- [ ] [human] One", "    ```", "    - [ ] [code] Example")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(open_fence)], ["One"])
 
     def test_a_live_runner_prompt_suppresses_the_review_item(self):
         node = held_issue(7, ac_body(HUMAN), comments=[comment_node(C1, ask())])
