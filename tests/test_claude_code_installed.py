@@ -111,6 +111,12 @@ class ClaudeSettingsInstalledTest(unittest.TestCase):
                          {"commit": "", "pr": "", "sessionUrl": False})
         self.assertNotIn("includeCoAuthoredBy", self.settings)
 
+    def test_the_owners_default_mode_stays_auto(self):
+        self.assertEqual(
+            self.settings["permissions"]["defaultMode"], "auto",
+            "the owner's sessions keep auto; a manager's mode lives only in its own settings file (ADR-console-057)",
+        )
+
 
 class ClaudeLaunchersInstalledTest(unittest.TestCase):
     @classmethod
