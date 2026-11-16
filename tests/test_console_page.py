@@ -1298,6 +1298,26 @@ class PageNoticeTest(unittest.TestCase):
         self.assertTrue(some(".notice code", background="var(--mantle)",
                              **{"white-space": "nowrap"}))
 
+    def test_the_post_control_stands_a_notice_gap_below_the_last_notice(self) -> None:
+        def top_gap(*selectors: str) -> float:
+            gap = None
+            for sel, body in css_rules(PAGE_TEXT):
+                if not set(x.strip() for x in sel.split(",")) & set(selectors):
+                    continue
+                for decl in body.split(";"):
+                    prop, _, value = decl.partition(":")
+                    if prop.strip() == "margin-top":
+                        gap = float(re.fullmatch(r"([\d.]+)px", value.strip()).group(1))
+            self.assertIsNotNone(gap, selectors)
+            return gap
+
+        between = top_gap(".notice + .notice")
+        for control in (".notice-open", ".notice-post"):
+            self.assertGreaterEqual(top_gap(control, ".notice-list + " + control), between, control)
+        for sel, body in css_rules(PAGE_TEXT):
+            if re.search(r"\.notice-(open|post)\b", sel):
+                self.assertNotRegex(body, r"margin(-top)?\s*:\s*0\b", sel)
+
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"snapshot": True}])
