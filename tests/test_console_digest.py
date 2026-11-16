@@ -196,7 +196,7 @@ class DigestTest(unittest.TestCase):
             Event(3, at(3), GOAL_WITHDRAWN, "owner/p00", {"sprint_id": "b" * 16}),
             Event(4, at(4), GOAL_WITHDRAWN, None, {"sprint_id": "c" * 16, "goal": "g"})], {}, {})
         self.assertEqual(found, [Moment(2, at(2), SPRINT_WITHDRAWN,
-                                        "The goal for owner/p00 was withdrawn: make the importer resumable")])
+                                        "The sprint for owner/p00 was dropped: make the importer resumable")])
 
     def test_a_brief_arriving_and_approved_are_moments(self):
         sid, goal = "a" * 16, "make the importer resumable"
@@ -244,7 +244,7 @@ class DigestTest(unittest.TestCase):
             Event(3, at(3), GOAL_WITHDRAWN, "owner/p00", row)], {}, {})
         self.assertEqual([m.sentence for m in found], [
             f"The manager of {title} was restarted",
-            f"The goal for owner/p00 was withdrawn: {title}"])
+            f"The sprint for owner/p00 was dropped: {title}"])
         self.assertNotIn("g" * 100, "".join(m.sentence for m in found))
 
     def test_a_wake_that_ran_and_a_takeover_that_started_each_say_one_sentence(self):
@@ -363,12 +363,11 @@ class DigestTest(unittest.TestCase):
 
         def moment(seq, text):
             return Moment(seq, at(seq), "sprint_state",
-                          f"The sprint for owner/p00 is now {text}: {goal}")
+                          f"The sprint for owner/p00 changed to {text}: {goal}")
 
-        self.assertEqual(said(moments(rows, {}, {})), [
-            moment(4, "on track"), moment(6, "closing"), moment(8, "done")])
+        self.assertEqual(said(moments(rows, {}, {})), [moment(8, "done")])
         self.assertEqual(said(moments(rows[4:], {}, {}, sprints=sprint_states(rows[:4]))), [
-            moment(6, "closing"), moment(8, "done")])
+            moment(8, "done")])
 
     def test_a_closing_report_is_a_moment_with_its_first_line(self):
         goal = "make the importer resumable"
@@ -436,8 +435,45 @@ class DigestTest(unittest.TestCase):
         found = [(m.seq, m.sentence) for m in moments(rows, {}, waiting)
                  if m.kind == SPRINT_STATE_MOMENT]
         self.assertEqual(found, [
-            (4, f"The sprint for owner/p00 is now waiting on you (1): {goal}"),
-            (7, f"The sprint for owner/p00 is now done: {goal}")])
+            (4, f"The sprint for owner/p00 changed to waiting on you: {goal}"),
+            (7, f"The sprint for owner/p00 changed to done: {goal}")])
+
+    def test_a_report_sentence_uses_the_ball_words_and_never_on_track(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        report = {"status": "one slice is building", "phase": "running",
+                  "milestone": "Importer resumes",
+                  "tracker_url": "https://github.com/owner/p00/milestone/3",
+                  "issues": [{"issue": 12, "stage": "building"}], "inbox": [12],
+                  "next": "start the resume slice"}
+
+        def reported(seq, phase, issue, inbox):
+            return Event(seq, at(seq), SPRINT_REPORTED, "owner/p00", {
+                "sprint_id": sid, "goal": goal, "report": {
+                    **report, "phase": phase, "issues": [{"issue": issue, "stage": "building"}],
+                    "inbox": inbox}})
+
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1}),
+            reported(4, "running", 12, [12]), reported(5, "running", 13, []),
+            reported(6, "done", 13, [])]
+        open_item = InboxRecord(
+            {"project_id": "owner/p00", "issue": 12, "key": "k", "answered": False},
+            at(0), at(0))
+        waiting = {("owner/p00", "k"): open_item}
+        found = moments(rows, {}, waiting)
+        self.assertEqual([(m.seq, m.sentence) for m in found if m.kind == SPRINT_STATE_MOMENT], [
+            (4, f"The sprint for owner/p00 changed to waiting on you: {goal}"),
+            (5, f"The sprint for owner/p00 changed to manager working: {goal}"),
+            (6, f"The sprint for owner/p00 changed to done: {goal}")])
+        for m in found:
+            self.assertNotIn("on track", m.sentence)
+            self.assertNotIn(" is now ", m.sentence)
 
 
 class QuestionDigestTest(unittest.TestCase):

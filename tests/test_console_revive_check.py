@@ -82,8 +82,9 @@ def text(state):
     return {"id": 9, "kind": "text", "text": revive_check.MESSAGE, "state": state}
 
 
-READ = view(messages=[text("read")])
+PICKED_UP = view(messages=[text("picked_up")])
 SENT = view(messages=[text("sent")])
+REPLIED = view(messages=[text("replied")])
 SCRIPT = [view(sprint=False), view(state="drafting", brief=1), view(state="drafting", brief=1),
           view()]
 
@@ -177,7 +178,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(committed_mode(WRAPPER), "100755")
 
     def test_the_removed_session_back_under_the_sprints_name_reading_a_message_is_met(self):
-        code, out = self.run_check(SCRIPT + [SENT, READ], [
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (None, listed("s-1"))])
         self.assertEqual((code, out), (0, {"after_removal": "same", "back_seconds": 130,
@@ -193,8 +194,15 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertFalse(self.state_file.exists())
         self.assertEqual(self.result(), {"back_seconds": 130, "status": "met", "cleared": CLEARED})
 
+    def test_a_replied_message_is_met(self):
+        code, out = self.run_check(SCRIPT + [SENT, REPLIED], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-1"))])
+        self.assertEqual((code, out), (0, {"after_removal": "same", "back_seconds": 130,
+                                           "status": "met"}))
+
     def test_a_new_manager_under_the_sprints_name_reading_a_message_is_met(self):
-        code, out = self.run_check(SCRIPT + [SENT, READ], [
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (None, listed("s-2"))])
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
@@ -203,7 +211,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(self.stops(), ["s-1", "s-2"])
 
     def test_a_slow_return_still_meets_start(self):
-        code, out = self.run_check(SCRIPT + [READ], [
+        code, out = self.run_check(SCRIPT + [PICKED_UP], [
             (None, listed("s-1")), (181, listed("s-1")), (None, GONE), (None, listed("s-2"))])
         self.assertEqual((code, out["back_seconds"], out["status"]), (0, 181, "met"))
 
@@ -242,7 +250,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual((code, out["phase"], out["status"]), (75, "stop", "waiting"))
         self.assertEqual(self.stops(), [])
         self.assertEqual(json.loads(self.state_file.read_text())["stopped_at"], None)
-        code, out = self.run_check([view(), READ], [
+        code, out = self.run_check([view(), PICKED_UP], [
             (None, listed("s-1")), (130, listed("s-1")), (None, GONE), (None, listed("s-2"))],
             now=self.time.now + 900, budget="300")
         self.assertEqual((code, out["back_seconds"], out["status"]), (0, 130, "met"))
@@ -281,13 +289,13 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual((code, out["reason"]), (1, "manager not reachable"))
 
     def test_a_refused_message_is_not_met(self):
-        code, out = self.run_check(SCRIPT + [READ], [
+        code, out = self.run_check(SCRIPT + [PICKED_UP], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (None, listed("s-2"))], statuses={"/api/message": [409]})
         self.assertEqual((code, out["reason"]), (1, "the console refused the message: 409"))
 
     def test_an_unanswered_message_post_is_sent_again_on_the_next_poll(self):
-        code, out = self.run_check(SCRIPT + [READ], [
+        code, out = self.run_check(SCRIPT + [PICKED_UP], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (None, listed("s-2"))], statuses={"/api/message": ["drop", 204]})
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
@@ -320,7 +328,7 @@ class ReviveCheckTest(unittest.TestCase):
                                             "status": "waiting"}))
         self.assertIsNotNone(json.loads(self.state_file.read_text())["messaged_at"])
         self.assertEqual(len(self.posts("/api/message")), 1)
-        code, out = self.run_check([READ], [(None, listed("s-1"))])
+        code, out = self.run_check([PICKED_UP], [(None, listed("s-1"))])
         self.assertEqual((code, out["status"], out["after_removal"]), (0, "met", "same"))
         self.assertEqual(self.posts("/api/message"), [])
         self.assertEqual(self.posts("/api/goal"), [])
@@ -332,14 +340,14 @@ class ReviveCheckTest(unittest.TestCase):
         self.failing = {"s-2": 1}
         readings = [(None, listed("s-1")), (20, listed("s-1")), (None, GONE),
                     (None, listed("s-2"))]
-        code, out = self.run_check(SCRIPT + [READ], readings)
+        code, out = self.run_check(SCRIPT + [PICKED_UP], readings)
         self.assertEqual((code, out), (75, {
             "reason": "the test manager is not stopped yet: the stop failed", "sprint_id": SID,
             "status": "waiting"}))
         self.assertEqual(self.posts("/api/withdraw"), [])
         self.assertTrue(self.state_file.exists())
         self.assertFalse(self.result_file.exists())
-        code, out = self.run_check([READ], [(None, listed("s-2"))])
+        code, out = self.run_check([PICKED_UP], [(None, listed("s-2"))])
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 20,
                                            "status": "met"}))
         self.assertEqual(self.stops(), ["s-2"])
@@ -351,7 +359,7 @@ class ReviveCheckTest(unittest.TestCase):
     def discarded_run(self, saved):
         self.result_file.parent.mkdir(parents=True, exist_ok=True)
         self.result_file.write_text(json.dumps({"back_seconds": 120, "status": "met"}))
-        code, out = self.run_check(SCRIPT + [SENT, READ], [(None, GONE),
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], [(None, GONE),
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (None, listed("s-1"))], saved=saved)
         self.assertEqual((code, out), (0, {"after_removal": "same", "back_seconds": 130,
@@ -382,7 +390,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(json.loads(self.state_file.read_text()), LEGACY)
 
     def test_the_finish_removes_the_replacement_and_not_the_first_session_again(self):
-        code, out = self.run_check(SCRIPT + [SENT, READ], [
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (None, listed("s-2"))])
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
@@ -430,7 +438,7 @@ class ReviveCheckTest(unittest.TestCase):
             self):
         both = {**listed("s-1"),
                 "s-9": Observation("s-9", "/srv/p01", 2, "idle", None, NAME, None, "p2")}
-        code, out = self.run_check(SCRIPT + [SENT, READ], [
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, both),
             (None, listed("s-2")), (None, GONE)])
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
@@ -449,7 +457,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.failing_removes = {"s-2": 1}
         readings = [(None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
                     (None, listed("s-2"))]
-        code, out = self.run_check(SCRIPT + [SENT, READ], readings)
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], readings)
         self.assertEqual((code, out), (75, {
             "reason": "the test manager's session is not removed yet: the removal failed",
             "sprint_id": SID, "status": "waiting"}))
@@ -460,7 +468,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(saved["stopped"], [
             {"session_id": "s-1", "profile": "work", "removed": True},
             {"session_id": "s-2", "profile": "work"}])
-        code, out = self.run_check([READ], [(None, GONE)])
+        code, out = self.run_check([PICKED_UP], [(None, GONE)])
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
                                            "status": "met"}))
         self.assertEqual(self.stops(), [])
@@ -472,7 +480,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.slow = {"s-2": 2000}
         readings = [(None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
                     (None, listed("s-2"))]
-        code, out = self.run_check(SCRIPT + [SENT, READ], readings)
+        code, out = self.run_check(SCRIPT + [SENT, PICKED_UP], readings)
         self.assertEqual((code, out), (75, {
             "reason": "the test manager's session is not removed yet: " + manager.OUT_OF_TIME_TEXT,
             "sprint_id": SID, "status": "waiting"}))
@@ -482,7 +490,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(saved["stopped"][-1], {"session_id": "s-2", "profile": "work"})
         self.assertEqual(saved["outcome"], {"code": 0, "reason": None})
         self.slow = {}
-        code, out = self.run_check([READ], [(None, GONE)])
+        code, out = self.run_check([PICKED_UP], [(None, GONE)])
         self.assertEqual(code, 0)
         self.assertEqual(self.removes(), [("remove", "s-2", "work")])
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
@@ -492,7 +500,7 @@ class ReviveCheckTest(unittest.TestCase):
                  "approved_versions": [1], "first_session": "s-1", "first_profile": "work",
                  "stopped_at": T0, "back_seconds": 130, "removed_at": T0 + 200,
                  "after_removal": "new", "messaged_at": T0 + 300}
-        code, out = self.run_check([READ], [(None, listed("s-2"))], saved=saved, now=T0 + 310)
+        code, out = self.run_check([PICKED_UP], [(None, listed("s-2"))], saved=saved, now=T0 + 310)
         self.assertEqual((code, out["status"]), (0, "met"))
         self.assertEqual(self.removals, ["s-2"])
         self.assertEqual(self.result()["cleared"], CLEARED)

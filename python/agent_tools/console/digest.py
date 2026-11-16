@@ -35,9 +35,10 @@ Event kinds read:
 - `manager.no_progress`, `sprint.continued` (`event_log.MANAGER_NO_PROGRESS`, `SPRINT_CONTINUED`):
   say nothing; the inbox item speaks.
 - `sprint.reported` (`event_log.SPRINT_REPORTED`, `sprints.py`): a manager's report of its sprint.
-  It speaks only when the sprint fold accepted it and the sprint's shown state (`view.sprint_state`,
-  the open inbox items counted as the page counts them, never quiet: no clock is read) differs
-  from the one before the report; a refused, ignored or state-repeating report says nothing.
+  It speaks only when the sprint fold accepted it and the sprint's shown words (the ball words of
+  its block, `sprints.BALL_TEXT` from `view.sprint_ball`, or the ended state's words from
+  `view.sprint_state`; the open inbox items counted as the page counts them, no clock read) differ
+  from the ones before the report; a refused, ignored or words-repeating report says nothing.
 - `question.answered` (`event_log.QUESTION_ANSWERED`, `sprints.py`): the owner answered a manager's
   question. It speaks only when its `differs` is `True`, so an answer that took the recommendation
   says nothing, and nothing else about a round (asking it, answering the others) speaks, a round
@@ -92,10 +93,10 @@ withdrawal removes the sprint).
     limit_stop       A session in <where> stopped on a usage limit.
     resumed          A session in <where> resumed work.
     session_ended    A session in <where> ended.
-    sprint_withdrawn The goal for <project_id> was withdrawn: <title>
+    sprint_withdrawn The sprint for <project_id> was dropped: <title>
     brief_sent       A brief for <project_id> arrived, version <n>: <title>
     brief_approved   The brief for <project_id> was approved, version <n>: <title>
-    sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <title>
+    sprint_state     The sprint for <project_id> changed to <its ball words, or its state once ended>: <title>
     question_withdrawn The manager of <title> took back a question: <question>
     question_replaced  The manager of <title> replaced a question: <the replaced question's ask>
                        (`The manager of <title> replaced <n> questions` when n > 1 were replaced)
@@ -146,10 +147,10 @@ from agent_tools.console.event_log import (
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import (
-    MANAGER_SESSION_NAME, SprintState, goal_title, sprint_states, sprint_title)
+    BALL_TEXT, MANAGER_SESSION_NAME, SprintState, goal_title, sprint_states, sprint_title)
 from agent_tools.console.view import (
     INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
-    sprint_state, sprint_waiting)
+    sprint_ball, sprint_state, sprint_waiting)
 
 LOOKED = "page.looked"
 FIRST_VISIT = timedelta(hours=8)
@@ -359,13 +360,19 @@ def _report_moment(event: Event, before: Mapping[str, SprintState],
     open_items = [r for r in records.values()
                   if r.item.get("project_id") == new.project_id and not r.item.get("answered")]
     waiting = sprint_waiting(new, open_items)
-    # The clock is not read here, so a sprint going quiet is never a change of state.
-    was = sprint_state(old, None, sprint_waiting(old, open_items))
-    now = sprint_state(new, None, waiting)
-    if was[0] == now[0]:
+    was = _shown_words(old, sprint_waiting(old, open_items))
+    now = _shown_words(new, waiting)
+    if was == now:
         return None
     return (SPRINT_STATE_MOMENT,
-            f"The sprint for {event.project} is now {now[1]}: {sprint_title(new)}")
+            f"The sprint for {event.project} changed to {now}: {sprint_title(new)}")
+
+
+def _shown_words(state: SprintState, waiting: int) -> str:
+    """The words a sprint's block shows: its ball words, or its state's once it has ended. The clock
+    is not read, so a sprint going quiet is never a change."""
+    ball = sprint_ball(state, None, waiting, ())
+    return BALL_TEXT[ball] if ball is not None else sprint_state(state, None, waiting)[1]
 
 
 def _closing_moment(event: Event, before: Mapping[str, SprintState],
@@ -426,7 +433,7 @@ def moments(
             if isinstance(event.project, str) and isinstance(goal, str):
                 title = _title(payload.get("sprint_id"), goal, previous)
                 said = (SPRINT_WITHDRAWN,
-                        f"The goal for {event.project} was withdrawn: {title}")
+                        f"The sprint for {event.project} was dropped: {title}")
         if event.kind == SPRINT_REPORTED:
             said = _report_moment(event, previous, folded, held)
         elif event.kind == SPRINT_CLOSED:

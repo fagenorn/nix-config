@@ -1291,7 +1291,7 @@ class SprintQuotaViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
         self.assertEqual(shown["statement"]["sentence"], view.PROGRESS_SENTENCE)
         self.assertEqual(view.PROGRESS_SENTENCE,
-                         "Tell the manager to continue, or withdraw the sprint.")
+                         "Tell the manager to continue, or drop the sprint.")
         bare = dataclasses.replace(with_manager(started(A)), no_progress_at=iso(R))
         self.assertIsNone(line(bare, R + MIN)["inbox"]["open"][0]["last_status"])
         both = dataclasses.replace(stopped, stalled="r", stalled_at=iso(R + 40 * MIN))
@@ -1649,7 +1649,7 @@ class SprintEndViewTest(unittest.TestCase):
         view = derive_view([state("p00", 1)], pending=pending)
         self.assertEqual(view["unstopped"], [
             {"project_id": "p00", "sprint_id": sid, "title": goal, "failed_at": at,
-             "text": f"The manager of a withdrawn goal could not be stopped: {reason}; "
+             "text": f"The manager of a dropped sprint could not be stopped: {reason}; "
                      "trying again"}
             for sid, reason, at in (("b" * 16, "boom", T0), ("e" * 16, "zzz", T0),
                                     ("a" * 16, "late", iso(T0_MS + MIN)))])
@@ -1663,12 +1663,14 @@ class SprintViewTest(unittest.TestCase):
         self.assertEqual(view["entries"][0]["sprints"], [{
             "type": "sprint", "sprint_id": "a" * 16,
             "title": "make the importer resumable", "goal": "make the importer resumable",
-            "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
-            "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+            "state": "drafting", "state_text": "drafting the brief",
+            "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
+            "stated_at": T0, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "sessions": [], "messages": [], "reach_text": None,
+            "sessions": [], "messages": [], "approval": None, "reach_text": None,
+            "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None}])
 
@@ -1681,7 +1683,7 @@ class SprintViewTest(unittest.TestCase):
                 shown = view["entries"][0]["sprints"][0]
                 self.assertEqual(shown["manager_text"], expected)
                 if now_ms is None:
-                    self.assertEqual(shown["age_text"], "stated just now")
+                    self.assertEqual(shown["age_text"], "goal set just now")
 
     def test_sprints_order_newest_first(self):
         view = derive_view([state("p00", 1)], sprints={
@@ -1748,23 +1750,22 @@ def message_entry(rows):
 class SprintMessageViewTest(unittest.TestCase):
     TEXT = "leave the importer's schema alone"
 
-    def test_a_messages_state_moves_from_sent_to_delivered_to_read(self):
+    def test_a_messages_state_moves_from_sent_to_picked_up(self):
         sent_row = messaged_row(3, self.TEXT)
-        base = {"id": 3, "kind": "text", "version": None, "text": self.TEXT,
-                "at": message_at(3)}
         entry = message_entry(message_rows(sent_row))
         self.assertEqual(entry["messages"], [{
-            **base, "state": "sent", "state_text": "sent", "read_at": None, "reply": None,
-            "reply_at": None}])
+            "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
+            "state": "sent", "state_text": "sent, the manager picks it up within a minute",
+            "action_text": None, "read_at": None, "reply": None, "reply_at": None,
+            "new": False}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
-        self.assertEqual(entry["messages"][0]["state"], "delivered")
-        self.assertEqual(entry["messages"][0]["state_text"], "delivered")
+        self.assertEqual(entry["messages"][0]["state"], "sent")
         entry = message_entry(message_rows(
             sent_row, nudged_row(4, 3, True),
             message_row(5, event_log.SPRINT_READ, {"through": 3})))
-        self.assertEqual(entry["messages"][0]["state"], "read")
-        self.assertEqual(entry["messages"][0]["state_text"], "read")
+        self.assertEqual(entry["messages"][0]["state"], "picked_up")
+        self.assertEqual(entry["messages"][0]["state_text"], "picked up")
         self.assertEqual(entry["messages"][0]["read_at"], message_at(5))
 
     def test_two_failed_nudges_show_manager_not_reachable_and_keep_the_messages(self):
@@ -1852,7 +1853,7 @@ class ReviveViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
         self.assertEqual(shown["statement"]["sentence"], view.MANAGER_SENTENCE)
         self.assertEqual(view.MANAGER_SENTENCE,
-                         "Try again to start a new manager, or withdraw the sprint.")
+                         "Try again to start a new manager, or drop the sprint.")
         entry = shown["entries"][0]["sprints"][0]
         self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
                          ("stalled", "managers keep failing: r", True))

@@ -23,8 +23,9 @@ found by its goal and states no second goal; any other state file is a resumed r
 goal and continues from what it records.
 
 It polls the view every 10 seconds (`POLL_SECONDS`), every 2 seconds (`READ_POLL_SECONDS`) once an
-approval message exists, up to `--budget`. The approval is read from the view only: the sprint's
-earliest message of kind `approved`; the HTTP status of `/api/approve` never records one. With no
+approval message exists, up to `--budget`. The approval is read from the view only: the sprint entry's
+`approval`, its earliest message of kind `approved` (kept apart from `messages`, which leaves out an
+approval the manager read without replying); the HTTP status of `/api/approve` never records one. With no
 approval message and an open `brief/<sprint id>` item at a version not in `approved_versions`,
 `POST /api/approve` is sent `{"project_id", "sprint_id", "version"}`: 204 or 409 continue the
 polling (409 means the version was replaced, already decided or asked to change, and the next poll
@@ -34,7 +35,7 @@ recording the version (an attempt the console never confirmed is not a refusal: 
 run sends it again). An open brief at a version already in `approved_versions` with no approval
 message is not met (`the console refused the approval of version <v>`): the console still shows it
 waiting after it answered. So a replaced version is followed by an approval of the new one, and no
-version the console answered is approved twice, across runs too. With the approval message, `state` `read` is met with `read_seconds` the
+version the console answered is approved twice, across runs too. With the approval message, `state` `picked_up` or `replied` (a read, with or without a reply) is met with `read_seconds` the
 console's `read_at` minus its `at`; `reach_text` not null is not met (`manager not reachable`); otherwise the
 polling continues. An unread approval is never a failure however long ago it was sent: `start` has
 no time bound of its own, so a budget spent while it is unread is 75 `{"status": "waiting",
@@ -44,7 +45,7 @@ here; speed is `timing`'s alone. A budget spent before the approval message is t
 
 Not met (exit 1) only for a functional failure: the sprint is gone (`the sprint is gone`), a
 `failed` or `missing` manager (its `manager_text`), a refused approval, or an unreachable manager.
-A sprint entry with no `messages` member is 75 `not_deployed`, after the finish below.
+A sprint entry with no `approval` member is 75 `not_deployed`, after the finish below.
 
 The finish (any met or not met outcome, and the `not_deployed` one) runs in this order. First it
 stops the test manager: the registry is read fresh and each listed session named
@@ -92,6 +93,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agent_tools.console import manager
+from agent_tools.console.sprints import PICKED_UP, REPLIED
 from agent_tools.console.manager_check import (
     DEFAULT_URL,
     NOT_YET,
@@ -282,14 +284,12 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
                 return settle(1, "the sprint is gone", None)
             if row.get("manager_state") in ("failed", "missing"):
                 return settle(1, row.get("manager_text"), None)
-            if "messages" not in row:
+            if "approval" not in row:
                 return settle(NOT_YET, None, None)
-            approvals = [m for m in row["messages"]
-                         if isinstance(m, dict) and m.get("kind") == "approved"]
-            if approvals:
+            message = row["approval"]
+            if isinstance(message, dict):
                 phase, pause = "read", READ_POLL_SECONDS
-                message = approvals[0]
-                if message.get("state") == "read":
+                if message.get("state") in (PICKED_UP, REPLIED):
                     seconds = _seconds(message.get("read_at"), message.get("at"))
                     if seconds is None:
                         return settle(1, "the read time is unreadable", None)
