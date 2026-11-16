@@ -416,7 +416,7 @@ class DocsTreeTest(unittest.TestCase):
         sprint_entry = next(
             line for line in (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
             if line.startswith("One goal, later its issues"))
-        self.assertTrue(sprint_entry.endswith("ADR-console-042, ADR-console-050)."))
+        self.assertTrue(sprint_entry.endswith("ADR-console-042, ADR-console-050, ADR-console-051)."))
         self.assertNotIn("ADR-console-046", sprint_entry)
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("050-*.md"))), 1)
 

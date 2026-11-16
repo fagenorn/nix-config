@@ -3441,6 +3441,22 @@ def sprint_lines(snap: dict) -> list:
     return [n for n in nodes(snap["projects"]) if n["tag"] == "li" and has_class(n, "sprint")]
 
 
+CHECK_Q = "Do the before and after pictures read well?"
+CHECK = {
+    "project_id": "owner/p00", "key": "owner/p00#30/9001", "issue": 30, "question": CHECK_Q,
+    "text": "Your check: " + CHECK_Q,
+}
+CHECK_ITEM = check_item("owner/p00#30/9001", "manual-check", project_id="owner/p00", issue=30,
+                        headline=CHECK_Q, question=CHECK_Q)
+DECISION_ITEM = item("D1")
+
+
+def with_check(open_items: list) -> dict:
+    frame = with_sprints([{**REPORTED, "checks": [CHECK]}])
+    frame["inbox"]["open"] = open_items
+    return frame
+
+
 class PageGoalTest(unittest.TestCase):
     def test_the_goal_field_sits_in_the_top_bar(self) -> None:
         html = PAGE.read_text(encoding="utf-8")
@@ -4657,6 +4673,91 @@ HOUR_MS = 3600000
 
 
 class PageSprintBlockTest(unittest.TestCase):
+    def test_a_held_check_is_one_line_inside_the_sprint_block(self) -> None:
+        (snap, plain) = render([
+            START, {"frame": with_check([CHECK_ITEM])}, {"snapshot": True},
+            {"frame": with_sprints([REPORTED])}, {"snapshot": True},
+        ])
+        (block,) = sprint_lines(snap)
+        self.assertEqual([full(n) for n in of_class(block, "button", "sprint-check")],
+                         ["Your check: " + CHECK_Q])
+        (checks,) = of_class(block, "ul", "sprint-checks")
+        children = block["children"]
+        head = next(i for i, c in enumerate(children) if has_class(c, "sp-head"))
+        self.assertIs(children[head + 1], checks)
+        self.assertEqual([full(n) for n in of_class(block, "span", "sprint-ball")],
+                         ["manager working"])
+        outside = [n for n in nodes(snap["projects"])
+                   if has_class(n, "sprint-check") and n not in nodes(block)]
+        self.assertEqual(outside, [])
+        (bare,) = sprint_lines(plain)
+        self.assertEqual(of_class(bare, "ul", "sprint-checks"), [])
+
+    def test_the_check_line_opens_its_card(self) -> None:
+        for name, items, active in (("lead", [CHECK_ITEM], "card lead"),
+                                    ("row", [DECISION_ITEM, CHECK_ITEM], "row")):
+            with self.subTest(name):
+                (before, after) = render([
+                    START, {"frame": with_check(items)}, {"snapshot": True},
+                    {"click": "sprint-check"}, {"snapshot": True},
+                ])
+                self.assertEqual(after["active"], active)
+                self.assertEqual(after["focus_count"], before["focus_count"] + 1)
+
+    def test_a_focused_check_card_keeps_enter_and_digits_from_answering_another_item(self) -> None:
+        for name, items in (("lead", [BRIEF, CHECK_ITEM]),
+                            ("row", [BRIEF, DECISION_ITEM, CHECK_ITEM])):
+            with self.subTest(name):
+                (_, focused, snap) = render([
+                    START, {"frame": with_check(items)}, {"snapshot": True}, {"click": "sprint-check"},
+                    {"snapshot": True}, {"key": "Enter", "follow": True}, {"key": "1", "follow": True},
+                    {"clock": 5000}, {"snapshot": True},
+                ])
+                self.assertIn(focused["active"], ("card lead", "row"))
+                self.assertEqual(approvals(snap), [])
+                self.assertEqual(answers(snap), [])
+
+    def test_a_focused_check_card_keeps_its_focus_through_the_next_streamed_view(self) -> None:
+        for name, items in (("lead", [BRIEF, CHECK_ITEM]),
+                            ("row", [BRIEF, DECISION_ITEM, CHECK_ITEM])):
+            with self.subTest(name):
+                (_, focused, refocused, snap) = render([
+                    START, {"frame": with_check(items)}, {"snapshot": True}, {"click": "sprint-check"},
+                    {"snapshot": True}, {"frame": with_check(items)}, {"snapshot": True},
+                    {"key": "Enter", "follow": True}, {"key": "1", "follow": True},
+                    {"clock": 5000}, {"snapshot": True},
+                ])
+                self.assertIn(focused["active"], ("card lead", "row"))
+                self.assertEqual(refocused["active"], focused["active"])
+                self.assertEqual(approvals(snap), [])
+                self.assertEqual(answers(snap), [])
+
+    def test_the_check_line_wears_the_sprint_openers_look_and_keeps_a_touch_target(self) -> None:
+        (style, top) = page_css()
+        opener = css_declared(top, ".sprint-detail summary")
+        line = css_declared(top, ".sprint-check")
+        self.assertEqual(line.get("color"), opener.get("color"))
+        self.assertEqual(line.get("cursor"), opener.get("cursor"))
+        self.assertEqual(line.get("font-size"), css_declared(top, ".sprint-detail").get("font-size"))
+        self.assertNotIn("text-decoration", line)
+        self.assertNotIn("min-height", line)
+        self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
+        (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
+        self.assertEqual(css_declared(narrow, ".sprint-check").get("min-height"), "44px")
+        # Top-aligned, so the text sits as far below the status line at 480 px as at 1440 px
+        # instead of centring in the 44 px target.
+        self.assertEqual(css_declared(narrow, ".sprint-check").get("display"), "flex")
+        self.assertEqual(css_declared(narrow, ".sprint-check").get("align-items"), "flex-start")
+        self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
+
+    def test_a_check_line_with_no_card_does_nothing(self) -> None:
+        (before, after) = render([
+            START, {"frame": with_check([])}, {"snapshot": True},
+            {"click": "sprint-check"}, {"snapshot": True},
+        ])
+        self.assertIsNone(after["active"])
+        self.assertEqual(after["focus_count"], before["focus_count"])
+
     def test_each_running_sprint_is_one_block_holding_its_project_and_every_control(self) -> None:
         a = running_sprint("a")
         b = running_sprint("b", retry=True)
