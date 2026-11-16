@@ -7805,17 +7805,40 @@ class DeclaredBranchTest(unittest.TestCase):
 MARKED = {"verdict": "marked", "covers": ["the settings page"]}
 D = "d" * 40
 AWAIT_REASON = "issue 9 needs the owner's look before merge"
+F, B = "f" * 40, "b" * 40
+RESUME = {"setup": {"look": MARKED, "head": SHA}}
+# The cont of the awaiting-look stop of a marked delivery (LookResumeTest pins it against the program), so SCENARIOS can resume it.
+LOOK_CONT = {
+    "setup": {"ok": True, "host": "h1", "slug": "owner/repo", "integration_branch": "dev", "default_branch": "main", "branch": "issue-9-x",
+              "worktree_path": "/r/.wt/w-issue-9-x", "dirty": False, "unset_env": [], "merge_strategy": "merge", "delete_branch": True,
+              "review": {"code": "cr", "plan": "pr"}, "review_state": {"code": "available", "plan": "available"},
+              "knowledge": {"standards": ["/r/docs/standards"], "hints": ["/r/.hints"], "rejections": ["/r/.rej"]},
+              "verification": [{"id": "build", "argv": ["make", "build"], "cwd": "."}],
+              "look": {"verdict": "marked", "covers": ["the settings page"]}, "holder": "h1/session-s1",
+              "worktree": "/r/.wt/w-issue-9-x", "base_sha": SHA, "plan_dir": "/r/.git/worktrees/w/deliver-standard"},
+    "lane": "standard",
+    "plan": {"status": "planned", "plan_root": "/r/.git/worktrees/w/deliver-standard/plan.md",
+             "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+             "tasks": [{"n": 1, "title": "one", "file": "task-1.md", "risk": "standard"}]},
+    "plan_reviewed": True,
+    "done": [{"n": 1, "commit": "c0ffee", "review_rounds": 0, "reviewer": "reviewer"}],
+    "fix_waves": 0,
+    "verified": {"head": SHA, "results": [{"id": "build", "status": "pass", "summary": "ok"}],
+                 "contract": '[{"argv":["make","build"],"cwd":".","id":"build"}]'},
+    "look": {"pr": 42, "head": SHA},
+    "final_reviewed": {"head": "c0ffee"},
+}
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push")),
+             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
-            "fix-sync-")),
+            "fix-sync-", "look-fix")),
     (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
-           "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-")),
+           "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-", "look-fix-review")),
     # #923: a review with no diff range (a no-commit task, a fix answered with no commit) runs on reviewer.
     (EITHER, ("review-", "direct-review", "rereview-")),
     (LITE, ("direct-rereview",)),
@@ -7860,6 +7883,10 @@ SCENARIOS = (
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
     # #1139: a marked issue stops at awaiting look; a head behind its base is synced and pushed first.
     {"patch": {"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}}},
+    # #1139: the owner's approve and changes answers resume an awaiting-look cont.
+    {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}), "patch": RESUME},
+    {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "changes", "words": "make the label bold"}),
+     "patch": dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})},
     WS_SCENARIO,
 )
 
@@ -8163,6 +8190,8 @@ class PreCommitFocusTest(unittest.TestCase):
         ({"replies": {"sync-review-1": FINDING, "checks-2": PASSED},
           "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})}, {"sync-1", "sync-resolve-1", "fix-sync-1"}),
         ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
+        # #1139: the owner's changes answer runs one fix round.
+        ({"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "changes", "words": "make the label bold"})}, {"look-fix"}),
     )
     FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
 
@@ -9169,12 +9198,12 @@ class StructuredReplyTest(unittest.TestCase):
         schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
                    r"|GRADED_FINDINGS|DIRECT_FINDINGS) \}")
         sites = [m.end() for m in re.finditer(schemas, source)]
-        self.assertEqual(len(sites), 15)
+        self.assertEqual(len(sites), 16)
         # The options object of a review call closes the readReview() call, or one of its three named options does.
         tails = [source[end:source.index(")", end) + 1] for end in sites]
         self.assertEqual(sorted(set(tails)), sorted([")", ", { fileless })", ", { ruled: true })", ", { optional: true })"]))
         self.assertEqual((tails.count(", { fileless })"), tails.count(", { ruled: true })"), tails.count(", { optional: true })")), (4, 2, 1))
-        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 15)
+        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 16)
         # No schema that carries findings is built anywhere else: each is one of the named ones above, FINDINGS spread into it.
         self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 5)
         self.assertEqual(source.count(", { fileless })"), 4)
@@ -10325,6 +10354,148 @@ class LookStopTest(unittest.TestCase):
         direct, direct_calls = run(args=DIRECT)
         self.assertEqual(direct["stage"], "done")
         self.assertEqual([l for l in labels(direct_calls) if l.startswith("look-")], [])
+
+
+class LookResumeTest(unittest.TestCase):
+    """#1139: the owner's approve or changes answer resumes the awaiting-look cont of a marked delivery."""
+
+    def look_cont(self):
+        result, _ = run(patch={"setup": {"look": MARKED}})
+        self.assertEqual(result["stage"], "awaiting-look")
+        return result["cont"]
+
+    def approve(self, head=SHA, patch=None, replies=None, cont=None, **extra):
+        look = dict({"answer": "approve", "head": head}, **extra)
+        return run(args=dict(ARGS, cont=cont or self.look_cont(), look=look), patch=RESUME if patch is None else patch, replies=replies)
+
+    def test_approve_for_the_current_head_records_the_approval_and_merges(self):
+        result, calls = self.approve()
+        got = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([l for l in got if l in ("look-head", "look-post", "pr", "merge")], ["look-head", "look-post", "pr", "merge"])
+        self.assertIn("gh pr view 42 --repo owner/repo --json state,headRefOid", prompt(calls, "look-head"))
+        self.assertIn("look-approval post --repo owner/repo --issue 9 --pr 42 --head " + SHA + " --answer approved --message session-s1",
+                      prompt(calls, "look-post"))
+        with self.subTest(message="msg-7"):
+            _, named = self.approve(message="msg-7")
+            self.assertIn("--message msg-7", prompt(named, "look-post"))
+
+    def test_approve_for_an_older_head_records_nothing_and_stops_at_the_current_head(self):
+        result, calls = self.approve(head=B)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], SHA)
+        self.assertEqual(result["reason"], AWAIT_REASON)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        self.assertIn("look-head", got)
+        for label in ("look-post", "look-pr", "pr", "merge"):
+            self.assertNotIn(label, got)
+
+    def test_approve_when_the_local_head_moved_records_nothing(self):
+        result, calls = self.approve(patch={"setup": {"look": MARKED, "head": F}, "verify": {"head": F}, "look-pr": {"head": F}})
+        got = labels(calls)
+        self.assertNotIn("look-post", got)
+        self.assertIn("look-pr", got)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], F)
+
+    def test_a_head_that_moves_under_the_lock_after_the_approval_stops_at_awaiting_look(self):
+        result, calls = self.approve(patch=dict(RESUME, **{
+            "pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
+            "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]}}))
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertNotIn("merge", got)
+        self.assertIn("land-unlock", got)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
+
+    def approved_cont(self):
+        result, _ = self.approve(replies={"merge": None})
+        self.assertEqual(result["stage"], "merge")
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA, "approved": SHA})
+        return result["cont"]
+
+    def test_an_approved_cont_lands_without_a_second_approval(self):
+        result, calls = run(args=dict(ARGS, cont=self.approved_cont()), patch=RESUME)
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("look-head", labels(calls))
+        self.assertNotIn("look-post", labels(calls))
+
+    def test_changes_run_one_fix_round_verify_again_and_stop_at_the_new_head(self):
+        patch = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})
+        result, calls = run(args=dict(ARGS, cont=self.look_cont(), look={"answer": "changes", "words": "make the label bold"}), patch=patch)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], F)
+        self.assertEqual([l for l in got if l in ("look-fix", "look-fix-review", "verify", "look-pr")],
+                         ["look-fix", "look-fix-review", "verify", "look-pr"])
+        self.assertEqual(got.count("look-fix"), 1)
+        fix = [c for c in calls if c["label"] == "look-fix"][0]
+        self.assertEqual(fix["agentType"], "implementer")
+        self.assertIn(json.dumps("make the label bold"), fix["prompt"])
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "look-fix-review"], ["reviewer"])
+        self.assertNotIn("merge", got)
+
+    def test_a_changes_round_whose_review_finds_a_defect_stops_without_a_second_round(self):
+        patch = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})
+        finding = {"verdict": "findings", "findings": [{"severity": "important", "summary": "still plain", "failing_input": "x"}]}
+        result, calls = run(args=dict(ARGS, cont=self.look_cont(), look={"answer": "changes", "words": "make the label bold"}),
+                            patch=patch, replies={"look-fix-review": finding})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "look-fix-review")
+        self.assertEqual(got.count("look-fix"), 1)
+        self.assertNotIn("verify", got)
+        self.assertNotIn("look-pr", got)
+
+    def test_look_args_are_checked_before_any_agent(self):
+        cont = self.look_cont()
+        approve = {"answer": "approve", "head": SHA}
+        shape = "look must be {answer: approve, head, message?} or {answer: changes, words}"
+        rows = (
+            (dict(ARGS, look=approve), "look needs a cont: it answers an awaiting-look stop"),
+            (dict(ARGS, cont=cont, mode="ready", look=approve), "look needs mode ship"),
+            (dict(ARGS, cont=ship_cont(), look=approve), "look approve needs a cont that stopped at awaiting-look"),
+            (dict(ARGS, cont=cont, look={"answer": "approve", "head": "abc"}), shape),
+            (dict(ARGS, cont=cont, look={"answer": "changes", "words": "  "}), shape),
+            (dict(ARGS, cont=cont, look={"answer": "changes", "words": "x" * 2001}), shape),
+            (dict(ARGS, cont=cont, look={"answer": "approve", "head": SHA, "message": "a b"}), shape),
+            (dict(ARGS, cont=cont, look={"answer": "later"}), shape),
+        )
+        for n, (args, error) in enumerate(rows):
+            with self.subTest(row=n, error=error):
+                out = run_out(args=args)
+                self.assertEqual(out["result"], {"stage": "args", "error": error})
+                self.assertEqual(out["calls"], [])
+
+    def test_approve_on_an_unmarked_issue_ships_as_today(self):
+        result, calls = run(args=dict(ARGS, cont=self.look_cont(), look={"answer": "approve", "head": SHA}), patch={"setup": {"head": SHA}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("look-head", labels(calls))
+
+    def test_a_new_approve_on_an_approved_cont_is_validated_again(self):
+        result, calls = self.approve(head=B, cont=self.approved_cont())
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], SHA)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        self.assertIn("look-head", got)
+        for label in ("look-post", "merge"):
+            self.assertNotIn(label, got)
+
+    def test_an_incomplete_look_head_reply_stops_at_look_approve(self):
+        replies = ({"state": "OPEN", "renew": {"verdict": "renewed"}}, {"state": "OPEN", "head": "abc", "renew": {"verdict": "renewed"}})
+        for reply, approved in [(r, approved) for r in replies for approved in (False, True)]:
+            with self.subTest(reply=reply, approved_cont=approved):
+                result, calls = self.approve(replies={"look-head": reply}, cont=self.approved_cont() if approved else None)
+                got = labels(calls)
+                self.assertEqual(result["stage"], "look-approve")
+                self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+                for label in ("look-post", "look-pr", "pr", "merge"):
+                    self.assertNotIn(label, got)
+
+    def test_the_scenario_look_cont_is_a_real_stop_cont(self):
+        self.assertEqual(LOOK_CONT, self.look_cont())
 
 
 if __name__ == "__main__":

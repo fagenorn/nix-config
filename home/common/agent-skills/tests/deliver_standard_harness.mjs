@@ -48,6 +48,10 @@ const DEFAULTS = [
   // #1139: a marked delivery's pull request step (no lock) and its push; the push answers the head the prompt names.
   [/^look-pr$/, { pr: 42, head: SHA, probe: { conflicted: false }, behind: false, renew: { verdict: 'renewed' } }],
   [/^look-push$/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, renew: { verdict: 'renewed' } })],
+  // #1139: the owner's look answers: the pull request head read, the approval post, and the fix round of a changes answer (look-fix-review falls to the review default).
+  [/^look-head$/, { head: SHA, state: 'OPEN', renew: { verdict: 'renewed' } }],
+  [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
+  [/^look-fix$/, { ...DONE, start_head: SHA, commit: 'f1c0de' }],
   [/^land-unlock$/, { verdict: 'released' }],
   [/^land-(re)?lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
@@ -86,7 +90,7 @@ const DEFAULTS = [
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push)$/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push|head)$/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)

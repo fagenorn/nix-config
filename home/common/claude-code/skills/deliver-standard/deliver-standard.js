@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look?, review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message?} records the approval for that head when the pull request head and the verified head are still it, then lands; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -34,7 +34,7 @@ export const meta = {
 // #1019: every setup first puts a worktree back on its branch when its HEAD is detached at the branch tip and the tree is clean.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look? (#1139: {pr, head}, the pull request and head an awaiting-look stop left for the owner's look) }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two (#1019: the second of those two revises runs in the same run, with no stop between, when the first one's re-review leaves only findings on criteria that revise changed); any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -89,6 +89,18 @@ if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean')
 const REVIEW_SIZING = args.review_sizing === true
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return { stage: 'args', error: 'clerk_model must be sonnet or haiku' }
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
+// #1139: the owner's answer to an awaiting-look stop: {answer: approve, head, message?} or {answer: changes, words}; only with a cont, only in ship mode.
+const LOOK_ANSWER = args.look === undefined ? null : args.look
+if (LOOK_ANSWER !== null) {
+  if (!CONT) return { stage: 'args', error: 'look needs a cont: it answers an awaiting-look stop' }
+  if (MODE !== 'ship') return { stage: 'args', error: 'look needs mode ship' }
+  const held = CONT.look
+  if (LOOK_ANSWER && LOOK_ANSWER.answer === 'approve' && !(held && typeof held === 'object' && Number.isInteger(held.pr) && held.pr > 0 && /^[0-9a-f]{40}$/.test(held.head))) return { stage: 'args', error: 'look approve needs a cont that stopped at awaiting-look' }
+  const sound = !!LOOK_ANSWER && typeof LOOK_ANSWER === 'object' && !Array.isArray(LOOK_ANSWER) && (LOOK_ANSWER.answer === 'approve'
+    ? typeof LOOK_ANSWER.head === 'string' && /^[0-9a-f]{40}$/.test(LOOK_ANSWER.head) && (LOOK_ANSWER.message === undefined || (typeof LOOK_ANSWER.message === 'string' && /^[A-Za-z0-9._:\/@+-]+$/.test(LOOK_ANSWER.message)))
+    : LOOK_ANSWER.answer === 'changes' && typeof LOOK_ANSWER.words === 'string' && LOOK_ANSWER.words.trim() !== '' && LOOK_ANSWER.words.length <= 2000)
+  if (!sound) return { stage: 'args', error: 'look must be {answer: approve, head, message?} or {answer: changes, words}' }
+}
 // #813: a setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never takes the trial model.
 const DEFAULT_CLERK_MODEL = 'sonnet'
 // The claim holder: a resume keeps cont.setup.holder; else it is built from the host and an id.
@@ -713,10 +725,12 @@ const MARKED = LOOK_READ && LOOK.verdict === 'marked'
 const COVERS = MARKED && Array.isArray(LOOK.covers) ? LOOK.covers.filter(c => typeof c === 'string' && c.trim()) : []
 const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
 const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to approve that head, or look {answer: changes, words: <the owner's words>} to ask for a change.`
-let LOOK_STOP = MARKED
+// #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
 // The pull request and head the awaiting-look stop left for the owner, carried in cont.look; a resume keeps it only when well formed.
-const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head } : null)
+const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved } : {}) } : null)
 let lookAt = lookOf(CONT && CONT.look)
+let approvedHead = lookAt && lookAt.approved ? lookAt.approved : null
+let LOOK_STOP = MARKED && approvedHead === null
 // #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
 // own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
 const outsideOf = xs => (Array.isArray(xs) ? xs : []).filter(x => isEntry(x) && present(x.file) && present(x.why)).map(x => ({ file: String(x.file), why: String(x.why).slice(0, REASON_MAX) }))
@@ -1942,6 +1956,16 @@ const rerunOnce = async (v, n) => {
   return { ...v, results }
 }
 const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_diff: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'why'] } }, unrelated: { type: 'object', properties: { test: { type: 'string' }, evidence: { type: 'string' } }, required: ['test', 'evidence'] } } }
+// #1139: the owner looked and asked for changes: one fix round on their words, then a fresh verify; a review that finds a defect stops.
+if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
+  const asked = [{ severity: 'important', source: 'owner', summary: LOOK_ANSWER.words, failing_input: `the owner's look at head ${lookAt ? lookAt.head : setup.head}` }]
+  const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  if (!implDone(lookFix) || sameSha(lookFix.commit, lookFix.start_head)) return stop('look-fix', { fix: lookFix })
+  const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span(lookFix)}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
+  if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
+  VERIFY_CACHED = false
+  verified = null
+}
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results, ...(picturesOf(verified).length ? { pictures: picturesOf(verified) } : {}) } : null
 if (VERIFY_CACHED) noteFlaky(verified.results)
 if (!VERIFY_CACHED) {
@@ -2161,6 +2185,34 @@ const lookStop = (pr, sha) => {
   lookAt = { pr, head: sha }
   verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(PICTURES.length ? { pictures: PICTURES } : {}) }
   return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(PICTURES.length ? { pictures: PICTURES } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: LOOK_REASON }
+}
+const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
+const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
+// #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is posted
+// only for the head the owner saw, when that is also the verified head. Anything else posts nothing and merges nothing.
+if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
+  approvedHead = null
+  lookAt = { pr: lookAt.pr, head: lookAt.head }
+  const hd = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then read the head of PR #${lookAt.pr}, changing nothing: run ${UNSET}gh pr view ${lookAt.pr} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
+${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(LOOK_HEAD_SCHEMA) }), r => r.renew)
+  if (!hd) return stop('look-approve', { result: null })
+  const lostLook = renewed(hd.renew, 'look-approve')
+  if (lostLook) return lostLook
+  if (!complete(hd, LOOK_HEAD_SCHEMA) || !SHA_RE.test(hd.head)) return stop('look-approve', { result: hd })
+  if (hd.state !== 'OPEN') return stop('look-approve', { details: `PR #${lookAt.pr} is ${hd.state}, not open, so the approval of ${LOOK_ANSWER.head} was not recorded` })
+  if (!sameSha(hd.head, LOOK_ANSWER.head)) return lookStop(lookAt.pr, hd.head)
+  if (sameSha(LOOK_ANSWER.head, verify.head)) {
+    const posted = await call(`${CTX}
+Record the owner's look approval of issue #${ISSUE} of ${SLUG}. Run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer approved --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()}
+It prints one JSON line. Return its verdict, comment_id and any detail. Run nothing else.
+${RULES}`, { label: 'look-post', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_POST_SCHEMA })
+    if (!posted || posted.verdict !== 'posted') return stop('look-approve', { result: posted })
+    approvedHead = LOOK_ANSWER.head
+    lookAt = { pr: lookAt.pr, head: approvedHead, approved: approvedHead }
+  }
+  LOOK_STOP = MARKED && approvedHead === null
 }
 const landBody = async () => {
   // The pr call may take the lock (--wait) after opening the PR: mark the verified head as possibly held before it, so a lost reply still reaches the release.
@@ -2528,6 +2580,8 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       continue
     }
     if (state === 'passed') {
+      // #1139: a marked delivery merges only the head the owner approved; a head that moved since stops for a new look, the lock released.
+      if (MARKED && approvedHead && !sameSha(head, approvedHead)) return lookStop(PR, head)
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       mg = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
