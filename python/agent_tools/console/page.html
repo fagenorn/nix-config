@@ -249,7 +249,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0; cursor: pointer; color: var(--sub0); }
 .finished-line .title-line { color: var(--text); overflow-wrap: anywhere; }
 .finished-line .ended { color: var(--ov2); }
-.closing-report { padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
+.message-text { color: var(--lav); }
+.closing-report { margin-left: 4px; border-left: 1px solid var(--hair); padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .closing-report p { margin-top: 4px; white-space: pre-wrap; }
 .closing-report .closing-counts { color: var(--ov2); }
 .closing-report .tracker { display: inline-block; margin-top: 4px; color: var(--lav); text-underline-offset: 3px; }
@@ -582,7 +583,7 @@ function messageList(messages) {
       continue;
     }
     const row = el("li", "message");
-    row.appendChild(el("span", "message-text", messageLabel(message)));
+    row.appendChild(el("span", "message-text", "You: " + messageLabel(message)));
     row.appendChild(el("span", "message-state", message.state_text));
     if (message.new === true) row.appendChild(el("span", "message-new", "new"));
     if (typeof message.action_text === "string") {
@@ -3093,7 +3094,7 @@ function closingReport(sprint) {
   }
   if (typeof closing.summary === "string") box.appendChild(el("p", "closing-summary", closing.summary));
   if (typeof closing.differently === "string" && closing.differently !== "") {
-    box.appendChild(el("p", "differently", "Would do differently: " + closing.differently));
+    box.appendChild(el("p", "differently", "Next time: " + closing.differently));
   }
   if (typeof closing.counts_text === "string") box.appendChild(el("p", "closing-counts", closing.counts_text));
   for (const [label, key] of [["Landed", "landed"], ["Held", "held"], ["Dropped", "dropped"]]) {

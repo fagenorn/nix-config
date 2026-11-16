@@ -2994,6 +2994,23 @@ def life_frame(messages: list, **extra: object) -> dict:
 
 
 class PageMessageLifeTest(unittest.TestCase):
+    def test_the_owners_words_read_you_in_lavender(self) -> None:
+        (snap,) = render([
+            START, {"frame": life_frame([life_entry(3, "replied", "replied", reply=REPLY_TEXT)])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        (words,) = of_class(line, "span", "message-text")
+        self.assertEqual(full(words), "You: note 3")
+        (reply,) = of_class(line, "p", "message-reply")
+        self.assertEqual(full(reply), "Manager: " + REPLY_TEXT)
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        merged = {}
+        for selector, decls in style_rules(style):
+            if selector == ".message-text":
+                merged.update(decls)
+        self.assertEqual(merged.get("color"), "var(--lav)")
+
     def test_only_the_latest_exchange_shows_and_older_ones_sit_behind_a_closed_fold(self) -> None:
         messages = [
             life_entry(3, "picked_up", "picked up"),
@@ -4023,6 +4040,52 @@ class PageSprintBlockTest(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_an_opened_finished_report_sits_inside_its_lines_fold(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        frame = with_sprints([DONE_SPRINT])
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const li = document.querySelector('#projects li.finished-line');
+          const box = (e) => e.getBoundingClientRect().toJSON();
+          const report = li.querySelector('.closing-report');
+          const style = getComputedStyle(report);
+          return {li: box(li), title: box(li.querySelector('summary .title-line')),
+                  summary: box(li.querySelector('summary')), report: box(report),
+                  borderStyle: style.borderLeftStyle, borderWidth: style.borderLeftWidth};
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                for width in (480, 1440):
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    page.add_init_script(fakes)
+                    page.route("http://console.test/", lambda route: route.fulfill(
+                        body=html, content_type="text/html"))
+                    page.goto("http://console.test/")
+                    page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", frame)
+                    page.click('details[data-key="finished"] > summary')
+                    page.click('details[data-key^="ended:"] > summary')
+                    got = page.evaluate(measure)
+                    li, title, summary, report = (got[k] for k in ("li", "title", "summary", "report"))
+                    self.assertGreaterEqual(report["top"], summary["bottom"] - 1, width)
+                    self.assertLessEqual(report["bottom"], li["bottom"] + 1, width)
+                    self.assertGreaterEqual(report["left"], title["left"] + 4, width)
+                    self.assertEqual(got["borderStyle"], "solid", width)
+                    self.assertGreaterEqual(float(got["borderWidth"][:-2]), 1, width)
+                    page.close()
+            finally:
+                browser.close()
+
     def test_the_open_tell_box_label_hint_and_field_do_not_overlap_and_the_field_spans_the_block(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -4148,9 +4211,20 @@ class PageSprintEndTest(unittest.TestCase):
         for hidden in (CLOSING["summary"], "cut smaller slices"):
             self.assertNotIn(hidden, shown)
         shown = visible_text(opened["projects"])
-        for expected in (CLOSING["summary"], "Would do differently: cut smaller slices",
+        for expected in (CLOSING["summary"], "Next time: cut smaller slices",
                          "1 landed, 1 dropped"):
             self.assertIn(expected, shown)
+
+    def test_an_opened_finished_report_reads_next_time(self) -> None:
+        done = {**DONE_SPRINT, "closing": {
+            **CLOSING, "differently": "Would split the second slice sooner."}}
+        (snap,) = render([
+            START, {"frame": with_sprints([done])}, {"open": "finished"},
+            {"open": "ended:" + "a" * 16}, {"snapshot": True},
+        ])
+        (lesson,) = of_class(snap["projects"], "p", "differently")
+        self.assertEqual(full(lesson), "Next time: Would split the second slice sooner.")
+        self.assertNotIn("Would do differently", visible_text(snap["projects"]))
 
     def test_a_closing_summary_keeps_its_line_breaks_and_an_ended_sprint_draws_no_report_data(
             self) -> None:
