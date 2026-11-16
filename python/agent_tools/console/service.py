@@ -81,7 +81,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm` and `POST /api/trust-check`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
+`POST /api/owner-notice` and `POST /api/owner-notice-withdraw`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -623,6 +624,25 @@ folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_spr
 `sprints.project_notices` over every folded sprint of the project, and appends and publishes
 nothing. None of the three nudges anybody, and none calls `tick`, `owner_path` or any other tracker
 writer; a refusal appends and publishes nothing.
+
+Owner notices (#1120, ADR-console-049): `POST /api/owner-notice` (`{"project_id", "text"}`, at most
+`MAX_OWNER_NOTICE_BYTES` 4096) and `POST /api/owner-notice-withdraw` (`{"project_id", "notice"}`, at most
+`MAX_OWNER_NOTICE_WITHDRAW_BYTES` 4096) are page writes: both pass `_page_write`'s guard before any body is
+read (no or a foreign `Origin` is 403 `origin refused`, a missing or wrong token 403 `token refused`,
+nothing appended). A body `sprints.parse_owner_notice` or `sprints.parse_owner_notice_withdrawal` does not
+accept is 400 `bad owner notice` or `bad owner notice withdrawal`; a `sprints.Refused` is `console:
+owner_notice_refused <project_id> <reason>` (`owner_notice_withdraw_refused` for the withdrawal) and 409 with
+the reason; any other exception is `console: owner_notice_failed <Type>: <message>` and 500 `owner notice
+failed` (`owner_notice_withdraw_failed`, `owner notice withdrawal failed`). No stderr line carries the text
+or the token; success is 204. `post_owner_notice(project_id, text)`, under the ingest lock, is
+`sprints.postable_owner_notice` (registered, a running sprint, a checked heads-up, at most five open),
+then exactly one `notice.posted` row (project the project) `{"poster": "owner", "notice": {"kind":
+"heads-up", "text": <checked>}}`, folded and published; it returns the row's `seq` and nudges nobody.
+`withdraw_owner_notice(project_id, notice_id)` is `sprints.withdrawable_owner_notice`, then exactly one
+`notice.withdrawn` row `{"poster": "owner", "notice": <id>}`. The rows are folded per project into
+`_owner_notices` (`sprints.owner_notices`, at start and in `_fold`) and touch no sprint. `list_notices`
+and a new manager's launch prompt add `sprints.open_owner_notices` to `sprints.project_notices` (`owner`
+entries), and a manager's `withdraw_notice` of an owner notice is refused (`owner_ids`).
 
 Pictures (#1089, ADR-console-036): `POST /api/picture` is a manager write dispatched like `/api/brief`,
 before `PAGE_WRITES`, whose body is one PNG and whose identity travels in headers. The checks run in
@@ -1263,6 +1283,8 @@ WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 NOTICE_PATH = "/api/notice"
 NOTICES_PATH = "/api/notices"
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
+OWNER_NOTICE_PATH = "/api/owner-notice"
+OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
@@ -1285,7 +1307,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH})
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1323,6 +1345,8 @@ MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_NOTICE_BYTES = 16384
 MAX_NOTICES_BYTES = 4096
 MAX_WITHDRAW_NOTICE_BYTES = 4096
+MAX_OWNER_NOTICE_BYTES = 4096
+MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -2288,6 +2312,53 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _owner_notice_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's heads-up for a project; False when it was refused."""
+        body = self._json_body(MAX_OWNER_NOTICE_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, text = sprints.parse_owner_notice(body)
+        except ValueError:
+            self._refuse(400, "bad owner notice")
+            return False
+        try:
+            console.post_owner_notice(project_id, text)
+        except sprints.Refused as error:
+            print(f"console: owner_notice_refused {project_id} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: owner_notice_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "owner notice failed")
+            return False
+        return True
+
+    def _owner_notice_withdraw_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's withdrawal of a heads-up; False when it was refused."""
+        body = self._json_body(MAX_OWNER_NOTICE_WITHDRAW_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, notice_id = sprints.parse_owner_notice_withdrawal(body)
+        except ValueError:
+            self._refuse(400, "bad owner notice withdrawal")
+            return False
+        try:
+            console.withdraw_owner_notice(project_id, notice_id)
+        except sprints.Refused as error:
+            print(f"console: owner_notice_withdraw_refused {project_id} {error}",
+                  file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: owner_notice_withdraw_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "owner notice withdrawal failed")
+            return False
+        return True
+
     def _decision_request(self, console: "ConsoleService", route: str) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
         name = "approve" if route == APPROVE_PATH else "reply"
@@ -2533,6 +2604,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == REGISTER_CANCEL_PATH:
             self.close_connection = True
             if not self._register_cancel_request(console):
+                return
+        elif route == OWNER_NOTICE_PATH:
+            self.close_connection = True
+            if not self._owner_notice_request(console):
+                return
+        elif route == OWNER_NOTICE_WITHDRAW_PATH:
+            self.close_connection = True
+            if not self._owner_notice_withdraw_request(console):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -2866,6 +2945,7 @@ class ConsoleService:
             self._moved = idle.last_moved(events)
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
+            self._owner_notices = sprints.owner_notices(events)
             self._pending = sprints.pending_stops(events)
             self._settle_stops()
             self._publish()
@@ -4403,7 +4483,9 @@ class ConsoleService:
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
             return None
         notices = sprints.notice_block(
-            sprints.project_notices(self._sprints.values(), project_id), sprint_id,
+            sprints.project_notices(self._sprints.values(), project_id,
+                                    owner=sprints.open_owner_notices(self._owner_notices,
+                                                                     project_id)), sprint_id,
             int(self._clock() * 1000))
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
@@ -5363,18 +5445,43 @@ class ConsoleService:
             self._apply(appended)
             return appended[-1].seq
 
+    def post_owner_notice(self, project_id: str, text: str) -> int:
+        """Append one owner `notice.posted` event for the project; its seq, the notice's id."""
+        with self._ingest:
+            checked = sprints.postable_owner_notice(
+                project_id, text, project_id in self._states, self._sprints.values(),
+                self._owner_notices)
+            appended = self.log.append([(NOTICE_POSTED, project_id, {
+                "poster": sprints.NOTICE_OWNER, "notice": checked})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def withdraw_owner_notice(self, project_id: str, notice_id: int) -> int:
+        """Append one owner `notice.withdrawn` event for an open owner notice; the notice's id."""
+        with self._ingest:
+            sprints.withdrawable_owner_notice(
+                project_id, notice_id, self._owner_notices, self._sprints.values())
+            appended = self.log.append([(NOTICE_WITHDRAWN, project_id, {
+                "poster": sprints.NOTICE_OWNER, "notice": notice_id})])
+            self._apply(appended)
+            return notice_id
+
     def list_notices(self, sprint_id: str, secret: str) -> list[dict]:
         """The open notices of the sprint's project in id order; appends and publishes nothing."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
-            return sprints.project_notices(self._sprints.values(), sprint.project_id)
+            return sprints.project_notices(
+                self._sprints.values(), sprint.project_id,
+                owner=sprints.open_owner_notices(self._owner_notices, sprint.project_id))
 
     def withdraw_notice(self, sprint_id: str, secret: str, notice_id: int) -> int:
         """Append one `notice.withdrawn` event for an open notice of the sprint; the notice's id."""
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
             others = [other for key, other in self._sprints.items() if key != sprint_id]
-            sprints.withdrawable_notice(sprint, notice_id, others)
+            sprints.withdrawable_notice(
+                sprint, notice_id, others,
+                owner_ids={n.notice_id for ns in self._owner_notices.values() for n in ns})
             appended = self.log.append([(NOTICE_WITHDRAWN, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": notice_id})])
             self._apply(appended)
@@ -5731,6 +5838,7 @@ class ConsoleService:
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
+        self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
         self._pending = sprints.pending_stops(appended, self._pending)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
