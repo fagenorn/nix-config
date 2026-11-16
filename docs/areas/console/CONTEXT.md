@@ -106,7 +106,7 @@ The tokens (input, cache writes, cache reads, output) and estimated list-price d
 _Avoid_: cost, usage
 
 **Spend page**:
-The console's second page, at `/spend`, opened from the "Spend" link in the desk page's top bar: today's, the last 7 days' or the last 30 days' spend in tokens and estimated dollars, a per-day trend and the breakdowns by project, sprint, phase, account and aspect. It only reads (ADR-console-052).
+The console's second page, at `/spend`, opened from the "Spend" link in the desk page's top bar: today's, the last 7 days' or the last 30 days' spend in tokens and estimated dollars, a per-day trend and the breakdowns by project, sprint, phase, account and aspect; a sprint's or run's spend figure on the desk page opens that item with its phase breakdown. It only reads (ADR-console-052, ADR-console-053).
 _Avoid_: metrics page, dashboard
 
 **Limit reading**:
