@@ -14,6 +14,23 @@ The snapshot's `release` member is derived, not authored: its `targets` list
 the targets the authored `release` member binds, with the operations each one
 runs (`release_profile.release_targets`).
 
+The contract may carry an optional top-level `production` member, in one of two
+forms. `{"none": true}` declares that the project has no production, and no
+rule member may stand beside it. `{"none": false, ...}` declares the rules:
+`changes` (the command ids, key-file globs and MCP tool names that change
+production, at least one in all), `read_only` (the command ids and MCP tool
+names that only read it) and `release_profile` (the one profile of
+`release.profiles` through which a change is allowed). `none` is always
+required, so neither form is implied. A command id must name a
+`bindings.commands` entry, an MCP tool is spelled `mcp__<server>__<tool>`, a
+key file follows the contract glob rule, and no command or tool may be both a
+changing and a read-only route. The snapshot always carries a derived
+`production` member: `{"status": "not_declared"}` when the section is absent,
+`{"status": "none"}` for the no-production form, and
+`{"status": "declared", "changes", "read_only", "release_profile"}` otherwise,
+with ids and globs returned as authored (they are not bindings, so no glob is
+made absolute). An absent section is not the same as declaring no production.
+
 `check-projections` judges each declared target against its source and
 refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
@@ -164,6 +181,15 @@ TOP_LEVEL_MEMBERS = (
     "platform",
     "release",
 )
+# Members a contract may carry but need not: absent means undeclared, and the
+# resolver never inserts one into the source.
+TOP_LEVEL_OPTIONAL_MEMBERS = ("production",)
+# The `production` section's members beside `none`, and the lists inside two of
+# them. `PRODUCTION_STATUSES` is the closed set of the snapshot member's status.
+PRODUCTION_RULE_MEMBERS = ("changes", "read_only", "release_profile")
+PRODUCTION_CHANGE_MEMBERS = ("commands", "key_files", "mcp_tools")
+PRODUCTION_READ_ONLY_MEMBERS = ("commands", "mcp_tools")
+PRODUCTION_STATUSES = ("not_declared", "none", "declared")
 # R2.1: the interval's exact members. The closed schema-compatibility reason
 # codes are `agent_platform.SCHEMA_REASON_CODES` — one home for that set (D7),
 # read through the library rather than copied here.
@@ -242,6 +268,10 @@ KNOWLEDGE_PATH_MEMBERS = {
 # `=` or any other non-name character is a violation rather than a value the
 # snapshot passes on.
 ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# One MCP tool as Claude Code names it: `mcp__<server>__<tool>`. A server-level
+# name (`mcp__<server>`) has no tool part and is not a tool.
+MCP_TOOL_NAME_PATTERN = re.compile(r"^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$")
 
 # The two rendered forms (D11). Both read only the entry and the schema
 # version, so nothing machine-specific can reach a generated target.
@@ -378,14 +408,15 @@ def check_safe_path(value: object, pointer: str, section: str,
     return False
 
 
-def check_contract_glob(value: object, pointer: str, violations: list[dict]) -> bool:
-    """A `workflow` path glob: a safe repository-relative path, spelled canonically (#279 D4)."""
-    if not check_safe_path(value, pointer, "workflow", violations):
+def check_contract_glob(value: object, pointer: str, violations: list[dict], *,
+                        section: str = "workflow") -> bool:
+    """A contract path glob: a safe repository-relative path, spelled canonically (#279 D4)."""
+    if not check_safe_path(value, pointer, section, violations):
         return False
     if is_canonical_path(value):
         return True
     violations.append(violation(
-        pointer, CANONICAL_PATH_MESSAGE, "contract.workflow.noncanonical_path"))
+        pointer, CANONICAL_PATH_MESSAGE, f"contract.{section}.noncanonical_path"))
     return False
 
 
@@ -804,14 +835,14 @@ def validate_commands(commands: dict, violations: list[dict]) -> None:
 
 
 def check_command_id(value: object, pointer: str, commands: dict | None,
-                     violations: list[dict]) -> None:
+                     violations: list[dict], *, section: str = "workflow") -> None:
     """A non-empty command id that is a key of `/bindings/commands`."""
-    if not check_string(value, pointer, "workflow", violations):
+    if not check_string(value, pointer, section, violations):
         return
     if commands is not None and value not in commands:
         violations.append(violation(
             pointer, "names no entry of bindings.commands",
-            "contract.workflow.unknown_command_id"))
+            f"contract.{section}.unknown_command_id"))
 
 
 def validate_workflow(workflow: dict, commands: dict | None,
@@ -1087,6 +1118,124 @@ def projection_paths(source: object) -> list[str]:
     return paths
 
 
+def check_production_entries(
+        section: dict, name: str, pointer: str, commands: dict | None,
+        changing: list | None, violations: list[dict]) -> None:
+    """One list of a `production` route group, entry by entry.
+
+    `changing` is the same-named `changes` list when this group is `read_only`:
+    an entry in both is refused, since one route cannot both change and only
+    read production.
+    """
+    if name not in section or not check_list(
+            section[name], pointer, "production", violations):
+        return
+    for index, value in enumerate(section[name]):
+        entry = f"{pointer}/{index}"
+        if name == "commands":
+            check_command_id(value, entry, commands, violations, section="production")
+        elif name == "key_files":
+            check_contract_glob(value, entry, violations, section="production")
+        elif not isinstance(value, str) or not MCP_TOOL_NAME_PATTERN.fullmatch(value):
+            violations.append(violation(
+                entry, "must name one MCP tool as mcp__<server>__<tool>",
+                "contract.production.not_mcp_tool"))
+            continue
+        if changing is not None and isinstance(value, str) and value in changing:
+            violations.append(violation(
+                entry, "is also declared as changing production",
+                "contract.production.route_both_ways"))
+
+
+def production_commands(source: dict) -> dict | None:
+    """The `bindings.commands` object, or None when it is not one (as `validate_bindings`)."""
+    bindings = source.get("bindings")
+    commands = bindings.get("commands") if isinstance(bindings, dict) else None
+    return commands if isinstance(commands, dict) else None
+
+
+def validate_production(source: dict, violations: list[dict]) -> None:
+    """The optional `production` member: no production, or its rules."""
+    production = source["production"]
+    if not check_object(production, "/production", "production", violations):
+        return
+    if "none" not in production:
+        violations.append(violation(
+            "/production/none", "required member is absent",
+            "contract.production.member_missing"))
+        none = None
+    else:
+        none = production["none"]
+        if not check_boolean(none, "/production/none", "production", violations):
+            none = None
+    if none is True:
+        for name in sorted(production):
+            if name in PRODUCTION_RULE_MEMBERS:
+                violations.append(violation(
+                    f"/production/{name}",
+                    "must be absent: the contract declares no production",
+                    "contract.production.none_with_rules"))
+            elif name != "none":
+                violations.append(violation(
+                    f"/production/{name}", "member is not part of this schema",
+                    "contract.production.member_unexpected"))
+        return
+    if none is not False:
+        # An absent or malformed `none` is reported once; the rule forms are
+        # not judged against a form the contract did not pick.
+        for name in sorted(production):
+            if name != "none" and name not in PRODUCTION_RULE_MEMBERS:
+                violations.append(violation(
+                    f"/production/{name}", "member is not part of this schema",
+                    "contract.production.member_unexpected"))
+        return
+    check_exact_members(
+        production, "/production", ("none",) + PRODUCTION_RULE_MEMBERS,
+        "production", violations)
+    commands = production_commands(source)
+    changes = production.get("changes")
+    if "changes" in production and check_object(
+            changes, "/production/changes", "production", violations):
+        check_exact_members(
+            changes, "/production/changes", PRODUCTION_CHANGE_MEMBERS,
+            "production", violations)
+        for name in PRODUCTION_CHANGE_MEMBERS:
+            check_production_entries(
+                changes, name, f"/production/changes/{name}", commands, None,
+                violations)
+        lists = [changes.get(name) for name in PRODUCTION_CHANGE_MEMBERS]
+        if all(isinstance(item, list) and not item for item in lists):
+            violations.append(violation(
+                "/production/changes",
+                "must name at least one command, key file or MCP tool that "
+                "changes production",
+                "contract.production.no_change_route"))
+    read_only = production.get("read_only")
+    if "read_only" in production and check_object(
+            read_only, "/production/read_only", "production", violations):
+        check_exact_members(
+            read_only, "/production/read_only", PRODUCTION_READ_ONLY_MEMBERS,
+            "production", violations)
+        for name in PRODUCTION_READ_ONLY_MEMBERS:
+            routes = changes.get(name) if isinstance(changes, dict) else None
+            check_production_entries(
+                read_only, name, f"/production/read_only/{name}", commands,
+                routes if isinstance(routes, list) else None, violations)
+    if "release_profile" in production and check_string(
+            production["release_profile"], "/production/release_profile",
+            "production", violations):
+        release = source.get("release")
+        profiles = release.get("profiles") if isinstance(release, dict) else None
+        # Any other `release` shape is skipped: the release grammar reports it.
+        if release == "unsupported" or (
+                isinstance(profiles, dict)
+                and production["release_profile"] not in profiles):
+            violations.append(violation(
+                "/production/release_profile",
+                "names no profile of release.profiles",
+                "contract.production.unknown_release_profile"))
+
+
 def validate_contract(source: dict, manifest: dict) -> list[dict]:
     """Every shape violation of the authored source, collected in one pass.
 
@@ -1109,7 +1258,7 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
                 f"/{name}", "required member is absent",
                 "contract.top_level.member_missing"))
     for name in sorted(source):
-        if name not in TOP_LEVEL_MEMBERS:
+        if name not in TOP_LEVEL_MEMBERS and name not in TOP_LEVEL_OPTIONAL_MEMBERS:
             violations.append(violation(
                 f"/{name}", "member is not part of this schema",
                 "contract.top_level.member_unexpected"))
@@ -1128,6 +1277,8 @@ def validate_contract(source: dict, manifest: dict) -> list[dict]:
         # admissibility rules refuse is a capability state, never a violation.
         violations.extend(
             release_profile.grammar_violations(source["release"], source))
+    if "production" in source:
+        validate_production(source, violations)
     violations.extend(validate_capability_bindings(source))
     return violations
 
@@ -1285,6 +1436,21 @@ def compute_capabilities(bindings: dict, root: Path, declarations: dict,
     return resolved
 
 
+def production_rules(source: dict) -> dict:
+    """The snapshot's derived `production` member (statuses: PRODUCTION_STATUSES)."""
+    if "production" not in source:
+        return {"status": "not_declared"}
+    production = source["production"]
+    if production["none"]:
+        return {"status": "none"}
+    return {
+        "status": "declared",
+        "changes": copy.deepcopy(production["changes"]),
+        "read_only": copy.deepcopy(production["read_only"]),
+        "release_profile": production["release_profile"],
+    }
+
+
 def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
     # Readiness reads the normalized bindings, so each command's `cwd` is
     # already the absolute base a relative argv[0] resolves against (D22).
@@ -1305,6 +1471,7 @@ def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:
         "capabilities": compute_capabilities(
             bindings, root, source["capabilities"], source["release"], source),
         "release": {"targets": release_profile.release_targets(source["release"])},
+        "production": production_rules(source),
     }
 
 

@@ -563,7 +563,7 @@ class GoalRouteTest(Case):
             "sessions": [], "messages": [], "approval": None,
             "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
-            "state_until": None, "pictures": []}])
+            "state_until": None, "pictures": [], "checks": []}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 
     def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):
