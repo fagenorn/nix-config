@@ -1860,13 +1860,59 @@ class SprintWaitViewTest(unittest.TestCase):
         self.assertEqual(shown["ball"], "manager")
         self.assertEqual(shown["now_text"], "waiting for a release step")
 
+    def test_a_delivery_waiting_for_or_holding_the_land_lock_reads_waiting_its_turn_to_merge(self):
+        now = self.now
+        holding = PullRequest(40, frozenset({4}), False, None, True)
+        queued = PullRequest(41, frozenset({99}), False, None, True)
+        cases = (
+            ("holding", {"p00": merged(None, (holding,), now - MIN, LocalReading((), False))}),
+            ("waiting in a lock step",
+             {"p00": merged(None, (queued,), now - MIN, LocalReading((), False), locking={4})}),
+            ("a kept lock time", moving(locks=((4, now - MIN),))))
+        for label, movement in cases:
+            with self.subTest(label):
+                shown = self.shown(movement)
+                self.assertEqual((shown["state"], shown["ball"], shown["now_text"]),
+                                 ("on_track", "manager", "waiting its turn to merge"))
+                self.assertNotIn("stuck", json.dumps(shown))
+                self.assertNotIn("stalled", json.dumps(shown))
+        with self.subTest("not the sprint's issue"):
+            shown = self.shown(moving(locks=((99, now - MIN),)))
+            self.assertEqual(shown["state"], "quiet")
+            self.assertTrue(shown["now_text"].startswith("last seen "))
+        with self.subTest("an open question is read first"):
+            text = self.shown(moving(locks=((4, now - MIN),)),
+                              sprint_state=asked(self.base))["now_text"]
+            self.assertTrue(text.startswith("waiting for your answer: "))
+
+    def test_a_lock_wait_last_seen_over_fifteen_minutes_ago_reads_may_be_stuck(self):
+        now = self.now
+        for minutes in (16, 14):
+            with self.subTest(minutes=minutes):
+                seen = now - minutes * MIN
+                first = merged(None, (PullRequest(40, frozenset({4}), False, None, True),),
+                               seen, LocalReading((), False))
+                gone = merged(first, (PullRequest(40, frozenset({4}), False, None, False),),
+                              now - MIN, LocalReading((), False))
+                shown = self.shown({"p00": gone})
+                if minutes == 16:
+                    self.assertEqual((shown["state"], shown["state_text"]),
+                                     ("quiet", "quiet for 16 min \u2014 may be stuck"))
+                    self.assertEqual(shown["ball"], "nobody")
+                    self.assertEqual(shown["now_text"],
+                                     "last seen building 1 of 7: Importer resumes")
+                else:
+                    self.assertEqual(shown["ball"], "manager")
+                    self.assertEqual(shown["now_text"], "waiting its turn to merge")
+
     def test_a_shown_merge_refusal_is_read_before_any_wait_sentence(self):
         now = self.now
         refused = reported(with_manager(started(A)), R, status="merge refused: checks not green")
         for label, movement in (("CI", moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),),
                                               read_ms=now - MIN)),
                                 ("a commit", moving(branches=((5, now - 5 * MIN),))),
-                                ("a release", moving(release_ms=now - MIN))):
+                                ("a release", moving(release_ms=now - MIN)),
+                                ("a lock wait", moving(locks=((4, now - MIN),)))):
             with self.subTest(label):
                 shown = self.shown(movement, sprint_state=refused)
                 self.assertEqual(shown["state"], "on_track")
@@ -1890,16 +1936,20 @@ class SprintWaitViewTest(unittest.TestCase):
                     self.assertEqual(shown["now_text"],
                                      "last seen building 1 of 7: Importer resumes")
 
-    def test_the_wait_sentence_follows_ci_then_committing_then_release(self):
+    def test_the_wait_sentence_follows_ci_then_committing_then_release_then_the_land_lock(self):
         now = self.now
         pull = PullMovement(40, frozenset({4}), now - MIN, now - MIN)
         cases = (
-            ("all three", moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN),
+            ("all four", moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN,
+                                locks=((4, now - MIN),)),
              "waiting for CI on its pull request"),
             ("no CI", moving(pulls=(dataclasses.replace(pull, running_ms=None),),
                              read_ms=now - MIN, release_ms=now - MIN),
              "a delivery is committing"),
-            ("only a release", moving(release_ms=now - MIN), "waiting for a release step"))
+            ("only a release", moving(release_ms=now - MIN), "waiting for a release step"),
+            ("a release and a lock wait", moving(release_ms=now - MIN, locks=((4, now - MIN),)),
+             "waiting for a release step"),
+            ("only a lock wait", moving(locks=((4, now - MIN),)), "waiting its turn to merge"))
         for label, movement, sentence in cases:
             with self.subTest(label):
                 self.assertEqual(self.shown(movement)["now_text"], sentence)

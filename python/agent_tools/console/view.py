@@ -475,8 +475,9 @@ time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms`
 report, approval or wait signal still moves the sprint whatever its order against the failure); with
 nothing else left it reads quiet at once. The wait signals are the last time CI ran on a pull
 request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
-(`commit_ms`) and the last time a release was in progress (`release_ms`), each read from the
-project's `ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
+(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery
+of the sprint held or waited for the land lock (`lock_ms`, #1184), each read from the project's
+`ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
 pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
 numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
 signal moves the sprint for `QUIET_AFTER_MS` after its time. The state's `quiet`,
@@ -502,8 +503,8 @@ a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owne
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
 wait, `NOW_QUOTA_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
-(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT` whose
-signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
+whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
 `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
 (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
@@ -653,6 +654,7 @@ from agent_tools.console.sprints import (
     NOW_COMMITTING_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
+    NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
     NOW_PERMISSION_TEXT,
     NOW_QUESTION_TEXT,
@@ -1084,10 +1086,11 @@ def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
 
 @dataclass(frozen=True)
 class WaitSignals:
-    """The last time each wait of #1110 was seen for one sprint, None when never."""
+    """The last time each wait of #1110 and #1184 was seen for one sprint, None when never."""
     ci_ms: int | None = None
     commit_ms: int | None = None
     release_ms: int | None = None
+    lock_ms: int | None = None
 
 
 NO_WAITS = WaitSignals()
@@ -1096,8 +1099,8 @@ NO_WAITS = WaitSignals()
 def wait_signals(state: SprintState, movement: ProjectMovement | None) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
-    belongs when its issues meet them, a branch when its issue is one of them, and the release
-    whatever the issues."""
+    belongs when its issues meet them, a branch when its issue is one of them, a land lock time
+    when its issue is one of them, and the release whatever the issues."""
     if movement is None:
         return NO_WAITS
     report = state.report
@@ -1107,8 +1110,9 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None) -> WaitSi
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
     commits += [moved for issue, moved in movement.branches if issue in issues]
+    locks = [moved for issue, moved in movement.locks if issue in issues]
     return WaitSignals(max(running, default=None), max(commits, default=None),
-                       movement.release_ms)
+                       movement.release_ms, max(locks, default=None))
 
 
 def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str],
@@ -1134,7 +1138,8 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
         signals.append(_millis(report.at))
     if state.moved_ms is not None:
         signals.append(state.moved_ms)
-    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms) if ms is not None]
+    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms, waits.lock_ms)
+                if ms is not None]
     failed = state.manager is not None and state.manager.state == FAILED and not listed
     if not failed:
         signals.append(_millis(state.stated_at))
@@ -1148,13 +1153,14 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
                 waits: WaitSignals) -> str | None:
     """The wait sentence of #1110, or None. It names the wait only when the wait signals alone
     move the sprint: with no clock, or when something else moves it, or when it is quiet whatever
-    the waits say, it is None. Else the first of CI, a committing delivery and a release step whose
-    signal is inside `QUIET_AFTER_MS`."""
+    the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
+    land lock whose signal is inside `QUIET_AFTER_MS`."""
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
-                     (waits.release_ms, NOW_RELEASE_TEXT)):
+                     (waits.release_ms, NOW_RELEASE_TEXT),
+                     (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:
             return text
     return None
