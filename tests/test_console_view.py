@@ -1930,16 +1930,16 @@ class NoticeViewTest(unittest.TestCase):
 
         self.assertEqual(by_id["p00"]["notices"], [
             {"id": 8, "sprint_id": B, "poster": "Keep the importer fast", "kind": "hand-off",
-             "kind_text": "hand-off", "text": "take the reader", "what": None,
+             "kind_text": "Hand-off", "text": "take the reader", "what": None,
              "until_text": None, "to_text": "for Fix the settings page", "at": at_min(8)},
             {"id": 7, "sprint_id": A, "poster": "Fix the settings page", "kind": "hand-off",
-             "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+             "kind_text": "Hand-off", "text": "the importer needs a retry", "what": None,
              "until_text": None, "to_text": "for you", "at": at_min(7)},
             {"id": 5, "sprint_id": B, "poster": "Keep the importer fast", "kind": "heads-up",
-             "kind_text": "heads-up", "text": "sprint ask gains a dry run", "what": None,
+             "kind_text": "Heads-up", "text": "sprint ask gains a dry run", "what": None,
              "until_text": None, "to_text": None, "at": at_min(5)},
             {"id": 3, "sprint_id": A, "poster": "Fix the settings page", "kind": "claim",
-             "kind_text": "claims", "text": "the page fold",
+             "kind_text": "Claim", "text": "the page fold",
              "what": "python/agent_tools/console/page.html",
              "until_text": "until the board fold lands", "to_text": None, "at": at_min(3)}])
         self.assertEqual(by_id["p01"]["notices"], [])

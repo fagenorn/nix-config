@@ -1312,7 +1312,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1119"))
+        self.assertTrue(decided.endswith(", #1133"))
+        self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
+        self.assertIn('"Hand-off for you, from <title>"', adr)
+        self.assertIn("its paths in the code style", adr)
+        self.assertIn("cut with an ellipsis, its whole text in its title (#1133)", adr)
+        self.assertNotIn("each open notice is one plain Overlay 2 line", adr)
         context = self.doc("docs/areas/console/CONTEXT.md")
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn('"Notices (n)" fold', notice)
