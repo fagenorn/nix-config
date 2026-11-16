@@ -206,6 +206,26 @@ class PageTest(unittest.TestCase):
         self.assertEqual(rule(".goal-filter").get("min-width"), "0")
         self.assertEqual(rule(".goal-act").get("flex"), "none")
 
+    def test_the_top_bar_carries_one_spend_link(self) -> None:
+        header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
+        self.assertEqual(self.text.count('href="/spend"'), 1)
+        self.assertEqual(header.count('<a class="nav" href="/spend">Spend</a>'), 1)
+        self.assertIn('<span class="brand">Console</span><a class="nav" href="/spend">Spend</a>', header)
+        self.assertEqual(re.findall(r'\shref="([^"]*)"', header), ["/spend"])
+        self.assertEqual(
+            re.findall(r'\shref="([^"]*)"', self.text[:self.text.index("<script>")]),
+            ["data:,", "/spend"],
+        )
+
+    def test_the_spend_link_is_quiet(self) -> None:
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        base = style[:style.index("@media")]
+        (nav,) = [d for s, d in style_rules(base) if s == ".nav"]
+        self.assertEqual(nav.get("color"), "var(--sub0)")
+        self.assertEqual(nav.get("white-space"), "nowrap")
+        self.assertNotIn("width", nav)
+        self.assertNotIn("min-width", nav)
+
     def test_the_top_bar_fits_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
         base, at = "", 0
@@ -235,7 +255,7 @@ class PageTest(unittest.TestCase):
             return bool(found) and float(found.group(1)) * (16 if found.group(2) == "rem" else 1) <= 448
 
         for selector, decls in rules:
-            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter")):
+            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter", ".nav")):
                 continue
             values = [decls[n] for n in ("width", "min-width", "flex-basis") if n in decls]
             parts = decls.get("flex", "").split()
@@ -259,11 +279,11 @@ class PageTest(unittest.TestCase):
         self.assertEqual(acct.get("max-width"), "100%")
         unwrapped = {
             selector for selector, decls in style_rules(base)
-            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
+            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter", ".nav"))
             and decls.get("white-space") == "nowrap"
         }
         self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b",
-                                    ".goal-in .goal-text::placeholder"})
+                                    ".goal-in .goal-text::placeholder", ".nav"})
         (long_name,) = render([
             START,
             {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
