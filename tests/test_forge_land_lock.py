@@ -1696,6 +1696,40 @@ class RefreshTest(Base):
         self.assertIn("forge-claim land release", out["detail"])
         self.assertEqual(self.world.refs(), {REF: B, BEAT: C})
 
+    def test_a_beat_at_the_callers_sha_whose_step_is_refused_still_changes_every_refresh(self):
+        """Issue 1132: the beat at the lock's own merge commit, the forge refusing its first parent. The
+        refresh must not delete it for the next refresh to create at the same sha again: a waiter
+        polling between two refreshes would see no change."""
+        self.refuse_from(D)
+        self.parents(B, D, E)
+        self.world.set_ref(BEAT, B)
+        seen = [B]
+        for _ in range(5):
+            code, out = run(*land("refresh", B))
+            self.assertEqual((code, out["verdict"]), (0, "refreshed"))
+            seen.append(self.world.refs().get(BEAT))
+        self.assertTrue(all(a != b for a, b in zip(seen, seen[1:])), seen)
+        self.assertEqual(seen[:3], [B, D, E])
+
+    def test_a_long_refusal_still_carries_the_next_step(self):
+        self.world.reset()
+        self.lock(B, refuse_to=(D, B, fm.ZERO_OID), refusal="the forge declined the update " * 20)
+        self.parents(C, D)
+        self.world.set_ref(BEAT, C)
+        code, out = run(*land("refresh", B))
+        self.assertEqual((code, out["error"]), (1, "gh_failed"))
+        self.assertIn("forge-claim land release", out["detail"])
+        self.assertIn("the forge declined", out["detail"])
+
+    def test_a_refused_beat_creation_reports_the_forges_reason_and_a_next_step(self):
+        self.world.reset()
+        self.lock(B, refuse_create=True)
+        code, out = run(*land("refresh", B))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        self.assertIn("Could not resolve to a Ref", out["detail"])
+        self.assertIn("forge-claim land release", out["detail"])
+        self.assertEqual(self.world.refs(), {REF: B})
+
     def test_a_lock_refreshed_at_the_largest_gap_of_a_train_wait_is_never_taken_over_as_idle(self):
         """The train's checks wait refreshes at gaps of 22 minutes at most (a refresh due after 7,
         behind a 15-minute watch), here for a whole wait of the waiter, 50 minutes, which is longer
