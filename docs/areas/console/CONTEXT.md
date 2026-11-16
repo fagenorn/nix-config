@@ -54,7 +54,7 @@ The questions a manager sends at once with `sprint ask`: each leads with its ask
 _Avoid_: poll, survey
 
 **Notice**:
-A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-042). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
+A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-043). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
 _Avoid_: lock, reservation, announcement
 
 **Picture**:
