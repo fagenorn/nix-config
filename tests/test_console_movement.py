@@ -15,7 +15,8 @@ from unittest import mock
 
 from agent_tools.console import movement
 from agent_tools.console.movement import (
-    LocalReading, ProjectMovement, PullMovement, PullRequest)
+    LocalReading, ProcessStat, ProjectMovement, PullMovement, PullRequest, SessionMovement,
+    SessionReading, SessionTarget, descendant_cpu, process_table, read_sessions, session_output_ms)
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -260,6 +261,158 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(
             movement.merged(prev, None, 3000, LocalReading(((4, 1400), (6, 2000)), False)).branches,
             ((4, 1500), (5, 1600), (6, 2000)))
+
+
+def stat(proc, pid, comm, ppid, ticks, start):
+    directory = Path(proc) / str(pid)
+    directory.mkdir(parents=True, exist_ok=True)
+    zeros = ["0"] * 9 + [str(ticks), "0", "0", "0"] + ["0"] * 4 + [start, "0", "0"]
+    (directory / "stat").write_text(f"{pid} ({comm}) S {ppid} " + " ".join(zeros), encoding="utf-8")
+
+
+def fake_proc(root):
+    proc = Path(root) / "proc"
+    (proc / "self").mkdir(parents=True)
+    (proc / "self" / "stat").write_text("1 (x) S 0", encoding="utf-8")
+    stat(proc, 100, "claude", 1, 90000, "1000")
+    stat(proc, 200, "zsh", 100, 50, "2000")
+    stat(proc, 300, "py ) (x", 200, 400, "3000")
+    stat(proc, 400, "other", 1, 7, "4000")
+    (proc / "500").mkdir()
+    return proc
+
+
+def write_at(path, seconds):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n", encoding="utf-8")
+    os.utime(path, (seconds, seconds))
+
+
+class SessionOutputTest(unittest.TestCase):
+    def test_a_sessions_output_is_the_newest_jsonl_write_of_its_transcript_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b = Path(tmp) / "a" / "projects", Path(tmp) / "b" / "projects"
+            write_at(a / "-srv-p00" / "s1.jsonl", 1_800_000_000)
+            write_at(a / "-srv-p00" / "s1" / "subagents" / "agent-x.jsonl", 1_800_000_100)
+            write_at(a / "-srv-p00" / "s1" / "subagents" / "workflows" / "wf_1" / "agent-y.jsonl",
+                     1_800_000_200)
+            write_at(a / "-srv-p00" / "s1" / "tool-results" / "big.txt", 1_800_000_900)
+            write_at(a / "-srv-p00" / "s2.jsonl", 1_800_000_800)
+            write_at(b / "-other" / "s1.jsonl", 1_800_000_300)
+            self.assertEqual(session_output_ms([a], "s1"), 1_800_000_200_000)
+            self.assertEqual(session_output_ms([a, b], "s1"), 1_800_000_300_000)
+            self.assertIsNone(session_output_ms([a], "s9"))
+            for bad in ("../s1", "a/b", "", "s\x001", ".", ".."):
+                self.assertIsNone(session_output_ms([a], bad), bad)
+            self.assertIsNone(session_output_ms([Path(tmp) / "missing"], "s1"))
+
+
+class ProcessTableTest(unittest.TestCase):
+    def test_the_stat_helper_writes_proc5_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stat(tmp, 300, "py ) (x", 200, 400, "3000")
+            fields = (Path(tmp) / "300" / "stat").read_text().rsplit(")", 1)[1].split()
+            self.assertEqual(fields[1], "200")
+            self.assertEqual(fields[11], "400")
+            self.assertEqual(fields[12:15], ["0", "0", "0"])
+            self.assertEqual(fields[19], "3000")
+
+    def test_a_session_reads_its_descendants_cpu_never_its_own(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = fake_proc(tmp)
+            table = process_table(proc, clock_ticks=100)
+            self.assertEqual(table[300], ProcessStat(200, "3000", 4000))
+            self.assertEqual(descendant_cpu(table, 100),
+                             (((200, "2000"), 500), ((300, "3000"), 4000)))
+            self.assertEqual(descendant_cpu(table, 999), ())
+            self.assertNotIn(500, table)
+            empty = Path(tmp) / "empty"
+            empty.mkdir()
+            self.assertIsNone(process_table(empty, clock_ticks=100))
+            stat(proc, 600, "a", 601, 1, "6000")
+            stat(proc, 601, "b", 600, 1, "6010")
+            table = process_table(proc, clock_ticks=100)
+            self.assertEqual(descendant_cpu(table, 600), (((601, "6010"), 10),))
+
+    def test_read_sessions_reads_output_and_cpu_once_per_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = fake_proc(tmp)
+            projects = Path(tmp) / "projects"
+            write_at(projects / "-srv-p00" / "s1.jsonl", 1_800_000_000)
+            targets = (SessionTarget("s2", None, frozenset({"b"})),
+                       SessionTarget("s1", 100, frozenset({"a"})),
+                       SessionTarget("s3", 999, frozenset()))
+            self.assertEqual(
+                read_sessions([projects], targets, proc=proc, clock_ticks=100),
+                (SessionReading("s1", frozenset({"a"}), 1_800_000_000_000,
+                                (((200, "2000"), 500), ((300, "3000"), 4000))),
+                 SessionReading("s2", frozenset({"b"}), None, None),
+                 SessionReading("s3", frozenset(), None, None)))
+            bare = read_sessions([projects], targets, proc=Path(tmp) / "empty", clock_ticks=100)
+            self.assertEqual([r.cpu for r in bare], [None, None, None])
+
+
+def reading(cpu, sprints=("a",), output=None, sid="s1"):
+    return SessionReading(sid, frozenset(sprints), output, cpu)
+
+
+def local_of(*readings, at=None):
+    return LocalReading((), False, (), tuple(readings), at)
+
+
+class SessionFoldTest(unittest.TestCase):
+    def test_cpu_moves_a_session_only_after_a_second_used_between_two_readings(self):
+        prev = None
+        steps = [
+            (1000, (((200, "2000"), 500),), None),
+            (2000, (((200, "2000"), 1490),), None),
+            (3000, (((200, "2000"), 2490),), 3000),
+            (4000, (((200, "2000"), 2490),), 3000),
+            (5000, (((200, "2000"), 2490), ((201, "2100"), 1000)), 5000),
+            (6000, (), 5000),
+            (7000, None, 5000),
+            (8000, (((202, "2200"), 5000),), 5000),
+        ]
+        for now, cpu, check in steps:
+            prev = movement.merged(prev, None, now, local_of(reading(cpu)))
+            got = prev.sessions[0]
+            self.assertEqual((got.session_id, got.sprint_id), ("s1", "a"))
+            self.assertEqual(got.check_ms, check, now)
+        self.assertEqual(prev.sessions[0].cpu, (((202, "2200"), 5000),))
+        none = movement.merged(prev, None, 9000, local_of(reading(None)))
+        self.assertIsNone(none.sessions[0].cpu)
+        self.assertEqual(none.sessions[0].check_ms, 5000)
+        again = movement.merged(prev, None, 9000, local_of(reading((((202, "2200"), 7000),)), at=8500))
+        self.assertEqual(again.sessions[0].check_ms, 8500)
+        self.assertEqual(again.sessions[0].read_ms, 8500)
+
+    def test_output_never_moves_back_and_an_absent_association_is_kept(self):
+        first = movement.merged(None, None, 6000, local_of(
+            reading(None, ("a",), 5000), reading(None, ("b",), 100, "s2")))
+        self.assertEqual(first.sessions, (SessionMovement("s1", "a", 5000, None, None, 6000),
+                                          SessionMovement("s2", "b", 100, None, None, 6000)))
+        second = movement.merged(first, None, 7000, local_of(reading(None, ("c",), 9000)))
+        self.assertEqual(second.sessions, (
+            SessionMovement("s1", "a", 5000, None, None, 6000),
+            SessionMovement("s1", "c", 9000, None, None, 7000),
+            SessionMovement("s2", "b", 100, None, None, 6000)))
+        third = movement.merged(second, None, 8000, local_of(
+            reading(None, ("a", "c"), 4000), at=7900))
+        self.assertIn(SessionMovement("s1", "a", 5000, None, None, 7900), third.sessions)
+        self.assertEqual(movement.merged(first, None, 8000, LocalReading((), False)).sessions,
+                         first.sessions)
+        self.assertEqual(movement.merged(None, None, 1, local_of(
+            reading(None, (), 5, "s9"))).sessions, ())
+
+    def test_a_session_that_left_a_sprint_keeps_its_last_times_there(self):
+        prev = None
+        for t, sprints, c in ((1000, ("a",), 0), (2000, ("a",), 5000),
+                              (3000, ("b",), 10000), (4000, ("b",), 15000)):
+            prev = movement.merged(prev, None, t, local_of(
+                reading((((200, "2000"), c),), sprints, t)))
+        self.assertEqual(prev.sessions, (
+            SessionMovement("s1", "a", 2000, 2000, (((200, "2000"), 5000),), 2000),
+            SessionMovement("s1", "b", 4000, 4000, (((200, "2000"), 15000),), 4000)))
 
 
 if __name__ == "__main__":
