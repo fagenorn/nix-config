@@ -1958,6 +1958,7 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
     HEAD_READ = "`gh pr view <pr> --repo <slug> --json headRefOid`"
     MERGE = "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`"
     LAND_RELEASE = "`forge-claim land release --repo <slug> --branch <int> --sha <lock sha>`"
+    TICK = "`look-approval tick --repo <slug> --issue <n> --pr <pr> --head <head>`"
 
     @staticmethod
     def section(prefix):
@@ -2048,6 +2049,14 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertIn(form, land)
         self.assertGreater(land.index("`--delete-branch`"), land.index(self.MERGE))
+
+    def test_a_marked_merge_ticks_the_look_after_the_merge(self):
+        land = self.section("Land")
+        self.assertIn(self.TICK, land)
+        self.assertGreater(land.index(self.TICK), land.index(self.MERGE))
+        for verdict in ("`ticked`", "`already`", "`unmarked`"):
+            with self.subTest(verdict=verdict):
+                self.assertIn(verdict, land[land.index(self.TICK):])
 
     def test_the_look_rules_name_no_project_literal(self):
         text = LOOK_RULES.read_text(encoding="utf-8")
