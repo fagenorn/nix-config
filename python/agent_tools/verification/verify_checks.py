@@ -150,6 +150,15 @@ profile, handle or Railway project, environment or service, since the repository
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
 
+`console-failed-start --port N` (`verify_checks.console_failed_start`, issue 1182) reads
+`GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object
+is `unreachable`, exit 75) and applies `failed_start_state` to it: with no open failed-start inbox card it is
+`not_yet` (75); otherwise each card must have a running sprint entry whose `now_text` reads the failed start,
+whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` is a plain, non-empty reason
+without a path. It is `met` (0) when every card does and `not_met` (1) with the sorted failed members
+(`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
+project, root, title or reason, since the repository is public.
+
 `console-first-screen --port N [--browser PATH]` (`verify_checks.console_first_screen`, issue 1031) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object is
 `unreachable`, exit 1), applies `first_screen_state` to it (any code other than 0 is returned as it is and no
@@ -1444,6 +1453,58 @@ def first_screen_state(view: object) -> tuple[int, dict]:
     return 1, {"verdict": "not_met", "questions": len(candidates), "problems": problems}
 
 
+FAILED_START_REASON = "failed_start"
+FAILED_START_NOW = "waiting for you: the manager failed to start"
+
+
+def failed_start_state(view: object) -> tuple[int, dict]:
+    """Issue 1182: every open failed-start card's sprint line reads the failed start, 0 met, 1 not met, 75 not yet."""
+    opened = view.get("inbox", {}).get("open") if isinstance(view, dict) and isinstance(view.get("inbox"), dict) else None
+    cards = [item for item in opened if isinstance(item, dict) and item.get("reason") == FAILED_START_REASON] \
+        if isinstance(opened, list) else []
+    if not cards:
+        return 75, {"verdict": "not_yet", "cards": 0}
+    running = {sprint.get("sprint_id"): sprint for sprint in _sprint_entries(view)
+               if sprint.get("ended_at") is None}
+    problems: set[str] = set()
+    for card in cards:
+        sprint = running.get(card.get("sprint_id"))
+        if sprint is None or sprint.get("now_text") != FAILED_START_NOW:
+            problems.add("line")
+        if sprint is not None:
+            if sprint.get("ball") != "owner":
+                problems.add("ball")
+            if sprint.get("retry") is not True:
+                problems.add("retry")
+        reason = card.get("last_reason")
+        if not isinstance(reason, str) or not reason or "/" in reason:
+            problems.add("reason")
+    if not problems:
+        return 0, {"verdict": "met", "cards": len(cards)}
+    return 1, {"verdict": "not_met", "cards": len(cards), "problems": sorted(problems)}
+
+
+def console_failed_start(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1182: `failed_start_state` of the live console's view; an unreachable console is not yet (75)."""
+    unreachable = 75, {"verdict": "unreachable", "cards": 0}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status, body = response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return unreachable
+    finally:
+        connection.close()
+    if status != 200:
+        return unreachable
+    try:
+        view = json.loads(body)
+    except ValueError:
+        return unreachable
+    return failed_start_state(view) if isinstance(view, dict) else unreachable
+
+
 class BrowserError(Exception):
     """Issue 1031: the headless browser failed, closed its pipe or did not answer in time."""
 
@@ -1747,6 +1808,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
     console.add_argument("--port", type=_port, required=True)
+    failed = checks.add_parser(
+        "console-failed-start",
+        help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
+    failed.add_argument("--port", type=_port, required=True)
     first = checks.add_parser(
         "console-first-screen",
         help="issue 1031: the live console's first screen shows a long-goal question whole above the fold")
@@ -1760,6 +1825,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-failed-start":
+        code, report = console_failed_start(args.port)
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-first-screen":

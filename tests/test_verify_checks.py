@@ -1,5 +1,6 @@
 """`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
 import contextlib
+import dataclasses
 import http.server
 import inspect
 import io
@@ -18,6 +19,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import sprints as console_sprints
+from agent_tools.console import view as console_view
+from agent_tools.console.sprints import Manager, SprintState
+from agent_tools.console.view import ProjectState
 from agent_tools.delivery import agent_gate_bundle
 from agent_tools.claims import forge_markers
 from agent_tools.system import siblings
@@ -1772,6 +1777,116 @@ class ConsoleStateTest(unittest.TestCase):
 
     def test_the_docstring_documents_the_check(self):
         for needle in ("console-state --port N", "verify_checks.console_state"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+
+class ConsoleFailedStartTest(unittest.TestCase):
+    """`console-failed-start` (issue 1182): an open failed-start card's sprint line reads the failed start."""
+
+    SID = "a" * 16
+    T0 = "2026-11-12T10:00:00.000000+00:00"
+    REASON = ("Workspace not trusted. Run `claude` in /home/x/p once and accept the trust prompt, "
+              "then retry.")
+
+    def real_view(self):
+        t0_ms = int(datetime.fromisoformat(self.T0).timestamp() * 1000)
+        sprint = dataclasses.replace(
+            SprintState(self.SID, "p00", "make the importer resumable", 5, self.T0),
+            manager=Manager("failed", self.T0, reason=self.REASON))
+        view = console_view.derive_view([ProjectState("p00", "/srv/p00", 1, "t1")],
+                                        sprints={self.SID: sprint}, now_ms=t0_ms + 60_000)
+        return json.loads(console_view.encode_view(view))
+
+    def stub(self, routes):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, body = routes.get(self.path.split("?", 1)[0], (404, b""))
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def closed_port(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    def test_no_open_card_is_not_yet(self):
+        self.assertEqual(verify_checks.failed_start_state({"inbox": {"open": []}, "entries": []}),
+                         (75, {"verdict": "not_yet", "cards": 0}))
+
+    def test_a_card_whose_line_reads_the_failed_start_is_met(self):
+        self.assertEqual(verify_checks.failed_start_state(self.real_view()),
+                         (0, {"verdict": "met", "cards": 1}))
+
+    def test_a_wrong_line_ball_retry_or_reason_is_not_met(self):
+        def sprint_of(view):
+            return verify_checks._sprint_entries(view)[0]
+
+        def card_of(view):
+            return view["inbox"]["open"][0]
+
+        def drop(view):
+            for project in view["entries"]:
+                project["sprints"] = []
+
+        cases = (
+            ("line", lambda v: sprint_of(v).update(now_text="drafting the brief")),
+            ("ball", lambda v: sprint_of(v).update(ball="nobody")),
+            ("retry", lambda v: sprint_of(v).update(retry=False)),
+            ("reason", lambda v: card_of(v).update(last_reason="Run claude in /home/x/p")),
+            ("line", drop))
+        for index, (problem, mutate) in enumerate(cases):
+            with self.subTest(index=index, problem=problem):
+                view = self.real_view()
+                mutate(view)
+                self.assertEqual(verify_checks.failed_start_state(view),
+                                 (1, {"verdict": "not_met", "cards": 1, "problems": [problem]}))
+
+    def test_the_wire_names_match_the_console(self):
+        self.assertEqual(verify_checks.FAILED_START_REASON, "failed_start")
+        self.assertEqual(verify_checks.FAILED_START_NOW, console_sprints.NOW_FAILED_START_TEXT)
+
+    def test_an_unreachable_console_is_not_yet(self):
+        unreachable = (75, {"verdict": "unreachable", "cards": 0})
+        self.assertEqual(verify_checks.console_failed_start(self.closed_port()), unreachable)
+        self.assertEqual(verify_checks.console_failed_start(
+            self.stub({"/api/state": (503, b"{}")})), unreachable)
+        self.assertEqual(verify_checks.console_failed_start(
+            self.stub({"/api/state": (200, b"[]")})), unreachable)
+
+    def test_the_command_and_its_wrapper_print_one_json_line(self):
+        port = self.stub({"/api/state": (200, console_view.encode_view(self.real_view()))})
+        expected = json.dumps({"verdict": "met", "cards": 1}, sort_keys=True) + "\n"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-failed-start", "--port", str(port)])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), expected)
+        result = run_from_root([str(ROOT / CHECKS / "console-failed-start"), "--port", str(port)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, expected)
+        for argv in (["console-failed-start"], ["console-failed-start", "--port", "0"]):
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-failed-start"), "100755")
+
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("console-failed-start --port N", "verify_checks.console_failed_start"):
             self.assertIn(needle, verify_checks.__doc__)
 
 
