@@ -12,6 +12,7 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
 from agent_tools.console import approve, folder_trust, inbox, register
+from agent_tools.console import spend
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
@@ -383,6 +384,26 @@ class DigestViewTest(unittest.TestCase):
         given = {"since": None, "first_visit": True, "recent": [], "earlier": [], "omitted": 0}
         self.assertEqual(derive_view([], digest=given)["digest"], given)
         self.assertIsNone(derive_view([])["digest"])
+
+
+class SpendViewWireTest(unittest.TestCase):
+    def test_view_carries_thirty_daily_totals_by_each_dimension(self):
+        today = "2026-11-16"
+        snap = spend.Snapshot(
+            {spend.Key(today, "s1", None, None, spend.SESSION):
+                spend.priced("claude-sonnet-4-6", {"input_tokens": 1330})},
+            {}, {}, {}, {"s1": "/srv/p00"})
+        v = spend.spend_view(snap, today=today, project_of={"/srv/p00": "p00"}.get,
+                             profiles={"s1": "p1"})
+        shown = json.loads(view.encode_view(derive_view([state("p00", 1)], spend=v)))
+        self.assertEqual(len(shown["spend"]["days"]), 30)
+        for day in shown["spend"]["days"]:
+            self.assertEqual(set(day), {"day", "total", "session", "project", "sprint", "run",
+                                        "phase", "account", "aspect"})
+        self.assertEqual(shown["spend"]["days"][-1]["project"]["p00"]["input"], 1330)
+
+    def test_view_without_spend_is_null(self):
+        self.assertIsNone(derive_view([state("p00", 1)])["spend"])
 
 
 def run(sid, run_id, moved_ms, *issues):

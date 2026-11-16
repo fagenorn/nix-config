@@ -50,6 +50,26 @@ The phase table: `phase_of(label)` reads a label (without a trailing `RERUN_SUFF
 `PHASE_LABELS` rows, one `(phase, regex)` per row matched with `re.fullmatch`, in order, first match
 wins; a label no row matches is `OTHER`. The rows follow the cost measurement's role mapping, so
 they are deliberately not `deliveries.OWNER_LABELS`.
+
+The view: `spend_view(snapshot, today, project_of, profiles)` is the wire object
+`{"approximate": <bool>, "days": [<day>, ...]}`, `WINDOW_DAYS` days, `today` and the days before it
+(UTC), oldest first. A day is `{"day", "total", <dimension>: {<key>: <tokens>}}` for each of
+`DIMENSIONS`, every `<tokens>` a `Tokens.wire()`; a day with nothing has a zero `total` and empty
+maps, and a key dated outside the days is ignored. Each message has one key in `session`, `project`,
+`account` and `aspect`, so the sums over each equal `total`. `approximate` is true when any message
+counted is, per day in `total` and for the view. The keys, per message key:
+
+- `session`: the key's session, else `UNATTRIBUTED`.
+- `project`: `project_of(repo)` of the session's repository (`Snapshot.repos`), `UNATTRIBUTED` when
+  the session, its repository or its project is unknown.
+- `account`: `profiles[session]` (the profile the session was seen under), else `UNATTRIBUTED`.
+- `sprint`: the sprint id when the session's name fully matches `MANAGER_SESSION_NAME`, `UNATTRIBUTED`
+  when the session is unknown, and not counted for any other session.
+- `run` and `phase` (source `AGENT` only): the run id when the run has a journal, and the phase of
+  the agent's journal label; `UNATTRIBUTED` when the run or the agent has no journal record.
+- `aspect`: `KEEPALIVE` for a ping; `DELIVERIES` for a workflow agent; for a session's own and
+  subagent transcripts `MANAGERS` when the session is a sprint's, `OUTSIDE` otherwise, and
+  `UNATTRIBUTED` when the session is unknown.
 """
 
 from __future__ import annotations
@@ -59,7 +79,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from stat import S_ISREG
 from typing import BinaryIO, NamedTuple
@@ -73,6 +93,7 @@ from agent_tools.console.deliveries import (
     Chunk,
     Unreadable,
 )
+from agent_tools.console.sprints import MANAGER_SESSION_NAME
 from agent_tools.hosts import model_pricing
 
 UNATTRIBUTED = "unattributed"
@@ -84,6 +105,12 @@ PHASES = ("setup", "plan", "plan review", "plan revise", "implement", "task revi
 SESSION = "session"
 AGENT = "agent"
 PING = "ping"
+
+MANAGERS = "managers"
+DELIVERIES = "deliveries"
+OUTSIDE = "outside_sprint"
+KEEPALIVE = "keepalive"
+DIMENSIONS = ("session", "project", "sprint", "run", "phase", "account", "aspect")
 
 BATCH = "deliver-batch"
 STANDARD = "deliver-standard"
@@ -401,3 +428,64 @@ class SpendReader:
 
 def _utc_date(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).date().isoformat()
+
+
+def spend_view(
+    snapshot: Snapshot,
+    *,
+    today: str,
+    project_of: Callable[[str], str | None],
+    profiles: Mapping[str, str],
+) -> dict:
+    """The wire object of the last `WINDOW_DAYS` days of `snapshot`, attributed (see the docstring)."""
+    last = date.fromisoformat(today)
+    days = [(last - timedelta(days=n)).isoformat() for n in range(WINDOW_DAYS - 1, -1, -1)]
+    totals: dict[str, Tokens] = {day: Tokens() for day in days}
+    groups: dict[str, dict[str, dict[str, Tokens]]] = {
+        day: {dimension: {} for dimension in DIMENSIONS} for day in days}
+    for key, tokens in snapshot.totals.items():
+        if key.day not in totals:
+            continue
+        totals[key.day] += tokens
+        for dimension, name in _attribute(snapshot, key, project_of, profiles):
+            bucket = groups[key.day][dimension]
+            bucket[name] = bucket.get(name, Tokens()) + tokens
+    return {
+        "approximate": any(total.approximate for total in totals.values()),
+        "days": [{"day": day, "total": totals[day].wire(),
+                  **{dimension: {name: tokens.wire()
+                                 for name, tokens in groups[day][dimension].items()}
+                     for dimension in DIMENSIONS}}
+                 for day in days],
+    }
+
+
+def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | None],
+               profiles: Mapping[str, str]) -> Iterator[tuple[str, str]]:
+    """The (dimension, name) pairs one key is counted under."""
+    session = key.session
+    repo = snapshot.repos.get(session) if session is not None else None
+    project = project_of(repo) if repo is not None else None
+    yield "session", session if session is not None else UNATTRIBUTED
+    yield "project", project if project is not None else UNATTRIBUTED
+    yield "account", profiles.get(session, UNATTRIBUTED) if session is not None else UNATTRIBUTED
+    sprint = None
+    if session is None:
+        yield "sprint", UNATTRIBUTED
+    else:
+        match = MANAGER_SESSION_NAME.fullmatch(snapshot.names.get(session, ""))
+        if match:
+            sprint = match.group("sprint")
+            yield "sprint", sprint
+    if key.source == AGENT:
+        labels = snapshot.journals.get(key.run) if key.run is not None else None
+        label = labels.get(key.agent) if labels is not None else None
+        yield "run", key.run[1] if labels is not None else UNATTRIBUTED
+        yield "phase", phase_of(label) if label is not None else UNATTRIBUTED
+        yield "aspect", DELIVERIES
+    elif key.source == PING:
+        yield "aspect", KEEPALIVE
+    elif session is None:
+        yield "aspect", UNATTRIBUTED
+    else:
+        yield "aspect", MANAGERS if sprint is not None else OUTSIDE

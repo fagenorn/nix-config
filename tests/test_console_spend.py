@@ -311,5 +311,168 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.totals(reader)[Key(DAY, "s1", None, None, SESSION)].input, 10)
 
 
+TODAY = "2026-11-16"
+SPRINT_NAME = (b'{"type":"agent-name","agentName":"p00 sprint 0123456789abcdef",'
+               b'"sessionId":"s1"}\n')
+PING_LINE = ('{"event":"ping","ts":"2026-11-16T09:00:00Z","conversation":"c1",'
+             '"model":"claude-sonnet-4-6","usage":{"input_tokens":3}}\n')
+
+
+class ViewCase(unittest.TestCase):
+    """A projects tree read into a snapshot, and the view over it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.projects = self.tmp / "projects"
+        self.slug = self.projects / "-srv-p00"
+        self.slug.mkdir(parents=True)
+        self.run = self.slug / "s1" / "subagents" / "workflows" / "wf_1"
+        self.run.mkdir(parents=True)
+        self.log = self.tmp / "proxy.log"
+
+    def write(self, path, *lines):
+        path.write_bytes(b"".join(lines))
+
+    def basic(self):
+        m1 = assistant("M1", TODAY, input=10)
+        self.write(self.slug / "s1.jsonl", m1, m1, assistant("M2", TODAY, input=20))
+        self.write(self.run / "journal.jsonl",
+                   b'{"type":"started","agentId":"a1","label":"plan","phase":"Plan"}\n'
+                   b'{"type":"started","agentId":"a2","label":"impl-1","phase":"Tasks"}\n')
+        m3 = assistant("M3", TODAY, input=100, output=1)
+        self.write(self.run / "agent-a1.jsonl", m3, m3, assistant("M4", TODAY, input=200))
+        self.write(self.run / "agent-a2.jsonl", assistant("M5", TODAY, input=1000))
+
+    def view(self, project_of=None, profiles=None):
+        reader = spend.SpendReader(repo_of=lambda cwd: cwd)
+        reader.read([self.projects], SINCE, self.log if self.log.exists() else None)
+        return spend.spend_view(
+            reader.snapshot(), today=TODAY,
+            project_of={"/srv/p00": "p00"}.get if project_of is None else project_of,
+            profiles={"s1": "p1"} if profiles is None else profiles)
+
+    def today(self, **kwargs):
+        return self.view(**kwargs)["days"][-1]
+
+
+class SpendViewTest(ViewCase):
+    def test_session_run_and_phase_equal_unique_message_sums(self):
+        self.basic()
+        d = self.today()
+        self.assertEqual(d["session"]["s1"]["input"], 1330)
+        self.assertEqual(d["run"]["wf_1"]["input"], 1300)
+        self.assertEqual(d["total"]["input"], 1330)
+        plan = priced_input(100) + priced_input(200)
+        plan = plan + spend.priced("claude-sonnet-4-6", {"output_tokens": 1})
+        self.assertEqual(set(d["phase"]), {"plan", "implement"})
+        self.assertEqual((d["phase"]["plan"]["input"], d["phase"]["plan"]["output"]), (300, 1))
+        self.assertEqual(d["phase"]["plan"]["dollars"], plan.wire()["dollars"])
+        self.assertEqual(d["phase"]["implement"], priced_input(1000).wire())
+
+    def test_dimension_sums_equal_total(self):
+        self.basic()
+        d = self.today()
+        for dimension in ("session", "project", "account", "aspect"):
+            with self.subTest(dimension=dimension):
+                self.assertEqual(sum(t["input"] for t in d[dimension].values()),
+                                 d["total"]["input"])
+        self.assertEqual({k: t["input"] for k, t in d["aspect"].items()},
+                         {"outside_sprint": 30, "deliveries": 1300})
+
+    def test_project_and_account(self):
+        self.basic()
+        d = self.today()
+        self.assertEqual(set(d["project"]), {"p00"})
+        self.assertEqual(set(d["account"]), {"p1"})
+        self.assertEqual(d["project"]["p00"]["input"], 1330)
+        d = self.today(project_of=lambda repo: None, profiles={})
+        self.assertEqual(set(d["project"]), {"unattributed"})
+        self.assertEqual(set(d["account"]), {"unattributed"})
+        self.assertEqual(d["project"]["unattributed"]["input"], 1330)
+
+    def test_sprint_and_aspect(self):
+        self.basic()
+        m1 = assistant("M1", TODAY, input=10)
+        self.write(self.slug / "s1.jsonl", SPRINT_NAME, m1, assistant("M2", TODAY, input=20))
+        self.write(self.slug / "s2.jsonl", assistant("M6", TODAY, sid="s2", input=4))
+        self.log.write_text(PING_LINE)
+        d = self.today()
+        self.assertEqual({k: t["input"] for k, t in d["sprint"].items()},
+                         {"0123456789abcdef": 1330, "unattributed": 3})
+        self.assertEqual(d["aspect"]["managers"]["input"], 30)
+        self.assertEqual(d["aspect"]["outside_sprint"]["input"], 4)
+        self.assertEqual(d["aspect"]["deliveries"]["input"], 1300)
+        self.assertEqual(d["aspect"]["keepalive"]["input"], 3)
+        for dimension in ("session", "project"):
+            self.assertEqual(d[dimension]["unattributed"]["input"], 3)
+        self.assertEqual(d["account"]["unattributed"]["input"], 7)  # the ping and s2, no profile
+
+    def test_thirty_days_oldest_first(self):
+        self.basic()
+        self.write(self.slug / "s3.jsonl", assistant("M7", "2026-10-17", sid="s3", input=7))
+        v = self.view()
+        self.assertEqual(len(v["days"]), 30)
+        self.assertEqual(v["days"][0]["day"], "2026-10-18")
+        self.assertEqual(v["days"][-1]["day"], TODAY)
+        empty = v["days"][0]
+        self.assertEqual(empty["total"], Tokens().wire())
+        for dimension in spend.DIMENSIONS:
+            self.assertEqual(empty[dimension], {})
+        snap = spend.Snapshot({Key("2026-10-17", "s1", None, None, SESSION): priced_input(5)},
+                              {}, {}, {}, {})
+        outside = spend.spend_view(snap, today=TODAY, project_of=lambda repo: None, profiles={})
+        self.assertTrue(all(day["total"] == Tokens().wire() for day in outside["days"]))
+
+    def test_approximate_marks_the_day_and_the_view(self):
+        self.write(self.slug / "s1.jsonl",
+                   assistant("A", TODAY, model="claude-opus-9-9", input=5),
+                   assistant("B", "2026-11-15", input=5))
+        v = self.view()
+        self.assertIs(v["days"][-1]["total"]["approximate"], True)
+        self.assertIs(v["days"][-2]["total"]["approximate"], False)
+        self.assertIs(v["approximate"], True)
+        self.write(self.slug / "s1.jsonl", assistant("A", TODAY, input=5))
+        v = self.view()
+        self.assertIs(v["days"][-1]["total"]["approximate"], False)
+        self.assertIs(v["approximate"], False)
+
+
+class UnattributedTest(ViewCase):
+    def test_line_without_session_id(self):
+        line = json.loads(assistant("A", TODAY, input=2))
+        del line["sessionId"]
+        self.write(self.slug / "s1.jsonl", (json.dumps(line) + "\n").encode())
+        d = self.today()
+        for dimension in ("session", "project", "account", "aspect", "sprint"):
+            with self.subTest(dimension=dimension):
+                self.assertEqual({k: t["input"] for k, t in d[dimension].items()},
+                                 {"unattributed": 2})
+
+    def test_run_without_journal(self):
+        run = self.slug / "s1" / "subagents" / "workflows" / "wf_2"
+        run.mkdir(parents=True)
+        self.write(run / "agent-a9.jsonl", assistant("A", TODAY, input=6))
+        d = self.today()
+        self.assertEqual({k: t["input"] for k, t in d["run"].items()}, {"unattributed": 6})
+        self.assertEqual({k: t["input"] for k, t in d["phase"].items()}, {"unattributed": 6})
+        self.assertEqual(set(d["aspect"]), {"deliveries"})
+
+    def test_agent_the_journal_never_started(self):
+        self.write(self.run / "journal.jsonl",
+                   b'{"type":"started","agentId":"a1","label":"plan","phase":"Plan"}\n')
+        self.write(self.run / "agent-a7.jsonl", assistant("A", TODAY, input=8))
+        d = self.today()
+        self.assertEqual(d["run"]["wf_1"]["input"], 8)
+        self.assertEqual({k: t["input"] for k, t in d["phase"].items()}, {"unattributed": 8})
+
+    def test_unknown_label_is_other_not_unattributed(self):
+        self.write(self.run / "journal.jsonl",
+                   b'{"type":"started","agentId":"a1","label":"recover-end-3","phase":"Plan"}\n')
+        self.write(self.run / "agent-a1.jsonl", assistant("A", TODAY, input=8))
+        self.assertEqual(set(self.today()["phase"]), {"other"})
+
+
 if __name__ == "__main__":
     unittest.main()
