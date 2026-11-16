@@ -41,6 +41,9 @@ PROD_ROW = {"default_branch": "main", "integration_branch": "main", "required_ch
 TOOL_PRODUCTION = {**PRODUCTION, "key_files": ["deploy/*.yaml", "ops/runbook.ipynb"],
                    "mcp_tools": ["mcp__deployer__apply"]}
 TOOL_ROW = {**PROD_ROW, "production": TOOL_PRODUCTION}
+MCP_APPLY = "mcp__deployer__apply"
+EDIT_TOOLS = (("Edit", "file_path"), ("Write", "file_path"), ("MultiEdit", "file_path"),
+              ("NotebookEdit", "notebook_path"))
 ABSENT = object()
 EXPECTED_ALLOW = [
     "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
@@ -473,6 +476,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "not-json", "[]", "{}",
             json.dumps({"tool_name": "Read", "tool_input": {"command": "git branch -d x"}}),
             json.dumps({"tool_name": "Bash", "tool_input": {"command": 3}}),
+            json.dumps({"tool_name": "Edit", "tool_input": {}}),
+            json.dumps({"tool_name": "Write", "tool_input": {"file_path": 3}}),
+            json.dumps({"tool_name": "Edit", "tool_input": {"file_path": ""}}),
+            json.dumps({"tool_name": "NotebookEdit", "tool_input": {"file_path": "/x.ipynb"}}),
+            json.dumps({"tool_name": "MultiEdit", "tool_input": "x"}),
         )
         for raw in cases:
             with self.subTest(raw=raw):
@@ -2091,6 +2099,297 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             refused.stderr)
         allowed = self.run_guard("just build", cwd=repo, guard_args=guard_args, timeout=60)
         self.assertEqual(0, allowed.returncode, allowed.stderr)
+
+    # ------------------------------------------------------------------
+    # Issue 1150: the guard also judges file-edit and MCP tool calls. A declared
+    # production MCP tool is refused by name; a write to a declared key file is
+    # refused in the checkout that declares it.
+    # ------------------------------------------------------------------
+
+    def run_tool(self, tool_name, tool_input, cwd=None, guard_args=None):
+        payload = {"tool_name": tool_name, "tool_input": tool_input}
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        if guard_args is None:
+            guard_args = ("--gh-bin", str(self.fake_gh))
+        return self.invoke_raw(json.dumps(payload), *guard_args)
+
+    def tool_args(self, rows):
+        return self.production_args(rows)
+
+    def tool_rows(self):
+        return {NODO: NODO_ROW, PROD: TOOL_ROW}
+
+    def test_a_write_to_a_declared_key_file_is_refused_for_every_edit_tool(self):
+        """A write to a declared key file is refused, in every spelling of the path."""
+        guard_args = self.tool_args(self.tool_rows())
+        glob_rows = {PROD: {**PROD_ROW, "production": {
+            **TOOL_PRODUCTION, "key_files": ["deploy/[!a].yaml"]}}}
+        glob_args = self.tool_args(glob_rows)
+        text = f"is a key file of {PROD} (key file glob "
+
+        def refused(tool, field, path, *more, cwd=None, args=guard_args):
+            result = self.run_tool(tool, {field: str(path)}, cwd=cwd, guard_args=args)
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertIn(text, result.stderr)
+            for expected in more:
+                self.assertIn(expected, result.stderr)
+
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for tool, field in EDIT_TOOLS:
+            with self.subTest(tool=tool):
+                refused(tool, field, prod / "deploy/prod.yaml")
+        with self.subTest(case="directories absent"):
+            refused("Write", "file_path", prod / "deploy/new/dir/x.yaml")
+        with self.subTest(case="notebook"):
+            refused("NotebookEdit", "notebook_path", prod / "ops/runbook.ipynb")
+        with self.subTest(case="relative path"):
+            refused("Edit", "file_path", "deploy/prod.yaml", cwd=prod)
+        with self.subTest(case="dot dot"):
+            refused("Edit", "file_path", prod / "src/../deploy/prod.yaml")
+        with self.subTest(case="alias into the checkout"):
+            alias = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "alias"
+            alias.symlink_to(prod)
+            refused("Edit", "file_path", alias / "deploy/prod.yaml")
+        with self.subTest(case="symlink reaching a key file"):
+            repo = self.make_repo(f"git@github.com:{PROD}.git")
+            (repo / "deploy").mkdir()
+            (repo / "deploy/prod.yaml").write_text("x", encoding="utf-8")
+            (repo / "notes.yaml").symlink_to("deploy/prod.yaml")
+            refused("Edit", "file_path", repo / "notes.yaml")
+        with self.subTest(case="key file that is a symlink to another file"):
+            repo = self.make_repo(f"git@github.com:{PROD}.git")
+            (repo / "deploy").mkdir()
+            (repo / "config").mkdir()
+            (repo / "config/live.yaml").write_text("x", encoding="utf-8")
+            (repo / "deploy/prod.yaml").symlink_to("../config/live.yaml")
+            refused("Edit", "file_path", repo / "deploy/prod.yaml",
+                    "`deploy/prod.yaml` is a key file")
+        with self.subTest(case="key file symlink reached through a directory symlink"):
+            repo = self.make_repo(f"git@github.com:{PROD}.git")
+            (repo / "deploy").mkdir()
+            (repo / "config").mkdir()
+            (repo / "config/live.yaml").write_text("x", encoding="utf-8")
+            (repo / "deploy/prod.yaml").symlink_to("../config/live.yaml")
+            (repo / "links").symlink_to("deploy")
+            refused("Edit", "file_path", repo / "links/prod.yaml",
+                    "`deploy/prod.yaml` is a key file")
+        with self.subTest(case="directory symlink inside the checkout"):
+            repo = self.make_repo(f"git@github.com:{PROD}.git")
+            (repo / "notebooks").mkdir()
+            (repo / "ops").symlink_to("notebooks")
+            refused("NotebookEdit", "notebook_path", repo / "ops/runbook.ipynb",
+                    "(key file glob ops/runbook.ipynb)")
+        with self.subTest(case="glob matches exactly"):
+            repo = self.make_repo(f"git@github.com:{PROD}.git")
+            refused("Write", "file_path", repo / "deploy/A.yaml",
+                    "(key file glob deploy/[!a].yaml)", args=glob_args)
+
+    def test_a_file_a_project_did_not_declare_is_written_freely(self):
+        guard_args = self.tool_args(self.tool_rows())
+        glob_args = self.tool_args({PROD: {**PROD_ROW, "production": {
+            **TOOL_PRODUCTION, "key_files": ["deploy/[!a].yaml"]}}})
+        bare_args = self.tool_args({PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        outside = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        for tool, field in EDIT_TOOLS:
+            for name, path, args in (
+                    ("undeclared file", prod / "README.md", guard_args),
+                    ("near miss", prod / "deploy.yaml", guard_args),
+                    ("another checkout", other / "deploy/prod.yaml", guard_args),
+                    ("outside any checkout", outside / "deploy/prod.yaml", guard_args),
+                    ("no cwd", "deploy/prod.yaml", guard_args),
+                    ("no key files", prod / "deploy/prod.yaml", bare_args),
+                    ("exact glob", prod / "deploy/a.yaml", glob_args)):
+                with self.subTest(tool=tool, case=name):
+                    result = self.run_tool(tool, {field: str(path)}, guard_args=args)
+                    self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_declared_production_mcp_tool_is_refused_wherever_it_is_called(self):
+        guard_args = self.tool_args(self.tool_rows())
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        other = self.make_repo("git@github.com:fagenorn/tool.git")
+        for name, cwd in (("declaring cwd", prod), ("other cwd", other), ("no cwd", None)):
+            with self.subTest(case=name):
+                result = self.run_tool(MCP_APPLY, {}, cwd=cwd, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(f"changes the production of {PROD} (production MCP tool)",
+                              result.stderr)
+        # File order lists acme/deployer first; the refusal names the slug that sorts first.
+        both = self.tool_args({PROD: TOOL_ROW, "acme/alpha": TOOL_ROW})
+        result = self.run_tool(MCP_APPLY, {}, cwd=other, guard_args=both)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("changes the production of acme/alpha (production MCP tool)",
+                      result.stderr)
+        self.assertNotIn("acme/deployer", result.stderr)
+
+    def test_an_mcp_tool_not_declared_as_changing_passes(self):
+        guard_args = self.tool_args(self.tool_rows())
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for name in ("mcp__deployer__status", "mcp__other__apply", "mcp__deployer__apply_all",
+                     "mcp__plugin_x_deployer__apply"):
+            with self.subTest(tool=name):
+                result = self.run_tool(name, {}, cwd=prod, guard_args=guard_args)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_bad_compiled_policy_blocks_no_edit_and_no_mcp_call(self):
+        """AC3: a compiled policy that does not load never refuses a tool call."""
+        held = Path(self.fixture_dir.name)
+        broken = held / "broken-tools.json"
+        broken.write_text("{", encoding="utf-8")
+        deep = held / "deep-tools.json"
+        deep.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        policies = (
+            ("missing", held / "absent-tools.json"), ("not json", broken),
+            ("a bad row", self.write_policy(
+                derived_repositories={PROD: TOOL_ROW, NODO: {**NODO_ROW, "owner": "x"}},
+                derivation={})),
+            ("a bad key file", self.write_policy(
+                derived_repositories={PROD: {**PROD_ROW, "production": {
+                    **TOOL_PRODUCTION, "key_files": [""]}}}, derivation={})),
+            ("deeply nested", deep))
+        for name, path in policies:
+            args = ("--gh-bin", str(self.fake_gh), "--policy", str(path))
+            for tool, field in EDIT_TOOLS:
+                with self.subTest(policy=name, tool=tool):
+                    result = self.run_tool(
+                        tool, {field: str(prod / "deploy/prod.yaml")}, guard_args=args)
+                    self.assertEqual(0, result.returncode, result.stderr)
+            with self.subTest(policy=name, tool=MCP_APPLY):
+                result = self.run_tool(MCP_APPLY, {}, guard_args=args)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_an_ordinary_edit_or_mcp_call_starts_no_child(self):
+        log = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "git.log"
+        logging_git = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "git"
+        logging_git.write_text(
+            f"#!/bin/sh\necho \"$*\" >> '{log}'\nexec '{self.base_policy['git_bin']}' \"$@\"\n",
+            encoding="utf-8")
+        logging_git.chmod(0o755)
+        guard_args = (*self.tool_args(self.tool_rows()), "--git-bin", str(logging_git))
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for tool, tool_input, code in (
+                ("Edit", {"file_path": str(prod / "README.md")}, 0),
+                ("Write", {"file_path": str(prod / "src/x.py")}, 0),
+                ("mcp__other__x", {}, 0), (MCP_APPLY, {}, 2)):
+            with self.subTest(tool=tool):
+                result = self.run_tool(tool, tool_input, guard_args=guard_args)
+                self.assertEqual(code, result.returncode, result.stderr)
+                self.assertFalse(log.exists())
+        result = self.run_tool("Edit", {"file_path": str(prod / "deploy/prod.yaml")},
+                               guard_args=guard_args)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertTrue(log.exists())
+
+    def test_a_key_file_write_is_refused_when_the_checkout_lookup_fails(self):
+        slow = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "git"
+        slow.write_text("#!/bin/sh\nexec sleep 3\n", encoding="utf-8")
+        slow.chmod(0o755)
+        guard_args = (*self.tool_args(self.tool_rows()), "--git-bin", str(slow),
+                      "--child-timeout-seconds", "0.3")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        result = self.run_tool("Edit", {"file_path": str(prod / "deploy/prod.yaml")},
+                               guard_args=guard_args)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("repository lookup timed out", result.stderr)
+        result = self.run_tool("Edit", {"file_path": str(prod / "README.md")},
+                               guard_args=guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_base_policy_is_read_only_for_a_key_file_candidate(self):
+        broken = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "base.json"
+        broken.write_text("{", encoding="utf-8")
+        guard_args = (*self.tool_args(self.tool_rows()), "--base-policy", str(broken))
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        result = self.run_tool("Edit", {"file_path": str(prod / "README.md")},
+                               guard_args=guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+        result = self.run_tool(MCP_APPLY, {}, guard_args=guard_args)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("(production MCP tool)", result.stderr)
+        result = self.run_tool("Edit", {"file_path": str(prod / "deploy/prod.yaml")},
+                               guard_args=guard_args)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn("lifecycle guard: invalid policy:", result.stderr)
+
+    def test_the_key_file_and_mcp_refusals_are_one_sentence(self):
+        guard_args = self.tool_args(self.tool_rows())
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        result = self.run_tool("Edit", {"file_path": str(prod / "deploy/prod.yaml")},
+                               guard_args=guard_args)
+        self.assertEqual(
+            f"lifecycle guard: `deploy/prod.yaml` is a key file of {PROD} "
+            "(key file glob deploy/*.yaml), so it changes only through the release profile "
+            "forge-main with release transaction preview and release transaction run.\n",
+            result.stderr)
+        result = self.run_tool(MCP_APPLY, {}, guard_args=guard_args)
+        self.assertEqual(
+            f"lifecycle guard: `mcp__deployer__apply` changes the production of {PROD} "
+            "(production MCP tool), so it runs only through the release profile "
+            "forge-main with release transaction preview and release transaction run.\n",
+            result.stderr)
+
+    def test_a_compiled_key_file_and_mcp_tool_round_trip_through_the_guard(self):
+        """The issue's demo: the compiler's row drives the refusals."""
+        def declare(contract):
+            contract["production"] = {
+                "none": False,
+                "changes": {"commands": ["nix-activate"], "key_files": ["deploy/*.yaml"],
+                            "mcp_tools": ["mcp__deployer__apply"]},
+                "read_only": {"commands": ["nix-build"],
+                              "mcp_tools": ["mcp__deployer__status"]},
+                "release_profile": "github-release"}
+
+        world = GuardPolicyWorld(self)
+        world.project("fixture/prodfix", "fagenorn/prodfix", mutate=declare)
+        code, report, stderr = world.compile(base=BASE_POLICY_PATH)
+        self.assertEqual((0, ["fagenorn/prodfix"]), (code, report["derived"]), stderr)
+        repo = self.make_repo("git@github.com:fagenorn/prodfix.git")
+        guard_args = ("--gh-bin", str(self.fake_gh), "--policy", str(world.output),
+                      "--derive-bin", str(world.row_check()))
+        refused = self.invoke_raw(json.dumps({
+            "tool_name": "Edit", "tool_input": {"file_path": str(repo / "deploy/prod.yaml")}}),
+            *guard_args, timeout=60)
+        self.assertEqual(2, refused.returncode, refused.stderr)
+        self.assertEqual(
+            "lifecycle guard: `deploy/prod.yaml` is a key file of fagenorn/prodfix "
+            "(key file glob deploy/*.yaml), so it changes only through the release profile "
+            "github-release with release transaction preview and release transaction run.\n",
+            refused.stderr)
+        refused = self.invoke_raw(json.dumps({"tool_name": MCP_APPLY, "tool_input": {}}),
+                                  *guard_args, timeout=60)
+        self.assertEqual(2, refused.returncode, refused.stderr)
+        self.assertIn("fagenorn/prodfix", refused.stderr)
+        for tool, tool_input in (("mcp__deployer__status", {}),
+                                 ("Edit", {"file_path": str(repo / "README.md")})):
+            with self.subTest(tool=tool):
+                allowed = self.invoke_raw(
+                    json.dumps({"tool_name": tool, "tool_input": tool_input}),
+                    *guard_args, timeout=60)
+                self.assertEqual(0, allowed.returncode, allowed.stderr)
+
+    def test_a_key_file_differing_only_in_case_follows_the_file_system(self):
+        guard_args = self.tool_args(self.tool_rows())
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        (prod / "deploy").mkdir()
+        (prod / "deploy/prod.yaml").write_text("x", encoding="utf-8")
+        probe = Path(self.fixture_dir.name) / "CaseProbe"
+        probe.write_text("x", encoding="utf-8")
+        insensitive = Path(self.fixture_dir.name, "caseprobe").exists()
+        first = self.run_tool("Edit", {"file_path": str(prod / "DEPLOY/Prod.YAML")},
+                              guard_args=guard_args)
+        second = self.run_tool("Write", {"file_path": str(prod / "Deploy/new.yaml")},
+                               guard_args=guard_args)
+        if insensitive:
+            self.assertEqual(2, first.returncode, first.stderr)
+            self.assertIn(f"`deploy/prod.yaml` is a key file of {PROD}", first.stderr)
+            self.assertEqual(2, second.returncode, second.stderr)
+            self.assertIn(f"`deploy/new.yaml` is a key file of {PROD}", second.stderr)
+        else:
+            self.assertEqual(0, first.returncode, first.stderr)
+            self.assertEqual(0, second.returncode, second.stderr)
 
     # ------------------------------------------------------------------
     # Release arm: the declared integration branch promoted into the default
