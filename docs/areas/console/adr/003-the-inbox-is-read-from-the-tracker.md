@@ -1,6 +1,6 @@
 # ADR-console-003 — The inbox is read from the tracker every two minutes, for active projects only
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-054
 - **Decided in:** #838, #859
 
 ## Context
@@ -10,7 +10,7 @@ The inbox lists what waits on the owner: the live owner-action markers of open i
 ## Decision
 
 - **Activity rule.** A project is read only while it is active: its last log event or the newest git write of its checkout (`FETCH_HEAD`, `logs/HEAD`, `index`, of the common git dir and every linked worktree) is at most 86400 seconds old. A project without a GitHub checkout is never read. The poll runs every 120 seconds and reads one project after another, outside the ingest lock.
-- **One search, at most four calls.** One GraphQL search per repository asks for open items carrying the `owner-action` or `owner-answered` label, 25 a page and the last 100 comments each, and pages at most four times (`inbox.MAX_CALLS`); more is a failed read. Markers decide, labels filter: only comments of a trusted author association (owner, member, collaborator) are parsed, so a stranger's comment never raises an item. A comment's id is `fullDatabaseId` (the 32-bit `databaseId` is too small for current ids) and a node's kind is its `__typename`.
+- **One search, at most four calls.** One GraphQL search per repository asks for open items carrying the `owner-action` or `owner-answered` label, 25 a page and the last 100 comments each, and pages at most four times (`inbox.MAX_CALLS`); more is a failed read. Since ADR-console-054 a second search for `needs-verification` runs after it, at most four calls, and never fails the read: past its last call it keeps what it read. Markers decide, labels filter: only comments of a trusted author association (owner, member, collaborator) are parsed, so a stranger's comment never raises an item. A comment's id is `fullDatabaseId` (the 32-bit `databaseId` is too small for current ids) and a node's kind is its `__typename`.
 - **Held work.** An issue holds one plus the issues it blocks (`issueDependenciesSummary.blocking`), a pull request holds one; open items are ordered by it.
 - **Seen, changed, gone.** A read is folded onto the log as `inbox.seen` (new key), `inbox.changed` (same key, different content) and `inbox.gone` (key no longer read), so an unchanged re-read appends nothing and "waiting since" is the time of the `seen` event, which survives a restart.
 - **Read health is logged only on change.** `inbox.health` is appended when a project's read goes from good to failed or back, never on a repeat. A failed read keeps the last items, marks them stale with the time of the last good read, and is stderr `console: tracker_failed <project> <Type>: <message>`. With nothing known the headline says the tracker cannot be read, never "Nothing needs you". Because the health is in the log, a restart shows a failed read as failed before any poll.

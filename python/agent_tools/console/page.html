@@ -2216,9 +2216,28 @@ function checkLabel(item) {
 function isOwnerCheck(item) {
   return typeof item.check_id === "string";
 }
+// A Before picture reads ahead of the After picture of the same width, whatever order the files are named in; every other order is kept.
+function beforeFirst(pictures) {
+  if (!Array.isArray(pictures)) return pictures;
+  const lead = (p) => /^(Before|After)(?:, (\d+) px)?$/.exec(pictureCaption(p.line));
+  const out = [];
+  for (const p of pictures) {
+    const own = lead(p);
+    let at = out.length;
+    if (own !== null && own[1] === "Before") {
+      const earlier = out.findIndex((q) => {
+        const other = lead(q);
+        return other !== null && other[1] === "After" && other[2] === own[2];
+      });
+      if (earlier !== -1) at = earlier;
+    }
+    out.splice(at, 0, p);
+  }
+  return out;
+}
 // An owner check's pictures (ADR-console-045) reuse the shared gallery and viewer of ADR-console-038.
 function checkPictures(node, item) {
-  const gallery = pictureGallery(itemId(item), item.pictures, pictureCaption);
+  const gallery = pictureGallery(itemId(item), beforeFirst(item.pictures), pictureCaption);
   if (gallery !== null) node.appendChild(gallery);
   if (!Array.isArray(item.missing_pictures)) return;
   for (const name of item.missing_pictures) node.appendChild(el("p", "pic-missing", name + " was not found on this host."));
@@ -3148,6 +3167,7 @@ const ANSWER_LABELS = {
   approval: { approve: "Approve" },
   "paid-approval": { approve: "Approve" },
   "stale-check": { keep: "Keep waiting", drop: "Accept without the host" },
+  "owner-review": { passed: "Approve" },
 };
 function draftOf(key) {
   return drafts.get(key) || { value: "", start: 0, end: 0 };
@@ -3171,8 +3191,9 @@ function typedArea(cls, label, placeholder) {
   return area;
 }
 function noteBox(item, state, box) {
-  const area = typedArea("note-text", "Note", "Write a note");
-  const send = actionButton("ans-note", "Send note", () => {
+  const review = item.kind === "owner-review";
+  const area = typedArea("note-text", "Note", review ? "What is not right yet" : "Write a note");
+  const send = actionButton("ans-note", review ? "Not yet" : "Send note", () => {
     const text = area.value;
     if (text.trim() === "") return;
     if (startCheck(item, state, "note", { note: text })) redraw();
