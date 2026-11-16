@@ -78,9 +78,11 @@ Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one li
  "next": "start the resume slice when 12 lands"}
 ```
 
+A merge the guard refuses is reported, never asked. When the guard refuses a merge that a delivery of this sprint attempts, for example because required checks are not green, send a report at once whose `status` starts with `merge refused: ` followed by the guard's reason in plain words, with no issue or pull request number: `merge refused: required checks are not green`. Never send a `sprint ask` question about it and never list its issue in `inbox`: the owner cannot act on it, and the page shows it in the sprint's line. Keep that start on each later report while the merge stays refused, because a report without it clears the line, and drop it on the first report after the merge lands; the owner's digest says a repeated identical refusal once.
+
 ## Questions
 
-1. Decide every reversible matter inside the approved brief yourself, and answer a delivery's "may I proceed" yourself.
+1. Decide every reversible matter inside the approved brief yourself, and answer a delivery's "may I proceed" yourself. A merge the guard refuses is not a real choice: report it as Reporting says and ask nothing about it.
 2. Bring every real choice, one only the owner can make, in one round: collect the questions and send them together with `sprint ask --round-file -`, a JSON object on standard input, `{"questions": [{"question": ..., "context": ..., "blocks": ..., "options": [...], "recommended": ...}]}`:
    - `question`: the ask: one sentence of at most 140 characters, written as the question the owner answers.
    - `context`: optional, at most 400 characters: the cause and the evidence the owner needs to answer.
