@@ -21,6 +21,7 @@
 | Account binding | Hosts |
 | Account profile | Hosts |
 | Accounts panel | Console |
+| Activation line | Console |
 | Activation unit | Release |
 | Adapter | Release |
 | Adoption | Project contract |
