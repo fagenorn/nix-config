@@ -16,6 +16,11 @@ with `/` separators; values are git blob ids (`blob_id`).
 (not under `__pycache__`, not `.pyc`) that `running` does not hold. The result is sorted, without
 duplicates.
 
+`Activation.local_behind` is True when the checkout's own `HEAD` does not hold, for some changed
+path, the blob origin holds (or its read failed): a `just switch` there would build the stale local
+tree and reinstall the same console, so the line asks for the checkout to be updated first. It is
+False when `HEAD` already carries every changed path as origin does.
+
 `reading(roots, running)` reads only `refs/remotes/origin/<branch>` of each checkout, where
 `<branch>` is the integration branch of the checkout's project contract, never the local branch or
 the working tree. It returns `Activation(root, changed)` for the first root in sorted order whose
@@ -58,6 +63,7 @@ class ReadFailed(Exception):
 class Activation:
     root: str
     changed: tuple[str, ...]
+    local_behind: bool = False
 
 
 def blob_id(data: bytes) -> str:
@@ -136,6 +142,27 @@ def _git(root: str, *arguments: str) -> bytes:
     return done.stdout
 
 
+def _tree_files(root: str, commit: str) -> dict[str, str]:
+    """Repository path -> blob id of every blob under `python/agent_tools` at `commit`."""
+    tree = _git(root, "ls-tree", "-r", "-z", "--full-tree", commit, "--", f"{SOURCE_DIR}/{_PACKAGE}")
+    files: dict[str, str] = {}
+    for record in tree.split(b"\0"):
+        if not record:
+            continue
+        head, tab, path = record.partition(b"\t")
+        fields = head.split(b" ")
+        if not tab or len(fields) != 3:
+            raise ReadFailed(f"{root}: git ls-tree gave a malformed record")
+        if fields[1] == b"blob":
+            files[path.decode("utf-8", "replace")] = fields[2].decode("ascii", "replace")
+    return files
+
+
+def local_files(root: str) -> dict[str, str]:
+    """Repository path -> blob id of every blob under `python/agent_tools` at the checkout's `HEAD`."""
+    return _tree_files(root, "HEAD")
+
+
 def origin_files(root: str, branch: str) -> dict[str, str] | None:
     """Repository path -> blob id of every blob under `python/agent_tools` on `refs/remotes/origin/<branch>`.
 
@@ -150,18 +177,7 @@ def origin_files(root: str, branch: str) -> dict[str, str] | None:
             commit = object_id
     if commit is None:
         return None
-    tree = _git(root, "ls-tree", "-r", "-z", "--full-tree", commit, "--", f"{SOURCE_DIR}/{_PACKAGE}")
-    files: dict[str, str] = {}
-    for record in tree.split(b"\0"):
-        if not record:
-            continue
-        head, tab, path = record.partition(b"\t")
-        fields = head.split(b" ")
-        if not tab or len(fields) != 3:
-            raise ReadFailed(f"{root}: git ls-tree gave a malformed record")
-        if fields[1] == b"blob":
-            files[path.decode("utf-8", "replace")] = fields[2].decode("ascii", "replace")
-    return files
+    return _tree_files(root, commit)
 
 
 def changed_paths(running: Mapping[str, str], origin: Mapping[str, str]) -> tuple[str, ...]:
@@ -191,12 +207,28 @@ def integration_branch(root: str) -> str | None:
     return branch
 
 
+def _local_behind(
+    root: str,
+    changed: tuple[str, ...],
+    origin: Mapping[str, str],
+    local: Callable[[str], Mapping[str, str]],
+) -> bool:
+    if not changed:
+        return False
+    try:
+        held = local(root)
+    except ReadFailed:
+        return True
+    return any(held.get(path) != origin.get(path) for path in changed)
+
+
 def reading(
     roots: Iterable[str],
     running: Mapping[str, str],
     *,
     branch_of: Callable[[str], str | None] = integration_branch,
     tree: Callable[[str, str], Mapping[str, str] | None] = origin_files,
+    local: Callable[[str], Mapping[str, str]] = local_files,
 ) -> Activation | None:
     """The activation reading of the first root whose origin carries the console; see the module docstring."""
     failures: list[str] = []
@@ -208,7 +240,8 @@ def reading(
             failures.append(str(error))
             continue
         if origin is not None and ENTRY in origin:
-            return Activation(root, changed_paths(running, origin))
+            changed = changed_paths(running, origin)
+            return Activation(root, changed, _local_behind(root, changed, origin, local))
     if failures:
         raise ReadFailed("; ".join(failures))
     return None

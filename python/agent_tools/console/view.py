@@ -62,7 +62,9 @@ Wire format, one object:
      "activation": <activation line> | null}
 
 `activation` is the one line the page shows when a console change has merged and this host is not
-yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": "<root>"}`. The
+yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": "<root>"}`; the text is
+ACTIVATION_BEHIND_TEXT instead when the reading's `local_behind` is set, because that checkout must be
+updated to origin before `just switch` there builds the change. The
 member is on every view and is null when `derive_view` is given no `activation` reading (the
 `activation.py` `Activation`) or one whose `changed` is empty. It is a line beside the statement,
 not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
@@ -689,6 +691,8 @@ INBOX_GONE = "inbox.gone"
 INBOX_HEALTH = "inbox.health"
 ACTIVATE_COMMAND = "just switch"
 ACTIVATION_TEXT = "A console change merged and is not active on this host: run {command} in {root}."
+ACTIVATION_BEHIND_TEXT = ("A console change merged and is not active on this host: run {command} in {root} "
+                          "once it is updated to origin's integration branch.")
 
 
 @dataclass(frozen=True)
@@ -1585,7 +1589,8 @@ def derive_view(
                 key=lambda p: (p.failed_at, p.sprint_id))],
         "activation": (
             None if activation is None or not activation.changed else
-            {"text": ACTIVATION_TEXT.format(command=ACTIVATE_COMMAND, root=activation.root),
+            {"text": (ACTIVATION_BEHIND_TEXT if activation.local_behind else ACTIVATION_TEXT).format(
+                command=ACTIVATE_COMMAND, root=activation.root),
              "command": ACTIVATE_COMMAND, "root": activation.root}),
     }
 

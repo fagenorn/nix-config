@@ -154,6 +154,27 @@ class ActivationReadingTest(Trees):
         self.advance({"python/agent_tools/system/util.py": "X = 2\n"})
         self.assertEqual(self.read().changed, ("python/agent_tools/system/util.py",))
 
+    def test_a_checkout_behind_the_compared_origin_is_marked_behind(self):
+        self.assertFalse(self.read().local_behind)
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        self.assertTrue(self.read().local_behind)
+
+    def test_a_checkout_that_already_holds_the_origin_change_is_not_behind(self):
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        git(self.checkout, "merge", "-q", "--ff-only", "origin/main")
+        result = self.read()
+        self.assertEqual(result.changed, (f"{CONSOLE}/view.py",))
+        self.assertFalse(result.local_behind)
+
+    def test_a_failed_read_of_the_checkout_counts_as_behind(self):
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        git(self.checkout, "merge", "-q", "--ff-only", "origin/main")
+
+        def failing(root):
+            raise activation.ReadFailed("no head")
+
+        self.assertTrue(self.read(local=failing).local_behind)
+
     def test_a_change_outside_the_console_files_is_not_named(self):
         self.advance({"docs/notes.md": "more\n", "python/agent_tools/verification/other.py": "Y = 2\n"})
         self.assertEqual(self.read().changed, ())
@@ -220,15 +241,23 @@ class ActivationReadingTest(Trees):
 
 
 class ActivationViewTest(Trees):
-    def line(self, root):
-        return {"text": f"A console change merged and is not active on this host: run just switch in {root}.",
+    def line(self, root, tail="."):
+        return {"text": f"A console change merged and is not active on this host: run just switch in {root}{tail}",
                 "command": "just switch", "root": root}
 
     def read(self):
         return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main")
 
-    def test_a_console_file_behind_origin_shows_the_line(self):
+    def test_a_console_file_behind_origin_shows_the_line_after_the_checkout_is_updated(self):
         self.advance({"python/agent_tools/console/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        result = view.derive_view([], activation=self.read())
+        self.assertEqual(
+            result["activation"],
+            self.line(str(self.checkout), " once it is updated to origin's integration branch."))
+
+    def test_an_updated_checkout_shows_the_plain_line(self):
+        self.advance({"python/agent_tools/console/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        git(self.checkout, "merge", "-q", "--ff-only", "origin/main")
         result = view.derive_view([], activation=self.read())
         self.assertEqual(result["activation"], self.line(str(self.checkout)))
 

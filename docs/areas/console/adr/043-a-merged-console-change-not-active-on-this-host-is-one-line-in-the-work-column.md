@@ -15,7 +15,7 @@ On 16 November the console ran stale after a console change merged: nothing on t
 
 **D3. The checkout and the branch.** The integration branch is the project contract's `vcs.integration_branch`. The checkout named is the first registered root, by sorted root, whose origin tree carries `python/agent_tools/console/console.py`.
 
-**D4. The line.** Exactly: "A console change merged and is not active on this host: run just switch in <root>." The command is `just switch`, the recipe both the macOS and the Linux `switch` of the justfile define; a test pins it to the justfile. The command is drawn in a code span in the system monospace stack, and the root breaks after a slash (ADR-console-037). When nothing differs the page draws nothing, not an empty line.
+**D4. The line.** Exactly: "A console change merged and is not active on this host: run just switch in <root>." The command is `just switch`, the recipe both the macOS and the Linux `switch` of the justfile define; a test pins it to the justfile. The command is drawn in a code span in the system monospace stack, and the root breaks after a slash (ADR-console-037). When the checkout's own `HEAD` does not yet hold a changed file as origin does (or its read failed), the line instead ends "once it is updated to origin's integration branch", because `just switch` builds the local tree and would reinstall the same console. When nothing differs the page draws nothing, not an empty line.
 
 **D5. Not counted.** The line is not an inbox item and not in the statement: the headline and the inbox count do not change, and no action is attached to it.
 
