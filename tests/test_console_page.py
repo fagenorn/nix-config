@@ -10368,7 +10368,11 @@ class WaitingLinePageTest(unittest.TestCase):
         self.assertEqual(line.get("font-size"), check.get("font-size"))
         (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
         self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
-        self.assertEqual(css_declared(narrow, ".sprint-checks .wait"), {})
+        # At 480 px the check line is a 44 px tap target with its text at the top; the waiting
+        # line takes the same box, so the gap below it is the check line's too.
+        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"),
+                         css_declared(narrow, ".sprint-check").get("min-height"))
+        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"), "44px")
 
     def test_a_project_with_only_waits_draws_its_name_and_its_line(self) -> None:
         frame = view([{**project(1, []), "waits": [UNDATED_WAIT]}])

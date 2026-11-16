@@ -431,6 +431,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
   .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
+  .sprint-checks .wait { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -1619,7 +1620,7 @@ function projectLine(entry) {
   }
   return line;
 }
-// A not-due owner check (#1129, ADR-console-052): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
+// A not-due owner check (#1129, ADR-console-053): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
 function waitLine(wait, tag) {
   const line = el(tag, "wait");
   if (typeof wait.until === "string") {
