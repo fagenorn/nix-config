@@ -350,6 +350,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "tracker_url": "<url>" | null,
                       "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
                       "waiting": <int>,
+                      "checks": [{"project_id", "key", "issue", "question", "text"}, ...],
                       "sessions": [<session entry>, ...],
                       "messages": [<message entry>, ...],
                       "reach_text": "manager not reachable" | null,
@@ -420,7 +421,11 @@ where a run's `done` reads `closed out` and any other run stage is that stage wi
 never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
-report's issues or its `inbox` numbers, plus the sprint's open questions.
+report's issues or its `inbox` numbers, plus the sprint's open questions. An open owner check (a
+verification prompt, ADR-console-043) whose `blocking` list meets none of the sprint's open issues
+(report issues not landed, held, dropped or closed out) is not counted and is listed in `checks`
+instead; a missing or malformed `blocking` counts as blocking. `checks` is ordered by
+`waiting_since` then `key`, and each check stays an inbox item.
 A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms`
 None) or while one of the sprint's listed sessions works, it moves. Else it is the latest of the
 approved brief's time (`decided_at`, else the sent time), the report's time, the fold's `moved_ms`
@@ -546,6 +551,7 @@ from agent_tools.console.sprints import (
     BALL_NOBODY,
     BALL_OWNER,
     BALL_TEXT,
+    CHECK_LINE_TEXT,
     CLOSED_OUT,
     CLOSING,
     CLOSING_TEXT,
@@ -630,6 +636,7 @@ from agent_tools.console.sprints import (
     sprint_title,
     unreachable,
 )
+from agent_tools.verification import verify_owner
 
 SHOWN_MESSAGES = 10
 REGISTERED = "project.registered"
@@ -917,12 +924,42 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
     return rows
 
 
-def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
-    """How many open items wait on the sprint: `records` naming an issue its report names, plus its
-    open questions."""
+def owner_check(item: Mapping) -> bool:
+    """Whether a tracker item is a verification owner prompt (ADR-console-043)."""
+    return item.get("reason") in verify_owner.REASONS
+
+
+def sprint_open_issues(state: SprintState) -> frozenset[int]:
+    """The issues of the sprint's report that are not landed, held, dropped or closed out; empty
+    with no report."""
+    if state.report is None:
+        return frozenset()
+    return frozenset(issue for issue, stage, _ in _effective_stages(state)
+                     if stage not in (LANDED, HELD, DROPPED, CLOSED_OUT))
+
+
+def _sprint_named(state: SprintState, records: Iterable[InboxRecord]) -> list[InboxRecord]:
     report = state.report
     named = set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
-    return sum(r.item.get("issue") in named for r in records) + len(open_questions(state))
+    return [r for r in records if r.item.get("issue") in named]
+
+
+def sprint_checks(state: SprintState, records: Iterable[InboxRecord]) -> list[InboxRecord]:
+    """The sprint's open owner checks that block none of its open issues (ADR-console-043), ordered
+    by `waiting_since` then `key`. A `blocking` that is missing or not a list counts as blocking."""
+    open_issues = sprint_open_issues(state)
+    checks = [r for r in _sprint_named(state, records)
+              if owner_check(r.item) and isinstance(r.item.get("blocking"), list)
+              and open_issues.isdisjoint(r.item["blocking"])]
+    return sorted(checks, key=lambda r: (r.waiting_since, r.item["key"]))
+
+
+def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
+    """How many open items wait on the sprint: `records` naming an issue its report names, minus
+    its check lines (`sprint_checks`), plus its open questions."""
+    named = _sprint_named(state, records)
+    checks = sprint_checks(state, named)
+    return len(named) - len(checks) + len(open_questions(state))
 
 
 def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str]) -> int | None:
@@ -1133,6 +1170,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                      for issue, stage in closing.issues) if closing is not None
               else [] if report is None else _effective_stages(state))
     waiting = sprint_waiting(state, records)
+    checks = sprint_checks(state, records)
     counts = {
         "landed": sum(stage == LANDED for _, stage, _ in stages),
         "in_delivery": sum(stage not in (LANDED, HELD, QUEUED) for _, stage, _ in stages),
@@ -1178,6 +1216,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "issues": [{"issue": issue, "stage": stage, "stage_text": text}
                    for issue, stage, text in stages],
         "waiting": waiting,
+        "checks": [{"project_id": r.item["project_id"], "key": r.item["key"],
+                    "issue": r.item["issue"], "question": r.item["question"],
+                    "text": CHECK_LINE_TEXT.format(question=r.item["question"])}
+                   for r in checks],
         "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)

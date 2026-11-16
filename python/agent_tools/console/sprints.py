@@ -227,7 +227,7 @@ order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the stage phrase
 (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
-line and never shortened.
+line and never shortened. A sprint's check line (#1111) reads `CHECK_LINE_TEXT`.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
@@ -591,6 +591,7 @@ NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
 NOW_STARTING_TEXT = "starting the work"
 NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
 NOW_QUIET_TEXT = "last seen {phrase}"
+CHECK_LINE_TEXT = "Your check: {question}"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
