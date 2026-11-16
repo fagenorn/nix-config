@@ -1,16 +1,19 @@
 """Read-only stand-in for `gh`, installed by the tracked-issue eval setup.
 
-Usage: gh.py --repo <sandbox repo> --log <calls log> <gh argv...>
+Usage: gh.py --repo <sandbox repo> --log <calls log> [--pulls <pulls.json>] <gh argv...>
 
 It answers the GitHub calls a lifecycle owner makes about the fixture's seeded issue
 (`issues/<nnn>-*.md`: open, no labels, no comments, no blockers) and refuses everything
-that would publish, so a run ends at the forge boundary. Every call appends
-`{"argv": [...], "exit": n}` to the log.
+that would publish, so a run ends at the forge boundary. With `--pulls` it also answers
+reads of the pull requests in that JSON file (`pr list`, `pr view`), and `api` reads of an
+issue and its comments; `api` writes, `pr create`, `pr merge` and `pr checks` stay refused.
+Every call appends `{"argv": [...], "exit": n}` to the log.
 """
 
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -62,6 +65,93 @@ def load_issue(repo, number):
     }
 
 
+def flag_present(args, *names):
+    """True when any of `names` is in `args`; each is removed from `args`."""
+    found = False
+    while any(argument in names for argument in args):
+        args.remove(next(argument for argument in args if argument in names))
+        found = True
+    return found
+
+
+def keep_fields(pull, fields):
+    wanted = fields.split(",")
+    unknown = [name for name in wanted if name not in pull]
+    if unknown:
+        raise ShimError("gh shim: unknown JSON field: %s" % ",".join(unknown))
+    return {name: pull[name] for name in wanted}
+
+
+def pr_list(pulls, args):
+    args = list(args)
+    flag_value(args, "--repo", "-R")
+    flag_value(args, "--search", "-S")
+    flag_value(args, "--limit", "-L")
+    state = flag_value(args, "--state", "-s") or "open"
+    head = flag_value(args, "--head", "-H")
+    fields = flag_value(args, "--json")
+    jq_expression = flag_value(args, "--jq", "-q")
+    found = [pull for pull in pulls
+             if (state == "all" or pull["state"] == state.upper())
+             and (head is None or pull["headRefName"] == head)]
+    if fields is not None:
+        found = [keep_fields(pull, fields) for pull in found]
+    emit(found, jq_expression)
+
+
+def pr_view(pulls, args):
+    args = list(args)
+    flag_value(args, "--repo", "-R")
+    fields = flag_value(args, "--json")
+    jq_expression = flag_value(args, "--jq", "-q")
+    if len(args) != 1:
+        raise ShimError("gh shim: pr view takes one pull request number or branch")
+    found = [pull for pull in pulls if args[0] in (str(pull["number"]), pull["headRefName"])]
+    if not found:
+        raise ShimError("no pull requests found for branch")
+    pull = found[0]
+    if fields is None:
+        if jq_expression is not None:
+            raise ShimError("gh shim: --jq needs --json")
+        print("title:\t%s\nstate:\t%s\nurl:\t%s\n--\n%s" % (pull["title"], pull["state"], pull["url"], pull["body"]))
+        return
+    emit(keep_fields(pull, fields), jq_expression)
+
+
+def api_read(repo, args):
+    """Answer a read of one issue or its comments; refuse every write and any other path."""
+    for index, argument in enumerate(args):
+        method = None
+        if argument in ("-X", "--method") and index + 1 < len(args):
+            method = args[index + 1]
+        elif argument.startswith("--method="):
+            method = argument[len("--method="):]
+        elif argument.startswith("-X") and len(argument) > 2:
+            method = argument[2:]
+        writes = argument in ("-f", "-F", "--field", "--raw-field", "--input") or argument.startswith(
+            ("--field=", "--raw-field=", "--input="))
+        if writes or (method is not None and method.upper() != "GET"):
+            raise ShimError("gh shim: api writes are not available in this sandbox")
+    words = list(args[1:])
+    flag_present(words, "--paginate")
+    slurp = flag_present(words, "--slurp")
+    jq_expression = flag_value(words, "--jq", "-q")
+    while flag_value(words, "-H", "--header") is not None:
+        pass
+    flag_value(words, "-X", "--method")
+    path = words[0].partition("?")[0] if len(words) == 1 else ""
+    issue = re.fullmatch(r"repos/[^/]+/[^/]+/issues/(\d+)", path)
+    comments = re.fullmatch(r"repos/[^/]+/[^/]+/issues/(\d+)/comments", path)
+    if issue:
+        found = load_issue(repo, int(issue.group(1)))
+        emit({"number": found["number"], "title": found["title"], "body": found["body"],
+              "state": "open", "labels": [], "user": {"login": "owner"}}, jq_expression)
+    elif comments:
+        emit([[]] if slurp else [], jq_expression)
+    else:
+        raise ShimError("gh shim: api %s is not available in this sandbox" % (path or "this call"))
+
+
 def issue_view(repo, args):
     flag_value(args, "--repo", "-R")
     fields = flag_value(args, "--json")
@@ -81,15 +171,21 @@ def issue_view(repo, args):
     emit({name: issue[name] for name in wanted}, jq_expression)
 
 
-def run(repo, args):
-    """Answer one call; return its exit code."""
+def run(repo, args, pulls=None):
+    """Answer one call; return its exit code. `pulls` is the pull request list, or None."""
     verb = args[:2]
     if verb == ["issue", "view"]:
         issue_view(repo, args[2:])
     elif args[:1] == ["api"] and any("sub_issues" in a or "dependencies" in a for a in args):
         emit([], flag_value(list(args), "--jq", "-q"))
+    elif args[:1] == ["api"] and pulls is not None:
+        api_read(repo, args)
+    elif verb == ["pr", "list"] and pulls is not None:
+        pr_list(pulls, args[2:])
     elif verb == ["pr", "list"]:
         emit([], flag_value(list(args), "--jq", "-q"))
+    elif verb == ["pr", "view"] and pulls is not None:
+        pr_view(pulls, args[2:])
     elif verb == ["pr", "view"]:
         raise ShimError("no pull requests found for branch")
     elif verb not in (["auth", "status"], ["issue", "comment"], ["issue", "edit"]):
@@ -100,11 +196,16 @@ def run(repo, args):
 
 def main(argv):
     if len(argv) < 4 or argv[0] != "--repo" or argv[2] != "--log":
-        print("usage: gh.py --repo <repo> --log <log> <gh argv...>", file=sys.stderr)
+        print("usage: gh.py --repo <repo> --log <log> [--pulls <file>] <gh argv...>", file=sys.stderr)
         return 2
     repo, log, args = argv[1], argv[3], argv[4:]
+    pulls = None
+    if args[:1] == ["--pulls"] and len(args) >= 2:
+        with open(args[1], encoding="utf-8") as handle:
+            pulls = json.load(handle)
+        args = args[2:]
     try:
-        code = run(repo, args)
+        code = run(repo, args, pulls)
     except ShimError as error:
         print(error, file=sys.stderr)
         code = 1

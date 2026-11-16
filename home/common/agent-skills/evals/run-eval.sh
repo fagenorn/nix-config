@@ -389,6 +389,11 @@ run_trial() {
       bash "$SETUPS/tracked-issue/setup.sh" "$WORK" "$REPO" || die "setup: tracked-issue failed"
       echo "setup: tracked-issue sandbox with a read-only gh at $WORK/bin/gh"
       ;;
+    marked-pr)
+      bash "$SETUPS/marked-pr/setup.sh" "$WORK" "$REPO" || die "setup: marked-pr failed"
+      PRE_WT="$WORK/issue-3-rename-flag"
+      echo "setup: marked-pr sandbox: issue 3 marked, pull request 7 open at $WORK/forge/pulls.json"
+      ;;
     *) die "unknown setup kind: $SETUP_KIND" ;;
   esac
   local BASE_MAIN
@@ -427,10 +432,10 @@ run_trial() {
   # variable lives only in this subshell.
   # CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 makes the `-p` run wait for its background agents
   # rather than stop them 10 minutes after the last turn (issue 432); EVAL_TIMEOUT bounds it.
-  # A tracked-issue run also gets the sandbox's read-only gh first on PATH, so every agent
-  # of the run inherits it.
+  # A tracked-issue or marked-pr run also gets the sandbox's read-only gh (and, for marked-pr,
+  # its forge-claim stand-in) first on PATH, so every agent of the run inherits them.
   ( cd "$REPO" && export CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1 CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 &&
-    { if [ "$SETUP_KIND" = tracked-issue ]; then export PATH="$WORK/bin:$PATH"; fi; } &&
+    { if [ "$SETUP_KIND" = tracked-issue ] || [ "$SETUP_KIND" = marked-pr ]; then export PATH="$WORK/bin:$PATH"; fi; } &&
     exec timeout "$EVAL_TIMEOUT" claude "${claude_args[@]}" ) \
     >"$WORK/result.json" 2>"$WORK/stderr.txt" </dev/null &
   CLAUDE_PID=$!

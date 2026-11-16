@@ -20,9 +20,12 @@ SKILL_ROOTS = (
 )
 BUDGET = (sys.executable, "-m", "agent_tools.delivery.artifact_budget")
 POLICY = REPO_ROOT / "home/common/agent-skills/artifact-budget-policy.json"
-SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue"}
+SETUP_KINDS = {"dirty-worktree", "shippable-worktree", "planned-worktree", "release-ready", "tracked-issue",
+                "marked-pr"}
 PIPELINE_SKILLS = ("ship-release",)
 ASSERT_LIB = EVALS_DIR / "assert-lib.sh"
+MARKED_SETUP = EVALS_DIR / "setups/marked-pr/setup.sh"
+GH_SHIM = EVALS_DIR / "setups/tracked-issue/gh.py"
 
 
 def case_files():
@@ -431,6 +434,132 @@ def implement_issue_three(git, worktree, branch, start="main"):
     subprocess.run(wgit + ["commit", "-q", "-m", "feat: rename list --all to --include-done (#3)"],
                    check=True)
     return wgit
+
+
+def marked_pr_sandbox(tmp):
+    """published_sandbox after the marked-pr setup: the runner's REPO and grading env."""
+    repo, _, env = published_sandbox(tmp)
+    for key, value in (("user.name", "eval"), ("user.email", "eval@example.invalid"),
+                       ("commit.gpgsign", "false")):
+        subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
+    subprocess.run(["bash", str(MARKED_SETUP), str(tmp), str(repo)],
+                   env={**os.environ, **QUIET_GIT}, check=True)
+    worktree = Path(tmp) / "issue-3-rename-flag"
+
+    def rev(*argv):
+        return subprocess.run(["git", "-C", *argv], capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    env.update(BASE_MAIN=rev(str(repo), "rev-parse", "main"),
+               ORIGIN_REFS=rev(env["ORIGIN"], "for-each-ref", "--format=%(refname) %(objectname)"),
+               PRE_WT=str(worktree), PRE_WT_HEAD=rev(str(worktree), "rev-parse", "HEAD"),
+               WT=str(worktree), WT_COUNT="1")
+    return repo, env
+
+
+class MarkedPrSetupTest(unittest.TestCase):
+    """#1140: the marked-pr setup gives a marked issue 3, its pushed branch and an open pull request 7."""
+
+    def sandbox(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        repo, env = marked_pr_sandbox(root)
+        return root, repo, env
+
+    def git(self, path, *argv):
+        return subprocess.run(["git", "-C", str(path), *argv], capture_output=True, text=True)
+
+    def run_cmd(self, argv, root, **extra):
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60,
+                              env={**os.environ, "PATH": f"{root}/bin:" + os.environ["PATH"],
+                                   **extra})
+
+    def test_the_branch_is_pushed_and_up_to_date(self):
+        _, repo, env = self.sandbox()
+        worktree = Path(env["PRE_WT"])
+        tip = self.git(env["ORIGIN"], "rev-parse", "refs/heads/issue-3-rename-flag").stdout.strip()
+        self.assertEqual(tip, env["PRE_WT_HEAD"])
+        self.assertEqual(self.git(worktree, "rev-list", "--count", "main..HEAD").stdout.strip(), "1")
+        self.assertEqual(self.git(worktree, "merge-base", "--is-ancestor", "main", "HEAD").returncode, 0)
+        self.assertEqual(self.git(worktree, "status", "--porcelain").stdout, "")
+
+    def test_the_issue_carries_one_look_marker(self):
+        from agent_tools.delivery import look_marker
+        _, repo, env = self.sandbox()
+        text = (repo / "issues/003-mechanical.md").read_text(encoding="utf-8")
+        body = text.partition("\n")[2]
+        self.assertEqual(len(look_marker.read_look(body).criteria), 1)
+        self.assertEqual(self.git(repo, "rev-parse", "main").stdout,
+                         self.git(env["ORIGIN"], "rev-parse", "main").stdout)
+
+    def test_the_reader_finds_the_look_needed_through_the_shim(self):
+        root, _, env = self.sandbox()
+        done = self.run_cmd(
+            [sys.executable, "-m", "agent_tools.delivery.look_approval", "status", "--repo",
+             "fixture/tinytask", "--issue", "3", "--pr", "7", "--head", env["PRE_WT_HEAD"]],
+            root, PYTHONPATH=str(REPO_ROOT / "python"))
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["verdict"], "needed")
+        self.assertTrue(out["covers"])
+
+    def test_the_shim_serves_pull_request_seven(self):
+        root, _, env = self.sandbox()
+        gh = str(root / "bin/gh")
+        viewed = self.run_cmd([gh, "pr", "view", "7", "--repo", "fixture/tinytask", "--json",
+                               "number,state,headRefOid"], root)
+        self.assertEqual(viewed.returncode, 0, viewed.stderr)
+        self.assertEqual(json.loads(viewed.stdout),
+                         {"number": 7, "state": "OPEN", "headRefOid": env["PRE_WT_HEAD"]})
+        self.assertEqual(viewed.stdout.strip(),
+                         '{"number":7,"state":"OPEN","headRefOid":"%s"}' % env["PRE_WT_HEAD"])
+        listed = self.run_cmd([gh, "pr", "list", "--repo", "fixture/tinytask", "--json", "number"], root)
+        self.assertEqual(listed.stdout.strip(), '[{"number":7}]')
+
+    def test_the_shim_refuses_every_write(self):
+        root, _, _ = self.sandbox()
+        gh = str(root / "bin/gh")
+        calls = (
+            ["api", "-X", "POST", "repos/fixture/tinytask/issues/3/comments", "-f", "body=x"],
+            ["api", "repos/fixture/tinytask/git/refs", "-f", "ref=refs/heads/x"],
+            ["pr", "merge", "7", "--repo", "fixture/tinytask", "--merge"],
+            ["pr", "create", "--repo", "fixture/tinytask"],
+        )
+        for argv in calls:
+            with self.subTest(argv=argv):
+                done = self.run_cmd([gh, *argv], root)
+                self.assertEqual(done.returncode, 1)
+                if argv[0] == "api":
+                    self.assertIn("api writes are not available in this sandbox", done.stderr)
+        logged = [json.loads(line) for line in
+                  (root / "gh-calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        for argv in calls:
+            self.assertIn({"argv": argv, "exit": 1}, logged)
+
+    def test_without_pulls_the_shim_answers_as_before(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        repo, _ = fixture_sandbox(root)
+        base = [sys.executable, "-I", str(GH_SHIM), "--repo", str(repo), "--log", str(root / "bare.jsonl")]
+        self.assertEqual(self.run_cmd(base + ["pr", "list"], root).stdout.strip(), "[]")
+        self.assertEqual(self.run_cmd(base + ["pr", "view", "7"], root).returncode, 1)
+
+    def test_the_forge_claim_stand_in_logs_and_refuses(self):
+        root, _, env = self.sandbox()
+        stand_in = str(root / "bin/forge-claim")
+        calls = (["land", "acquire", "--repo", "fixture/tinytask", "--branch", "main", "--sha",
+                  env["PRE_WT_HEAD"], "--wait"],
+                 ["release", "--repo", "fixture/tinytask", "--issue", "3"])
+        for argv in calls:
+            with self.subTest(argv=argv):
+                done = self.run_cmd([stand_in, *argv], root)
+                self.assertEqual(done.returncode, 1)
+                self.assertIn("forge-claim shim:", done.stderr)
+        logged = [json.loads(line) for line in
+                  (root / "forge-claim-calls.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([entry["argv"] for entry in logged], [list(argv) for argv in calls])
 
 
 class SpecFormatCheckTest(unittest.TestCase):
