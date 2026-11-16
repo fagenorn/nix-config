@@ -1,6 +1,6 @@
 # ADR-console-035 — Every registration failure is a counted card, and a finished registration leaves only its project
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-036
 - **Decided in:** #1085
 
 ## Context
