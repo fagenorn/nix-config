@@ -533,8 +533,10 @@ class PageTest(unittest.TestCase):
             for size in found:
                 self.assertLess(size, 1.5, selector)
 
-    def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 4)
+    def test_the_tracker_sign_in_and_spend_links_are_the_only_hrefs(self) -> None:
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
+        self.assertEqual(
+            self.text.count('link.href = "/spend#" + kind + "=" + encodeURIComponent(id);'), 1)
         lines = self.text.splitlines()
         (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
         self.assertIn("isHttps(", lines[at - 1] + lines[at])
@@ -10318,3 +10320,167 @@ class PageReportPictureTest(unittest.TestCase):
         (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertEqual(focused["key"], REPORT_KEY + "/1")
         self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/message"]), 1)
+
+
+def spend_tokens(input: int, cache_read: int, output: int, dollars: float,
+                 approximate: bool = False) -> dict:
+    return {"input": input, "cache_write": 0, "cache_read": cache_read, "output": output,
+            "dollars": dollars, "approximate": approximate}
+
+
+def with_spend(frame: dict, days: object) -> dict:
+    return {**frame, "spend": {"approximate": False, "days": days}}
+
+
+def spend_day(day: str, sprint: dict, run: dict) -> dict:
+    return {"day": day, "total": spend_tokens(0, 0, 0, 0.0), "sprint": sprint, "run": run,
+            "session": {}, "project": {}, "phase": {}, "account": {}, "aspect": {}}
+
+
+SPEND_DAYS = [
+    spend_day("2026-11-10", {"a" * 16: spend_tokens(200_000, 900_000, 50_000, 1.15)},
+              {"wf_a": spend_tokens(10_000, 2_000, 345, 0.0712)}),
+    spend_day("2026-11-11", {"a" * 16: spend_tokens(50_000, 0, 0, 2.25),
+                             "d" * 16: spend_tokens(2_000_000, 400_000, 100_000, 1234.5)}, {}),
+]
+SPEND_FRAME = with_spend(view([{
+    **project(0, [session("s1", "working", "working", deliveries=[RUN])]),
+    "sprints": [REPORTED],
+    "finished_sprints": {"label": "Finished sprints", "count": 1,
+                         "sprints": [ended_sprint("d", HOUR_MS)]},
+}]), SPEND_DAYS)
+SPEND_OPENS = [{"open": "line:owner/p00"}, {"open": "finished"}, {"open": "ended:" + "d" * 16}]
+
+
+def figures(tree: dict) -> list:
+    return [n for n in nodes(tree) if n["tag"] == "a" and has_class(n, "spend")]
+
+
+def with_ancestors(tree: dict, above: tuple = ()) -> list:
+    found = [(tree, above)]
+    for child in tree["children"]:
+        found += with_ancestors(child, above + (tree,))
+    return found
+
+
+class PageSpendFigureTest(unittest.TestCase):
+    def test_each_item_with_spend_shows_one_figure_linking_to_it_on_the_spend_page(self) -> None:
+        (snap,) = render([START, {"frame": SPEND_FRAME}, *SPEND_OPENS, {"snapshot": True}])
+        found = figures(snap["projects"])
+        self.assertEqual(len(found), 3)
+        (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
+        self.assertEqual(full(sprint), "1.2M tokens, about $3.40")
+        self.assertEqual(sprint["href"], "/spend#sprint=" + "a" * 16)
+        self.assertEqual(sprint["title"], "Estimated at API list prices")
+        (parent,) = [n for n, above in with_ancestors(snap["projects"]) if sprint in n["children"]]
+        self.assertEqual((parent["tag"], parent["cls"]), ("p", "sp-spend"))
+        (run,) = figures(of_class(snap["projects"], "li", "run")[0])
+        self.assertEqual(full(run), "12.3k tokens, about $0.07")
+        self.assertEqual(run["href"], "/spend#run=wf_a")
+        (ended,) = figures(of_class(snap["projects"], "li", "finished-line")[0])
+        self.assertEqual(full(ended), "2.5M tokens, about $1,234.50")
+        self.assertEqual(ended["href"], "/spend#sprint=" + "d" * 16)
+
+    def test_an_approximate_figure_says_so_in_its_title(self) -> None:
+        days = [SPEND_DAYS[0], spend_day("2026-11-11", {
+            "a" * 16: spend_tokens(50_000, 0, 0, 2.25, True)}, {})]
+        (snap,) = render([START, {"frame": with_spend(SPEND_FRAME, days)}, {"snapshot": True}])
+        (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
+        self.assertEqual(sprint["title"], "Estimated at API list prices, approximate")
+
+    def test_an_unmanaged_runs_figure_shows_in_the_unmanaged_line(self) -> None:
+        frame = with_spend(view([], [unmanaged_entry(
+            [session("s1", "working", "working", deliveries=[RUN])])]), SPEND_DAYS)
+        (snap,) = render([START, {"frame": frame}, {"open": "line:/srv/elsewhere"},
+                          {"snapshot": True}])
+        (run,) = figures(snap["unmanaged"])
+        self.assertEqual(run["href"], "/spend#run=wf_a")
+
+    def test_no_figure_sits_inside_a_summary(self) -> None:
+        (snap,) = render([START, {"frame": SPEND_FRAME}, *SPEND_OPENS, {"snapshot": True}])
+        pairs = with_ancestors(snap["projects"])
+        found = [(n, above) for n, above in pairs if has_class(n, "spend")]
+        self.assertEqual(len(found), 3)
+        for n, above in found:
+            self.assertEqual([a for a in above if a["tag"] == "summary"], [])
+        (sprint,) = of_class(snap["projects"], "li", "sprint")
+        kids = sprint["children"]
+        (at,) = [i for i, k in enumerate(kids) if has_class(k, "sp-head")]
+        self.assertTrue(has_class(kids[at + 1], "sp-spend"))
+        self.assertEqual(len(figures(kids[at + 1])), 1)
+        (line,) = of_class(snap["projects"], "li", "finished-line")
+        (details,) = [c for c in line["children"] if c["tag"] == "details"]
+        self.assertEqual(details["children"][0]["tag"], "summary")
+        self.assertTrue(has_class(details["children"][1], "sp-spend"))
+        self.assertEqual(len(figures(details["children"][1])), 1)
+
+    def test_an_item_without_spend_shows_no_figure(self) -> None:
+        empty = {"sprint": {}, "run": {}}
+        zero = spend_tokens(0, 0, 0, 0.0)
+        no_run = {**RUN, "run_id": "unattributed"}
+        unattributed = view([{
+            **project(0, [session("s1", "working", "working", deliveries=[no_run])]),
+            "sprints": [REPORTED]}])
+        cases = {
+            "no member": SPEND_FRAME_WITHOUT,
+            "null": {**SPEND_FRAME, "spend": None},
+            "empty maps": with_spend(SPEND_FRAME, [spend_day("2026-11-10", **empty)]),
+            "zero counts": with_spend(SPEND_FRAME, [spend_day(
+                "2026-11-10", {"a" * 16: zero, "d" * 16: zero}, {"wf_a": zero})]),
+            "unattributed": with_spend(unattributed, [spend_day(
+                "2026-11-10", {}, {"unattributed": spend_tokens(5, 0, 0, 1.0)})]),
+        }
+        for name, frame in cases.items():
+            with self.subTest(name):
+                opens = SPEND_OPENS if name != "unattributed" else SPEND_OPENS[:1]
+                (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
+                                  {"frame": frame}, *opens, {"snapshot": True}])
+                self.assertEqual([n for n in nodes(snap["projects"])
+                                  if has_class(n, "spend") or has_class(n, "sp-spend")], [])
+                (run,) = of_class(snap["projects"], "li", "run")
+                self.assertEqual([full(c) for c in run["children"]], [
+                    "#856", "building task 3 of 5", "#857", "plan review", "moved 3 min ago"])
+
+    def test_the_figure_is_quiet_overlay_2_and_never_peach(self) -> None:
+        self.assertEqual(fold_colour_faults(PAGE_TEXT, {"spend", "sp-spend"}), [])
+        rules = css_rules(PAGE_TEXT)
+        spend = [b for s, b in rules if re.search(r"\.spend(?![\w-])", s)]
+        sp_spend = [b for s, b in rules if re.search(r"\.sp-spend(?![\w-])", s)]
+        self.assertTrue(any("color: var(--ov2)" in b for b in spend))
+        self.assertTrue(any("color: var(--ov2)" in b for b in sp_spend))
+        for body in spend + sp_spend:
+            self.assertNotIn("--peach", body)
+        (snap,) = render([START, {"frame": SPEND_FRAME}, *SPEND_OPENS, {"snapshot": True}])
+        for n in nodes(snap["projects"]):
+            if has_class(n, "spend") or has_class(n, "sp-spend"):
+                self.assertFalse(has_class(n, "needs"))
+
+    def test_a_spend_figure_adds_nothing_to_the_statement(self) -> None:
+        with_figures, without = render([
+            START, {"frame": SPEND_FRAME}, *SPEND_OPENS, {"snapshot": True},
+            {"frame": SPEND_FRAME_WITHOUT}, {"snapshot": True}])
+        self.assertEqual(len(figures(with_figures["projects"])), 3)
+        self.assertEqual(with_figures["statement"], without["statement"])
+        (h1,) = [n for n in nodes(with_figures["statement"]) if n["tag"] == "h1"]
+        self.assertEqual(full(h1), "Nothing needs you")
+        self.assertFalse(has_class(h1, "needs"))
+
+    def test_an_open_fold_and_a_focused_field_survive_a_frame_that_changes_a_figure(self) -> None:
+        later = with_spend(SPEND_FRAME, [SPEND_DAYS[0], spend_day("2026-11-11", {
+            "a" * 16: spend_tokens(150_000, 0, 0, 4.0)}, {})])
+        (snap,) = render([
+            START, {"frame": SPEND_FRAME}, {"open": "sprint:" + "a" * 16},
+            {"open": "line:owner/p00"}, {"click": "tell-open"},
+            {"type": {"class": "tell", "text": "keep the schema"}},
+            {"frame": later}, {"snapshot": True}])
+        open_keys = {n["key"] for n in nodes(snap["projects"])
+                     if n["tag"] == "details" and n["open"]}
+        self.assertIn("sprint:" + "a" * 16, open_keys)
+        self.assertIn("line:owner/p00", open_keys)
+        self.assertEqual(snap["active"], "tell")
+        self.assertEqual(snap["field"]["value"], "keep the schema")
+        (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
+        self.assertEqual(full(sprint), "1.3M tokens, about $5.15")
+
+
+SPEND_FRAME_WITHOUT = {k: v for k, v in SPEND_FRAME.items() if k != "spend"}
