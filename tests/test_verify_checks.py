@@ -1,6 +1,7 @@
 """`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
 import contextlib
 import http.server
+import inspect
 import io
 import json
 import os
@@ -19,13 +20,17 @@ from unittest import mock
 
 from agent_tools.delivery import agent_gate_bundle
 from agent_tools.claims import forge_markers
-from agent_tools.verification import verify_checks, verify_issues
+from agent_tools.system import siblings
+from agent_tools.verification import verify_checks, verify_exec, verify_issues
 from agent_tools.system import forge_api
 from agent_tools.verification.verify_checks import required_checks, self_hosted_runner
 
 from . import console_test_support as support
+from . import railway_world
 from .guard_policy_world import GuardPolicyWorld
 from .pre_push_world import PrePushWorld
+from .railway_world import MERGE, deployment
+from .test_railway_deploy_adapter import request as railway_request
 from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2194,3 +2199,349 @@ class ConsoleFirstScreenTest(unittest.TestCase):
         self.assertEqual(committed_mode(f"{CHECKS}/console-first-screen"), "100755")
         for needle in ("console-first-screen --port N", "verify_checks.console_first_screen"):
             self.assertIn(needle, verify_checks.__doc__)
+
+
+# --- railway-project-read (issue 1124) ----------------------------------------------------
+
+DEVENV = """#!{python}
+import json, os, subprocess, sys, time
+from pathlib import Path
+
+state = Path(os.environ["RAILWAY_READ_FIXTURE"])
+with open(state / "devenv.jsonl", "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
+if sys.argv[1:3] != ["shell", "--"]:
+    sys.exit(64)
+if (state / "sleep").exists():
+    time.sleep(30)
+if (state / "fail").exists():
+    sys.exit(3)
+print("entering shell", flush=True)
+env = dict(os.environ)
+env["PATH"] = {bin!r} + ":" + env["PATH"]
+done = subprocess.run(sys.argv[3:], env=env, stdout=subprocess.PIPE, text=True)
+sys.stdout.write(done.stdout)
+sys.exit(done.returncode)
+"""
+SITE = {"kind": "github_repository", "repository": railway_request()["parameters"]["target"]["repository"],
+        "branch": "main"}
+
+
+def railway_params(services=None):
+    """The adapter parameters of a satisfied read, as the adapter's own suite builds them."""
+    return railway_request(**({} if services is None else {"services": services}))["parameters"]
+
+
+class RailwayReadWorld:
+    """Registered projects whose dev shell supplies the only railway, read through fake seams."""
+
+    def __init__(self, test_case):
+        self.case = test_case
+        tmp = tempfile.TemporaryDirectory()
+        test_case.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name).resolve()
+        self.me = pwd.getpwuid(os.getuid()).pw_name
+        self.sys = self.tmp / "sys"
+        self.sys.mkdir()
+        # The host's own bin directories can hold a railway (the one this issue removes), so
+        # the tools the dev shell needs are linked into `sys/` and only `sys/` is the system path.
+        for program in ("git", "env"):
+            found = shutil.which(program)
+            if found is None:
+                test_case.skipTest(f"no {program}")
+            (self.sys / program).symlink_to(found)
+        self.git = shutil.which("git")
+        self.system_path = str(self.sys)
+        self.world = railway_world.RailwayWorld(test_case)
+        self.state = self.tmp / "devenv-state"
+        self.state.mkdir()
+        patch = mock.patch.dict(os.environ, {"RAILWAY_READ_FIXTURE": str(self.state)})
+        patch.start()
+        test_case.addCleanup(patch.stop)
+        devenv = self.sys / "devenv"
+        devenv.write_text(DEVENV.format(python=sys.executable, bin=str(self.world.bin)),
+                          encoding="utf-8")
+        devenv.chmod(0o755)
+        self.world.status()
+        self.world.deployments("api", deployment("d1", MERGE))
+        self.home = self.tmp / "home"
+        (self.home / ".agents/state/fleet").mkdir(parents=True)
+        self.roots, self.contracts, self.configs, self.unreadable = [], {}, {}, set()
+        self.source_calls, self.inspect_calls = [], []
+        self.targets = [{"adapter": "railway-deploy", "operations": ["deploy"],
+                         "profile": "fixture-main", "target": {**SITE, "handle": "fixture-site"}}]
+        self.inspection = None
+
+    def project(self, config, *, devenv=True):
+        index = len(self.roots)
+        root = self.tmp / f"checkout-{index}"
+        root.mkdir()
+        subprocess.run([self.git, "init", "-q", str(root)], check=True)
+        (root / ".agents").mkdir()
+        (root / ".agents/project.json").write_text("{}", encoding="utf-8")
+        if devenv:
+            (root / "devenv.nix").write_text("{}", encoding="utf-8")
+        contract = self.tmp / f"contract-{index}"
+        contract.mkdir()
+        self.roots.append(root)
+        self.contracts[str(root)] = contract
+        self.configs[str(contract)] = config
+        self.write_registry()
+        return root
+
+    def write_registry(self):
+        projects = [{"project_id": f"fixture-project-{i}", "root": str(root)}
+                    for i, root in enumerate(self.roots)]
+        (self.home / ".agents/state/fleet/registry.json").write_text(
+            json.dumps({"schema_version": 1, "projects": projects}), encoding="utf-8")
+
+    @contextlib.contextmanager
+    def source(self, entry):
+        self.source_calls.append(entry["root"])
+        if entry["root"] in self.unreadable:
+            raise verify_exec.SourceError("contract_unreadable")
+        yield verify_exec.Source({"release": {"targets": self.targets}},
+                                 self.contracts[entry["root"]],
+                                 railway_params()["candidate"]["commit"], "main")
+
+    def inspect(self, contract_root, profile_id, env, deadline):
+        self.inspect_calls.append((contract_root, profile_id))
+        if self.inspection is not None:
+            return self.inspection(contract_root)
+        return {"bindings": {"adapters": {"rw": {
+                    "adapter": "railway-deploy",
+                    "config": {"deploy": self.configs[str(contract_root)]}}}},
+                "graphs": {"activation": [{"id": "deploy", "adapter": "rw", "operation": "deploy",
+                                           "target": "fixture-site"}]}}
+
+    def read(self, **extra):
+        environ = {**os.environ, "PYTHONPATH": os.path.relpath(ROOT / "python")}
+        options = {"user": self.me, "home": str(self.home), "system_path": self.system_path,
+                   "environ": environ, "source": self.source, "inspect_profile": self.inspect}
+        return verify_checks.railway_project_read(**{**options, **extra})
+
+    def devenv_calls(self):
+        path = self.state / "devenv.jsonl"
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+
+
+class RailwayProjectReadTest(unittest.TestCase):
+    def setUp(self):
+        self.w = RailwayReadWorld(self)
+
+    def met(self, reasons, units=1, read=1):
+        return {"met": True, "system_railway": None, "units": units, "read": read,
+                "reasons": reasons}
+
+    def test_every_registered_railway_unit_read_from_its_dev_shell_is_met(self):
+        root = self.w.project(railway_params(["api"])["config"])
+        self.assertEqual(self.w.read(), (0, self.met(["deployed"])))
+        (call,) = self.w.devenv_calls()
+        self.assertEqual(call["cwd"], str(root))
+        argv = call["argv"]
+        self.assertEqual(json.loads(argv[argv.index("--parameters") + 1]), railway_params(["api"]))
+        self.assertTrue(self.w.world.calls("railway"))
+
+    def test_without_the_project_railway_the_unit_is_not_read(self):
+        self.w.project(railway_params(["api"])["config"])
+        (self.w.world.bin / "railway").unlink()
+        self.assertEqual(self.w.read(), (1, {"met": False, "system_railway": None, "units": 1,
+                                             "read": 0, "reasons": ["executable_missing"]}))
+
+    def test_every_unit_must_read_not_one(self):
+        self.w.project(railway_params(["api"])["config"])
+        self.w.project(railway_params()["config"])
+        self.w.world.respond("railway", ["deployment", "list", "--service", "admin",
+                                         "--environment", "production", "--json"], None, exit=1,
+                             stderr="Unauthorized. Please run `railway login` again.")
+        self.assertEqual(self.w.read(), (1, {"met": False, "system_railway": None, "units": 2,
+                                             "read": 1,
+                                             "reasons": ["deployed", "railway_unauthorized"]}))
+
+    def test_a_checkout_that_differs_from_origin_cannot_suppress_a_watch(self):
+        root = self.w.project(railway_params(["api"])["config"])
+        subprocess.run([self.w.git, "-C", str(root), "checkout", "-q", "-b", "local-only"], check=True)
+        code, report = self.w.read()
+        self.assertEqual(report["units"], 1)
+        (call,) = self.w.inspect_calls
+        self.assertEqual(call[0], self.w.contracts[str(root)])
+        self.assertNotEqual(call[0], root)
+        default = inspect.signature(verify_checks.railway_project_read).parameters["source"].default
+        self.assertIs(default, verify_exec.project_source)
+
+    def test_a_system_railway_is_not_met_and_reads_nothing(self):
+        self.w.project(railway_params(["api"])["config"])
+        found = self.w.sys / "railway"
+        found.write_text("#!/bin/sh\n", encoding="utf-8")
+        found.chmod(0o755)
+        code, report = self.w.read()
+        self.assertEqual((code, report["system_railway"], report["met"]), (1, str(found), False))
+        self.assertEqual(self.w.devenv_calls(), [])
+        self.assertEqual(self.w.source_calls, [])
+        self.assertEqual(self.w.world.calls("railway"), [])
+
+    def test_a_railway_in_the_global_nix_profile_is_found(self):
+        prefix = self.w.tmp / "prefix"
+        me, home = self.w.me, str(self.w.home)
+        absolute = ("/nix/var/nix/profiles/default/bin", "/run/current-system/sw/bin",
+                    f"/etc/profiles/per-user/{me}/bin", "/opt/homebrew/bin", "/usr/local/bin")
+        for directory in absolute:
+            with self.subTest(directory=directory):
+                found = Path(f"{prefix}{directory}/railway")
+                found.parent.mkdir(parents=True, exist_ok=True)
+                found.write_text("#!/bin/sh\n", encoding="utf-8")
+                found.chmod(0o755)
+                path = verify_checks.railway_system_path(me, home, prefix=str(prefix))
+                code, report = self.w.read(system_path=path)
+                self.assertEqual((code, report["system_railway"]), (1, str(found)))
+                found.unlink()
+        with self.subTest(directory="{home}/.nix-profile/bin"):
+            found = self.w.home / ".nix-profile/bin/railway"
+            found.parent.mkdir(parents=True)
+            found.write_text("#!/bin/sh\n", encoding="utf-8")
+            found.chmod(0o755)
+            path = verify_checks.railway_system_path(me, home, prefix=str(prefix))
+            code, report = self.w.read(system_path=path)
+            self.assertEqual((code, report["system_railway"]), (1, str(found)))
+
+    def test_the_system_dirs_cover_the_runner_path(self):
+        me, home = self.w.me, str(self.w.home)
+        entries = verify_checks.railway_system_path(me, home).split(":")
+        for entry in ("/run/current-system/sw/bin", "/nix/var/nix/profiles/default/bin",
+                      "/usr/bin", "/bin", "/usr/sbin", "/sbin", f"/etc/profiles/per-user/{me}/bin",
+                      f"{home}/.nix-profile/bin"):
+            self.assertIn(entry, entries)
+
+    def test_an_unread_unit_is_not_met(self):
+        w = self.w
+        w.project(railway_params(["api"])["config"])
+        # The missing command goes last: it removes the world's railway for the rest of the test.
+        for reason in ("railway_unauthorized", "lookup_failed", "executable_missing"):
+            with self.subTest(reason=reason):
+                if reason == "executable_missing":
+                    (w.world.bin / "railway").unlink()
+                else:
+                    stderr = ("Unauthorized. Please run `railway login` again."
+                              if reason == "railway_unauthorized" else "boom")
+                    w.world.respond("railway", ["status", "--json"], None, exit=1, stderr=stderr)
+                self.assertEqual(w.read(), (1, {"met": False, "system_railway": None, "units": 1,
+                                                "read": 0, "reasons": [reason]}))
+
+    def test_a_railway_project_without_a_dev_shell_is_not_met(self):
+        root = self.w.project(railway_params(["api"])["config"])
+        (root / "devenv.nix").unlink()
+        self.assertEqual(self.w.read(), (1, {"met": False, "system_railway": None, "units": 1,
+                                             "read": 0, "reasons": ["no_dev_shell"]}))
+        self.assertEqual(self.w.devenv_calls(), [])
+
+    def test_no_registered_railway_unit_is_not_yet(self):
+        with self.subTest("another adapter"):
+            self.w.project(railway_params(["api"])["config"])
+            self.w.targets = [{"adapter": "github-forge", "operations": ["merge"],
+                               "profile": "fixture-main", "target": {**SITE, "handle": "forge"}}]
+            code, report = self.w.read()
+            self.assertEqual((code, report["units"], report["met"]), (75, 0, False))
+            self.assertEqual(self.w.inspect_calls, [])
+        with self.subTest("no registry"):
+            (self.w.home / ".agents/state/fleet/registry.json").unlink()
+            self.assertEqual(self.w.read()[0], 75)
+
+    def test_the_read_ends_before_the_runner_kills_it(self):
+        self.assertLess(verify_checks.RAILWAY_READ_BUDGET + 3 * verify_exec.GIT_TIMEOUT,
+                        verify_exec.TIMEOUT)
+        self.w.project(railway_params(["api"])["config"])
+        (self.w.state / "sleep").write_text("", encoding="utf-8")
+        started = time.monotonic()
+        self.assertEqual(self.w.read(budget=1), (2, {"met": False, "error": "read_timeout"}))
+        self.assertLess(time.monotonic() - started, 10)
+        with self.subTest("no time left"):
+            self.w.source_calls.clear()
+            self.assertEqual(self.w.read(budget=0), (2, {"met": False, "error": "read_timeout"}))
+            self.assertEqual(self.w.source_calls, [])
+
+    def test_an_unreadable_step_exits_2_with_its_code_only(self):
+        def failing(code):
+            return 2, {"met": False, "error": code}
+        root = self.w.project(railway_params(["api"])["config"])
+        with self.subTest("contract_unreadable"):
+            self.w.unreadable.add(str(root))
+            self.assertEqual(self.w.read(), failing("contract_unreadable"))
+            self.w.unreadable.clear()
+        with self.subTest("inspection_unreadable"):
+            self.w.inspection = lambda contract_root: None
+            self.assertEqual(self.w.read(), failing("inspection_unreadable"))
+            self.w.inspection = None
+        with self.subTest("read_failed"):
+            (self.w.state / "fail").write_text("", encoding="utf-8")
+            self.assertEqual(self.w.read(), failing("read_failed"))
+            (self.w.state / "fail").unlink()
+        with self.subTest("devenv_missing"):
+            (self.w.sys / "devenv").unlink()
+            self.assertEqual(self.w.read(), failing("devenv_missing"))
+        with self.subTest("registry_unreadable"):
+            (self.w.home / ".agents/state/fleet/registry.json").write_text("not json",
+                                                                         encoding="utf-8")
+            self.assertEqual(self.w.read(), failing("registry_unreadable"))
+
+    def test_the_report_names_no_project(self):
+        w = self.w
+        w.project(railway_params(["api"])["config"])
+        w.project(railway_params()["config"])
+        w.world.respond("railway", ["deployment", "list", "--service", "admin", "--environment",
+                                    "production", "--json"], None, exit=1, stderr="Unauthorized")
+        reports = [w.read()[1]]
+        w.unreadable.add(str(w.roots[0]))
+        reports.append(w.read()[1])
+        w.unreadable.clear()
+        (w.world.bin / "railway").unlink()
+        reports.append(w.read()[1])
+        names = ["fixture-project-0", "fixture-project-1", "fixture-main", "fixture-site",
+                 railway_world.SLUG, railway_world.CONFIG["project"],
+                 railway_world.CONFIG["environment"], *railway_world.CONFIG["services"],
+                 *map(str, w.roots), *map(str, w.contracts.values())]
+        for report in reports:
+            text = json.dumps(report)
+            for name in names:
+                self.assertNotIn(name, text)
+
+
+class RailwayProjectReadCommandTest(unittest.TestCase):
+    def test_the_profile_is_inspected_by_the_packaged_sibling_at_the_contract_root(self):
+        seen = {}
+
+        def bounded(argv, *, cwd, env, deadline):
+            seen.update(argv=argv, cwd=cwd, env=env)
+            return subprocess.CompletedProcess(argv, 0, "{}", "")
+        with mock.patch.object(verify_checks, "_run_bounded", side_effect=bounded):
+            result = verify_checks._railway_profile_inspection(
+                Path("/c"), "p", {"PATH": "x"}, time.monotonic() + 5)
+        self.assertEqual(result, {})
+        self.assertEqual(seen["argv"], [*siblings.sibling_argv("release.release"), "profile",
+                                        "inspect", "p", "--repo-root", "/c"])
+        self.assertFalse(any(".agents/bin" in part for part in seen["argv"]))
+        self.assertEqual(seen["env"], {"PATH": "x"})
+
+    def test_the_command_prints_one_json_line_and_exits_with_the_verdict(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        empty, home = Path(tmp.name) / "empty", Path(tmp.name) / "home"
+        empty.mkdir()
+        home.mkdir()
+        result = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks",
+                                "railway-project-read", "--system-path", str(empty)],
+                               env_extra={"HOME": str(home)})
+        self.assertEqual(result.returncode, 75, result.stderr)
+        lines_out = result.stdout.splitlines()
+        self.assertEqual(len(lines_out), 1)
+        self.assertFalse(json.loads(lines_out[0])["met"])
+
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("railway-project-read [--system-path PATH]",
+                       "verify_checks.railway_project_read", "issue 1124", "no_dev_shell",
+                       "read_timeout", "integration"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+    def test_the_check_script_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/railway-project-read"), "100755")

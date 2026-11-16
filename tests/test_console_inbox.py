@@ -1,8 +1,10 @@
 """The console's inbox reader (#859): owner-action markers into inbox items, and the local activity reading."""
 
+import copy
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -47,8 +49,11 @@ def comment_node(cid, body, assoc="OWNER"):
             "updatedAt": "2026-11-10T09:00:00Z"}
 
 
-def issue_node(number, comments, blocking=0):
+def issue_node(number, comments, blocking=0, blocks=()):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": blocking},
+            "blocking": {"totalCount": len(blocks),
+                         "nodes": [{"number": n, "state": state, "repository": {"nameWithOwner": repo}}
+                                   for n, state, repo in blocks]},
             "comments": {"totalCount": len(comments), "nodes": comments}}
 
 
@@ -81,12 +86,48 @@ def read(*pages, **kwargs):
     return inbox.read_items(PROJECT, SLUG, call=lambda argv: answers.pop(0) if answers else page([]), **kwargs)
 
 
+def graphql_read(*pages, **kwargs):
+    """`read`, but the answer holds only what the outgoing query selects, as GraphQL answers."""
+    answers = list(pages)
+
+    def answer(argv):
+        text = " ".join(next(a for a in argv if a.startswith("query=")).split())
+        fragment = text.split("... on Issue {", 1)[1].split("... on PullRequest", 1)[0]
+        reply = copy.deepcopy(answers.pop(0) if answers else page([]))
+        selection = ""
+        if "blocking(first: 100) {" in fragment:
+            start = fragment.index("blocking(first: 100) {")
+            depth, end = 0, start
+            for end in range(fragment.index("{", start), len(fragment)):
+                depth += {"{": 1, "}": -1}.get(fragment[end], 0)
+                if depth == 0:
+                    break
+            selection = fragment[start:end + 1]
+        for node in reply["data"]["search"]["nodes"]:
+            if node.get("__typename") != "Issue":
+                continue
+            if not selection:
+                node.pop("blocking", None)
+                continue
+            connection = node["blocking"]
+            if not re.search(r"\btotalCount\b", selection):
+                connection.pop("totalCount", None)
+            for blocked in connection["nodes"]:
+                for name in ("number", "state", "repository"):
+                    if not re.search(rf"\b{name}\b", selection):
+                        blocked.pop(name, None)
+                if "repository" in blocked and not re.search(r"\bnameWithOwner\b", selection):
+                    blocked["repository"].pop("nameWithOwner", None)
+        return reply
+    return inbox.read_items(PROJECT, SLUG, call=answer, **kwargs)
+
+
 def expected(issue, comment_id, reason, **fields):
     return {"key": f"{SLUG}#{issue}/{comment_id}", "project_id": PROJECT, "repo": SLUG, "issue": issue,
             "comment_id": comment_id, "url": f"https://github.com/{SLUG}/issues/{issue}#issuecomment-{comment_id}",
             "reason": reason, "kind": reason, "question": foa.SENTENCES.get(reason), "detail": "",
             "questions": [], "items": [], "answers": [], "paid": False, "confirm": "",
-            "answered": False, **fields}
+            "answered": False, "blocking": [], **fields}
 
 
 def three_nodes():
@@ -211,6 +252,16 @@ class VerifyPromptTableTest(unittest.TestCase):
                                           confirm=confirm, detail=detail, answered=answered,
                                           question=question, check_id=check_id, reading="", held_work=1))
         self.assertEqual(json.loads(json.dumps(items)), items)
+
+    def test_an_issue_lists_the_open_issues_it_blocks_in_its_own_repository(self):
+        blocks = [(21, "OPEN", SLUG), (20, "OPEN", SLUG.upper()), (21, "OPEN", SLUG), (22, "CLOSED", SLUG),
+                  (23, "OPEN", "someone/else")]
+        nodes = [issue_node(7, [comment_node(C1, decision_body())], blocking=2, blocks=blocks),
+                 issue_node(8, [comment_node(C2, ask())], blocks=[(30, "OPEN", SLUG)]),
+                 pr_node(9, [comment_node(C3, bullet_body("needs-label", ["needs the label"]))])]
+        items = graphql_read(page(nodes))
+        self.assertEqual({i["issue"]: i["blocking"] for i in items}, {7: [20, 21], 8: [30], 9: []})
+        self.assertEqual([i["held_work"] for i in items if i["issue"] == 7], [3])
 
     def test_the_version_names_the_prompt_content_the_owner_saw(self):
         def version(body):
@@ -551,7 +602,7 @@ class HeldReviewTest(unittest.TestCase):
                 "reason": "held-review", "kind": "owner-review", "question": heading or text, "criterion_text": text,
                 "detail": text,
                 "check_id": "", "reading": "", "questions": [], "items": [], "answers": ["passed", "note"],
-                "paid": False, "confirm": "", "answered": False, "held_work": held_work,
+                "paid": False, "confirm": "", "answered": False, "held_work": held_work, "blocking": [],
                 "version": canonical.telemetry_digest({"issue": issue, "index": index, "kind": "human",
                                                        "text": text}),
                 "criterion": index}
@@ -783,6 +834,14 @@ class ReadTest(unittest.TestCase):
         del no_summary["issueDependenciesSummary"]
         no_type = issue_node(7, [])
         del no_type["__typename"]
+        no_blocking = issue_node(7, [])
+        del no_blocking["blocking"]
+
+        def blocked(**fields):
+            return page([{**issue_node(7, []), "blocking": {"totalCount": 1, "nodes": [
+                {"number": 21, "state": "OPEN", "repository": {"nameWithOwner": SLUG}, **fields}]}}])
+        no_number = blocked()
+        del no_number["data"]["search"]["nodes"][0]["blocking"]["nodes"][0]["number"]
         table = [
             ("comments truncated", page([{**issue_node(7, [comment_node(C1, decision_body())]),
                                           "comments": {"totalCount": 101,
@@ -793,6 +852,14 @@ class ReadTest(unittest.TestCase):
             ("hasNextPage not bool", page([], more="yes"), "payload_invalid"),
             ("no dependency summary", page([no_summary]), "payload_invalid"),
             ("blocking is a bool", page([issue_node(7, [], blocking=True)]), "payload_invalid"),
+            ("blocking truncated", page([{**issue_node(7, []), "blocking": {"totalCount": 101, "nodes": []}}]),
+             "payload_incomplete"),
+            ("no blocking connection", page([no_blocking]), "payload_invalid"),
+            ("a blocked issue with no number", no_number, "payload_invalid"),
+            ("a blocked issue number is a bool", blocked(number=True), "payload_invalid"),
+            ("a blocked issue state is empty", blocked(state=""), "payload_invalid"),
+            ("a blocked issue state is unknown", blocked(state="MERGED"), "payload_invalid"),
+            ("a blocked issue state is not a string", blocked(state=1), "payload_invalid"),
             ("no typename", page([no_type]), "payload_invalid"),
             ("a discussion", page([{**issue_node(7, []), "__typename": "Discussion"}]), "payload_invalid"),
             ("id not digits", page([bad_id("68x")]), "payload_invalid"),

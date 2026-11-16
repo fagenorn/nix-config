@@ -124,6 +124,28 @@ a `PATH` entry ahead of `/usr/bin` and `python3` reports version 3.13 or later; 
 when both probes are. It exits 0 when met, 1 when not and 2 when a probe is unreadable (no sentinel lines in
 its output, a timeout or a shell that cannot be run). It never writes a file.
 
+`railway-project-read [--system-path PATH]` (`verify_checks.railway_project_read`, issue 1124) is met when
+no host-wide `railway` exists and every Railway deploy watch the registered projects declare reads its
+deploys from the project's own dev shell. It first searches `PATH` (the host's system and profile bin
+directories, `RAILWAY_SYSTEM_DIRS`, unless `--system-path` names another) for `railway`: one found is not met (1)
+and nothing else runs. Otherwise, for each project of the host's registry it reads the contract at the
+integration branch commit that the registered `origin` lists, through `verify_exec.project_source`, in a
+scratch export (never the checkout, so a local branch cannot hide a watch), and takes each `railway-deploy`
+release target's activation units through the packaged `release profile inspect`. A unit is read, with the
+packaged `release adapter inspect railway-deploy deploy` run as `devenv shell -- env PYTHONPATH=... <sibling>` in
+the project's root, so the adapter finds the `railway` the dev shell provides; both packaged siblings run through
+`siblings.sibling_argv` with an absolute `PYTHONPATH`, and nothing runs from `~/.agents/bin`. A project with no
+`devenv.nix` has the reason `no_dev_shell` and is not read. A unit counts as read when its observation lists
+services and none of them carries an unread reason (`RAILWAY_UNREAD_REASONS`, such as `executable_missing` or
+`railway_unauthorized`). It exits 0 when there is at least one unit and every unit is read, 1 when a unit is not
+read or a system `railway` exists, 75 when no registered project has a Railway unit, and 2 when a step cannot be
+read, with only `{"met": false, "error": CODE}` (`registry_unreadable`, `contract_unreadable`,
+`inspection_unreadable`, `devenv_missing`, `read_failed` or `read_timeout`). The whole collection is bounded by
+`RAILWAY_READ_BUDGET` seconds, short enough that a source read still running at the deadline ends before
+`verify_exec.TIMEOUT` kills the check, and a child that outlasts it is killed with its process group and reports
+`read_timeout`. The report carries counts and reason codes only: it never names a project, root, repository,
+profile, handle or Railway project, environment or service, since the repository is public.
+
 `console-state --port N` (`verify_checks.console_state`, issue 856) is met when
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
@@ -167,6 +189,7 @@ import pwd
 import re
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -181,9 +204,9 @@ from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.guard.push_fixture import make_push_fixture
-from agent_tools.system import forge_api, github_remote
+from agent_tools.system import forge_api, github_remote, siblings
 from agent_tools.system.semver import parse_semver
-from agent_tools.verification import verify_issues
+from agent_tools.verification import verify_exec, verify_issues
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -1118,6 +1141,182 @@ def darwin_shell_path(*, user: str, home: str, zsh_bin: str = "/bin/zsh",
     return (2 if unreadable else 0 if met else 1), {"met": met, "probes": probes}
 
 
+RAILWAY_UNREAD_REASONS = ("executable_missing", "railway_unauthorized", "lookup_failed",
+                          "lookup_timeout", "payload_invalid", "project_mismatch",
+                          "parameters_invalid")
+# The seconds the whole collection may take. One source read still running at the deadline can hold
+# three network git children (`ls-remote`, the default branch's fetch and the integration branch's
+# fetch in `adopt_verify.remote_source`), each bounded by `verify_exec.GIT_TIMEOUT`, so the budget plus
+# three of them stays under `verify_exec.TIMEOUT`, which kills the check's process group.
+RAILWAY_READ_BUDGET = 200
+# The host's non-project system and profile bin directories: every non-store entry of the
+# verify-pending runner's PATH, plus the per-user, XDG and Homebrew profiles railway can be installed in.
+RAILWAY_SYSTEM_DIRS = ("/run/current-system/sw/bin", "/etc/profiles/per-user/{user}/bin",
+                       "{home}/.nix-profile/bin", "{home}/.local/state/nix/profile/bin",
+                       "/nix/var/nix/profiles/default/bin", "/opt/homebrew/bin", "/usr/local/bin",
+                       "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+class _ReadTimeout(Exception):
+    """A child outlasted the collection's deadline."""
+
+
+def railway_system_path(user: str, home: str, prefix: str = "") -> str:
+    """`RAILWAY_SYSTEM_DIRS` as a PATH; `prefix` roots the absolute entries (a test seam)."""
+    entries = []
+    for entry in RAILWAY_SYSTEM_DIRS:
+        entries.append((home + entry[len("{home}"):]) if entry.startswith("{home}")
+                       else prefix + entry.format(user=user))
+    return ":".join(entries)
+
+
+def _run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str],
+                 deadline: float) -> subprocess.CompletedProcess:
+    """Run `argv` until `deadline`; kill its process group and raise `_ReadTimeout` past it."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _ReadTimeout
+    proc = subprocess.Popen(list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            errors="replace", start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.communicate()
+        raise _ReadTimeout from None
+    return subprocess.CompletedProcess(list(argv), proc.returncode, out or "", err or "")
+
+
+def _json_object(text: str) -> dict | None:
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _railway_profile_inspection(contract_root: Path, profile_id: str, env: Mapping[str, str],
+                                deadline: float) -> dict | None:
+    """`release profile inspect` of the packaged sibling at `contract_root`, or None when unreadable."""
+    argv = [*siblings.sibling_argv("release.release"), "profile", "inspect", profile_id,
+            "--repo-root", str(contract_root)]
+    try:
+        done = _run_bounded(argv, cwd=contract_root, env=env, deadline=deadline)
+    except OSError:
+        return None
+    return _json_object(done.stdout) if done.returncode == 0 else None
+
+
+def _railway_units(inspection: dict, target: dict) -> list[tuple[str, dict]] | None:
+    """`(node id, config)` of each railway-deploy deploy unit of the target, or None when malformed."""
+    try:
+        adapters = inspection["bindings"]["adapters"]
+        nodes = inspection["graphs"]["activation"]
+        handle = target["target"]["handle"]
+        units = []
+        for node in nodes:
+            alias = adapters.get(node["adapter"])
+            if (isinstance(alias, dict) and alias.get("adapter") == "railway-deploy"
+                    and node["operation"] == "deploy" and node["target"] == handle):
+                units.append((node["id"], alias["config"][node["id"]]))
+        return units
+    except (KeyError, TypeError, AttributeError):
+        return None
+
+
+def _railway_read(observation: dict) -> tuple[bool, str]:
+    """Whether the observation read the unit's services, and its reason."""
+    reason = observation.get("reason")
+    reason = reason if isinstance(reason, str) else "payload_invalid"
+    facts = observation.get("facts")
+    services = facts.get("services") if isinstance(facts, dict) else None
+    if not isinstance(services, list) or not services:
+        return False, reason
+    for service in services:
+        if not isinstance(service, dict) or service.get("reason") in RAILWAY_UNREAD_REASONS:
+            return False, reason
+    return True, reason
+
+
+def railway_project_read(*, user: str, home: str, system_path: str | None = None,
+                         environ: Mapping[str, str] | None = None,
+                         source=verify_exec.project_source,
+                         inspect_profile=_railway_profile_inspection,
+                         budget: float = RAILWAY_READ_BUDGET) -> tuple[int, dict]:
+    """Issue 1124: no system railway, and every registered Railway unit reads from its dev shell."""
+    deadline = time.monotonic() + budget
+    path = system_path or railway_system_path(user, home)
+    found = shutil.which("railway", path=path)
+    if found:
+        return 1, {"met": False, "system_railway": found, "units": 0, "read": 0, "reasons": []}
+
+    def failed(code: str) -> tuple[int, dict]:
+        return 2, {"met": False, "error": code}
+    entries = _registry_entries(Path(home) / ".agents/state/fleet/registry.json", absent_ok=True)
+    if entries is None:
+        return failed("registry_unreadable")
+    base = dict(os.environ if environ is None else environ)
+    pythonpath = ":".join(os.path.abspath(part) for part in base.get("PYTHONPATH", "").split(":")
+                          if part)
+    env = {**base, "PATH": path, "PYTHONPATH": pythonpath}
+    outcomes: list[tuple[bool, str]] = []
+    try:
+        for entry in entries:
+            if time.monotonic() >= deadline:
+                return failed("read_timeout")
+            work: list[tuple[Path, dict]] = []
+            try:
+                with source(entry) as src:
+                    release = src.snapshot.get("release")
+                    targets = release.get("targets") if isinstance(release, dict) else None
+                    for target in targets if isinstance(targets, list) else []:
+                        if not isinstance(target, dict) or target.get("adapter") != "railway-deploy":
+                            continue
+                        inspection = inspect_profile(src.contract_root, target.get("profile"),
+                                                     env, deadline)
+                        units = None if inspection is None else _railway_units(inspection, target)
+                        if units is None:
+                            return failed("inspection_unreadable")
+                        for _, config in units:
+                            ground = target["target"]
+                            work.append((Path(entry["root"]), {
+                                "target": {"kind": ground["kind"],
+                                           "repository": ground["repository"],
+                                           "branch": ground["branch"]},
+                                "candidate": {"commit": src.commit}, "config": config}))
+            except verify_exec.SourceError:
+                return failed("contract_unreadable")
+            for root, parameters in work:
+                if not (root / "devenv.nix").is_file():
+                    outcomes.append((False, "no_dev_shell"))
+                    continue
+                if shutil.which("devenv", path=path) is None:
+                    return failed("devenv_missing")
+                argv = ["devenv", "shell", "--", "env", f"PYTHONPATH={pythonpath}",
+                        *siblings.sibling_argv("release.release"), "adapter", "inspect",
+                        "railway-deploy", "deploy", "--parameters",
+                        json.dumps(parameters, sort_keys=True)]
+                try:
+                    done = _run_bounded(argv, cwd=root, env=env, deadline=deadline)
+                except OSError:
+                    return failed("read_failed")
+                lines = [line for line in done.stdout.splitlines() if line.strip()]
+                observation = _json_object(lines[-1]) if lines else None
+                if done.returncode != 0 or observation is None:
+                    return failed("read_failed")
+                outcomes.append(_railway_read(observation))
+    except _ReadTimeout:
+        return failed("read_timeout")
+    read = sum(1 for ok, _ in outcomes if ok)
+    code = 75 if not outcomes else 0 if read == len(outcomes) else 1
+    return code, {"met": code == 0, "system_railway": None, "units": len(outcomes), "read": read,
+                  "reasons": sorted({reason for _, reason in outcomes})}
+
+
 def console_state(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
     """Issue 856: the console's state endpoint answers 200 on loopback (0), else 1."""
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
@@ -1539,6 +1738,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "darwin-shell-path",
         help="issue 810: a fresh login zsh puts the Nix profiles before /usr/bin")
     shell.add_argument("--zsh", default="/bin/zsh")
+    railway = checks.add_parser(
+        "railway-project-read",
+        help="issue 1124: no system railway, and every registered Railway unit reads its deploys "
+             "from its dev shell")
+    railway.add_argument("--system-path", default=None)
     console = checks.add_parser(
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
@@ -1565,6 +1769,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check == "darwin-shell-path":
         entry = pwd.getpwuid(os.getuid())
         code, report = darwin_shell_path(user=entry.pw_name, home=entry.pw_dir, zsh_bin=args.zsh)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "railway-project-read":
+        entry = pwd.getpwuid(os.getuid())
+        code, report = railway_project_read(
+            user=entry.pw_name, home=os.environ.get("HOME") or entry.pw_dir,
+            system_path=args.system_path)
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "registry-agreement":

@@ -116,6 +116,7 @@ class TickOnTrackerTest(unittest.TestCase):
 
 def node(number, comment_id, body):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": 0},
+            "blocking": {"totalCount": 0, "nodes": []},
             "comments": {"totalCount": 1, "nodes": [{
                 "fullDatabaseId": str(comment_id), "body": body, "authorAssociation": "OWNER",
                 "updatedAt": "2026-11-10T09:00:00Z"}]}}
