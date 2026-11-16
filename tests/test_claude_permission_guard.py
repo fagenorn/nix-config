@@ -2064,6 +2064,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "devenv shell -- git commit -m 'run just switch later'",
             "timeout 5 echo 'run just switch later'",
             "xargs printf '%s\\n' 'run just switch later'",
+            "echo 'just switch <<'; sh -c true",
+            'echo "run just switch later <<"; sh -c true',
         )
         runs = (
             "sh -c 'just switch'", "printf '%s\\n' 'a note' > note.txt; sh -c 'just switch'",
@@ -2078,6 +2080,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "echo 'a note'; nix-shell --run 'just switch'",
             "printf '%s\\n' 'run kubectl later' > note.txt; sh -c 'kubectl apply -f x'",
             "echo 'a note'; just switch",
+            "cmd='just switch'; eval \"$cmd\"", "c='just switch'\nsh -c \"$c\"",
+            "export C='kubectl apply -f x' && bash -c \"$C\"", "echo 'just switch' > f && bash < f",
+            "echo 'just switch' > f && bash f", "echo 'just switch' > f; sh -c 'bash f'",
+            "echo 'just switch' | { true; sh; }", "echo 'just switch' | (true; sh)",
+            "timeout 5 flock /tmp/deploy.lock -c 'just switch'",
+            "eval $(true; printf '%s' 'just switch')",
+            "devenv shell 'just switch'", "devenv shell -- 'just switch'",
+            "timeout 5 devenv shell 'just switch'",
         )
         for command in mentions:
             with self.subTest(mention=command):
