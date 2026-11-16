@@ -1433,6 +1433,125 @@ class QuestionEndTest(unittest.TestCase):
         self.assertEqual(state.questions, ())
 
 
+def taken_back(seq, sprint_id, round_id, index, question="q"):
+    return Event(seq, at(seq), event_log.QUESTION_WITHDRAWN, "owner/p00",
+                 {"sprint_id": sprint_id, "goal": "one", "round": round_id, "index": index,
+                  "question": question})
+
+
+class QuestionWithdrawFoldTest(unittest.TestCase):
+    OTHER = "fedcba9876543210"
+
+    def folded(self, *rows):
+        return sprints.sprint_states([*approved_rows(), *rows])[SID]
+
+    def by_id(self, state, round_id, index):
+        return next(q for q in state.questions if (q.round_id, q.index) == (round_id, index))
+
+    def test_a_withdrawn_question_is_no_longer_open_and_takes_no_answer(self):
+        state = self.folded(asked(4, SID, [QUESTION, SECOND]), taken_back(5, SID, 4, 0))
+        self.assertEqual([(q.round_id, q.index) for q in sprints.open_questions(state)], [(4, 1)])
+        gone = self.by_id(state, 4, 0)
+        self.assertEqual((gone.withdrawn_at, gone.replaced_by), (at(5), None))
+        later = self.folded(asked(4, SID, [QUESTION, SECOND]), taken_back(5, SID, 4, 0),
+                            answer_row(6, SID, 4, 0, "files", "files"))
+        self.assertEqual((later.messages, later.questions), (state.messages, state.questions))
+
+    def test_a_withdrawal_of_an_unknown_answered_or_withdrawn_question_changes_nothing(self):
+        base = [asked(4, SID, [QUESTION, SECOND])]
+        cases = {
+            "unknown": (base, taken_back(6, SID, 99, 0)),
+            "answered": ([*base, answer_row(5, SID, 4, 0, "files", "files")],
+                         taken_back(6, SID, 4, 0)),
+            "withdrawn": ([*base, taken_back(5, SID, 4, 0)], taken_back(6, SID, 4, 0)),
+            "bool index": (base, taken_back(6, SID, 4, True)),
+            "closed": ([*base, closed(5, SID, QuestionEndTest.CLOSE)], taken_back(6, SID, 4, 0)),
+        }
+        for name, (rows, row) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.folded(*rows, row), self.folded(*rows))
+
+    def test_a_round_with_replaces_withdraws_the_named_open_question(self):
+        replacing = {**QUESTION, "context": "with the detail",
+                     "replaces": {"round": 4, "index": 0}}
+        state = self.folded(asked(4, SID, [QUESTION, SECOND]), asked(5, SID, [replacing]))
+        gone = self.by_id(state, 4, 0)
+        self.assertEqual((gone.withdrawn_at, gone.replaced_by), (at(5), 5))
+        self.assertEqual([(q.round_id, q.index) for q in sprints.open_questions(state)],
+                         [(4, 1), (5, 0)])
+        marked = {**QUESTION, "replaces": {"round": 4, "index": 1}}
+        state = self.folded(asked(4, SID, [QUESTION, SECOND]),
+                            answer_row(5, SID, 4, 1, "no", "no"), asked(6, SID, [marked]))
+        kept = self.by_id(state, 4, 1)
+        self.assertEqual((kept.answer, kept.withdrawn_at, kept.replaced_by), ("no", None, None))
+        self.assertIsNotNone(self.by_id(state, 6, 0))
+
+    def test_a_done_report_whose_only_open_question_is_withdrawn_has_ended(self):
+        state = self.folded(asked(4, SID, [QUESTION]),
+                            reported(5, SID, {**QuestionEndTest.DONE}),
+                            taken_back(6, SID, 4, 0))
+        self.assertEqual(sprints.ended_at(state), at(5))
+
+    def test_checked_round_keeps_a_replaces_mark_and_refuses_a_bad_one(self):
+        mark = {"round": 4, "index": 0}
+        marked = {**QUESTION, "replaces": mark}
+        self.assertEqual(sprints.checked_round({"questions": [marked]})["questions"][0]["replaces"],
+                         mark)
+        self.assertNotIn("replaces", sprints.checked_round({"questions": [QUESTION]})["questions"][0])
+        for bad in ("x", {"round": 4}, {"round": 0, "index": 0}, {"round": True, "index": 0},
+                    {"round": 4, "index": -1}, {"round": 4, "index": 0, "x": 1}):
+            with self.subTest(bad=bad):
+                self.assertEqual(refusal({"questions": [{**QUESTION, "replaces": bad}]}),
+                                 sprints.REPLACES_SHAPE.format(n=1))
+        self.assertEqual(refusal({"questions": [marked, {**SECOND, "replaces": dict(mark)}]}),
+                         sprints.REPLACES_TWICE.format(n=2))
+        loose = sprints.checked_round({"questions": [marked]}, limits=False)
+        self.assertEqual(loose["questions"][0]["replaces"], mark)
+        self.assertEqual(sprints.replaced(loose), [(4, 0)])
+        self.assertEqual(sprints.replaced(sprints.checked_round(
+            {"questions": [QUESTION, {**SECOND, "replaces": {"round": 3, "index": 2}}, marked]})),
+            [(3, 2), (4, 0)])
+        self.assertEqual(sprints.QUESTION_SHAPE.format(n=1),
+                         "question 1 is not an object of question, context, blocks, options, "
+                         "recommended, pictures and replaces")
+
+    def test_withdrawable_names_why_a_question_cannot_be_taken_back(self):
+        state = self.folded(asked(4, SID, [QUESTION, SECOND]),
+                            answer_row(5, SID, 4, 1, "no", "no"),
+                            asked(6, SID, [SECOND]), taken_back(7, SID, 6, 0))
+        other = sprints.sprint_states([
+            stated(1, "owner/p00", self.OTHER, "two"), sent(2, self.OTHER, 1, PARTS),
+            approved(3, self.OTHER, 1), asked(9, self.OTHER, [QUESTION])])[self.OTHER]
+        self.assertEqual(sprints.withdrawable(state, 4, 0).question, QUESTION["question"])
+        for args, others, reason in (
+                ((9, 0), [other], "this question belongs to another sprint"),
+                ((9, 0), [], "this question is not known"),
+                ((4, 5), [], "this question is not known"),
+                ((4, 1), [], "this question is already answered"),
+                ((6, 0), [], "this question is already withdrawn")):
+            with self.subTest(args=args):
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.withdrawable(state, *args, others=others)
+                self.assertEqual(str(caught.exception), reason)
+
+    def test_parse_withdraw_question_request(self):
+        def body(**over):
+            return json.dumps({"sprint_id": SID, "secret": "s", "round": 4, "index": 0,
+                               **over}).encode()
+        self.assertEqual(sprints.parse_withdraw_question_request(body()), (SID, "s", 4, 0))
+        missing = {"sprint_id": SID, "secret": "s", "round": 4}
+        for name, raw in (("extra", body(x=1)), ("missing", json.dumps(missing).encode()),
+                          ("round 0", body(round=0)), ("index -1", body(index=-1)),
+                          ("index true", body(index=True)), ("secret 3", body(secret=3)),
+                          ("sprint x", body(sprint_id="x")),
+                          ("repeated", b'{"sprint_id": "%s", "secret": "s", "round": 4, '
+                                       b'"round": 4, "index": 0}' % SID.encode()),
+                          ("array", b"[1]")):
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    sprints.parse_withdraw_question_request(raw)
+
+
 def refusal(round_):
     with unittest.TestCase().assertRaises(sprints.Refused) as caught:
         sprints.checked_round(round_)
