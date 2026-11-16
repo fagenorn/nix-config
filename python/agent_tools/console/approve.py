@@ -117,7 +117,9 @@ when a plan line starts with `deletes `, the only case a deletion is acknowledge
 `title(name)` and `body(latest)` word the pull request from the plan. `retained(plan_id)` reads the
 kept worktree of a failed apply from its failure record (a file of at most 65536 bytes holding a JSON
 object whose `branch` and `worktree` are strings and whose worktree is a directory), else None; it
-never raises.
+never raises. `left_behind(plan_id, root)` is wider: true when the failure record, the worktree directory
+or the local `branch_of` branch of a failed apply remains, so a copy whose record was never written (a
+timed-out apply) or whose cleanup stopped half way is still found.
 
 Runners. The console never merges: the forge's required checks keep merge safety, and `GitHubForge`
 has no method that merges. `push(root, branch, commit, cancel=None, *, timeout=PUSH_TIMEOUT, environ=None)`
@@ -766,6 +768,32 @@ def retained(plan_id: str) -> dict | None:
         return {"branch": record["branch"], "worktree": record["worktree"]}
     except (adopt_apply.AdoptError, OSError, ValueError):
         return None
+
+
+def left_behind(plan_id: str, root: str, *, timeout: float = 10.0) -> bool:
+    """True when a failed apply of `plan_id` left any copy `Adopter.discard` removes (#1088).
+
+    Every deterministic target counts, not only the pair `retained` shows: the failure record, the
+    worktree directory and the local branch of `branch_of`. An apply that timed out leaves the
+    directory before it writes a record, and a cleanup that stopped half way leaves the branch.
+    An unreadable plan id or a branch that cannot be asked about is False for that target.
+    """
+    try:
+        digest = adopt_apply.plan_digest(plan_id)
+        record = adopt_apply.failure_record_path(digest)
+        branch = branch_of(plan_id)
+    except adopt_apply.AdoptError:
+        return False
+    if os.path.lexists(record) or os.path.lexists(record.parent / digest):
+        return True
+    try:
+        done = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 class PushFailed(Exception):

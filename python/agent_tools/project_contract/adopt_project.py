@@ -74,7 +74,9 @@ commit that fails is refused `adopt.commit.failed`, except that when the
 contract asked for a signature and a `git commit-tree -S` probe of the
 worktree's `HEAD` tree (no ref moved, no hook run) also fails, it is refused
 `adopt.commit.signing_unavailable`; either way the worktree is retained and
-the commit is never retried unsigned.
+the commit is never retried unsigned. A contract that asks for no signature
+commits with `--no-gpg-sign`, so a host whose `commit.gpgsign` is on never
+reaches its signer for it.
 
 `plan --contract-draft FILE` plans the adoption of a checkout that has no
 project contract by carrying one drafted outside it (#1067). The file holds one
@@ -827,7 +829,10 @@ def command_apply(args: argparse.Namespace) -> int:
             "verification_failed", "adopt.commit.unresolved_policy", "",
             "the worktree's commit signing policy could not be resolved")
     code, _ = adopt_inspection.run_git(
-        worktree, "commit", "--quiet", *(["-S"] if signed else []),
+        worktree, "commit", "--quiet",
+        # An unsigned contract is explicit about it: a host that signs every
+        # commit by default (`commit.gpgsign`) must not reach for its signer.
+        "-S" if signed else "--no-gpg-sign",
         "-m", adopt_apply.commit_message(
             stored_plan["project_id"], digest, records))
     if code != 0:

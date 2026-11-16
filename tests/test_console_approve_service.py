@@ -189,6 +189,25 @@ class ApproveCase(Case):
         (home / f"{digest}.failure.json").write_text(json.dumps({
             "branch": f"adopt-{digest[:12]}", "worktree": str(home / digest)}))
 
+    def kept_bare(self, plan_id):
+        """A copy a timed-out apply left before it wrote its record: the bare directory."""
+        digest = adopt_apply.plan_digest(plan_id)
+        (self.home / ".agents/state/adopt/worktrees" / digest).mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(approve.retained(plan_id))
+
+    def answer_after_a_failed_apply(self, **fake_arguments):
+        self.ready(apply_result=SIGNING, **fake_arguments)
+        self.run_approval("apply_failed")
+        return self.fake
+
+    def answered(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, _ = self.answer(answer_of(PID_B, {
+                "id": "candidate-class", "subject": ".claude/odd.md", "value": "keep"}))
+            self.assertEqual(status, 204)
+            return self.settled_row(self.repo)
+
     def approve(self, body=None, headers=None, raw=None):
         payload = json.dumps(body).encode() if raw is None else raw
         sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
@@ -491,19 +510,6 @@ class ApplyCardTest(ApproveCase):
                  if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
         return status, files
 
-    def answer_after_a_failed_apply(self, **fake_arguments):
-        self.ready(apply_result=SIGNING, **fake_arguments)
-        self.run_approval("apply_failed")
-        return self.fake
-
-    def answered(self):
-        errors = io.StringIO()
-        with contextlib.redirect_stderr(errors):
-            status, _, _ = self.answer(answer_of(PID_B, {
-                "id": "candidate-class", "subject": ".claude/odd.md", "value": "keep"}))
-            self.assertEqual(status, 204)
-            return self.settled_row(self.repo)
-
     def test_apply_it_again_after_a_kept_copy_asks_apply_to_discard_it(self):
         fake = self.ready(apply_result=SIGNING)
         self.run_approval("apply_failed")
@@ -513,6 +519,20 @@ class ApplyCardTest(ApproveCase):
     def test_a_draft_change_after_a_failed_apply_discards_its_kept_copy_before_planning(self):
         fake = self.answer_after_a_failed_apply()
         self.kept(PID_B)
+        before = len(fake.order)
+        self.answered()
+        self.assertEqual(fake.order[before:], [("discard", PID_B), ("plan", str(self.repo))])
+
+    def test_a_kept_copy_with_no_record_is_discarded_before_planning(self):
+        fake = self.answer_after_a_failed_apply()
+        self.kept_bare(PID_B)
+        before = len(fake.order)
+        self.answered()
+        self.assertEqual(fake.order[before:], [("discard", PID_B), ("plan", str(self.repo))])
+
+    def test_a_kept_branch_with_no_directory_is_discarded_before_planning(self):
+        fake = self.answer_after_a_failed_apply()
+        git(self.repo, "branch", approve.branch_of(PID_B))
         before = len(fake.order)
         self.answered()
         self.assertEqual(fake.order[before:], [("discard", PID_B), ("plan", str(self.repo))])
@@ -1395,6 +1415,72 @@ class CancelAfterApplyTest(CancelChecks, ApproveCase):
         self.assert_cancelled(self.repo)
         self.assertEqual(self.fake.order[-1], ("discard", PID_B))
         self.assertEqual(self.fake.order.count(("discard", PID_B)), 1)
+
+    def test_cancel_after_a_failed_apply_removes_a_copy_that_has_no_record(self):
+        self.ready(apply_result=SIGNING)
+        self.run_approval("apply_failed")
+        self.kept_bare(PID_B)
+        self.assert_cancelled(self.repo)
+        self.assertEqual(self.fake.order.count(("discard", PID_B)), 1)
+
+    def test_cancel_after_a_failed_apply_removes_a_branch_that_has_no_copy(self):
+        self.ready(apply_result=SIGNING)
+        self.run_approval("apply_failed")
+        git(self.repo, "branch", approve.branch_of(PID_B))
+        self.assert_cancelled(self.repo)
+        self.assertEqual(self.fake.order.count(("discard", PID_B)), 1)
+
+    def test_cancel_of_a_failure_with_no_plan_id_cleans_the_earlier_failed_apply(self):
+        fake = self.answer_after_a_failed_apply(discard_result=DISCARD_FAILED)
+        self.kept(PID_B)
+        row = self.answered()
+        self.assertEqual((row["result"], row["plan_id"]), ("failed", None))
+        fake.discard_result = None
+        self.assertEqual(self.cancel({"root": str(self.repo)})[::2], (204, b""))
+        self.assertEqual(fake.order[-1], ("discard", PID_B))
+        self.assertIsNone(self.view()["registration"])
+        self.assertEqual(sorted(str(r[1]["plan_id"]) for r in self.rows("registration.cancelled")),
+                         sorted([str(None), PID_B]))
+        self.assertEqual(self.apply_cards(), [])
+        self.assertEqual(self.inbox_of(self.repo), [])
+        self.restart()
+        self.assertIsNone(self.view()["registration"])
+        self.assertEqual(self.apply_cards(), [])
+
+    def test_a_check_again_under_way_when_the_registration_is_cancelled_brings_no_card_back(self):
+        mode = {"block": None}
+
+        def granter(path, key):
+            if mode["block"] is not None:
+                mode["block"].wait(30)
+                return folder_trust.FAILED
+            return folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key)
+
+        self.trust["trust_granter"] = granter
+        self.ready(apply_result=SIGNING)
+        self.run_approval("apply_failed")
+        self.assertTrue([i for i in self.view()["inbox"]["open"] if i["reason"] == "trust_failed"])
+        rows = len(self.rows("trust.granted"))
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        mode["block"] = gate
+        answers = []
+        retry = threading.Thread(target=lambda: answers.append(support.post_page(
+            self.svc.address, self.CHECK, self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"root": str(self.repo), "profile": "solo"}).encode())))
+        retry.start()
+        end = time.monotonic() + 30
+        while time.monotonic() < end and self.svc._grants_running == 0:
+            time.sleep(0.01)
+        self.assertEqual(self.svc._grants_running, 1)
+        self.assertEqual(self.cancel({"root": str(self.repo)})[::2], (204, b""))
+        gate.set()
+        retry.join(30)
+        self.assertFalse(retry.is_alive())
+        self.assertEqual(len(self.rows("trust.granted")), rows)
+        self.assertEqual(self.inbox_of(self.repo), [])
+        self.restart()
+        self.assertEqual(self.inbox_of(self.repo), [])
 
     def test_a_cancel_whose_discard_fails_is_refused_and_keeps_the_registration(self):
         self.ready(apply_result=SIGNING, discard_result=DISCARD_FAILED)

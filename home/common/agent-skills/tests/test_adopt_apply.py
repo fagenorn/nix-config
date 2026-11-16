@@ -1723,6 +1723,21 @@ class CommitGateTest(ApplyTestCase):
             "the contract asks for a signed commit and this host could not "
             "sign one")
 
+    def test_an_unsigned_contract_commits_past_a_default_that_signs(self):
+        """A host that signs every commit by default (`commit.gpgsign`) with a
+        broken signer still applies a contract that asks for no signature, and
+        the commit carries none."""
+        root = apply_repo(self.home, signed=False)
+        git(root, "config", "commit.gpgsign", "true")
+        git(root, "config", "gpg.format", "openpgp")
+        git(root, "config", "gpg.program",
+            str(root / "no-such-signing-program"))
+        git(root, "config", "user.signingkey", "DEADBEEF")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        result = self.succeed(root, plan_id)
+        raw = git(root, "cat-file", "commit", result["commit"])
+        self.assertNotIn("gpgsig", raw)
+
     def test_a_failing_hook_with_a_working_signer_stays_commit_failed(self):
         root = apply_repo(self.home, signed=True)
         tools = Path(tempfile.mkdtemp())

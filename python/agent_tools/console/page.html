@@ -2542,8 +2542,7 @@ function actionLine(item, state, lead) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send primary needs" : "send", words, () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
-    send.replaceChildren();
-    pathWords(send, words);
+    send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
   if (lead && !isQuestion(item) && !isRegister(item)) act.appendChild(detailFold(item));

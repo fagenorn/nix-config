@@ -75,7 +75,7 @@ Two kinds record an adoption the owner approved on the page (#1054): `ADOPTION_S
 on an apply card) is not in `KEPT_KINDS` either.
 
 `REGISTRATION_CANCELLED` (`registration.cancelled`, #1088, `{"by": "owner", "root", "plan_id"}`, one per
-Cancel registration the owner chooses) is not in `KEPT_KINDS`; the registration, deferral, adoption and
+Cancel registration the owner chooses, plus one per other failed apply of the same root) is not in `KEPT_KINDS`; the registration, deferral, adoption and
 folder-trust folds each drop what it names. `cancelled_registration(event)` reads it: `(root, plan_id)`
 for exactly that payload (`plan_id` null for a registration with none, a failed plan), else None.
 

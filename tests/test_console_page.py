@@ -8016,6 +8016,11 @@ class PathWrapPageTest(unittest.TestCase):
         self.assertEqual(self.segs(send), [".agents/", "artifacts/", "specs/", "design.md"])
         self.assertEqual(self.wbrs(send), 3)
         self.assertEqual(full(send), self.SOLE)
+        # `.send` is an inline-flex row: its direct children are flex items, so the words sit in
+        # one inline span (a single item) or each slash would gain the button's gap.
+        (words,) = send["children"]
+        self.assertEqual(words["tag"], "span")
+        self.assertEqual(full(words), self.SOLE)
 
     def test_a_register_ask_and_title_break_only_at_slashes(self) -> None:
         (snap,) = render([START, {"frame": cards([self.ID_FAILED], FAILED_REGISTRATION)},
