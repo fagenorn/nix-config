@@ -406,6 +406,68 @@ class SprintCommandTest(Case):
     def asked_rows(self):
         return [row for row in support.log_rows(self.store) if row[2] == "questions.asked"]
 
+    def sent_round(self, svc, sid, round_=None):
+        """A sent round: its secret file and its round id."""
+        secret, path = self.asking(svc, sid, round_)
+        got = run_sprint("ask", "--sprint", sid, "--secret-file", secret, "--round-file", path,
+                         "--port", self.port(svc))
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        return secret, self.asked_rows()[-1][0]
+
+    def withdraw(self, svc, sid, secret, *args):
+        return run_sprint("withdraw-question", "--sprint", sid, "--secret-file", secret, *args,
+                          "--port", self.port(svc))
+
+    def test_withdraw_question_takes_one_open_question_back(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, r = self.sent_round(svc, sid)
+        before = support.log_rows(self.store)
+        got = self.withdraw(svc, sid, secret, "--round", r, "--index", "0")
+        after = support.log_rows(self.store)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, f"sprint: round {r} question 0 withdrawn\n", ""))
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(after[-1][2], "question.withdrawn")
+        self.assertEqual([i["key"] for i in view_of(svc)["inbox"]["open"]],
+                         [f"question/{sid}/{r}/1"])
+
+    def test_withdraw_question_refusals_exit_1_and_bad_arguments_exit_2(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, r = self.sent_round(svc, sid)
+        self.assertEqual(self.withdraw(svc, sid, secret, "--round", r, "--index", "0").returncode, 0)
+        got = self.assert_unchanged(svc, lambda: self.withdraw(
+            svc, sid, secret, "--round", r, "--index", "0"))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 409: this question is already withdrawn\n"))
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("A" * 43 + "\n")
+        got = self.assert_unchanged(svc, lambda: self.withdraw(
+            svc, sid, wrong, "--round", r, "--index", "1"))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 403: secret refused\n"))
+        for args in (("--round", r, "--index", "-1"), ("--round", r, "--index", "x"),
+                     ("--round", "0", "--index", "0"), ("--index", "0")):
+            with self.subTest(args=args):
+                got = self.assert_unchanged(svc, lambda: self.withdraw(svc, sid, secret, *args))
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+
+    def test_ask_sends_a_replaces_mark_and_the_owner_sees_one_card(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, r = self.sent_round(svc, sid, {"questions": [Q0]})
+        path = self.store.parent / "replacing.json"
+        path.write_text(json.dumps({"questions": [
+            {**Q0, "context": "with the detail", "replaces": {"round": r, "index": 0}}]}))
+        got = run_sprint("ask", "--sprint", sid, "--secret-file", secret, "--round-file", path,
+                         "--port", self.port(svc))
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        (card,) = [i for i in view_of(svc)["inbox"]["open"] if i["reason"] == "question"]
+        self.assertTrue(card["key"].endswith("/0"), card["key"])
+        self.assertEqual(card["context"], "with the detail")
+
     def test_ask_sends_a_round_that_becomes_one_open_item_per_question(self):
         svc = self.open()
         sid = self.goal(svc)
@@ -765,6 +827,20 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, questions)
         self.assertIn("`answer`", text.partition("## Every turn")[2].partition("\n## ")[0])
 
+    def test_the_contract_says_to_replace_a_question_rather_than_ask_it_again(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        questions = " ".join(text.partition("## Questions")[2].partition("\n## ")[0].split())
+        for needle in ("`replaces`", '`"replaces": {"round": <id>, "index": <n>}`',
+                       "never ask it again", "`sprint withdraw-question --round <id> --index <n>`",
+                       "counts from 0", "the owner sees one card",
+                       "the manager took this question back",
+                       "until every question of it is answered or taken back",
+                       "while another question of the open round stays open, "
+                       "a replacement round is still refused"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, questions)
+        self.assertNotIn("until every question of it is answered, another round", questions)
+
     def test_the_contract_states_the_title_ask_context_and_option_limits(self):
         text = CONTRACT.read_text(encoding="utf-8")
         drafting = " ".join(text.partition("## Drafting the brief")[2].partition("\n## ")[0].split())
@@ -845,7 +921,8 @@ class CommandContractTest(unittest.TestCase):
                      "POST /api/report", "sprint contract", "sprint ask", "--round-file",
                      "POST /api/ask", "chosen", "round or reply file",
                      '"context": "<optional, at most 400 characters>"',
-                     "six parts, `title` first"):
+                     "six parts, `title` first", "sprint withdraw-question",
+                     "POST /api/withdraw-question", "--index", "replaces"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 

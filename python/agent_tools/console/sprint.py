@@ -6,6 +6,7 @@
     sprint close [--sprint <id>] [--secret-file <path>] --closing-file <path | -> [--port N]
     sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
     sprint recap [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint withdraw-question [--sprint <id>] [--secret-file <path>] --round <id> --index <n> [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--port N]
@@ -17,7 +18,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `ask`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -67,8 +68,13 @@ round is
                     "options": ["<one line, at most 80 characters>", ...],
                     "recommended": "<exact text of one option>",
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
-                                  "pair": "before" | "after"}, ...]}, ...],
+                                  "pair": "before" | "after"}, ...],
+                    "replaces": {"round": <id>, "index": <n>}}, ...],
      "blocker": true | false}                   (blocker optional, default false)
+
+`replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
+in the order the round was sent), and the console takes that question back in the write that
+accepts the new one. The command sends it as given and validates no more than it did: the console decides.
 
 `pictures` is optional, at most 8 to a question, and `pair` is optional; a question whose ask or context
 names screenshots, a `.png` file or a screenshots folder must carry one, else the console refuses the
@@ -89,6 +95,14 @@ On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when
 0; a 200 answer without integer `round` and `questions` is `sprint: refused 200: unreadable
 answer: <error>` and exit 1. Beyond the pictures' own rules the command validates no member of the
 round: the console decides, in one place.
+
+`sprint withdraw-question` reads the secret the same way and sends `POST /api/withdraw-question` with
+`{"sprint_id", "secret", "round", "index"}`, no `Origin`, for the question `--index` (an integer of at
+least 0, counting from 0 in the order the round was sent) of the round `--round` (an integer of at
+least 1); anything else is exit 2 with no request sent. On success it prints `sprint: round <r>
+question <i> withdrawn` and exit 0; a refusal (an answered question, one already withdrawn, another
+sprint's question, a wrong secret) is `sprint: refused <status>: <text>` and exit 1, and a 200 answer
+without integer `round` and `index` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
 
 `sprint report --help` and `sprint close --help` list the members of the report and of the closing
 report, each with one line and an example, the same lists `sprint contract` prints.
@@ -229,12 +243,34 @@ def message_id(text: str) -> int:
     return value
 
 
+def round_id(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a round id (an integer of at least 1)")
+    return value
+
+
+def question_index(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = -1
+    if value < 0:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a question index (an integer of at least 0)")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sprint", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (("brief", "send the sprint's brief to the console"),
                        ("report", "send the sprint's report to the console"),
                        ("ask", "send one round of questions to the owner"),
+                       ("withdraw-question", "take back one of the sprint's open questions"),
                        ("close", "send the sprint's closing report"),
                        ("inbox", "print the owner's unread messages to the sprint"),
                        ("recap", "print what a manager needs to pick the sprint up"),
@@ -264,6 +300,11 @@ def build_parser() -> argparse.ArgumentParser:
                                   help="the closing report as a JSON object; - reads stdin")
         if name == "picture":
             each.add_argument("--file", type=Path, required=True, help="the PNG file to send")
+        if name == "withdraw-question":
+            each.add_argument("--round", type=round_id, required=True,
+                              help="the id of the round holding the question")
+            each.add_argument("--index", type=question_index, required=True,
+                              help="the question's index in its round, counting from 0")
         if name == "reply":
             each.add_argument("--message", type=message_id, required=True,
                               help="the id of the message being answered")
@@ -479,6 +520,21 @@ def send_round(args: argparse.Namespace, sprint: str) -> str:
     return f"sprint: round {sent} sent, {questions} {noun}"
 
 
+def send_withdrawal(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "round": args.round,
+                       "index": args.index}).encode()
+    text = ask(args.port, "POST", service.WITHDRAW_QUESTION_PATH, body)
+    try:
+        answer = json.loads(text)
+        round_, index = answer["round"], answer["index"]
+        if any(type(n) is not int for n in (round_, index)):
+            raise TypeError("round and index are not both integers")
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    return f"sprint: round {round_} question {index} withdrawn"
+
+
 def send_report(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     report = read_object(args.report_file, "report")
@@ -566,6 +622,8 @@ def main(argv: list[str] | None = None) -> int:
             line = send_report(args, sprint)
         elif args.command == "ask":
             line = send_round(args, sprint)
+        elif args.command == "withdraw-question":
+            line = send_withdrawal(args, sprint)
         elif args.command == "close":
             line = send_closing(args, sprint)
         elif args.command == "inbox":

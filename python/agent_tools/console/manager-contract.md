@@ -87,6 +87,7 @@ Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one li
    - `blocks`: one line, what waits behind the answer.
    - `options`: two to four one-line options of at most 80 characters each.
    - `recommended`: the exact text of the option you recommend.
+   - `replaces`: optional, `{"round": <id>, "index": <n>}`: names one open question of this sprint by its round id and its index, which counts from 0 in the order the round was sent; see item 4.
    - `pictures`: optional, at most 8 to a question: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`. `sprint ask` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once in a question) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and nothing is sent.
 
    A question about look or layout carries its pictures, each with one line saying what to look at: attach them with `pictures` (`file`, `line`, optional `pair`) instead of pointing at a folder. A round in which a question's `question` or `context` names screenshots (the word screenshot or screenshots, in any case, or "screen shot"), a `.png` file or a folder with a `screenshots` segment, but attaches no picture, is refused with that question named and nothing is sent: attach the pictures with `pictures`, or reword the question.
@@ -98,8 +99,9 @@ Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one li
    Bad: one `question` paragraph of about 500 characters holding the cause, the evidence and the ask together, refused with `question 1's ask is over 140 characters`.
 
    It prints `sprint: round <id> sent, <n> questions`.
-3. A sprint has one open round at a time: until every question of it is answered, another round is refused with `a round of questions is already open`. Only a question that stops all work goes out as a further round, with `"blocker": true` beside `questions`.
-4. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, the chosen option or the owner's own words: act on it and answer it with `sprint reply` like any message.
+3. A sprint has one open round at a time: until every question of it is answered or taken back, another round is refused with `a round of questions is already open`. A round that replaces questions of the open round is taken only when it replaces every one of them still open: while another question of the open round stays open, a replacement round is still refused. Only a question that stops all work goes out as a further round, with `"blocker": true` beside `questions`.
+4. To re-ask a question (to add the pictures you forgot, fix its words or change an option), send the new round with `"replaces": {"round": <id>, "index": <n>}` on the new question, and never ask it again as a new question. The console takes the old question back in the same write, so the owner sees one card; item 3's rule still applies to the replacing round. To take back a question you no longer need, run `sprint withdraw-question --round <id> --index <n>` (`<n>` counts from 0). An answered question, one already taken back, or another sprint's question is refused with the reason and nothing is sent. An owner who answers a question you took back is told "the manager took this question back".
+5. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, the chosen option or the owner's own words: act on it and answer it with `sprint reply` like any message.
 
 ## Ending
 
