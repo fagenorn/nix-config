@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
     ADD_STEPS, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, GOAL_FRAME, MORE_KEY, NOW_MS, NOW_S, NO_LINK_RUNNING, OPEN_A, OWNER_W, PICTURED, PROGRESS,
@@ -15,6 +16,7 @@ from .test_console_page import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
+SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
 
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
@@ -58,6 +60,7 @@ DESK_CONTROLS: dict = {
              "notice-text", "register-path", "goal-filter", "goal-text"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
 }
+SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
 BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick"})
 BARE_FIELDS = frozenset({"goal-text"})
 BARE_ROLES = BARE_BUTTONS | BARE_FIELDS
@@ -136,6 +139,17 @@ def outside_blocks(text: str) -> str:
 
 def page_style() -> str:
     return re.search(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8")).group(1)
+
+
+def spend_style() -> str:
+    return re.search(r"(?s)<style>(.*?)</style>", SPEND.read_text(encoding="utf-8")).group(1)
+
+
+def spend_buttons() -> list:
+    """Every button node of the Spend page's default render."""
+    (snap,) = render_spend([{"frame": spend_view_fixture()}, {"snapshot": True}])["snapshots"]
+    return [node for tree in snap.values() if isinstance(tree, dict)
+            for node, _parent in _walk(tree, None) if node["tag"] == "button"]
 
 
 def page_script() -> str:
@@ -259,6 +273,13 @@ class ControlInventoryTest(unittest.TestCase):
                 if bad:
                     wrong.append(f"{role(node['cls'])}: {node['cls']}")
         self.assertEqual(sorted(set(wrong)), [])
+        buttons = spend_buttons()
+        self.assertTrue(buttons)
+        for node in buttons:
+            kinds = set(node["cls"].split()) & set(KINDS)
+            with self.subTest(spend=node["cls"]):
+                self.assertEqual(len(kinds), 1)
+                self.assertLessEqual(kinds, SPEND_CONTROLS.get(role(node["cls"]), frozenset()))
 
     def test_every_listed_desk_control_is_drawn(self) -> None:
         drawn = {role_key(n["cls"]) for snap in self.snaps for n in controls_of(snap)
@@ -452,6 +473,23 @@ class ControlStyleTest(unittest.TestCase):
         outside = style_rules(outside_blocks(self.style))
         for selector, _decls in outside:
             self.assertNotIn(selector, ["." + k for k in KINDS], selector)
+
+    def test_both_pages_share_one_controls_block(self) -> None:
+        spend = SPEND.read_text(encoding="utf-8")
+        self.assertEqual(controls_block(spend), controls_block(PAGE.read_text(encoding="utf-8")))
+        self.assertNotIn("/* controls: desk */", spend)
+        self.assertIn("--hover: rgba(202, 211, 245, .05);", spend_style())
+
+    def test_both_pages_turn_motion_off_under_reduced_motion(self) -> None:
+        for name, style in (("desk", self.style), ("spend", spend_style())):
+            with self.subTest(page=name):
+                block = media_block(style, "(prefers-reduced-motion: reduce)")
+                self.assertTrue(block)
+                rules = style_rules(block)
+                for selector in ("*", "*::before", "*::after"):
+                    held = {k: v for s, d in rules if s == selector for k, v in d.items()}
+                    self.assertEqual(held.get("transition-duration"), ".001ms !important")
+                    self.assertEqual(held.get("animation-duration"), ".001ms !important")
 
     def test_kind_rules_own_the_control_look(self) -> None:
         offenders = []

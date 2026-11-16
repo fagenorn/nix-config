@@ -246,7 +246,7 @@ class SpendRenderTest(unittest.TestCase):
         self.assertEqual([b["attrs"]["data-span"] for b in buttons], ["1", "7", "30"])
         self.assertEqual({b["attrs"]["type"] for b in buttons}, {"button"})
         self.assertEqual({b["tag"] for b in buttons}, {"button"})
-        self.assertEqual({b["cls"] for b in buttons}, {"span"})
+        self.assertEqual({b["cls"] for b in buttons}, {"span btn-quiet"})
         figures = find(snap["summary"], "div", "figure")
         self.assertEqual(
             [find(f, "span", "figure-label")[0]["text"] for f in figures],
