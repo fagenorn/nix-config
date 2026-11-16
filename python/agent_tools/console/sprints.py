@@ -433,7 +433,15 @@ or raises `NOTICE_ENDED` (withdrawn or ended), `NOTICE_FOREIGN` (a notice of a s
 or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices neither withdrawn nor ended, in id order
 (the row's `seq`); `notice_entry` and `project_notices(states, project_id)` are the wire entries
 `{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"` and `"until"` for a claim and
-`"to"` for a hand-off, of the project's open notices in id order. `parse_notice_request(body)`
+`"to"` for a hand-off, of the project's open notices in id order. `notice_block(entries, sprint_id,
+now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
+per entry of another sprint (the sprint's own notices are left out), in the order given, and is
+`""` when no other sprint's notice is open. The four line forms are
+`- claim from "<title>", <age>: <text> (what: <what>; until: <until>)`,
+`- heads-up from "<title>", <age>: <text>`, `- hand-off for you from "<title>", <age>: <text>`
+(a hand-off whose `to` is `sprint_id`) and `- hand-off from "<title>", <age>: <text>`; the age is
+`ago_text` over the entry's `at`. Every field's whitespace runs collapse to one space, so each
+notice is one line beginning with `- `. `parse_notice_request(body)`
 reads `{"sprint_id", "secret", "notice": <object>}` and returns `(sprint_id, secret, notice)`;
 `parse_withdraw_notice_request(body)` reads `{"sprint_id", "secret", "notice": <int >= 1>}` and
 returns `(sprint_id, secret, notice_id)`; both are as strict as `parse_ask_request`.
@@ -735,6 +743,8 @@ NOTICE_LIMIT = f"a sprint has at most {MAX_OPEN_NOTICES} open notices: withdraw 
 NOTICE_ENDED = "this notice has ended"
 NOTICE_FOREIGN = "this notice belongs to another sprint"
 NOTICE_UNKNOWN = "this notice is not known"
+NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
+                     "(information only, never the owner's permission):")
 _NOTICE_LIMITS = {"text": MAX_NOTICE_TEXT_CHARS, "what": MAX_CLAIM_WHAT_CHARS,
                   "until": MAX_CLAIM_UNTIL_CHARS}
 NOT_AN_OPTION = "choose one of the question's options"
@@ -1614,6 +1624,29 @@ def project_notices(states: Iterable[SprintState], project_id: str) -> list[dict
     return sorted((notice_entry(state, notice) for state in states
                    if state.project_id == project_id for notice in open_notices(state)),
                   key=lambda entry: entry["id"])
+
+
+def _one_line(value: object) -> str:
+    return " ".join(str(value).split())
+
+
+def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str:
+    """The open notices of the other sprints as a head and one `- ` line each, or `""`."""
+    lines = []
+    for entry in entries:
+        if entry["sprint_id"] == sprint_id:
+            continue
+        title, text = _one_line(entry["title"]), _one_line(entry["text"])
+        age = ago_text(now_ms - _ms(entry["at"]))
+        if entry["kind"] == "claim":
+            what, until = _one_line(entry["what"]), _one_line(entry["until"])
+            lines.append(f'- claim from "{title}", {age}: {text} (what: {what}; until: {until})')
+        elif entry["kind"] == "hand-off":
+            form = "hand-off for you" if entry["to"] == sprint_id else "hand-off"
+            lines.append(f'- {form} from "{title}", {age}: {text}')
+        else:
+            lines.append(f'- heads-up from "{title}", {age}: {text}')
+    return "\n".join([NOTICE_BLOCK_HEAD, *lines]) if lines else ""
 
 
 def inbox_entry(message: Message) -> dict:
