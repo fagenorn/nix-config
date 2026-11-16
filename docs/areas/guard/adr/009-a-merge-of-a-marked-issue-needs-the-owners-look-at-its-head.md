@@ -15,7 +15,9 @@ An issue whose body carries a look marker line is a criterion, not a label: mark
 - One approval covers one head. A new commit to the pull request needs a new look, and the latest answer for a head decides, so a later request for changes withdraws an earlier approval.
 - Both merge arms run the gate, right after the mergeability check and before their first gate, so a pull request merged onto an integration base meets it before the exemption, and a release pull request meets it before its rollup predicate.
 - The guard stays standard-library only and imports nothing from `agent_tools`. It reads the pull request body, each referenced issue and its comments with its own store `gh`, then runs the shared reader as a child the wrapper names with `--look-bin`, as it runs the row check through `--derive-bin`.
-- A failed, timed-out or unreadable lookup refuses, and so does a missing `--look-bin`: the gate fails closed.
+- A merge that settles a marked issue must carry `--match-head-commit`, the rule of the plan-gated floor: the guard's read of the head is seconds older than the merge, and only GitHub's atomic head match makes the approved head the head that merges. The mergeability check has already held the flag equal to the head read, so the flag names the approved head.
+- A pull request's issues are found by every keyword GitHub closes an issue on, plus `Refs`, and by this repository's issue URLs, so the gate is no narrower than the forge's own closing.
+- A failed, timed-out or unreadable lookup refuses, an issue or pull request object with no `body` key included, and so does a missing `--look-bin`: the gate fails closed.
 
 ## Consequences
 

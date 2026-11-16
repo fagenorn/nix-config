@@ -18,11 +18,13 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    and head has `answer=approved`) or `needed`; a matching marker with no `answer` field approves
    nothing but, being the latest, still decides. Exit 0. Output keys: `repo`, `issue`, `pr`,
    `head`, `verdict`, `covers` (the criteria text), `answer` (the latest marker's, or null) and
-   `comment_id` (the latest marker's, or null).
+   `comment_id` (the latest marker's, or null). An issue object with no `body` key is a forge error
+   (`payload_invalid`, exit 1), never an unmarked issue.
 3. `judge` reads `{"pr": <positive int>, "head": <40 lowercase hex or null>, "issues":
    [{"number": <positive int>, "body": <string or null>, "comments": [<REST issue comment>, ...]}]}`
-   from stdin and prints `verdict` `admit` (exit 0), or `refuse` (exit 1) with `issue` (the first
-   marked issue lacking an approval) and `covers`, or `error` (exit 2) with `error` `usage` (not
+   from stdin and prints `verdict` `admit` (exit 0) with `marked` (the numbers of the marked issues
+   it admitted, ascending, possibly none), or `refuse` (exit 1) with `issue` (the first marked
+   issue lacking an approval) and `covers`, or `error` (exit 2) with `error` `usage` (not
    JSON, wrong types, a bool number, a missing key) or `payload_invalid` (a trusted comment
    `forge_markers.parse` rejects) and `detail`. It starts no subprocess, reads no environment and
    makes no network call: the merge guard runs it through its wrapper.
@@ -116,9 +118,10 @@ def post(args: argparse.Namespace) -> int:
 
 def status(args: argparse.Namespace) -> int:
     issue = forge_api.gh_json(["api", f"repos/{args.repo}/issues/{args.issue}"])
-    body = issue.get("body") if isinstance(issue, dict) else None
-    if not isinstance(issue, dict) or not (body is None or isinstance(body, str)):
-        raise forge_api.ForgeError("payload_invalid", "issue body is not a string or null")
+    if not isinstance(issue, dict) or "body" not in issue or not (
+            issue["body"] is None or isinstance(issue["body"], str)):
+        raise forge_api.ForgeError("payload_invalid", "issue body is missing or not a string or null")
+    body = issue["body"]
     comments = forge_markers.list_comments(args.repo, args.issue)
     look = lm.read_look(body)
     marker = lm.look_answer(comments, args.issue, args.pr, args.head)
@@ -173,7 +176,7 @@ def judge(stdin: str) -> int:
         emit({**base, "verdict": "error", "error": error.code, "detail": error.detail})
         return USAGE
     if verdict.admit:
-        emit({**base, "verdict": "admit"})
+        emit({**base, "verdict": "admit", "marked": list(verdict.marked)})
         return 0
     emit({**base, "verdict": "refuse", "issue": verdict.issue, "covers": list(verdict.covers)})
     return 1

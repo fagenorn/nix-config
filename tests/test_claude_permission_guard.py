@@ -4974,6 +4974,12 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     )
     LOOK_MARKED = {"1200": {"body": LOOK_BODY}}
     LOOK_MERGE = "gh pr merge 1300 --repo fagenorn/nix-config --merge --delete-branch"
+    LOOK_PINNED = (
+        "gh pr merge 1300 --repo fagenorn/nix-config --merge "
+        f"--match-head-commit {LOOK_HEAD} --delete-branch")
+    LOOK_UNPINNED_REFUSAL = (
+        "lifecycle guard: unsafe merge: issue 1200 awaits the owner's look, so the merge must "
+        f"carry --match-head-commit {LOOK_HEAD}, the head the owner approved")
     LOOK_REFUSAL = (
         "lifecycle guard: unsafe merge: issue 1200 needs the owner's look before merge, "
         "and head 1a2b3c4 has no recorded approval; ask the owner and record the answer"
@@ -5091,6 +5097,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "lifecycle guard: unsafe merge: cannot read issue 1200"),
             ({"FAKE_COMMENTS_MODE": "invalid"}, None,
              "lifecycle guard: unsafe merge: cannot read the comments of issue 1200"),
+            ({"FAKE_ISSUE_JSON": '{"number": 1200}'}, None,
+             "lifecycle guard: unsafe merge: cannot read issue 1200"),
+            ({"FAKE_BODY_JSON": "{}"}, None,
+             "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({}, ("--gh-bin", str(self.fake_gh), "--look-bin", str(broken)),
              "lifecycle guard: look check failed:"),
         )
@@ -5105,7 +5115,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         repo = self.look_repo()
         for association in ("OWNER", "MEMBER"):
             with self.subTest(association=association):
-                result = self.run_guard(self.LOOK_MERGE, repo, self.marked_with(
+                result = self.run_guard(self.LOOK_PINNED, repo, self.marked_with(
                     self.look_comment(10, association=association)))
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual("", result.stderr)
@@ -5130,10 +5140,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         repo = self.look_repo()
         refused = self.run_guard(self.LOOK_MERGE, repo, self.look_env(self.LOOK_MARKED))
         self.assert_look_refusal(refused)
-        approved = self.run_guard(self.LOOK_MERGE, repo, self.marked_with(self.look_comment(10)))
+        approved = self.run_guard(self.LOOK_PINNED, repo, self.marked_with(self.look_comment(10)))
         self.assertEqual(0, approved.returncode, approved.stderr)
         moved = self.run_guard(
-            self.LOOK_MERGE, repo, self.marked_with(self.look_comment(10), head="f" * 40))
+            self.LOOK_PINNED.replace(self.LOOK_HEAD, "f" * 40), repo,
+            self.marked_with(self.look_comment(10), head="f" * 40))
         self.assert_look_refusal(moved, self.LOOK_REFUSAL.replace("1a2b3c4", "fffffff"))
 
     RELEASE_MERGE = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
@@ -5183,9 +5194,49 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             self.look_comment(10, issue=1200, pr=1484, head=self.HEAD_SHA)]}}
         env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
                "FAKE_ISSUES": json.dumps(issues)}
-        result = self.run_guard(self.RELEASE_MERGE, repo, env)
+        result = self.run_guard(
+            f"{self.RELEASE_MERGE} --match-head-commit {self.HEAD_SHA}", repo, env)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("", result.stderr)
+
+    def test_an_approved_marked_merge_without_match_head_commit_refuses(self):
+        approved = self.marked_with(self.look_comment(10))
+        for name, command, repo, env in (
+            ("feature arm", self.LOOK_MERGE, self.look_repo(), approved),
+            ("with a subject", self.LOOK_MERGE.replace(
+                "--merge", '--merge --subject "page (#1300)"'), self.look_repo(), approved),
+        ):
+            with self.subTest(arm=name):
+                self.assert_look_refusal(
+                    self.run_guard(command, repo, env), self.LOOK_UNPINNED_REFUSAL)
+        release_issues = {"1200": {"body": self.LOOK_BODY, "comments": [
+            self.look_comment(10, issue=1200, pr=1484, head=self.HEAD_SHA)]}}
+        release_env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
+                       "FAKE_ISSUES": json.dumps(release_issues)}
+        result = self.run_guard(
+            self.RELEASE_MERGE, self.make_repo("git@github.com:elevenyellow/nodocom.git"),
+            release_env)
+        self.assert_look_refusal(
+            result, self.LOOK_UNPINNED_REFUSAL.replace(self.LOOK_HEAD, self.HEAD_SHA))
+
+    def test_every_github_closing_form_reaches_the_look_gate(self):
+        repo = self.look_repo()
+        forms = (
+            "Fix #1200", "Fixed #1200", "Closed #1200", "Close #1200", "Resolve #1200",
+            "Resolved #1200", "closes: #1200",
+            "Closes https://github.com/fagenorn/nix-config/issues/1200",
+            "fixes fagenorn/nix-config#1200")
+        for form in forms:
+            with self.subTest(form=form):
+                env = self.look_env(self.LOOK_MARKED, body=f"Settles it.\n{form}", branch="topic")
+                self.assert_look_refusal(self.run_guard(self.LOOK_MERGE, repo, env))
+
+    def test_another_repositorys_issue_url_is_ignored(self):
+        env = self.look_env(
+            self.LOOK_MARKED, branch="topic",
+            body="Closes https://github.com/other/repo/issues/1200")
+        result = self.run_guard(self.LOOK_MERGE, self.look_repo(), env)
+        self.assertEqual(0, result.returncode, result.stderr)
 
 
 if __name__ == "__main__":

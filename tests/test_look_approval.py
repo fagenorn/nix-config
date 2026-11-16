@@ -96,6 +96,12 @@ class StatusTest(unittest.TestCase):
         code, out = run(*STATUS)
         self.assertEqual((code, out["verdict"]), (0, "unmarked"))
 
+    def test_status_of_an_issue_with_no_body_key_is_an_error(self):
+        self.world.comment_store(SLUG, ISSUE, [])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7})
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+
     def test_status_of_a_marker_with_no_answer_is_needed(self):
         cases = {
             "only": ([comment(5, NO_ANSWER)], 5),
@@ -152,7 +158,13 @@ class JudgeTest(unittest.TestCase):
         self.assertEqual((code, out), (1, {"command": "look-approval", "action": "judge",
                                            "verdict": "refuse", "issue": 1200, "covers": [WHAT]}))
         code, out = self.judge(self.payload([approval]))
-        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge", "verdict": "admit"}))
+        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge", "verdict": "admit",
+                                           "marked": [1200]}))
+        unmarked = json.dumps({"pr": 12, "head": HEAD, "issues": [
+            {"number": 7, "body": "plain", "comments": []}]})
+        code, out = self.judge(unmarked)
+        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge",
+                                           "verdict": "admit", "marked": []}))
         code, out = self.judge("{")
         self.assertEqual((code, out["error"]), (2, "usage"))
         code, out = self.judge(self.payload(pr=True))

@@ -441,8 +441,10 @@ release arm's rollup predicate, with the matched PR number (the release arm
 receives it as `validate_release_merge`'s last parameter).
 1. The guard reads the PR body, `gh pr view <n> --repo <slug> --json body`.
 2. The PR's issues are the number in an `issue-<n>-` head branch plus every
-   `Closes`, `Fixes`, `Resolves` or `Refs` (any case, an optional colon) in the
-   body followed by `#<n>` or `<slug>#<n>` for this repository's slug; a
+   closing keyword GitHub honours (`close`, `closes`, `closed`, `fix`, `fixes`,
+   `fixed`, `resolve`, `resolves`, `resolved`) or `Refs` (any case, an optional
+   colon) in the body followed by `#<n>`, `<slug>#<n>` or
+   `https://github.com/<slug>/issues/<n>` for this repository's slug; a
    reference naming another repository is ignored. No issue: the merge is
    judged exactly as before, with no further child.
 3. For each issue it reads `gh api repos/<slug>/issues/<n>` and
@@ -452,7 +454,12 @@ receives it as `validate_release_merge`'s last parameter).
 4. It runs the look check, the store script `--look-bin` names
    (`look-approval judge`), with `{"pr", "head", "issues": [{"number", "body",
    "comments"}]}` on stdin and the row check's scrubbed environment. Exit 0 with
-   verdict `admit` passes. Exit 1 with verdict `refuse` and an integer `issue`
+   verdict `admit` and a `marked` array of integers passes, except that when
+   `marked` is not empty the merge must carry `--match-head-commit` (held equal to
+   the PR head by the mergeability check, so GitHub's atomic head match decides
+   the head that merges): without it the merge is refused as `unsafe merge: issue
+   <n> awaits the owner's look, so the merge must carry --match-head-commit
+   <head>, the head the owner approved`. Exit 1 with verdict `refuse` and an integer `issue`
    refuses as `unsafe merge: issue <n> needs the owner's look before merge, and
    head <first seven characters> has no recorded approval; ask the owner and
    record the answer`, or, with no readable head, as `unsafe merge: cannot read
@@ -466,7 +473,8 @@ timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> lookup failed` or `issue <n> comment lookup failed` with the child's
 diagnostic, and output that is not the expected shape is refused as `unsafe
 merge: cannot read the PR body`, `cannot read issue <n>` or `cannot read the
-comments of issue <n>`. Which issues are marked, and which approvals count
+comments of issue <n>`; an issue or PR body object with no `body` key is
+unreadable, never an empty body. Which issues are marked, and which approvals count
 (the owner's or a member's, naming this issue, this PR and this head, the
 latest answer deciding), is `look-approval`'s contract; `--admin` is in no merge
 form, so it is refused by the grammar before any lookup.
@@ -1129,11 +1137,16 @@ FORM_TABLE = {
 # The value `--match-head-commit` takes: a full commit SHA (issue 402 D10), which
 # must also be the PR's head commit (issue 476 D3).
 HEAD_COMMIT = re.compile(r"[0-9a-f]{40}")
-# The words that tie a pull request to an issue it settles (issue 1138): an optional
-# colon, then `#<n>` or `<owner>/<name>#<n>`; the look gate reads only the
-# repository's own references.
+# The words that tie a pull request to an issue it settles (issue 1138): every
+# keyword GitHub closes an issue on (close, closes, closed, fix, fixes, fixed,
+# resolve, resolves, resolved) and `refs`, an optional colon, then `#<n>`,
+# `<owner>/<name>#<n>` or a `https://github.com/<owner>/<name>/issues/<n>` URL;
+# the look gate reads only the repository's own references. Each match is
+# `(url slug, qualified slug, number)`, the slug groups empty when not spelled.
 LOOK_REFERENCE = re.compile(
-    r"\b(?:closes|fixes|resolves|refs)\b[ \t]*:?[ \t]*(?:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?#([1-9][0-9]*)\b",
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs)\b[ \t]*:?[ \t]*"
+    r"(?:https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/"
+    r"|([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)([1-9][0-9]*)\b",
     re.IGNORECASE)
 # GitHub's answer to a branch-protection read on a plan that cannot protect the
 # branch (issue 552 D2): `gh api` exits non-zero and writes this body to stdout.
@@ -4887,7 +4900,7 @@ def validate_merge(text, context, compiled):
     problem = mergeability_problem(pr_facts, base, head_commit)
     if problem is not None:
         return refuse("merge", problem)
-    status = look_problem(context, number, pr_facts)
+    status = look_problem(context, number, pr_facts, head_commit)
     if status is not None:
         return status
 
@@ -4975,16 +4988,18 @@ def mergeability_problem(pr_facts, base, head_commit):
 def look_issue_numbers(head_ref, body, repository):
     """The issues a pull request settles, ascending (issue 1138).
 
-    The number in an `issue-<n>-` head branch, and every `Closes`, `Fixes`,
-    `Resolves` or `Refs` (any case, an optional colon) in the body followed by
-    `#<n>` or `<repository>#<n>`; a reference naming another repository is
-    ignored.
+    The number in an `issue-<n>-` head branch, and every closing keyword of
+    GitHub (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`,
+    `resolves`, `resolved`) or `Refs` (any case, an optional colon) in the body
+    followed by `#<n>`, `<repository>#<n>` or this repository's issue URL; a
+    reference naming another repository is ignored.
     """
     found = set()
     named = re.match(r"issue-([1-9][0-9]*)-", head_ref) if isinstance(head_ref, str) else None
     if named is not None:
         found.add(int(named.group(1)))
-    for slug, number in LOOK_REFERENCE.findall(body):
+    for url_slug, slug, number in LOOK_REFERENCE.findall(body):
+        slug = url_slug or slug
         if not slug or slug.lower() == repository.lower():
             found.add(int(number))
     return sorted(found)
@@ -5025,8 +5040,8 @@ def look_issue_facts(context, number):
         f"cannot read issue {number}")
     if status is not None:
         return None, status
-    if not isinstance(issue, dict) or not (
-        issue.get("body") is None or isinstance(issue["body"], str)
+    if not isinstance(issue, dict) or "body" not in issue or not (
+        issue["body"] is None or isinstance(issue["body"], str)
     ):
         return None, refuse("merge", f"cannot read issue {number}")
     pages, status = look_json(
@@ -5045,14 +5060,18 @@ def look_issue_facts(context, number):
     return {"number": number, "body": issue.get("body"), "comments": comments}, None
 
 
-def look_problem(context, number, pr_facts):
+def look_problem(context, number, pr_facts, head_commit):
     """None when the look gate passes, else the status the merge returns (issue 1138).
 
-    `number` is the pull request number string. The gate reads the PR body, then
+    `number` is the pull request number string and `head_commit` the command's
+    `--match-head-commit` value, None without the flag. The gate reads the PR body, then
     each issue the PR settles (`look_issue_numbers`) with its comments, and asks the
     look check (`--look-bin`) whether every issue whose body carries a look marker
     has the owner's approval of the PR's head. A PR settling no issue passes with
-    no further lookup; any failed, timed-out or unreadable lookup refuses.
+    no further lookup; any failed, timed-out or unreadable lookup refuses. When
+    the approval covers at least one marked issue the merge must carry
+    `--match-head-commit` (the mergeability check has held it equal to the PR
+    head), so GitHub's atomic head match decides the head that merges.
     """
     repository = context.repository
     pr_body, status = look_json(
@@ -5060,8 +5079,8 @@ def look_problem(context, number, pr_facts):
         "PR body lookup timed out", "PR body lookup failed", "cannot read the PR body")
     if status is not None:
         return status
-    if not isinstance(pr_body, dict) or not (
-        pr_body.get("body") is None or isinstance(pr_body["body"], str)
+    if not isinstance(pr_body, dict) or "body" not in pr_body or not (
+        pr_body["body"] is None or isinstance(pr_body["body"], str)
     ):
         return refuse("merge", "cannot read the PR body")
     numbers = look_issue_numbers(
@@ -5096,7 +5115,18 @@ def look_problem(context, number, pr_facts):
     except ValueError:
         verdict = None
     if isinstance(verdict, dict):
-        if child.returncode == 0 and verdict.get("verdict") == "admit":
+        marked = verdict.get("marked")
+        if (
+            child.returncode == 0
+            and verdict.get("verdict") == "admit"
+            and isinstance(marked, list)
+            and all(isinstance(n, int) and not isinstance(n, bool) for n in marked)
+        ):
+            if marked and head_commit is None:
+                return refuse(
+                    "merge",
+                    f"issue {marked[0]} awaits the owner's look, so the merge must carry "
+                    f"--match-head-commit {head}, the head the owner approved")
             return None
         issue = verdict.get("issue")
         if (
@@ -5226,7 +5256,7 @@ def validate_release_merge(
     problem = mergeability_problem(pr_facts, base, head_commit)
     if problem is not None:
         return refuse("merge", problem)
-    status = look_problem(context, number, pr_facts)
+    status = look_problem(context, number, pr_facts, head_commit)
     if status is not None:
         return status
     try:

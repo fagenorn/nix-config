@@ -29,7 +29,8 @@ a candidate that approves nothing.
 
 `judge` walks the issues in ascending number. The first marked issue with no answer, whose
 answer is not `approved`, or for which the head is unknown, yields `Verdict(False, number,
-covers)`; otherwise `Verdict(True)`. An unmarked issue needs nothing.
+covers)`; otherwise `Verdict(True, marked=...)`, `marked` the numbers of the marked issues it
+admitted, ascending. An unmarked issue needs nothing.
 
 This module reads no network, runs no subprocess and reads no clock.
 """
@@ -81,6 +82,7 @@ class Verdict:
     admit: bool
     issue: int | None = None
     covers: tuple[str, ...] = ()
+    marked: tuple[int, ...] = ()
 
 
 def read_look(body: str | None) -> Look:
@@ -146,12 +148,17 @@ def look_answer(comments: Iterable[Mapping[str, Any]], issue: int, pr: int,
 
 
 def judge(pr: int, head: str | None, issues: Iterable[IssueFacts]) -> Verdict:
-    """Admit the merge, or name the first marked issue (by number) that lacks an approval."""
+    """Admit the merge, or name the first marked issue (by number) that lacks an approval.
+
+    An admit names the marked issues it admitted in `marked`, ascending.
+    """
+    marked = []
     for facts in sorted(issues, key=lambda f: f.number):
         look = read_look(facts.body)
         if not look.marked:
             continue
+        marked.append(facts.number)
         marker = look_answer(facts.comments, facts.number, pr, head) if head is not None else None
         if marker is None or marker.fields.get("answer") != "approved":
             return Verdict(False, facts.number, look.covers)
-    return Verdict(True)
+    return Verdict(True, marked=tuple(marked))
