@@ -255,9 +255,10 @@ Rounds of questions (#891) are what an approved sprint's manager asks the owner.
 them, both kept (`event_log.QUESTIONS_ASKED`, `QUESTION_ANSWERED`; each with the project in its
 project column):
 
-    questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>,
+    questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>, "pictures"?: [<id>],
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
-                                      "recommended"}]}
+                                      "recommended", "pictures"?: [{"picture": <id>,
+                                      "line": <str>, "pair"?: "before" | "after"}]}]}
     question.answered {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                        "question": <str>, "answer": <str>, "chosen": <str> | null,
                        "recommended": <str>, "differs": <bool>}
@@ -266,7 +267,9 @@ The round the manager sends (inside the ask request) and the owner's answer (the
 
     {"questions": [{"question": "<the ask>", "context": "<why, optional>",
                     "blocks": "<one line>", "options": ["<one line>", ...],
-                    "recommended": "<exact text of one option>"}, ...],
+                    "recommended": "<exact text of one option>",
+                    "pictures": [{"picture": "<id>", "line": "<one line>",
+                                  "pair": "before" | "after"}, ...]}, ...],
      "blocker": true | false}                   (blocker optional, default false)
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "choice": <int >= 0>}
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "text": "<words>"}
@@ -277,17 +280,30 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended`), `QUESTION_MEMBER` for `question`
+a key outside `question, context, blocks, options, recommended, pictures`), `QUESTION_MEMBER` for
+`question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
 and not a string non-empty after stripping), `CONTEXT_TOO_LONG`, `QUESTION_MEMBER` for `blocks`
 (one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option not a string non-empty after
 stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option with a line break or
 over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION`
-(`recommended` not a string whose strip equals one stripped option). With `limits=False` the three
-limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a `question` or `context` over
-`MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`). It returns a new `{"blocker": <bool>,
-"questions": [{"question", "blocks", "options", "recommended"}]}` with every text stripped, a
-question carrying `"context"` only when the round gave one.
+(`recommended` not a string whose strip equals one stripped option). The picture checks follow
+(#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
+`MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
+`picture, line, pair`, or `picture` or `line` missing), `PICTURE_MEMBER` for `picture` (not a string
+fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after
+stripping), `LINE_TOO_LONG` (over `MAX_PICTURE_LINE_CHARS`), `PICTURE_MEMBER` for `line` again (a
+line break, or over `MAX_LINE_CHARS`) and `PICTURE_MEMBER` for `pair` (present and not in `PAIRS`);
+after the loop `PAIR_TWICE` for the first `pair` given twice. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
+name the service's refusals of a picture it does not hold or another sprint sent. With
+`limits=False` the three limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a
+`question` or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a
+picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
+`{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
+text stripped, a question carrying `"context"` only when the round gave one and `"pictures"`
+(`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list.
+`round_pictures(checked)` is the unique picture ids of a checked round, in question then picture
+order.
 `parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}` (exactly those
 keys) and returns `(sprint_id, secret, round)`, `round` an object whose keys are a subset of
 `questions, blocker`; `parse_round_answer(body)` reads the page's body, exactly one of `choice` and
@@ -298,8 +314,11 @@ The fold keeps each open sprint's `Question`s on `SprintState.questions`, ordere
 index)`. A `questions.asked` row changes a sprint only when it is open, its brief is approved
 (`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
 (absent: false), so a logged round over a limit folds whole and renders cut; each
-checked question is then added with `round_id` the row's `seq`, its `index` and `at`. The fold does
-not enforce one open round; the service does. A `question.answered` row applies only when its `round`
+checked question is then added with `round_id` the row's `seq`, its `index` and `at`. Each checked
+question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
+row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
+matches `PICTURE_ID`; any other such row changes nothing. The fold does not enforce one open round;
+the service does. A `question.answered` row applies only when its `round`
 and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a string and
 its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
 `answered_at` (the row's `at`) and `differs`, computed as `chosen != recommended` (the row's own
@@ -404,12 +423,14 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_NO_PROGRESS,
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
-                                           MANAGER_WOKEN, QUESTION_ANSWERED, QUESTIONS_ASKED,
-                                           SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
-                                           SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
-                                           SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
+                                           MANAGER_WOKEN, PICTURE_STORED, QUESTION_ANSWERED,
+                                           QUESTIONS_ASKED, SPRINT_ANSWERED, SPRINT_CLOSED,
+                                           SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED,
+                                           SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED,
+                                           Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
+from agent_tools.console.pictures import PICTURE_ID
 from agent_tools.console.sessions import SEEN
 
 MAX_GOAL_CHARS = 2000
@@ -464,6 +485,9 @@ MAX_TITLE_CHARS = 60
 MAX_ASK_CHARS = 140
 MAX_CONTEXT_CHARS = 400
 MAX_OPTION_CHARS = 80
+MAX_PICTURES = 8
+MAX_PICTURE_LINE_CHARS = 140
+PAIRS = ("before", "after")
 MAX_REPORT_ISSUES = 200
 ON_TRACK = "on_track"
 ON_TRACK_TEXT = "on track"
@@ -514,8 +538,16 @@ UNKNOWN_MESSAGE = "this message is not known"
 NO_QUESTIONS = "the round has no questions"
 TOO_MANY_QUESTIONS = "a round has at most 10 questions"
 BAD_BLOCKER = "the round's blocker is not true or false"
-QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, options and "
-                  "recommended")
+QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, options, "
+                  "recommended and pictures")
+PICTURES_SHAPE = "question {n}'s pictures are not a list"
+TOO_MANY_PICTURES = f"question {{n}} has more than {MAX_PICTURES} pictures"
+PICTURE_SHAPE = "question {n} picture {m} is not an object of picture, line and pair"
+PICTURE_MEMBER = "question {n} picture {m} has no valid {member}"
+LINE_TOO_LONG = f"question {{n}} picture {{m}}'s line is over {MAX_PICTURE_LINE_CHARS} characters"
+PAIR_TWICE = "question {n} marks two pictures {pair}"
+PICTURE_UNKNOWN = "question {n} picture {m} is not known"
+PICTURE_FOREIGN = "question {n} picture {m} was sent by another sprint"
 TITLE_TOO_LONG = f"the brief's title is at most {MAX_TITLE_CHARS} characters"
 ASK_TOO_LONG = (f"question {{n}}'s ask is over {MAX_ASK_CHARS} characters: keep it to the question "
                 "the owner answers and move the rest into context")
@@ -642,6 +674,13 @@ class Message:
 
 
 @dataclass(frozen=True)
+class QuestionPicture:
+    picture: str
+    line: str
+    pair: str | None = None
+
+
+@dataclass(frozen=True)
 class Question:
     round_id: int
     index: int
@@ -656,6 +695,7 @@ class Question:
     differs: bool | None = None
     answered_at: str | None = None
     context: str | None = None
+    pictures: tuple[QuestionPicture, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -689,6 +729,7 @@ class SprintState:
     idle_nudges: int = 0
     idle_nudged_at: str | None = None
     no_progress_at: str | None = None
+    pictures: frozenset[str] = frozenset()
 
     @property
     def state(self) -> str:
@@ -968,7 +1009,8 @@ def checked_report(report: dict) -> dict:
 
 def _checked_question(n: int, question: object, limits: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
-                                                                "options", "recommended"}:
+                                                                "options", "recommended",
+                                                                "pictures"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1002,11 +1044,56 @@ def _checked_question(n: int, question: object, limits: bool) -> dict:
     recommended = question.get("recommended")
     if not isinstance(recommended, str) or recommended.strip() not in stripped:
         raise Refused(NO_RECOMMENDATION.format(n=n))
+    pictures = _checked_pictures(n, question["pictures"], limits) if "pictures" in question else []
     checked = {"question": text.strip(), "blocks": blocks.strip(), "options": stripped,
                "recommended": recommended.strip()}
     if "context" in question:
         checked["context"] = context.strip()
+    if pictures:
+        checked["pictures"] = pictures
     return checked
+
+
+def _checked_pictures(n: int, pictures: object, limits: bool) -> list[dict]:
+    if not isinstance(pictures, list):
+        raise Refused(PICTURES_SHAPE.format(n=n))
+    if len(pictures) > MAX_PICTURES:
+        raise Refused(TOO_MANY_PICTURES.format(n=n))
+    checked = []
+    for m, row in enumerate(pictures, 1):
+        if (not isinstance(row, dict) or not set(row) <= {"picture", "line", "pair"}
+                or "picture" not in row or "line" not in row):
+            raise Refused(PICTURE_SHAPE.format(n=n, m=m))
+        picture, line = row["picture"], row["line"]
+        if not isinstance(picture, str) or not PICTURE_ID.fullmatch(picture):
+            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="picture"))
+        if not _text(line):
+            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="line"))
+        if limits and len(line.strip()) > MAX_PICTURE_LINE_CHARS:
+            raise Refused(LINE_TOO_LONG.format(n=n, m=m))
+        if not _line(line):
+            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="line"))
+        if "pair" in row and row["pair"] not in PAIRS:
+            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="pair"))
+        member = {"picture": picture, "line": line.strip()}
+        if "pair" in row:
+            member["pair"] = row["pair"]
+        checked.append(member)
+    pairs = [member["pair"] for member in checked if "pair" in member]
+    for pair in pairs:
+        if pairs.count(pair) > 1:
+            raise Refused(PAIR_TWICE.format(n=n, pair=pair))
+    return checked
+
+
+def round_pictures(checked: dict) -> list[str]:
+    """The unique picture ids of a checked round, in question then picture order."""
+    ids: list[str] = []
+    for question in checked["questions"]:
+        for member in question.get("pictures", ()):
+            if member["picture"] not in ids:
+                ids.append(member["picture"])
+    return ids
 
 
 def checked_round(round_: dict, *, limits: bool = True) -> dict:
@@ -1193,7 +1280,10 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
             return state
         added = tuple(Question(event.seq, index, event.at, checked["blocker"], row["question"],
                                row["blocks"], tuple(row["options"]), row["recommended"],
-                               context=row.get("context"))
+                               context=row.get("context"),
+                               pictures=tuple(QuestionPicture(p["picture"], p["line"],
+                                                              p.get("pair"))
+                                              for p in row.get("pictures", ())))
                       for index, row in enumerate(checked["questions"]))
         return replace(state, questions=(*state.questions, *added))
     round_id, index = payload.get("round"), payload.get("index")
@@ -1407,6 +1497,11 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
         elif event.kind in (QUESTIONS_ASKED, QUESTION_ANSWERED) and sprint_id in folded:
             folded[sprint_id] = _folded_question(folded[sprint_id], event)
+        elif event.kind == PICTURE_STORED and sprint_id in folded:
+            picture = event.payload.get("picture")
+            if isinstance(picture, str) and PICTURE_ID.fullmatch(picture):
+                folded[sprint_id] = replace(folded[sprint_id],
+                                            pictures=folded[sprint_id].pictures | {picture})
     return folded
 
 
