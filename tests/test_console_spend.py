@@ -591,6 +591,18 @@ class CheckSharesTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(spend.main(argv), 2)
 
+    def test_a_basic_or_week_date_is_read_as_the_day_it_names(self):
+        for start, end in (("20261109", "20261116"), ("20261109", "2026-11-16"),
+                           ("2026-W46-1", "2026-W47-1")):
+            argv = ["check-shares", "--projects", str(self.projects), "--from", start,
+                    "--to", end]
+            out = io.StringIO()
+            with self.subTest(start=start, end=end), contextlib.redirect_stdout(out):
+                self.assertEqual(spend.main(argv), 0)
+            line = json.loads(out.getvalue().splitlines()[0])
+            self.assertEqual((line["from"], line["to"], line["tokens"]),
+                             ("2026-11-09", "2026-11-16", 100_000))
+
     def test_runs_as_a_module_from_the_root(self):
         empty = self.tmp / "empty"
         empty.mkdir()

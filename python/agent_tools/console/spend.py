@@ -83,6 +83,8 @@ measurement's deliver-batch table grouped into `PHASES`, `off` the phases of the
 `PHASES` order, whose share is more than `--tolerance` points (default 3.0) from it). Exit 0 when
 there are tokens and `off` is empty, 1 when a phase is off, 75 when the window holds no tokens (its
 transcripts are gone or not yet read), 2 on a usage error or a `--from` after `--to`.
+`--from` and `--to` take any ISO 8601 date `date.fromisoformat` accepts and are read as the
+`YYYY-MM-DD` day it names.
 """
 
 from __future__ import annotations
@@ -559,8 +561,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--program", default=BATCH)
     try:
         args = parser.parse_args(argv)
-        for value in (args.start, args.end):
-            date.fromisoformat(value)
+        args.start = date.fromisoformat(args.start).isoformat()
+        args.end = date.fromisoformat(args.end).isoformat()
         if args.start > args.end:
             parser.error("--from is after --to")
     except SystemExit as stop:
