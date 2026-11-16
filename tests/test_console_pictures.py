@@ -1641,7 +1641,7 @@ class PictureDocsTest(unittest.TestCase):
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
         lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
         status = next(r for r in lines if r.startswith("- **Status:**"))
-        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056"), status)
+        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-057"), status)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
