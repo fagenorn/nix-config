@@ -81,6 +81,8 @@
 // refuses focus inside an inert subtree. The harness still performs no native activation and no
 // native focus move: a key never clicks the focused button and Tab never moves focus by itself;
 // both are checked in a browser.
+// window has scrollY (default 0) and scrollTo(x, y), which sets scrollY to y; a {scroll: y}
+// step sets scrollY as the owner scrolling would, and a snapshot adds scroll_y.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -303,7 +305,7 @@ function listen(target) {
 function fire(target, name, extra) {
   for (const fn of listeners[target][name] || []) fn(Object.assign({ type: name }, extra));
 }
-const window = { addEventListener: listen("window") };
+const window = { addEventListener: listen("window"), scrollY: 0, scrollTo(x, y) { this.scrollY = y; } };
 const posts = [];
 const replies = [];
 const held = [];
@@ -522,6 +524,8 @@ async function run() {
       for (const fn of target.listeners.input || []) fn({ type: "input", target });
     } else if ("select" in step) {
       byClass(step.select.cls, scopeOf(step)).setSelectionRange(step.select.start, step.select.end);
+    } else if ("scroll" in step) {
+      window.scrollY = step.scroll;
     } else if ("focus_on" in step) {
       byClass(step.focus_on, scopeOf(step), step.nth).focus();
     } else if ("picture_reply" in step) {
@@ -571,6 +575,7 @@ async function run() {
           end: field.selectionEnd,
         },
         focus_count: state.focusCount,
+        scroll_y: window.scrollY,
         key_prevented: state.keyPrevented,
         posts: posts.slice(),
       });

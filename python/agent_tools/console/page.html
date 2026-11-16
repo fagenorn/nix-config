@@ -332,10 +332,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 #unmanaged { margin-top: 24px; }
 .pics { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; max-width: 100%; }
 .pic { margin: 0; flex: 0 1 200px; min-width: 0; max-width: 100%; }
-.pic-pair { display: flex; gap: 12px; flex: 1 1 412px; min-width: 0; max-width: 100%; }
+.pic-pair { display: flex; align-items: flex-start; gap: 12px; flex: 1 1 412px; min-width: 0; max-width: 100%; }
 .pic-pair .pic { flex: 1 1 0; }
-.pic-thumb { display: block; width: 100%; padding: 0; overflow: hidden; cursor: zoom-in; background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
-.pic-thumb img { display: block; width: 100%; height: 120px; object-fit: contain; background: var(--crust); }
+.pic-thumb { display: block; width: 100%; padding: 0; overflow: hidden; cursor: zoom-in; background: rgba(24, 25, 38, .22); border: 1px solid var(--hair); border-radius: 8px; }
+.pic-thumb img { display: block; width: 100%; height: auto; min-height: 48px; max-height: 180px; object-fit: contain; }
 .pic-thumb img[hidden] { display: none; }
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
 .pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
@@ -346,8 +346,8 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 .viewer:focus-visible { outline: none; }
 .viewer-bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--mantle); border-bottom: 1px solid var(--hair); }
 .viewer-count { margin: 0; min-width: 4.5em; font-size: .8125rem; color: var(--sub0); text-align: center; white-space: nowrap; }
-.viewer-stage { flex: 1 1 auto; min-height: 0; display: flex; padding: 20px 16px; overflow: auto; overscroll-behavior: contain; }
-.viewer-stage > * { margin: auto; max-width: 100%; }
+.viewer-stage { flex: 1 1 auto; min-height: 0; display: flex; padding: 16px 16px 24px; overflow: auto; overscroll-behavior: contain; }
+.viewer-stage > * { margin: 0 auto auto; max-width: 100%; }
 .viewer-pair { display: flex; gap: 16px; max-width: 100%; }
 .viewer-pic { margin: 0; min-width: 0; }
 .viewer-pic.current { outline: 2px solid var(--lav); outline-offset: 4px; border-radius: 4px; }
@@ -370,11 +370,12 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .statement .sub { font-size: 1rem; }
 }
 @media (max-width: 480px) {
-  .pic-pair { flex-direction: column; }
+  .pic-pair { flex-direction: column; align-items: stretch; }
   .viewer-pair { flex-direction: column; }
   .viewer-bar { padding: 8px 12px; }
   .viewer-bar button { min-height: 44px; padding: 6px 12px; }
   .pic { flex-basis: 100%; }
+  .pic-thumb img { max-height: 240px; }
   .card .q.reg, .rest .q.reg { font-size: 1rem; }
   .desk-grid { padding: 24px 16px 48px; }
   .statement h1 { font-size: 2rem; }
@@ -2181,7 +2182,7 @@ function openViewer(key, sequence, index) {
   if (viewer !== null) return;
   const host = document.getElementById("viewer");
   const shaded = [...document.body.children].filter((n) => n !== host && n.inert !== true);
-  viewer = { key, sequence, index, shaded };
+  viewer = { key, sequence, index, shaded, scroll: window.scrollY };
   drawViewer();
   for (const n of shaded) n.inert = true;
   host.hidden = false;
@@ -2189,14 +2190,15 @@ function openViewer(key, sequence, index) {
 }
 function closeViewer() {
   if (viewer === null) return;
-  const { key, index, shaded } = viewer;
+  const { key, index, shaded, scroll } = viewer;
   viewer = null;
   for (const n of shaded) n.inert = false;
   const host = document.getElementById("viewer");
   host.hidden = true;
   host.replaceChildren();
   const thumb = [...document.querySelectorAll("button.pic-thumb")].find((n) => n.dataset.key === key + "/" + index);
-  if (thumb !== undefined) thumb.focus();
+  if (thumb !== undefined) thumb.focus({ preventScroll: true });
+  window.scrollTo(0, scroll);
 }
 function viewerKey(event) {
   if (viewer === null) return false;

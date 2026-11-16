@@ -1881,13 +1881,26 @@ class PagePictureTest(unittest.TestCase):
         narrow = media_block(style, "(max-width: 480px)")
         self.assertEqual(declared(narrow, ".pic-pair").get("flex-direction"), "column")
 
-    def test_a_thumbnail_shows_the_whole_picture_in_a_box_of_one_size(self) -> None:
-        _, top = page_css()
+    def test_a_thumbnail_follows_its_pictures_shape_up_to_a_bound(self) -> None:
+        style, top = page_css()
         image = css_declared(top, ".pic-thumb img")
+        self.assertEqual((image.get("width"), image.get("height")), ("100%", "auto"))
         self.assertEqual(image.get("object-fit"), "contain")
-        self.assertEqual(image.get("width"), "100%")
-        self.assertRegex(image.get("height", ""), r"^\d+px$")
-        self.assertRegex(image.get("background", ""), r"^var\(--[a-z0-9]+\)$")
+        self.assertEqual(image.get("max-height"), "180px")
+        narrow = media_block(style, "(max-width: 480px)")
+        self.assertEqual(css_declared(narrow, ".pic-thumb img").get("max-height"), "240px")
+        self.assertEqual(css_declared(top, ".pic-pair").get("align-items"), "flex-start")
+        self.assertEqual(css_declared(narrow, ".pic-pair").get("align-items"), "stretch")
+
+    def test_a_thumbnails_letterbox_is_a_light_tint_of_the_card(self) -> None:
+        _, top = page_css()
+        for selector in (".pic-thumb", ".pic-thumb img"):
+            fill = css_declared(top, selector).get("background", "")
+            if fill in ("", "none", "transparent"):
+                continue
+            tint = re.fullmatch(r"rgba\(\s*\d+,\s*\d+,\s*\d+,\s*(\.\d+|0\.\d+)\)", fill)
+            self.assertIsNotNone(tint, selector + " " + fill)
+            self.assertLessEqual(float(tint.group(1)), .35, selector)
 
     def test_the_pair_sits_in_one_row_on_a_desktop(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
@@ -2088,6 +2101,21 @@ class PageViewerTest(unittest.TestCase):
         narrow = media_block(style, "(max-width: 480px)")
         tall = css_declared(narrow, ".viewer-bar button").get("min-height", "0px")
         self.assertGreaterEqual(int(tall.removesuffix("px")), 44)
+
+    def test_the_viewer_shows_its_pictures_at_the_top_of_the_stage(self) -> None:
+        _, top = page_css()
+        stage = css_declared(top, ".viewer-stage")
+        self.assertIn(stage.get("align-items"), (None, "flex-start", "start"))
+        placed = css_declared(top, ".viewer-stage > *").get("margin", "")
+        self.assertEqual(placed.split()[0], "0", placed)
+        self.assertNotIn(placed, ("auto", "auto auto"))
+
+    def test_closing_the_viewer_restores_the_page_scroll(self) -> None:
+        (snap,) = render(self.opened + [
+            {"scroll": 640}, {"click": "pic-thumb", "nth": 1}, {"scroll": 0},
+            {"key": "Escape", "follow": True}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+        self.assertEqual(snap["scroll_y"], 640)
 
     def test_the_viewer_is_opaque_and_the_page_behind_it_does_not_scroll(self) -> None:
         _, top = page_css()
