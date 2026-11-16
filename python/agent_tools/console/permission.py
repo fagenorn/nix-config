@@ -8,10 +8,12 @@ is enforced without the row check):
 - the project's resolved contract declares `production.status == "none"`: BYPASS, "no production";
   the policy file is not read;
 - status `"declared"` and the guard's compiled policy, loaded whole, holds a row whose
-  `evidence.project_id` is the project's and which carries a `production` member: BYPASS,
+  `evidence.project_id` is the project's and whose `production` member covers the resolved
+  declaration (the changing commands as `{id, argv}`, the key-file globs and the MCP tool
+  names, equal to what `guard_policy.production_row` compiles from the snapshot): BYPASS,
   "production rules in place";
-- status `"declared"` and the policy loads but holds no such row: AUTO, "production rules
-  declared but not in the guard's policy";
+- status `"declared"` and the policy loads but holds no such row, or the row is older than
+  the declaration: AUTO, "production rules declared but not in the guard's policy";
 - status `"declared"` and the policy cannot be loaded: AUTO, "the guard's policy cannot be read";
   the guard drops a whole file for any malformed row, the matching row or an unrelated one, so
   such a file never yields bypass;
@@ -212,6 +214,31 @@ def policy_rows(path: Path) -> dict | None:
     return dict(derived)
 
 
+def _declared_changes(snapshot: dict) -> dict | None:
+    """The changing production rules the snapshot declares, in the row's shape, else None.
+
+    Mirrors the three members `guard_policy.production_row` compiles that the guard refuses on
+    (`tests/test_console_permission.py` pins the parity); a snapshot too thin to compile is None.
+    """
+    try:
+        production = snapshot["production"]
+        changes = production["changes"]
+        commands = snapshot["bindings"]["commands"]
+        return {
+            "changes": [{"id": command_id, "argv": list(commands[command_id]["argv"])}
+                        for command_id in changes["commands"]],
+            "key_files": list(changes["key_files"]),
+            "mcp_tools": list(changes["mcp_tools"]),
+        }
+    except (KeyError, TypeError):
+        return None
+
+
+def _covers(compiled: dict, declared: dict) -> bool:
+    """True when a compiled row's `production` holds exactly the declared changing rules."""
+    return all(compiled.get(member, []) == declared[member] for member in declared)
+
+
 def read(project_id: str, root: str, *, resolve=resolve_project.resolve,
          policy_path: Path | None = None) -> Permission:
     """The permission mode a manager of `project_id`, whose checkout is `root`, runs under."""
@@ -230,7 +257,11 @@ def read(project_id: str, root: str, *, resolve=resolve_project.resolve,
     rows = policy_rows(policy_path or policy_file())
     if rows is None:
         return Permission(AUTO, POLICY_UNREADABLE)
+    declared = _declared_changes(snapshot)
+    if declared is None:
+        return Permission(AUTO, NOT_ENFORCED)
     for value in rows.values():
-        if value["evidence"].get("project_id") == project_id and "production" in value:
+        if (value["evidence"].get("project_id") == project_id and "production" in value
+                and _covers(value["production"], declared)):
             return Permission(BYPASS, RULES_IN_PLACE)
     return Permission(AUTO, NOT_ENFORCED)

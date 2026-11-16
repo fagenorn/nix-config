@@ -20,8 +20,16 @@ BYPASS = "bypassPermissions"
 AUTO = "auto"
 
 
-def snap(status):
-    return {"production": {"status": status}}
+def snap(status, commands=(), key_files=(), mcp_tools=()):
+    """A resolved snapshot declaring `status`; `commands` maps a changing command id to its argv."""
+    production = {"status": status}
+    if status == "declared":
+        production.update(
+            changes={"commands": list(commands), "key_files": list(key_files),
+                     "mcp_tools": list(mcp_tools)},
+            read_only={"commands": [], "mcp_tools": []}, release_profile="r")
+    return {"production": production,
+            "bindings": {"commands": {name: {"argv": list(argv)} for name, argv in dict(commands).items()}}}
 
 
 def row(project_id, production=True):
@@ -99,6 +107,48 @@ class PermissionReadTest(unittest.TestCase):
         result = self.read(snap("declared"), path)
         self.assertEqual(result, permission.Permission(BYPASS, "production rules in place"))
         self.assertEqual(result.text, "bypass: production rules in place")
+
+    def test_a_row_older_than_the_declaration_runs_in_auto(self):
+        def stale(**members):
+            value = row("owner/p01")
+            value["production"] = {**value["production"], **members}
+            return document({"owner/p01": value})
+
+        deploy = {"id": "deploy", "argv": ["kubectl", "apply"]}
+        declared = snap("declared", commands={"deploy": ["kubectl", "apply"]},
+                        key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__deploy"])
+        current = stale(changes=[deploy], key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__deploy"])
+        cases = [
+            ("new mcp tool", snap("declared", mcp_tools=["mcp__prod__deploy"]), stale()),
+            ("new command", snap("declared", commands={"deploy": ["kubectl", "apply"]}), stale()),
+            ("changed argv", snap("declared", commands={"deploy": ["kubectl", "delete"]}),
+             stale(changes=[deploy])),
+            ("new key file", snap("declared", key_files=["k8s/*.yaml"]), stale()),
+            ("another mcp tool", declared,
+             stale(changes=[deploy], key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__other"])),
+        ]
+        for name, snapshot, content in cases:
+            with self.subTest(name):
+                self.assertEqual(self.read(snapshot, write(self.tmp, content)),
+                                 permission.Permission(AUTO, permission.NOT_ENFORCED))
+        with self.subTest("a row that holds every declared rule"):
+            self.assertEqual(self.read(declared, write(self.tmp, current)),
+                             permission.Permission(BYPASS, permission.RULES_IN_PLACE))
+        with self.subTest("a snapshot too thin to compare"):
+            self.assertEqual(
+                self.read({"production": {"status": "declared"}}, write(self.tmp, current)),
+                permission.Permission(AUTO, permission.NOT_ENFORCED))
+
+    def test_the_declared_rules_are_what_the_guard_compiles(self):
+        from agent_tools.guard import guard_policy
+
+        snapshot = snap("declared", commands={"deploy": ["kubectl", "apply"]},
+                        key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__deploy"])
+        compiled = guard_policy.production_row(snapshot)
+        declared = permission._declared_changes(snapshot)
+        self.assertEqual(declared, {member: compiled[member]
+                                    for member in ("changes", "key_files", "mcp_tools")})
+        self.assertTrue(permission._covers(compiled, declared))
 
     def test_declared_rules_the_guard_does_not_hold_run_in_auto(self):
         (self.tmp / "dir").mkdir()

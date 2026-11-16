@@ -4821,6 +4821,18 @@ class PageSprintReportTest(unittest.TestCase):
         (note,) = [c for c in closed_fold["children"] if has_class(c, "permission")]
         self.assertEqual(full(note), "Permission mode auto: no production rules declared")
 
+    def test_a_finished_sprint_shows_the_permission_mode(self) -> None:
+        text = "bypass: production rules in place"
+        reported = {**ended_sprint("c", 10 * 60000, CLOSING), "permission_text": text}
+        unreported = {**ended_sprint("d", 20 * 60000, None), "permission_text": text}
+        bare = ended_sprint("e", 30 * 60000, CLOSING)
+        (snap,) = render([START, {"frame": with_sprints([reported, unreported, bare])},
+                          {"open": "finished"}, {"open": "ended:" + "c" * 16},
+                          {"open": "ended:" + "d" * 16}, {"open": "ended:" + "e" * 16},
+                          {"snapshot": True}])
+        notes = [full(n) for n in nodes(snap["projects"]) if has_class(n, "permission")]
+        self.assertEqual(notes, ["Permission mode " + text] * 2)
+
 
 CLOSING = {
     "at": "2026-11-12T11:00:00+00:00", "summary": "The importer now resumes after a crash.",

@@ -138,9 +138,13 @@ def verdict(project: str, log: Path, accounts: Path, home: Path) -> tuple[int, d
     ceiling = next((later["seen_after"] for later_seq, later in started
                     if later_seq > seq and later.get("sprint_id") == sprint_id
                     and _seen_after(later) is not None), None)
+    predecessors = {row["session_id"] for at, row in seen
+                    if row.get("name") == name and isinstance(row.get("session_id"), str)
+                    and at <= floor}
     candidates = [(at, row["session_id"]) for at, row in seen
                   if row.get("name") == name and isinstance(row.get("session_id"), str)
-                  and at > floor and (ceiling is None or at <= ceiling)]
+                  and at > floor and (ceiling is None or at <= ceiling)
+                  and row["session_id"] not in predecessors]
     if not candidates:
         return not_yet("not_seen")
     session_id = candidates[0][1]

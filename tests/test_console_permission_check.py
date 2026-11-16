@@ -145,6 +145,13 @@ class PermissionCheckTest(unittest.TestCase):
         code, output = self.run_check()
         self.assertEqual((code, output["session_id"]), (1, "s-1"))
 
+    def test_a_predecessor_seen_again_after_the_started_row_is_not_this_managers(self):
+        self.append(seen("s-0", N), started(S, N, BYPASS, seen_after=1), seen("s-0", N), seen("s-1", N))
+        self.transcript("s-0", *self.mode_lines(BYPASS))
+        self.transcript("s-1", *self.mode_lines(AUTO))
+        code, output = self.run_check()
+        self.assertEqual((code, output["session_id"], output["mode"]), (1, "s-1", AUTO))
+
     def test_a_session_seen_after_a_later_started_row_is_not_the_first_managers(self):
         self.append(seen("s-0", N), started(S, N, BYPASS, seen_after=1),
                     started(S, N, BYPASS, seen_after=2), seen("s-2", N))
