@@ -21,7 +21,7 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import event_log, pictures, sprint, sprints, write_guard
+from agent_tools.console import event_log, pictures, service, sprint, sprints, write_guard
 from agent_tools.console.event_log import PICTURE_STORED, Event
 from agent_tools.console.pictures import SIGNATURE
 
@@ -946,6 +946,21 @@ class PictureAskTest(PictureCase):
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (1, "", "sprint: refused 400: " + pictures.SIGNATURE_WRONG + "\n"))
         self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_ask_with_a_round_too_large_once_ids_are_named_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        line = "\u00e9" * 140
+        round_ = {"questions": [
+            {**self.Q, "pictures": [{"file": str(good), "line": line}] * 8} for _ in range(10)]}
+        got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, round_))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused before sending: the round is larger than "
+            f"{service.MAX_ASK_BYTES} bytes\n"))
+        self.assertEqual(self.rows("picture.stored"), [])
+        self.assertEqual(self.rows("questions.asked"), [])
+        self.assertEqual(self.entries(), [])
 
     def test_a_mixed_round_with_an_unknown_picture_uploads_nothing(self):
         svc = self.open()

@@ -3112,6 +3112,9 @@ function renderInbox(view) {
   const held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  // A picture's thumbnail is redrawn by every render, so the one holding focus is found again by its stable key.
+  const heldThumb = active && active.dataset && active.tagName === "BUTTON" && active.className === "pic-thumb"
+    ? active.dataset.key : null;
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
@@ -3259,6 +3262,10 @@ function renderInbox(view) {
     again.setSelectionRange(held.start, held.end);
   }
   if (viewer !== null && ![...document.querySelectorAll("button.pic-thumb")].some((n) => n.dataset.key.startsWith(viewer.key + "/"))) closeViewer();
+  if (heldThumb !== null && viewer === null) {
+    const thumb = [...document.querySelectorAll("button.pic-thumb")].find((n) => n.dataset.key === heldThumb);
+    if (thumb !== undefined) thumb.focus({ preventScroll: true });
+  }
   prunePictures();
 }
 function momentLine(moment) {

@@ -49,8 +49,9 @@ round is
 `file` as `sprint picture` does (a relative path is read from the current directory) and sends the
 member with `"picture": "<id>"` in place of `"file"`; a member with `"picture"` and no `"file"` is
 sent as given. Before it reads or sends anything it checks the round's pictures with the console's
-own rules (`agent_tools.console.sprints.checked_round`): a refusal is stderr `sprint: refused
-before sending: <reason>` and exit 1. It then reads every file before it uploads any: a file that
+own rules (`agent_tools.console.sprints.checked_round`) and the size of the whole request with
+each picture's id in place (the console takes at most 65536 bytes): a refusal is stderr `sprint:
+refused before sending: <reason>` and exit 1. It then reads every file before it uploads any: a file that
 cannot be read, or one over 2 MiB, is exit 2 and nothing is uploaded or sent. Whether a picture
 belongs to the sprint, and the sprint's state, stay the console's to decide: before it uploads
 anything it asks the console to check the round with its `file` members left out (`"dry_run":
@@ -359,10 +360,16 @@ def send_round(args: argparse.Namespace, sprint: str) -> str:
     round_ = read_object(args.round_file, "round")
     members = round_pictures(round_)
     if members:
+        named = with_ids(round_, {id(m): "0" * 64 for m in members})
         try:
-            sprints.checked_round(with_ids(round_, {id(m): "0" * 64 for m in members}))
+            sprints.checked_round(named)
         except sprints.Refused as error:
             raise Refused(f"sprint: refused before sending: {error}") from error
+        # An id is as long as its placeholder, so the whole request's size is known before an upload.
+        if len(json.dumps({"sprint_id": sprint, "secret": secret, "round": named}).encode()
+               ) > service.MAX_ASK_BYTES:
+            raise Refused("sprint: refused before sending: the round is larger than "
+                          f"{service.MAX_ASK_BYTES} bytes")
         check_header_secret(secret)
         files = [read_picture(Path(m["file"])) for m in members]
         # The console judges the named pictures and the sprint's state now, so a refusal leaves

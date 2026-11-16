@@ -1950,6 +1950,13 @@ class PageViewerTest(unittest.TestCase):
         self.assertEqual(self.count(snap), "2 of 3")
         self.assertTrue(snap["key_prevented"])
 
+    def test_a_focused_thumbnail_keeps_focus_through_an_unrelated_frame(self) -> None:
+        (snap,) = render(self.opened + [
+            {"focus_on": "pic-thumb", "nth": 1}, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        self.assertEqual(snap["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertTrue(focused["key"].endswith("/1"), focused["key"])
+
     def test_arrows_move_between_the_cards_pictures_and_stop_at_the_ends(self) -> None:
         right = {"key": "ArrowRight", "follow": True}
         left = {"key": "ArrowLeft", "follow": True}
