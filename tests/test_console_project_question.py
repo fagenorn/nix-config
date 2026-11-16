@@ -10,16 +10,23 @@ import os
 import shlex
 import subprocess
 import sys
+import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import project_question, project_question_hook as hook
+from agent_tools.console import (
+    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
+from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_account_service import Listing
+from .test_console_writes import Case
 
 DECLARED = (("just", "build"),)
 ROUTES = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
@@ -381,3 +388,366 @@ class NoProductionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ASKED = "project_question.asked"
+ANSWERED_KIND = "project_question.answered"
+QUESTION_ROUTE = "/api/project-question"
+JSON = {"Content-Type": "application/json"}
+WHY = "owner/p01"
+
+
+def wait_until(predicate):
+    deadline = time.monotonic() + 5
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert predicate(), "the condition did not become true within 5 s"
+
+
+class QuestionCase(Case):
+    """A service whose question session is a stub: the asker records each call and returns an outcome."""
+
+    def setUp(self):
+        super().setUp()
+        self.outcome = project_question.Outcome("answered", answer="Answer: it builds.")
+        self.raises = None
+        self.asked = []
+        self.queued = []
+        self.calls = []
+        self.profiles = self.store.parent.parent / "accounts" / "profiles"
+
+    def asker(self, ask, cancel):
+        self.asked.append((ask, cancel))
+        if self.raises is not None:
+            raise self.raises
+        return self.outcome
+
+    def start(self, **kwargs):
+        support.write_registry(self.registry, support.entries(2))
+        support.sign_in(self.store, "work")
+        defaults = {
+            "profile_dirs": [support.profile_dir(self.store, "work")],
+            "session_poll_seconds": 3600, "project_asker": self.asker,
+            "project_routes": lambda root: ROUTES,
+            "project_question_dispatch": lambda job: job()}
+        for name, value in defaults.items():
+            kwargs.setdefault(name, value)
+        return super().start(**kwargs)
+
+    def start_removal(self, **kwargs):
+        support.profile_dir(self.store, "work")
+        kwargs.setdefault("profile_dirs", Listing(self.profiles))
+        kwargs.setdefault("signin_reader", lambda one: signin.Status("signed_in", None))
+        kwargs.setdefault("signer_out", lambda one: self.calls.append(("signout", one.profile)))
+        kwargs.setdefault("account_remover", self.remover)
+        kwargs.setdefault("choice_file", self.profiles.parent / "chosen-profile")
+        return self.start(**kwargs)
+
+    def remover(self, name):
+        self.calls.append(("rm", name))
+        shutil.rmtree(self.profiles / name)
+
+    def question_rows(self):
+        return [(row[2], row[3], json.loads(row[4])) for row in support.log_rows(self.store)
+                if row[2].startswith("project_question.")]
+
+
+class QuestionServiceTest(QuestionCase):
+    def test_asking_appends_a_question_row_then_exactly_one_answer_row_per_outcome(self):
+        svc = self.start()
+        cases = (
+            (project_question.Outcome("answered", answer="Answer: x"), None,
+             {"outcome": "answered", "answer": "Answer: x"}),
+            (project_question.Outcome("failed", reason="boom"), None,
+             {"outcome": "failed", "reason": "boom"}),
+            (project_question.Outcome("timed_out", reason="the session did not answer within 300 s"),
+             None, {"outcome": "timed_out",
+                    "reason": "the session did not answer within 300 s"}),
+            (None, RuntimeError("down"), {"outcome": "failed", "reason": "RuntimeError: down"}))
+        for outcome, raises, tail in cases:
+            with self.subTest(tail=tail):
+                self.outcome, self.raises = outcome, raises
+                before = len(self.question_rows())
+                qid = svc.ask_project_question(WHY, " why? ")
+                self.assertEqual(self.question_rows()[before:], [
+                    (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work"}),
+                    (ANSWERED_KIND, WHY, {"question_id": qid, **tail})])
+                self.assertEqual(svc._project_questions_open, 0)
+
+    def test_the_session_gets_the_chosen_profile_the_root_and_the_routes(self):
+        svc = self.start()
+        svc.ask_project_question(WHY, "why?")
+        (ask, cancel), = self.asked
+        self.assertEqual((ask.profile, ask.root, ask.routes, ask.question),
+                         ("work", "/srv/p01", ROUTES, "why?"))
+        self.assertEqual(ask.settings.parent, self.store.with_name("project-question-settings"))
+        self.assertIs(cancel, svc._stop)
+
+    def test_nothing_reaches_the_tracker(self):
+        def refuse(name):
+            def double(*args, **kwargs):
+                self.calls.append(name)
+                raise AssertionError(name)
+            return double
+        svc = self.start(tracker=refuse("tracker"), tick=refuse("tick"),
+                         owner_path=refuse("owner_path"), criterion_path=refuse("criterion_path"),
+                         slug_of=lambda root: None)
+        for outcome, raises in ((project_question.Outcome("answered", answer="Answer: x"), None),
+                                (project_question.Outcome("failed", reason="boom"), None),
+                                (project_question.Outcome("timed_out", reason="late"), None),
+                                (None, RuntimeError("down"))):
+            self.outcome, self.raises = outcome, raises
+            svc.ask_project_question(WHY, "why?")
+        self.assertEqual(self.calls, [])
+
+    def test_refusals_append_nothing(self):
+        cases = (
+            ({}, "owner/p99", "why?", "this project is not registered"),
+            ({}, WHY, "   ", "write the question first"),
+            ({}, WHY, "x" * 2001, "a question is at most 2000 characters"),
+            ({"project_asker": None}, WHY, "why?", "questions are not available on this host yet"),
+            ({"profile_dirs": []}, WHY, "why?", "no account can take a question now"))
+        for kwargs, project, text, reason in cases:
+            with self.subTest(reason=reason):
+                svc = self.start(**kwargs)
+                before = self.question_rows()
+                with self.assertRaises(project_question.Refused) as caught:
+                    svc.ask_project_question(project, text)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertEqual(self.question_rows(), before)
+                self.assertEqual(self.asked, [])
+                self.assertEqual(svc._project_questions_open, 0)
+                svc.close()
+
+    def test_a_dispatch_that_fails_still_answers_the_question_once(self):
+        def dispatch(job):
+            raise RuntimeError("no thread")
+        svc = self.start(project_question_dispatch=dispatch)
+        with self.assertRaises(RuntimeError):
+            svc.ask_project_question(WHY, "why?")
+        (asked, project, payload), (answered, _, tail) = self.question_rows()
+        self.assertEqual((asked, project, answered), (ASKED, WHY, ANSWERED_KIND))
+        self.assertEqual(tail, {"question_id": payload["question_id"], "outcome": "failed",
+                                "reason": "RuntimeError: no thread"})
+        self.assertEqual(self.asked, [])
+        self.assertEqual(svc._project_questions_open, 0)
+
+    def test_an_unresolvable_contract_is_a_failed_answer_and_starts_no_session(self):
+        error = resolve_project.ContractError(
+            "resolver_failure", "resolver.internal",
+            [{"pointer": "", "message": "the resolver failed unexpectedly"}])
+
+        def routes(root):
+            raise error
+        svc = self.start(project_routes=routes)
+        qid = svc.ask_project_question(WHY, "why?")
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows()[-1], (ANSWERED_KIND, WHY, {
+            "question_id": qid, "outcome": "failed",
+            "reason": project_question.CONTRACT_UNREADABLE.format(
+                detail="ContractError: " + str(error))}))
+
+    def test_the_question_kinds_are_not_kept(self):
+        self.assertEqual(event_log.PROJECT_QUESTION_ASKED, ASKED)
+        self.assertEqual(event_log.PROJECT_QUESTION_ANSWERED, ANSWERED_KIND)
+        self.assertNotIn(ASKED, event_log.KEPT_KINDS)
+        self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
+        self.assertEqual(event_log.SCHEMA_VERSION, 10)
+
+
+def question_threads():
+    return [t for t in threading.enumerate() if t.name == service.PROJECT_QUESTION_THREAD]
+
+
+class QuestionLifecycleTest(QuestionCase):
+    def test_an_orderly_stop_records_the_running_questions_answer_once(self):
+        entered = threading.Event()
+
+        def asker(ask, cancel):
+            entered.set()
+            cancel.wait(10)
+            time.sleep(0.2)
+            return project_question.Outcome("failed", reason=project_question.STOPPED_TEXT)
+        svc = self.start(project_question_dispatch=None, project_asker=asker)
+        record = svc._record_project_answer
+
+        def record_then_linger(*args):
+            record(*args)
+            time.sleep(0.3)  # the worker outlives its answer: only a join waits for it
+        svc._record_project_answer = record_then_linger
+        qid = svc.ask_project_question(WHY, "why?")
+        self.assertTrue(entered.wait(10))
+        svc.close()
+        self.assertEqual(self.question_rows(), [
+            (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work"}),
+            (ANSWERED_KIND, WHY, {"question_id": qid, "outcome": "failed",
+                                  "reason": project_question.STOPPED_TEXT})])
+        self.assertEqual(question_threads(), [])
+
+    def test_a_question_accepted_before_a_stop_and_not_yet_dispatched_is_answered_before_the_log_closes(self):
+        svc = self.start(project_question_dispatch=self.queued.append)
+        qid = svc.ask_project_question(WHY, "why?")
+        closer = threading.Thread(target=svc.close)
+        closer.start()
+        try:
+            wait_until(svc._stop.is_set)
+            closer.join(2)  # past the server's 0.5 s shutdown poll: only the drain still holds it
+            self.assertTrue(closer.is_alive())
+        finally:
+            self.queued[0]()
+        closer.join(10)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows(), [
+            (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work"}),
+            (ANSWERED_KIND, WHY, {"question_id": qid, "outcome": "failed",
+                                  "reason": project_question.STOPPED_TEXT})])
+
+    def test_a_question_asked_while_the_console_stops_is_refused_and_appends_nothing(self):
+        svc = self.start(project_question_dispatch=self.queued.append)
+        svc.ask_project_question(WHY, "why?")
+        closer = threading.Thread(target=svc.close)
+        closer.start()
+        try:
+            wait_until(svc._stop.is_set)
+            with self.assertRaises(project_question.Refused) as caught:
+                svc.ask_project_question(WHY, "again?")
+            self.assertEqual(str(caught.exception), "the console is stopping")
+            self.assertEqual([kind for kind, _, _ in self.question_rows()], [ASKED])
+        finally:
+            for job in list(self.queued):
+                job()
+        closer.join(10)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(len(self.queued), 1)
+
+    def test_concurrent_questions_are_each_answered_once_on_stop(self):
+        entered = []
+        barrier = threading.Barrier(2, timeout=10)
+
+        def asker(ask, cancel):
+            entered.append(ask.question_id)
+            barrier.wait()
+            cancel.wait(10)
+            return project_question.Outcome("failed", reason=project_question.STOPPED_TEXT)
+        svc = self.start(project_question_dispatch=None, project_asker=asker)
+        ids = []
+        askers = [threading.Thread(target=lambda text=text: ids.append(
+            svc.ask_project_question(WHY, text))) for text in ("one?", "two?")]
+        for each in askers:
+            each.start()
+        for each in askers:
+            each.join(10)
+        wait_until(lambda: len(entered) == 2 and barrier.n_waiting == 0)
+        svc.close()
+        rows = self.question_rows()
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(sorted(p["question_id"] for k, _, p in rows if k == ASKED), sorted(ids))
+        self.assertEqual(sorted(p["question_id"] for k, _, p in rows if k == ANSWERED_KIND),
+                         sorted(ids))
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(question_threads(), [])
+
+    def test_a_removal_waits_for_a_running_question_and_is_refused_while_it_runs(self):
+        entered, gate = threading.Event(), threading.Event()
+
+        def asker(ask, cancel):
+            entered.set()
+            gate.wait(10)
+            return project_question.Outcome("answered", answer="Answer: x")
+        self.addCleanup(gate.set)
+        svc = self.start_removal(
+            project_asker=asker,
+            project_question_dispatch=lambda job: threading.Thread(target=job).start())
+        qid = svc.ask_project_question(WHY, "why?")
+        self.assertTrue(entered.wait(10))
+        with mock.patch.object(account_remove, "DRAIN_TIMEOUT", 0.2):
+            with self.assertRaises(sprints.Refused) as caught:
+                svc.remove_account("work", "work")
+        self.assertEqual(str(caught.exception), account_remove.busy("work"))
+        self.assertEqual(self.calls, [])
+        gate.set()
+        wait_until(lambda: [k for k, _, _ in self.question_rows()] == [ASKED, ANSWERED_KIND])
+        self.assertEqual(self.question_rows()[-1][2],
+                         {"question_id": qid, "outcome": "answered", "answer": "Answer: x"})
+
+    def test_a_queued_question_whose_profile_is_removed_fails_without_a_session(self):
+        for name, reason in (
+                ("marked", "work is being removed"),
+                ("gone", "the account work was removed before the session started")):
+            with self.subTest(name):
+                self.calls.clear()
+                self.queued.clear()
+                self.asked.clear()
+                support.profile_dir(self.store, "work")
+                if name == "marked":
+                    def signer_out(one):
+                        self.calls.append(("signout", one.profile))
+                        self.queued[0]()
+                    svc = self.start_removal(project_question_dispatch=self.queued.append,
+                                             signer_out=signer_out)
+                else:
+                    svc = self.start_removal(project_question_dispatch=self.queued.append)
+                qid = svc.ask_project_question(WHY, "why?")
+                svc.remove_account("work", "work")
+                if name == "gone":
+                    self.assertFalse((self.profiles / "work").exists())
+                    self.queued[0]()
+                self.assertEqual(self.asked, [])
+                answered = [p for k, _, p in self.question_rows()
+                            if k == ANSWERED_KIND and p["question_id"] == qid]
+                self.assertEqual(answered, [{"question_id": qid, "outcome": "failed",
+                                             "reason": reason}])
+                svc.close()
+
+
+class QuestionRouteTest(QuestionCase):
+    def post(self, svc, body, headers):
+        payload = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return support.post_page(svc.address, QUESTION_ROUTE, headers, payload)
+
+    def test_the_route_refuses_without_the_token_or_origin_and_appends_nothing(self):
+        svc = self.start()
+        body = {"project_id": WHY, "question": "why?"}
+        origin = f"http://127.0.0.1:{svc.address[1]}"
+        cases = (
+            ({"Origin": origin, **JSON}, b"token refused\n"),
+            (self.own(svc, Origin="http://example.test", **JSON), b"origin refused\n"),
+            ({"X-Console-Token": self.token(), **JSON}, b"origin refused\n"))
+        for headers, text in cases:
+            with self.subTest(text=text):
+                got = self.assert_unchanged(svc, lambda: self.post(svc, body, headers))
+                self.assertEqual((got[0], got[2]), (403, text))
+        self.assertEqual(self.asked, [])
+
+    def test_the_route_refuses_an_unregistered_project_and_appends_nothing(self):
+        svc = self.start()
+        cases = (
+            ({"project_id": "owner/p99", "question": "why?"}, 409,
+             b"this project is not registered\n"),
+            (b'{"project_id":"owner/p01"}', 400, b"bad question\n"),
+            ({"project_id": WHY, "question": ""}, 409, b"write the question first\n"))
+        for body, status, text in cases:
+            with self.subTest(text=text):
+                got = self.assert_unchanged(
+                    svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
+                self.assertEqual((got[0], got[2]), (status, text))
+        self.assertEqual(self.asked, [])
+
+    def test_a_question_from_the_page_is_answered_into_the_log(self):
+        svc = self.start()
+        status, _, body = self.post(
+            svc, {"project_id": WHY, "question": "what does the build check?"},
+            self.own(svc, **JSON))
+        self.assertEqual((status, body), (204, b""))
+        asked, answered = self.question_rows()[-2:]
+        self.assertEqual((asked[0], asked[1], answered[0], answered[1]),
+                         (ASKED, WHY, ANSWERED_KIND, WHY))
+
+    def test_the_route_is_a_page_write_that_takes_only_post(self):
+        svc = self.start()
+        self.assertIn(QUESTION_ROUTE, service.PAGE_WRITES)
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                status, headers, _ = support.request(svc.address, method, QUESTION_ROUTE)
+                self.assertEqual((status, headers["Allow"]), (405, "POST"))
