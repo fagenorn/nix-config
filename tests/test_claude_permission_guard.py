@@ -1878,7 +1878,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         return tuple(
             f"cat <<'{delimiter}' >/dev/null\n{early}\ndon't\n{delimiter}\njust switch # '"
             for delimiter, early in (("X>", "X&>"), ("X>&", "X>"), ("X<&", "X<"),
-                                     ("X>|", "X>")))
+                                     ("X>|", "X>"))) + (
+            # A later expanding body the scan cannot read leaves the earlier bodies
+            # unrewritten too: the whole remainder goes to the raw-text reading.
+            "cat <<'X>' <<EOF >/dev/null\nX&>\nEOF\ndon't\nX>\n$?\nEOF\njust switch # '",)
 
     def test_a_production_command_hidden_by_a_runner_a_redirection_or_a_quoting_is_refused(self):
         """AC1 review findings: shell text behind a runner, a leading redirection, an ANSI-C

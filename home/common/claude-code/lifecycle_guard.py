@@ -3825,6 +3825,8 @@ def ansi_c_pieces(text):
                 continue
             cursor, delimiter, strip_tabs, expands = read_heredoc_delimiter(text, index)
             if delimiter is None:
+                # The segmenter refuses the same text, and its bodies stay as written.
+                guarded.add(len(out))
                 out.append(text[index:])
                 break
             guarded.add(len(out))
@@ -3838,6 +3840,10 @@ def ansi_c_pieces(text):
             end = skip_heredoc_bodies(text, index, pending)
             pending = []
             if end is None:
+                # The remainder holds bodies the scan could not read: it stays as
+                # written, so the segmenter refuses it as it does the original text
+                # and no earlier body is closed by a rewritten delimiter (issue 1173).
+                guarded.add(len(out))
                 out.append(text[index:])
                 break
             body = text[index:end]
