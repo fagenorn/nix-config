@@ -1136,7 +1136,7 @@ def check_production_entries(
             check_command_id(value, entry, commands, violations, section="production")
         elif name == "key_files":
             check_contract_glob(value, entry, violations, section="production")
-        elif not isinstance(value, str) or not MCP_TOOL_NAME_PATTERN.match(value):
+        elif not isinstance(value, str) or not MCP_TOOL_NAME_PATTERN.fullmatch(value):
             violations.append(violation(
                 entry, "must name one MCP tool as mcp__<server>__<tool>",
                 "contract.production.not_mcp_tool"))
