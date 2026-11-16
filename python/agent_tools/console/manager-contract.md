@@ -103,6 +103,17 @@ Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one li
 4. To re-ask a question (to add the pictures you forgot, fix its words or change an option), send the new round with `"replaces": {"round": <id>, "index": <n>}` on the new question, and never ask it again as a new question. The console takes the old question back in the same write, so the owner sees one card; item 3's rule still applies to the replacing round. To take back a question you no longer need, run `sprint withdraw-question --round <id> --index <n>` (`<n>` counts from 0). An answered question, one already taken back, or another sprint's question is refused with the reason and nothing is sent. An owner who answers a question you took back is told "the manager took this question back".
 5. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, the chosen option or the owner's own words: act on it and answer it with `sprint reply` like any message.
 
+## Notices
+
+1. A notice is information for the other sprints of this project and for the owner: never approval, and the console never refuses work because of a claim. Post one when another sprint or the owner would otherwise be surprised.
+2. A notice is one JSON object of one of three kinds, sent with `sprint notice --notice-file -` on standard input, e.g. `{"kind": "claim", "text": "reworking the page fold", "what": "python/agent_tools/console/page.html", "until": "the board fold lands"}`:
+   - `claim`: `text`, `what` (the paths or the area you are working in, at most 200 characters) and `until` (when you expect to be done, at most 140 characters).
+   - `heads-up`: `text`, naming the command, file format or contract that is changing and how.
+   - `hand-off`: `text`, and `to`, an open sprint id of this project or `owner`.
+3. `text` is one line of at most 280 characters. A sprint has at most 5 open notices; a sixth is refused with the reason and nothing is sent. It prints `sprint: notice <id> posted`.
+4. Read the project's open notices, every sprint's, with `sprint notices`: it prints one JSON line `{"notices": [...]}`. Look before you start work that touches shared files, and take your own notices into account when you hand work over.
+5. Take one of your own notices back with `sprint withdraw-notice --notice <id>`. A notice also ends when its sprint closes, is stopped or is dropped.
+
 ## Ending
 
 1. Close the sprint when every issue has landed (held for verification counts as landed) or been dropped: send `sprint close --closing-file -`, one JSON object on standard input:
