@@ -36,6 +36,7 @@ from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 from .console_test_support import JPEG, PIXEL, WIDE  # noqa: F401 -- fixtures shared with the inbox suite (#1112)
+from .console_test_support import get_page as get
 
 
 def chunk(kind: bytes, data: bytes) -> bytes:
@@ -923,21 +924,6 @@ class PictureRetentionTest(PictureCase):
         lines = [line for line in captured.getvalue().splitlines()
                  if line.startswith("console: picture_sweep_failed NotADirectoryError:")]
         self.assertEqual(len(lines), 2)
-
-
-def get(address, path, headers=None):
-    connection = http.client.HTTPConnection(*address, timeout=5)
-    try:
-        connection.putrequest("GET", path, skip_host=True)
-        connection.putheader("Host", f"{address[0]}:{address[1]}")
-        for name, value in (headers or {}).items():
-            for member in (value if isinstance(value, list) else [value]):
-                connection.putheader(name, member)
-        connection.endheaders()
-        response = connection.getresponse()
-        return response.status, response.getheaders(), response.read()
-    finally:
-        connection.close()
 
 
 def values(headers, name):

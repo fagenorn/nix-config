@@ -191,3 +191,18 @@ def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, pro
     svc.start()
     test.addCleanup(svc.close)
     return svc
+
+
+def get_page(address, path, headers=None):
+    connection = http.client.HTTPConnection(*address, timeout=5)
+    try:
+        connection.putrequest("GET", path, skip_host=True)
+        connection.putheader("Host", f"{address[0]}:{address[1]}")
+        for name, value in (headers or {}).items():
+            for member in (value if isinstance(value, list) else [value]):
+                connection.putheader(name, member)
+        connection.endheaders()
+        response = connection.getresponse()
+        return response.status, response.getheaders(), response.read()
+    finally:
+        connection.close()
