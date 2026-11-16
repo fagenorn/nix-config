@@ -2,6 +2,7 @@
 
 Run: just agent-workflow-tests
 """
+import dataclasses
 import json
 import unittest
 from datetime import datetime
@@ -9,7 +10,8 @@ from pathlib import Path
 
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console.digest import (
-    ANSWER_DIFFERS, BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
+    ANSWER_DIFFERS, BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED,
+    MERGE_REFUSED_MOMENT, SHOWN,
     SPRINT_DONE_MOMENT, SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
     PROJECT_REGISTERED, moments)
 from agent_tools.console.event_log import (
@@ -17,8 +19,9 @@ from agent_tools.console.event_log import (
     MANAGER_FAILED, MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED, SPRINT_CLOSED, SPRINT_CONTINUED, SPRINT_NUDGED, SPRINT_REPORTED,
     SPRINT_STOP_REQUESTED, Event)
+from agent_tools.console.deliveries import IssueStage
 from agent_tools.console.sessions import SessionState
-from agent_tools.console.sprints import sprint_states
+from agent_tools.console.sprints import Observed, sprint_states
 from agent_tools.console.view import InboxRecord
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -508,6 +511,64 @@ class DigestTest(unittest.TestCase):
         for m in found:
             self.assertNotIn("nothing running", m.sentence)
             self.assertNotIn("quiet", m.sentence)
+
+    sid = "a" * 16
+    goal = "make the importer resumable"
+    refused_a = "merge refused: required checks are not green"
+    refused_b = "merge refused: the pull request is behind its base"
+
+    def refusal_rows(self, *reports):
+        row = {"sprint_id": self.sid, "goal": self.goal}
+        head = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1})]
+        return head + [self.reported(seq, status) for seq, status in reports]
+
+    def reported(self, seq, status):
+        return Event(seq, at(seq), SPRINT_REPORTED, "owner/p00", {
+            "sprint_id": self.sid, "goal": self.goal, "report": {
+                "status": status, "phase": "running", "milestone": "Importer resumes",
+                "tracker_url": "https://github.com/owner/p00/milestone/3",
+                "issues": [{"issue": 12, "stage": "landing"}, {"issue": 13, "stage": "building"}],
+                "inbox": [], "next": "rerun the checks"}})
+
+    def refusals(self, found):
+        return [(m.seq, m.kind, m.sentence) for m in found if m.kind == MERGE_REFUSED_MOMENT]
+
+    def test_a_refused_merge_says_one_line_however_often_it_is_repeated(self):
+        rows = self.refusal_rows((4, self.refused_a), (5, self.refused_a), (6, self.refused_a))
+        once = [(4, "merge_refused",
+                 "A merge in make the importer resumable was refused: required checks are not green")]
+        found = moments(rows, {}, {})
+        self.assertEqual(self.refusals(found), once)
+        self.assertFalse([m for m in found if m.kind == SPRINT_STATE_MOMENT and m.seq in (5, 6)])
+        self.assertEqual(
+            self.refusals(moments(rows[3:], {}, {}, sprints=sprint_states(rows[:3]))), once)
+        self.assertEqual(
+            self.refusals(moments(rows[4:], {}, {}, sprints=sprint_states(rows[:4]))), [])
+        self.assertEqual(self.refusals(moments(rows[:4], {}, {})), once)
+
+    def test_a_refusal_speaks_again_after_a_clearing_report_or_with_a_new_reason(self):
+        rows = self.refusal_rows((4, self.refused_a), (5, "one slice is landing"), (6, self.refused_a),
+                         (7, self.refused_b), (8, self.refused_b))
+        found = [m for m in moments(rows, {}, {}) if m.kind == MERGE_REFUSED_MOMENT]
+        self.assertEqual([m.seq for m in found], [4, 6, 7])
+        self.assertTrue(found[-1].sentence.endswith(
+            "was refused: the pull request is behind its base"))
+
+    def test_an_unrelated_issue_closing_out_between_identical_refusals_says_nothing_new(self):
+        rows = self.refusal_rows((4, self.refused_a))
+        fold = sprint_states(rows)
+        at_ms = int(datetime.fromisoformat(at(4)).timestamp() * 1000) + 1
+        fold[self.sid] = dataclasses.replace(
+            fold[self.sid],
+            observed=(Observed(13, at_ms, "s1", "wf_c", IssueStage(13, "done")),))
+        found = moments([self.reported(5, self.refused_a)], {}, {}, sprints=fold)
+        self.assertEqual(self.refusals(found), [])
 
 
 class QuestionDigestTest(unittest.TestCase):

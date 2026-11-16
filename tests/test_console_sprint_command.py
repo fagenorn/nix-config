@@ -999,6 +999,25 @@ class ManagerContractTest(unittest.TestCase):
                 with self.subTest(heading=heading, needle=needle):
                     self.assertIn(needle, section)
 
+    def test_the_contract_says_a_refused_merge_goes_in_the_status_line_and_is_never_a_question(self):
+        text = run_sprint("contract").stdout
+        reporting = " ".join(text.partition("## Reporting\n")[2].partition("\n## ")[0].split())
+        questions = " ".join(text.partition("## Questions\n")[2].partition("\n## ")[0].split())
+        for needle in (
+            "send a report at once whose `status` starts with `merge refused: ` followed by"
+            " the guard's reason in plain words",
+            "Never send a `sprint ask` question about it and never list its issue in `inbox`",
+            "Keep that start on each later report while the merge stays refused, because a"
+            " report without it clears the line",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, reporting)
+        self.assertIn("A merge the guard refuses is not a real choice: report it as Reporting"
+                      " says and ask nothing about it.", questions)
+        self.assertEqual(
+            sprints.refused_reason("merge refused: required checks are not green"),
+            "required checks are not green")
+
     def test_the_report_help_names_its_optional_pictures(self):
         self.assertIn("pictures:", run_sprint("report", "--help").stdout)
 
