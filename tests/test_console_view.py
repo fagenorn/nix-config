@@ -1432,6 +1432,18 @@ class SprintReportViewTest(unittest.TestCase):
                 self.assertEqual(shown["state"], "waiting")
                 self.assertEqual(shown["checks"], [])
 
+    def test_a_check_on_an_open_issue_of_the_sprint_keeps_the_ball_with_the_owner(self):
+        for stage in ("building", "verifying", "queued"):
+            with self.subTest(stage=stage):
+                sprint_state = reported(started(A), R, issues=((12, stage),))
+                records = {("p00", "k1"): check_item("p00", "k1", 12, [])}
+                shown = entry(line(sprint_state, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["now_text"], "waiting for your decision on the tracker")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["state"], "waiting")
+                self.assertEqual(shown["checks"], [])
+
     def test_a_check_with_no_blocking_list_counts_as_waiting(self):
         for blocking in (MISSING, "12"):
             with self.subTest(blocking=blocking):

@@ -4580,6 +4580,10 @@ class PageSprintBlockTest(unittest.TestCase):
         self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
         (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
         self.assertEqual(css_declared(narrow, ".sprint-check").get("min-height"), "44px")
+        # Top-aligned, so the text sits as far below the status line at 480 px as at 1440 px
+        # instead of centring in the 44 px target.
+        self.assertEqual(css_declared(narrow, ".sprint-check").get("display"), "flex")
+        self.assertEqual(css_declared(narrow, ".sprint-check").get("align-items"), "flex-start")
         self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
 
     def test_a_check_line_with_no_card_does_nothing(self) -> None:

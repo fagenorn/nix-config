@@ -987,10 +987,12 @@ def _sprint_named(state: SprintState, records: Iterable[InboxRecord]) -> list[In
 
 def sprint_checks(state: SprintState, records: Iterable[InboxRecord]) -> list[InboxRecord]:
     """The sprint's open owner checks that block none of its open issues (ADR-console-049), ordered
-    by `waiting_since` then `key`. A `blocking` that is missing or not a list counts as blocking."""
+    by `waiting_since` then `key`. A check on an issue that is itself open (building, verifying or
+    queued) blocks it, and a `blocking` that is missing or not a list counts as blocking."""
     open_issues = sprint_open_issues(state)
     checks = [r for r in _sprint_named(state, records)
               if owner_check(r.item) and isinstance(r.item.get("blocking"), list)
+              and r.item.get("issue") not in open_issues
               and open_issues.isdisjoint(r.item["blocking"])]
     return sorted(checks, key=lambda r: (r.waiting_since, r.item["key"]))
 
