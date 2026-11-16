@@ -200,6 +200,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .st-dim { color: var(--ov2); }
 .sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
+.sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
+.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -223,7 +225,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
 .wait { margin-top: 6px; font-size: .84375rem; color: var(--sub0); max-width: 44rem; overflow-wrap: anywhere; }
 .wait a { color: inherit; text-underline-offset: 3px; }
+.sprint-checks .wait { margin: 0; padding: 2px 0; font-size: .8125rem; max-width: none; }
 .activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
+.notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
@@ -293,10 +297,19 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
 .notice-list { margin-top: 4px; }
-.notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--ov2); }
+.notice { color: var(--ov2); }
+.notice + .notice { margin-top: 12px; }
 .notice > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.notice .notice-poster { color: var(--sub0); }
-.notices-project { min-width: 0; overflow-wrap: anywhere; }
+.notice-head { display: flex; align-items: baseline; gap: 0 8px; color: var(--sub0); }
+.notice-head > *, .notice-claim > * { min-width: 0; }
+.notice-who { flex: 1 1 auto; min-width: 0; }
+.notice-head .notice-age { flex: none; margin-left: auto; color: var(--ov2); white-space: nowrap; }
+.notice-words { color: var(--text); }
+.notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.notices-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
+.line.notices summary { display: revert; list-style: revert; }
+.line.notices summary::-webkit-details-marker { display: revert; }
+.notice .notice-long, .notice code { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
@@ -415,6 +428,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
+  .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -481,6 +495,27 @@ function pathWords(node, text) {
       if (i > 0) node.appendChild(el("wbr"));
       node.appendChild(el("span", "seg", segment));
     });
+  }
+  flush();
+  return node;
+}
+// A run of LONG_WORD characters or more with no space is one cut span carrying its whole text in its title (#1133).
+const LONG_WORD = 24;
+function cutWords(node, text) {
+  let plain = "";
+  const flush = () => {
+    if (plain !== "") node.appendChild(el("span", "", plain));
+    plain = "";
+  };
+  for (const run of String(text).split(/(\s+)/)) {
+    if (/\s/.test(run) || run.length < LONG_WORD) {
+      plain += run;
+      continue;
+    }
+    flush();
+    const long = el("span", "notice-long", run);
+    long.setAttribute("title", run);
+    node.appendChild(long);
   }
   flush();
   return node;
@@ -748,6 +783,14 @@ function fillSprint(item, entry, sprint) {
     sprintRedraw -= 1;
   }
 }
+function focusCard(card) {
+  if (card === undefined || !card.isConnected) return;
+  if (card.tabIndex !== 0) card.tabIndex = -1;
+  card.focus();
+}
+function openCheckCard(check) {
+  focusCard(inboxCards.get(check.project_id + "#" + check.key));
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
@@ -801,7 +844,18 @@ function drawSprint(item, entry, sprint) {
   words.appendChild(age);
   head.appendChild(words);
   item.appendChild(head);
-  for (const wait of Array.isArray(sprint.waits) ? sprint.waits : []) item.appendChild(waitLine(wait, "p"));
+  const checks = sprint.checks || [];
+  const waits = Array.isArray(sprint.waits) ? sprint.waits : [];
+  if (checks.length > 0 || waits.length > 0) {
+    const list = el("ul", "sprint-checks");
+    for (const check of checks) {
+      const line = el("li", "");
+      line.appendChild(actionButton("sprint-check", check.text, () => openCheckCard(check)));
+      list.appendChild(line);
+    }
+    for (const wait of waits) list.appendChild(waitLine(wait, "li"));
+    item.appendChild(list);
+  }
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -1585,13 +1639,41 @@ function waitLine(wait, tag) {
 }
 function noticeLine(notice) {
   const item = el("li", "notice");
-  item.appendChild(el("span", "notice-poster", notice.poster));
-  item.appendChild(el("span", "notice-kind", notice.kind_text));
-  if (typeof notice.what === "string") item.appendChild(pathWords(el("span", "notice-what"), notice.what));
-  item.appendChild(el("span", "notice-text", notice.text));
-  if (typeof notice.until_text === "string") item.appendChild(el("span", "notice-until", notice.until_text));
-  if (typeof notice.to_text === "string") item.appendChild(el("span", "notice-for", notice.to_text));
-  item.appendChild(timeEl("ago", notice.at, "notice-age"));
+  const head = el("p", "notice-head");
+  const who = el("span", "notice-who");
+  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + notice.to_text : notice.kind_text;
+  who.appendChild(cutWords(el("b", "notice-label"), label));
+  who.appendChild(cutWords(el("span", "notice-from"), ", from " + notice.poster));
+  head.appendChild(who);
+  head.appendChild(timeEl("ago", notice.at, "notice-age"));
+  item.appendChild(head);
+  item.appendChild(cutWords(el("p", "notice-words"), notice.text));
+  if (typeof notice.what === "string") {
+    const claim = el("p", "notice-claim");
+    const paths = el("span", "notice-paths");
+    let plain = "";
+    const flush = () => {
+      if (plain !== "") cutWords(paths, plain);
+      plain = "";
+    };
+    // Only a path-shaped word (a slash, or a dot between word characters) takes the code chip; trailing punctuation and every other word of an area in words stay plain text.
+    for (const run of notice.what.trim().split(/(\s+)/)) {
+      const path = run.replace(/[,;:.]+$/, "");
+      if (!(path.includes("/") || /\w\.\w/.test(path))) {
+        plain += run;
+        continue;
+      }
+      flush();
+      const code = el("code", "notice-path", path);
+      code.setAttribute("title", path);
+      paths.appendChild(code);
+      plain += run.slice(path.length);
+    }
+    flush();
+    claim.appendChild(paths);
+    if (typeof notice.until_text === "string") claim.appendChild(cutWords(el("span", "notice-until"), notice.until_text));
+    item.appendChild(claim);
+  }
   return item;
 }
 // One closed fold of a project's open notices, in the view's order and words; null when it has none.
@@ -2106,6 +2188,7 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
+let inboxCards = new Map();
 let keyHint = null;
 let hintHost = null;
 function itemId(item) {
@@ -3268,6 +3351,8 @@ function drawInbox(view) {
   const held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  // A card the owner focused from a check line is rebuilt by every redraw, so its item key is kept and the replacement card is focused again.
+  const heldCard = [...inboxCards].find(([, card]) => card === active);
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
@@ -3386,6 +3471,7 @@ function drawInbox(view) {
     }
     section.appendChild(rest);
   }
+  inboxCards = cardOf;
   const answered = view.inbox.answered;
   if (answered.length > 0) {
     const done = el("ul", "done");
@@ -3413,6 +3499,8 @@ function drawInbox(view) {
   if (again !== undefined) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
+  } else if (heldCard !== undefined) {
+    focusCard(cardOf.get(heldCard[0]));
   }
 }
 function momentLine(moment) {
@@ -4401,7 +4489,8 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const focused = event.target && event.target.tagName;
-  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT"].includes(focused)) return;
+  // A card focused by its sprint's check line (openCheckCard) is ARTICLE or LI: the answer keys stay with it, not with the unrelated item currentEntry would pick.
+  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT", "ARTICLE", "LI"].includes(focused)) return;
   if (event.target && event.target.isContentEditable === true) return;
   if (event.key === "a") {
     openAccounts();

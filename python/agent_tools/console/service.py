@@ -820,6 +820,29 @@ with its traceback, or the whole returned report with its failed `checks`); one 
 `console: adoption_register_ended <plan_id> <result>` (` unchanged` when nothing was appended)
 ends the run. The console never writes the registry: the child does.
 
+Movement (#1110, the reading `movement.py` makes and ADR-console-042 uses):
+when the service is given a `pull_reader`, a thread, `MOVEMENT_THREAD`, started by `start()`, calls
+`poll_movement()` at once and then every `movement_seconds` (`MOVEMENT_SECONDS`, two minutes). One
+poll reads, one project after another and never inside the ingest lock, each registered project
+with at least one sprint that has not ended (`sprints.ended_at` is None); first, under the lock, it
+drops the reading of every project not in that set, so a project with no such sprint costs no
+call. For a project it reads the local half, `local_reader(root, pattern)` (default
+`movement.read_local`: the branch reflogs and the release store), where `pattern` is the project's
+branch pattern, and the forge half, `pull_reader(slug, pattern, cancelled=...)` (`movement.read_pulls`:
+one call for the open pull requests), through `answer.with_retries`, so a transient `ForgeError`
+is retried on ADR-console-032's schedule within its 30-second deadline and a non-transient one is
+not. A forge read that cannot be made (no `pull_reader`, no slug) or that failed leaves `pulls`
+None, and `movement.merged` keeps the last good reading of the pull requests: the sprint reads
+its wait for the quiet window from the last time anything moved, then goes quiet. The merged reading
+is kept per project in memory only (a restart reads at once), published, and never appended to the
+log. The stop flag cancels the read in flight and a read finished after the stop changes nothing.
+Stderr lines: `console: movement_read_failed <project_id> <Type>: <message>` (a forge read that
+failed), `console: movement_local_failed <project_id> <Type>: <message>` (the local read raised;
+it reads as no movement), `console: movement_release_invalid <project_id> <transaction id>...` (the
+release store holds a transaction that is not readable; one line until a good read, and it moves
+nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
+loop goes on). The cost is one forge call per project with a running sprint per `MOVEMENT_SECONDS`.
+
 Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
 question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
 `tick(slug, issue, comment_id, questions, choices)`), and marks the item answered at once. It
@@ -1173,6 +1196,17 @@ repository's pattern did not resolve, again only after it resolved in between), 
 unreadable, again only after it read successfully in between) and `console: journals_unreadable
 <session_id> <reason>` (a session's journal listing turned unreadable, likewise).
 
+Spend (#1134): the thread named `SPEND_THREAD`, started by `start()`, calls `poll_spend()` every
+`spend_seconds` (`SPEND_SECONDS`), the first poll `spend_seconds` after `start()`; construction never
+reads a transcript, so the view's `spend` is null until that poll. `poll_spend()` reads the session,
+session-subagent and workflow agent transcripts under the `projects` directory beside each of
+`session_dirs()` (see `spend.py`), and on darwin the keepalive ping log (`ping_log()`), outside the
+ingest lock, then builds the spend view and publishes it under that lock; it appends nothing to the
+log. The account of a session is folded from the log's `session.seen` and `session.profile` rows
+(`spend.session_profiles`) and is kept after `session.gone`, for as long as those rows are retained.
+A failed iteration is one stderr line `console: spend_poll_failed <Type>: <message>` and the loop
+goes on.
+
 Construction order: bind the server (an `OSError` propagates and nothing else is
 opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
 not start); open the event log; run one retention pass; fold the projects, the sessions, the inbox,
@@ -1180,9 +1214,9 @@ the read health, the deliveries, the sprints, the withdrawn ids and the pending 
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
-re-raised. `start()` serves on a daemon thread named `console-http`; `close()`
+re-raised. `start()` serves on a daemon thread named `console-http` and starts the spend thread; `close()`
 sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
-tracker, retention and digest threads and tears the rest down; it is idempotent.
+tracker, movement, retention, digest and spend threads and tears the rest down; it is idempotent.
 """
 
 import contextlib
@@ -1201,14 +1235,14 @@ import uuid
 import collections
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    activation, account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, sprints, write_guard)
+    account_add, account_remove, activation, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    folder_trust, manager, movement, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1350,10 +1384,14 @@ ACTIVATION_SECONDS = 60.0
 ACTIVATION_THREAD = "console-activation-poll"
 ADOPTION_SECONDS = 120.0
 ADOPTION_THREAD = "console-adoption-poll"
+MOVEMENT_SECONDS = 120.0
+MOVEMENT_THREAD = "console-movement-poll"
 RETENTION_SECONDS = 86400.0
 RETENTION_THREAD = "console-retention"
 DIGEST_SECONDS = 60.0
 DIGEST_THREAD = "console-digest"
+SPEND_SECONDS = 60.0
+SPEND_THREAD = "console-spend"
 MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
@@ -2670,6 +2708,9 @@ class ConsoleService:
                  tracker: Callable[..., list[dict]] | None = None,
                  tracker_seconds: float = TRACKER_SECONDS,
                  adoption_seconds: float = ADOPTION_SECONDS,
+                 pull_reader: Callable[..., tuple[movement.PullRequest, ...]] | None = None,
+                 local_reader: Callable[[str, str | None], movement.LocalReading] = movement.read_local,
+                 movement_seconds: float = MOVEMENT_SECONDS,
                  activation_reader: Callable[[Iterable[str]], activation.Activation | None] | None = None,
                  activation_seconds: float = ACTIVATION_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
@@ -2678,6 +2719,8 @@ class ConsoleService:
                  clock: Callable[[], float] = time.time,
                  retention_seconds: float = RETENTION_SECONDS,
                  digest_seconds: float = DIGEST_SECONDS,
+                 spend_seconds: float = SPEND_SECONDS,
+                 ping_log: Callable[[], Path | None] = spend.default_ping_log,
                  log_clock: Callable[[], str] = utc_now,
                  token_path: Path | None = None,
                  sprint_secrets: Path | None = None,
@@ -2793,6 +2836,9 @@ class ConsoleService:
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
         self._use = manager.ProfileUse({}, {})
+        self._spend = spend.SpendReader(repo_of=repo_of)
+        self._spend_view: dict | None = None
+        self._spend_profiles: dict[str, str] = {}
         self._absent: frozenset[str] = frozenset()
         self._deliveries: dict[tuple[str, str], deliveries.DeliveryState] = {}
         self._reader = deliveries.JournalReader()
@@ -2804,6 +2850,11 @@ class ConsoleService:
         self._tracker_seconds = tracker_seconds
         self._adoption_seconds = adoption_seconds
         self._adoption_thread: threading.Thread | None = None
+        self._pull_reader = pull_reader
+        self._local_reader = local_reader
+        self._movement_seconds = movement_seconds
+        self._movement: dict[str, movement.ProjectMovement] = {}
+        self._movement_thread: threading.Thread | None = None
         self._activation_reader = activation_reader
         self._activation_seconds = activation_seconds
         self._activation: activation.Activation | None = None
@@ -2816,8 +2867,11 @@ class ConsoleService:
         self._revive_since_ms = int(clock() * 1000)
         self._retention_seconds = retention_seconds
         self._digest_seconds = digest_seconds
+        self._spend_seconds = spend_seconds
+        self._ping_log = ping_log
         self._retention_thread: threading.Thread | None = None
         self._digest_thread: threading.Thread | None = None
+        self._spend_thread: threading.Thread | None = None
         self._looked: str | None = None
         self._moments: list[digest.Moment] = []
         self._tracker_thread: threading.Thread | None = None
@@ -2852,6 +2906,7 @@ class ConsoleService:
             self._states = project_states(events)
             self._sessions = sessions.session_states(events)
             self._use = manager.profile_use(events)
+            self._spend_profiles = spend.session_profiles(events)
             self._inbox = inbox_records(events)
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
@@ -2970,6 +3025,7 @@ class ConsoleService:
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
+            spend=self._spend_view,
             capacity=cap, activation=self._activation,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
@@ -2987,7 +3043,7 @@ class ConsoleService:
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked))
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -5720,6 +5776,7 @@ class ConsoleService:
         self._states = project_states(appended, self._states)
         self._sessions = sessions.session_states(appended, self._sessions)
         self._use = manager.profile_use(appended, self._use)
+        self._spend_profiles = spend.session_profiles(appended, self._spend_profiles)
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
@@ -5753,6 +5810,7 @@ class ConsoleService:
             if removed:
                 self._sessions = sessions.session_states(events)
                 self._use = manager.profile_use(events)
+                self._spend_profiles = spend.session_profiles(events)
                 self._inbox = inbox_records(events)
                 self._capacity = capacity.capacity_state(events)
                 self._signins = signin.signin_state(events)
@@ -5792,6 +5850,35 @@ class ConsoleService:
             except Exception as error:
                 print(f"console: digest_expiry_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
+
+    def poll_spend(self) -> None:
+        """Read the transcripts, rebuild the spend view and publish it; see the module docstring."""
+        projects_dirs: list[Path] = []
+        for directory in self._session_dirs():
+            projects = Path(directory).parent / "projects"
+            if projects not in projects_dirs:
+                projects_dirs.append(projects)
+        today = datetime.fromtimestamp(self._clock(), timezone.utc).date()
+        since = (today - timedelta(days=spend.WINDOW_DAYS - 1)).isoformat()
+        self._spend.read(projects_dirs, since, self._ping_log())
+        snapshot = self._spend.snapshot()
+        with self._ingest:
+            self._spend_view = spend.spend_view(
+                snapshot, today=today.isoformat(),
+                project_of=lambda repo: project_for(repo, self._states),
+                profiles=self._spend_profiles)
+            self._publish()
+
+    def _spend_step(self) -> None:
+        try:
+            self.poll_spend()
+        except Exception as error:
+            print(f"console: spend_poll_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+
+    def _spend_loop(self) -> None:
+        while not self._stop.wait(self._spend_seconds):
+            self._spend_step()
 
     def poll_tracker(self) -> None:
         """One refresh of the inbox of every active project; see the module docstring."""
@@ -6049,6 +6136,65 @@ class ConsoleService:
             if self._stop.wait(self._adoption_seconds):
                 return
 
+    def poll_movement(self) -> None:
+        """One read of the movement of every project with a running sprint; see the module docstring."""
+        with self._ingest:
+            running = {sprint.project_id for sprint in self._sprints.values()
+                       if sprints.ended_at(sprint) is None}
+            roots = {project_id: state.root for project_id, state in self._states.items()
+                     if project_id in running}
+            dropped = [project_id for project_id in self._movement if project_id not in roots]
+            for project_id in dropped:
+                del self._movement[project_id]
+            if dropped and not self._closed:
+                self._publish()
+        for project_id, root in sorted(roots.items()):
+            if self._stop.is_set():
+                return
+            pattern = self._branch_pattern(root)
+            try:
+                local = self._local_reader(root, pattern)
+            except Exception as error:
+                print(f"console: movement_local_failed {project_id} {type(error).__name__}: {error}",
+                      file=sys.stderr)
+                local = movement.LocalReading((), False)
+            pulls = None
+            slug = self._slug_of(root) if self._pull_reader is not None else None
+            if slug is not None:
+                try:
+                    pulls = answer.with_retries(
+                        lambda: self._pull_reader(slug, pattern, cancelled=self._stop.is_set),
+                        clock=self._monotonic, sleep=self._write_sleep)
+                except Exception as error:
+                    if (isinstance(error, ForgeError) and error.code == "cancelled") or self._stop.is_set():
+                        return
+                    print(f"console: movement_read_failed {project_id} "
+                          f"{type(error).__name__}: {error}", file=sys.stderr)
+            if self._stop.is_set():
+                return
+            key = f"release {project_id}"
+            if local.invalid:
+                self._warn_once(key, f"console: movement_release_invalid {project_id} "
+                                     f"{' '.join(local.invalid)}")
+            else:
+                self._unreadable.discard(key)
+            with self._ingest:
+                if project_id not in self._states or self._closed:
+                    continue
+                self._movement[project_id] = movement.merged(
+                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local)
+                self._publish()
+
+    def _move(self) -> None:
+        while True:
+            try:
+                self.poll_movement()
+            except Exception as error:
+                print(f"console: movement_poll_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            if self._stop.wait(self._movement_seconds):
+                return
+
     def _track(self) -> None:
         while True:
             try:
@@ -6098,12 +6244,19 @@ class ConsoleService:
             self._adoption_thread = threading.Thread(
                 target=self._adopt, name=ADOPTION_THREAD, daemon=True)
             self._adoption_thread.start()
+        if self._pull_reader is not None:
+            self._movement_thread = threading.Thread(
+                target=self._move, name=MOVEMENT_THREAD, daemon=True)
+            self._movement_thread.start()
         self._retention_thread = threading.Thread(
             target=self._retain_loop, name=RETENTION_THREAD, daemon=True)
         self._retention_thread.start()
         self._digest_thread = threading.Thread(
             target=self._expire_loop, name=DIGEST_THREAD, daemon=True)
         self._digest_thread.start()
+        self._spend_thread = threading.Thread(
+            target=self._spend_loop, name=SPEND_THREAD, daemon=True)
+        self._spend_thread.start()
         if self._prober is not None or self._signin_reader is not None:
             self._probe_thread = threading.Thread(
                 target=self._probe_loop, name=PROBE_LOOP_THREAD, daemon=True)
@@ -6134,10 +6287,14 @@ class ConsoleService:
             self._activation_thread.join()
         if self._adoption_thread is not None:
             self._adoption_thread.join()
+        if self._movement_thread is not None:
+            self._movement_thread.join()
         if self._retention_thread is not None:
             self._retention_thread.join()
         if self._digest_thread is not None:
             self._digest_thread.join()
+        if self._spend_thread is not None:
+            self._spend_thread.join()
         if self._probe_thread is not None:
             self._probe_thread.join()
         if self._signin_thread is not None:

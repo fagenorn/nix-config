@@ -6,6 +6,7 @@ import json
 import re
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from unittest import mock
 
@@ -14,6 +15,7 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
 from agent_tools.console import approve, folder_trust, inbox, register
+from agent_tools.console import spend
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
@@ -29,6 +31,14 @@ from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.capacity import EMPTY, CapacityState, capacity_view
 from agent_tools.console.manager import session_name
+from agent_tools.console.movement import (
+    LocalReading,
+    ProjectMovement,
+    PullMovement,
+    PullRequest,
+    merged,
+    pulls_from_answer,
+)
 from agent_tools.console.sprints import (
     APPROVED,
     CHANGES,
@@ -392,6 +402,26 @@ class DigestViewTest(unittest.TestCase):
         given = {"since": None, "first_visit": True, "recent": [], "earlier": [], "omitted": 0}
         self.assertEqual(derive_view([], digest=given)["digest"], given)
         self.assertIsNone(derive_view([])["digest"])
+
+
+class SpendViewWireTest(unittest.TestCase):
+    def test_view_carries_thirty_daily_totals_by_each_dimension(self):
+        today = "2026-11-16"
+        snap = spend.Snapshot(
+            {spend.Key(today, "s1", None, None, spend.SESSION):
+                spend.priced("claude-sonnet-4-6", {"input_tokens": 1330})},
+            {}, {}, {}, {"s1": "/srv/p00"})
+        v = spend.spend_view(snap, today=today, project_of={"/srv/p00": "p00"}.get,
+                             profiles={"s1": "p1"})
+        shown = json.loads(view.encode_view(derive_view([state("p00", 1)], spend=v)))
+        self.assertEqual(len(shown["spend"]["days"]), 30)
+        for day in shown["spend"]["days"]:
+            self.assertEqual(set(day), {"day", "total", "session", "project", "sprint", "run",
+                                        "phase", "account", "aspect"})
+        self.assertEqual(shown["spend"]["days"][-1]["project"]["p00"]["input"], 1330)
+
+    def test_view_without_spend_is_null(self):
+        self.assertIsNone(derive_view([state("p00", 1)])["spend"])
 
 
 def run(sid, run_id, moved_ms, *issues):
@@ -841,6 +871,7 @@ def decision_prompt(extra):
 def held_node(number, comments):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": 0},
             "repository": {"defaultBranchRef": {"name": "main"}},
+            "blocking": {"totalCount": 0, "nodes": []},
             "comments": {"totalCount": len(comments), "nodes": comments}}
 
 
@@ -1257,6 +1288,18 @@ def open_item(pid, key, issue, answered=False):
     return InboxRecord({**item(pid, key, answered=answered), "issue": issue}, "t1", "u1")
 
 
+CHECK_Q = "Do the before and after pictures read well?"
+MISSING = object()
+HELD_SPRINT = reported(started(A), R, issues=((12, "building"), (13, "landed"), (30, "held")))
+
+
+def check_item(pid, key, issue, blocking=(), answered=False):
+    return InboxRecord({
+        **item(pid, key, answered=answered), "issue": issue, "reason": "verify-ask",
+        "kind": "manual-check", "question": CHECK_Q, "answers": ["passed", "failed", "note"],
+        **({} if blocking is MISSING else {"blocking": blocking})}, "t1", "u1")
+
+
 NAME = "p00 sprint " + A
 U = "2026-11-13T09:30:00+00:00"
 
@@ -1394,6 +1437,76 @@ class SprintReportViewTest(unittest.TestCase):
         shown = entry(line(it, R + 4 * MIN, records, [state("p00", 1), state("p01", 2)]))
         self.assertEqual((shown["state"], shown["state_text"]), ("waiting", "waiting on you (2)"))
         self.assertEqual(shown["waiting"], 2)
+
+    def test_a_held_check_that_blocks_no_open_issue_leaves_the_ball_with_the_manager(self):
+        for blocking in ([], [99], [13], [30]):
+            with self.subTest(blocking=blocking):
+                records = {("p00", "k1"): check_item("p00", "k1", 30, blocking)}
+                shown = entry(line(HELD_SPRINT, R + 4 * MIN, records))
+                self.assertEqual((shown["ball"], shown["ball_text"]),
+                                 ("manager", "manager working"))
+                self.assertEqual(shown["now_text"], "building 1 of 3: Importer resumes")
+                self.assertEqual(shown["waiting"], 0)
+                self.assertEqual(shown["state"], "on_track")
+
+    def test_a_held_check_is_a_check_line_and_still_an_inbox_item(self):
+        records = {("p00", "k1"): check_item("p00", "k1", 30, [])}
+        view = line(HELD_SPRINT, R + 4 * MIN, records)
+        self.assertEqual(entry(view)["checks"], [{
+            "project_id": "p00", "key": "k1", "issue": 30, "question": CHECK_Q,
+            "text": "Your check: " + CHECK_Q}])
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        self.assertEqual(view["statement"]["headline"], "1 thing needs you")
+        self.assertEqual([e["key"] for e in view["inbox"]["open"]], ["k1"])
+
+    def test_a_check_whose_issue_blocks_an_open_issue_of_the_sprint_keeps_the_ball_with_the_owner(
+            self):
+        queued = reported(started(A), R, issues=((12, "building"), (14, "queued"), (30, "held")))
+        for sprint_state, blocking in ((HELD_SPRINT, [12]), (queued, [14])):
+            with self.subTest(blocking=blocking):
+                records = {("p00", "k1"): check_item("p00", "k1", 30, blocking)}
+                shown = entry(line(sprint_state, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["now_text"], "waiting for your decision on the tracker")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["state"], "waiting")
+                self.assertEqual(shown["checks"], [])
+
+    def test_a_check_on_an_open_issue_of_the_sprint_keeps_the_ball_with_the_owner(self):
+        for stage in ("building", "verifying", "queued"):
+            with self.subTest(stage=stage):
+                sprint_state = reported(started(A), R, issues=((12, stage),))
+                records = {("p00", "k1"): check_item("p00", "k1", 12, [])}
+                shown = entry(line(sprint_state, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["now_text"], "waiting for your decision on the tracker")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["state"], "waiting")
+                self.assertEqual(shown["checks"], [])
+
+    def test_a_check_with_no_blocking_list_counts_as_waiting(self):
+        for blocking in (MISSING, "12"):
+            with self.subTest(blocking=blocking):
+                records = {("p00", "k1"): check_item("p00", "k1", 30, blocking)}
+                shown = entry(line(HELD_SPRINT, R + 4 * MIN, records))
+                self.assertEqual(shown["ball"], "owner")
+                self.assertEqual(shown["waiting"], 1)
+                self.assertEqual(shown["checks"], [])
+
+    def test_only_an_owner_check_becomes_a_check_line(self):
+        record = InboxRecord(
+            {**item("p00", "k1"), "issue": 30, "reason": "decision", "blocking": []}, "t1", "u1")
+        shown = entry(line(HELD_SPRINT, R + 4 * MIN, {("p00", "k1"): record}))
+        self.assertEqual(shown["ball"], "owner")
+        self.assertEqual(shown["waiting"], 1)
+        self.assertEqual(shown["checks"], [])
+
+    def test_checks_are_ordered_by_waiting_since_then_key(self):
+        later = dataclasses.replace(check_item("p00", "k1", 30, []), waiting_since="t2")
+        earlier = dataclasses.replace(check_item("p00", "k2", 30, []), waiting_since="t1")
+        shown = entry(line(HELD_SPRINT, R + 4 * MIN,
+                           {("p00", "k1"): later, ("p00", "k2"): earlier}))
+        self.assertEqual([c["key"] for c in shown["checks"]], ["k2", "k1"])
 
     def test_state_quiet_may_be_stuck(self):
         view = line(reported(started(A), R), R + 16 * MIN)
@@ -1674,6 +1787,155 @@ class SprintMovementViewTest(unittest.TestCase):
         self.assertEqual(entry(line(failed, T0_MS + MIN))["ball"], "nobody")
 
 
+def moving(**kw):
+    return {"p00": ProjectMovement(**kw)}
+
+
+class SprintWaitViewTest(unittest.TestCase):
+    """CI, a committing delivery and a release step move a sprint and name its wait (#1110)."""
+
+    base = reported(with_manager(started(A)), R)
+    now = R + 20 * MIN
+
+    def shown(self, movement, now=None, sessions=None, sprint_state=None):
+        return entry(line(sprint_state or self.base, now or self.now,
+                          sessions=[idle_session] if sessions is None else sessions,
+                          movement=movement))
+
+    def test_a_check_in_progress_on_its_pull_request_reads_waiting_for_ci(self):
+        now = self.now
+        answer = json.loads(
+            (Path(__file__).parent / "fixtures/console/forge-pulls.json").read_text())
+        movement = {"p00": merged(None, pulls_from_answer(answer, "issue-<num>-<slug>"),
+                                  now - MIN, LocalReading((), False))}
+        shown = self.shown(movement)
+        self.assertEqual(shown["state"], "on_track")
+        self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
+        self.assertEqual(shown["now_text"], "waiting for CI on its pull request")
+        self.assertNotIn("may be stuck", json.dumps(shown))
+        with self.subTest("not the sprint's pull request"):
+            other = reported(with_manager(started(A)), R, issues=((1, "landed"), (2, "building")))
+            shown = self.shown(movement, sprint_state=other)
+            self.assertEqual(shown["state"], "quiet")
+            self.assertEqual(shown["ball"], "nobody")
+            self.assertTrue(shown["now_text"].startswith("last seen "))
+
+    def test_a_commit_five_minutes_ago_reads_a_delivery_is_committing(self):
+        now = self.now
+        for label, movement in (
+                ("on its pull request's branch",
+                 moving(pulls=(PullMovement(40, frozenset({4}), None, now - 5 * MIN),),
+                        read_ms=now - MIN)),
+                ("on a delivery run's branch", moving(branches=((5, now - 5 * MIN),)))):
+            with self.subTest(label):
+                shown = self.shown(movement)
+                self.assertEqual(shown["state"], "on_track")
+                self.assertEqual(shown["ball"], "manager")
+                self.assertEqual(shown["now_text"], "a delivery is committing")
+        with self.subTest("a branch of another issue"):
+            self.assertEqual(
+                self.shown(moving(branches=((99, now - 5 * MIN),)))["state"], "quiet")
+
+    def test_a_release_in_progress_reads_waiting_for_a_release_step(self):
+        shown = self.shown(moving(release_ms=self.now - MIN))
+        self.assertEqual(shown["state"], "on_track")
+        self.assertEqual(shown["ball"], "manager")
+        self.assertEqual(shown["now_text"], "waiting for a release step")
+
+    def test_a_shown_merge_refusal_is_read_before_any_wait_sentence(self):
+        now = self.now
+        refused = reported(with_manager(started(A)), R, status="merge refused: checks not green")
+        for label, movement in (("CI", moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),),
+                                              read_ms=now - MIN)),
+                                ("a commit", moving(branches=((5, now - 5 * MIN),))),
+                                ("a release", moving(release_ms=now - MIN))):
+            with self.subTest(label):
+                shown = self.shown(movement, sprint_state=refused)
+                self.assertEqual(shown["state"], "on_track")
+                self.assertEqual(shown["now_text"], "merge refused: checks not green")
+
+    def test_every_signal_finished_and_twenty_quiet_minutes_reads_may_be_stuck(self):
+        now = self.now
+        for label, quiet_min, ball in (("twenty minutes", 20, "nobody"),
+                                       ("fourteen minutes is still moving", 14, "manager")):
+            with self.subTest(label):
+                seen = now - quiet_min * MIN
+                first = merged(None, (PullRequest(40, frozenset({4}), True, seen - 5 * MIN),),
+                               seen, LocalReading(((5, seen),), True))
+                gone = merged(first, (), now - MIN, LocalReading((), False))
+                shown = self.shown({"p00": gone})
+                self.assertEqual(shown["ball"], ball)
+                if quiet_min == 20:
+                    self.assertEqual((shown["state"], shown["state_text"]),
+                                     ("quiet", "quiet for 20 min \u2014 may be stuck"))
+                    self.assertEqual(shown["ball_text"], "nothing running, may be stuck")
+                    self.assertEqual(shown["now_text"],
+                                     "last seen building 1 of 7: Importer resumes")
+
+    def test_the_wait_sentence_follows_ci_then_committing_then_release(self):
+        now = self.now
+        pull = PullMovement(40, frozenset({4}), now - MIN, now - MIN)
+        cases = (
+            ("all three", moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN),
+             "waiting for CI on its pull request"),
+            ("no CI", moving(pulls=(dataclasses.replace(pull, running_ms=None),),
+                             read_ms=now - MIN, release_ms=now - MIN),
+             "a delivery is committing"),
+            ("only a release", moving(release_ms=now - MIN), "waiting for a release step"))
+        for label, movement, sentence in cases:
+            with self.subTest(label):
+                self.assertEqual(self.shown(movement)["now_text"], sentence)
+
+    def test_the_wait_sentence_shows_only_while_nothing_else_moves(self):
+        now = self.now
+        movement = moving(release_ms=now - MIN)
+        stage = "building 1 of 7: Importer resumes"
+        with self.subTest("a working session"):
+            self.assertEqual(self.shown(movement, sessions=[working_session])["now_text"], stage)
+        with self.subTest("a fresh report"):
+            fresh = reported(with_manager(started(A)), now - 2 * MIN)
+            self.assertEqual(self.shown(movement, sprint_state=fresh)["now_text"], stage)
+        with self.subTest("an open question"):
+            text = self.shown(movement, sprint_state=asked(self.base))["now_text"]
+            self.assertTrue(text.startswith("waiting for your answer: "))
+        with self.subTest("no clock"):
+            shown = entry(line(self.base, None, sessions=[idle_session], movement=movement))
+            self.assertEqual(shown["now_text"], stage)
+
+    def test_a_wait_signal_moves_a_sprint_whose_manager_failed(self):
+        now = self.now
+        movement = moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),),
+                          read_ms=now - MIN)
+        shown = self.shown(movement, sessions=[], sprint_state=failed_at(self.base, R + 5 * MIN))
+        self.assertEqual(shown["ball"], "manager")
+        self.assertEqual(shown["now_text"], "waiting for CI on its pull request")
+
+    def test_a_signal_that_disappears_keeps_moving_the_sprint_for_the_window(self):
+        now = self.now
+        seen = now - 10 * MIN
+        cases = (
+            ("a merged pull request after CI",
+             (PullRequest(40, frozenset({4}), True, None),), LocalReading((), False),
+             "waiting for CI on its pull request"),
+            ("a merged pull request after a commit",
+             (PullRequest(40, frozenset({4}), False, seen),), LocalReading((), False),
+             "a delivery is committing"),
+            ("a deleted branch", (), LocalReading(((5, seen),), False),
+             "a delivery is committing"),
+            ("a finished release", (), LocalReading((), True), "waiting for a release step"))
+        for label, pulls, local, sentence in cases:
+            with self.subTest(label):
+                first = merged(None, pulls, seen, local)
+                gone = {"p00": merged(first, (), now - MIN, LocalReading((), False))}
+                shown = self.shown(gone)
+                self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+                self.assertEqual(shown["now_text"], sentence)
+                later = self.shown(gone, now=now + 10 * MIN)
+                self.assertEqual((later["state"], later["state_text"]),
+                                 ("quiet", "quiet for 20 min \u2014 may be stuck"))
+                self.assertEqual(later["ball"], "nobody")
+
+
 class SprintEndViewTest(unittest.TestCase):
     def test_a_closed_sprint_reads_done_with_what_landed(self):
         it = reported(started(A), R, issues=((12, "building"), (13, "queued"), (14, "held")))
@@ -1828,7 +2090,8 @@ class SprintViewTest(unittest.TestCase):
             "stated_at": T0, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
-            "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0, "waits": [],
+            "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
+            "checks": [], "waits": [],
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
@@ -1940,16 +2203,16 @@ class NoticeViewTest(unittest.TestCase):
 
         self.assertEqual(by_id["p00"]["notices"], [
             {"id": 8, "sprint_id": B, "poster": "Keep the importer fast", "kind": "hand-off",
-             "kind_text": "hand-off", "text": "take the reader", "what": None,
+             "kind_text": "Hand-off", "text": "take the reader", "what": None,
              "until_text": None, "to_text": "for Fix the settings page", "at": at_min(8)},
             {"id": 7, "sprint_id": A, "poster": "Fix the settings page", "kind": "hand-off",
-             "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+             "kind_text": "Hand-off", "text": "the importer needs a retry", "what": None,
              "until_text": None, "to_text": "for you", "at": at_min(7)},
             {"id": 5, "sprint_id": B, "poster": "Keep the importer fast", "kind": "heads-up",
-             "kind_text": "heads-up", "text": "sprint ask gains a dry run", "what": None,
+             "kind_text": "Heads-up", "text": "sprint ask gains a dry run", "what": None,
              "until_text": None, "to_text": None, "at": at_min(5)},
             {"id": 3, "sprint_id": A, "poster": "Fix the settings page", "kind": "claim",
-             "kind_text": "claims", "text": "the page fold",
+             "kind_text": "Claim", "text": "the page fold",
              "what": "python/agent_tools/console/page.html",
              "until_text": "until the board fold lands", "to_text": None, "at": at_min(3)}])
         self.assertEqual(by_id["p01"]["notices"], [])
@@ -2675,7 +2938,7 @@ class WaitingLineTest(unittest.TestCase):
         self.assertEqual(entry(shown)["waiting"], 0)
         self.assertEqual(shown["entries"][0]["waits"], [])
 
-    def test_a_release_window_wait_is_a_card_once_its_time_has_passed_and_the_runner_asks(self):
+    def test_a_prompted_waiting_check_becomes_a_card_once_its_time_passes(self):
         check = human({"days_after": {"event": "released", "days": 2}}, "Two days of rows after the release. Count them.")
         key = verify_issues.block_key(10, block_of(check))
         hold = dated_comment(10, hold_body(check), "2026-11-16T08:00:00Z")

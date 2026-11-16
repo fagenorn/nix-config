@@ -21,9 +21,11 @@ A check held for the owner can be due by its block yet waiting by its wording. T
 
 **D6. Where a wait lives.** Waits are inbox items, never counted. A wait sits under the sprint whose report names its issue, else under its project, which a wait keeps active and drawn. The digest rule follows: a wait is not a transition the digest announces.
 
+Retention keeps the newest row of an outstanding wait (`event_log`): an idle project is polled only while it holds a wait and an unchanged wait appends no row, so ninety days of silence would otherwise drop the line and the polling with it, and the check would never become a card.
+
 **D7. No clock ends a wait in the view.** The view's clock is the host's, never the forge's; only a tracker read, with the forge's clock, ends a wait.
 
-**D8. The page line.** A wait is one quiet line: `Waiting until <day>: <text> #<issue>` for a dated wait, `<text> #<issue>` for an undated one, with the issue number linking to the tracker comment. The day is the new `day` form of a time element, drawn in local time (`Wed 18 Nov`). No border, no background, no button. The text is set as text.
+**D8. The page line.** A wait is one quiet line: `Waiting until <day>: <text> #<issue>` for a dated wait, `<text> #<issue>` for an undated one, with the issue number linking to the tracker comment. The day is the new `day` form of a time element, drawn in local time (`Wed 18 Nov`). No border, no background, no button. Under a sprint the line sits in the same list as the sprint's check lines (ADR-console-051), so it is indented to the sprint head's text and has the check line's even gap above and below. The text is set as text.
 
 **D9. The import edge.** `agent_tools.console.inbox` imports `agent_tools.verification.verify_wait`. This amends ADR-console-012's "one new import edge"; the layout table in `tests/test_agent_tools_layout.py` lists it.
 

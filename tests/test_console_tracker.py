@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, inbox, pictures, service, view
+from agent_tools.console import console, inbox, movement, pictures, service, view
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
@@ -498,6 +498,21 @@ class CommandTest(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(console.main(["--port", "0"]), 1)
         self.assertIs(recorded["tracker"], inbox.read_items)
+
+    def test_the_command_reads_the_pull_requests(self):
+        recorded = {}
+
+        def refuse(*args, **kwargs):
+            recorded.update(kwargs)
+            raise OSError("taken")
+
+        with mock.patch.object(service, "ConsoleService", side_effect=refuse), \
+                mock.patch.object(service, "default_store", return_value=Path("/nonexistent/store")), \
+                mock.patch.object(service, "default_registry", return_value=Path("/nonexistent/registry")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console.main(["--port", "0"]), 1)
+        self.assertIs(recorded["pull_reader"], movement.read_pulls)
+
 
     def test_the_command_passes_the_screenshot_locations(self):
         for argv, expected in ((["--port", "0", "--screenshots", "/a", "--screenshots", "/b"],

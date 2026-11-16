@@ -50,6 +50,15 @@ beside `github-actions-health`. Its target is a `github_repository` (`kind`, `re
 `environment` and `services` (a non-empty `string_list`), all required. Its executables are
 `gh` and `railway`.
 
+The `railway` it runs is the one on the release's PATH, which the project's dev shell provides:
+no host installs it system-wide (issue 1124). A missing command is `unknown`
+(`executable_missing`), and a nonzero exit carrying Railway's `Unauthorized` or `Not
+authenticated` marker is `unknown` (`railway_unauthorized`). Each of them, whether it ends the
+status read or any service's read, ends the observation's references with one `next-step:`
+entry (after every other reference, once), so the park reason says what to do: run the release
+from the project's dev shell, or run `railway login` there. No other reason carries one, and the
+`running_subject_identity` answer carries the same references.
+
 `inspect` reads `railway status --json` first, whose linked project `name` must equal
 `config.project` and which must list an environment named `config.environment` (else
 `unknown`, `project_mismatch`), then `railway deployment list --service <s> --environment
@@ -116,6 +125,18 @@ SERVING = ("SUCCESS", "SLEEPING")
 FAILED = ("FAILED", "CRASHED")
 REMOVED = ("REMOVED", "REMOVING")
 PRECEDENCE = ("diverged", "unknown", "in_progress", "absent", "satisfied")
+# The Railway CLI's own auth-failure markers: `AUTH_FAILURE_MARKERS` in railwayapp/cli
+# `src/errors.rs`, which prints `Unauthorized. Please login with `railway login`` and the like.
+AUTH_FAILURE_MARKERS = ("Unauthorized", "Not authenticated")
+NEXT_STEPS = {
+    "executable_missing": (
+        "next-step:no railway command was found on PATH; no host installs railway "
+        "system-wide, so run the release from the project's own environment (its dev shell, "
+        "for example devenv shell), which provides railway"),
+    "railway_unauthorized": (
+        "next-step:Railway refused the sign-in; run `railway login` in the project's own "
+        "environment, then run the release again"),
+}
 
 
 def deployment_argv(service: str, environment: str) -> list[str]:
@@ -245,8 +266,11 @@ def _railway(args: list[str], deadline: float) -> tuple[str, Any, str]:
     """Run `railway <args>` within what is left of `deadline`: `(status, payload, detail)`.
 
     The status vocabulary is `release_merge.gh`'s: `"ok"` with the strictly parsed JSON payload,
-    or `lookup_failed`, `lookup_timeout`, `payload_invalid` and `executable_missing` with a
-    payload of `None`. The child inherits the environment unchanged.
+    or `lookup_failed`, `lookup_timeout`, `payload_invalid`, `executable_missing` and
+    `railway_unauthorized` with a payload of `None`. `railway_unauthorized` is a nonzero exit
+    whose stderr or stdout carries one of `AUTH_FAILURE_MARKERS`; any other nonzero exit is
+    `lookup_failed`, and a zero exit is never `railway_unauthorized`. The child inherits the
+    environment unchanged.
     """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -262,7 +286,9 @@ def _railway(args: list[str], deadline: float) -> tuple[str, Any, str]:
         return "lookup_failed", None, f"railway could not be started: {error}"
     detail = done.stderr.strip()[:DETAIL_LIMIT]
     if done.returncode != 0:
-        return "lookup_failed", None, detail
+        refused = any(marker in done.stderr or marker in done.stdout
+                      for marker in AUTH_FAILURE_MARKERS)
+        return ("railway_unauthorized" if refused else "lookup_failed"), None, detail
     try:
         return "ok", json.loads(done.stdout, object_pairs_hook=reject_duplicate_keys,
                                 parse_constant=reject_nonfinite_literal), detail
@@ -590,6 +616,13 @@ class _Reading:
         self.comparisons: dict[str, list[str] | str] = {}
 
 
+def _next_step(reading: _Reading, reason: str) -> None:
+    """End the references with the next step `reason` names, once (none for other reasons)."""
+    step = NEXT_STEPS.get(reason)
+    if step is not None and step not in reading.references:
+        reading.references.append(step)
+
+
 def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
     """Plan steps 1 to 4: the released commit, the linkage, each service and the skip evidence."""
     reading = _Reading(parameters)
@@ -603,6 +636,7 @@ def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
     status, payload, detail = _railway(list(STATUS_ARGV), deadline)
     if status != "ok":
         reading.failure = {"outcome": "unknown", "reason": status, "detail": detail}
+        _next_step(reading, status)
         return reading
     edges = (payload.get("environments", {}).get("edges")
              if isinstance(payload, dict) and isinstance(payload.get("environments"), dict)
@@ -638,6 +672,8 @@ def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
     pending = [service for service in reading.services if service.pending_skip]
     if pending:
         _settle_skips(reading, pending, target, released, deadline)
+    for service in reading.services:
+        _next_step(reading, service.reason)
     return reading
 
 

@@ -23,11 +23,12 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import console as console_module
-from agent_tools.console import capacity, deliveries, digest, probe, service, sessions, signin, sprints
-from agent_tools.console import signin_run, view
+from agent_tools.console import capacity, deliveries, digest, movement, probe, service, sessions, signin, sprints
+from agent_tools.console import signin_run, spend, view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.write_guard import TokenError
 from agent_tools.console.view import derive_view, encode_view, project_states
+from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
 from .test_console_briefs import PARTS
@@ -1568,6 +1569,40 @@ class WaitClockTest(Case):
         self.assertEqual(shown["statement"]["inbox_items"], 0)
         svc.close()
 
+    def test_a_wait_survives_retention_and_its_project_is_still_polled_once_idle(self):
+        now = [T0]
+        last = [T0]
+        item = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
+                "issue": 7, "comment_id": 1, "url": "https://example.test/7", "reason": "verify-wait",
+                "kind": "waiting", "question": "Read the hourly rows.", "questions": [], "items": [],
+                "answers": [], "answered": False, "held_work": 1, "blocking": [],
+                "wait": {"reason": "not_before", "until": "2030-01-01T00:00:00+00:00",
+                         "what": "Read the hourly rows."}}
+        calls = []
+        current = [item]
+
+        def tracker(project_id, slug, *, cancelled):
+            calls.append(project_id)
+            return [current[0]]
+
+        svc = self.start(support.entries(1), retention_seconds=86400, tracker=tracker,
+                         slug_of=lambda root: "octo/p00", activity=lambda root: last[0], **clocks(now))
+        svc.poll_tracker()
+        now[0] = T0 + 91 * 86400
+        svc.retain()
+        before = len(calls)
+        svc.poll_tracker()
+        self.assertEqual(len(calls), before + 1)
+        self.assertEqual(json.loads(svc.view_bytes)["entries"][0]["waits"][0]["text"], "Read the hourly rows.")
+        current[0] = {k: v for k, v in item.items() if k != "wait"}
+        svc.poll_tracker()
+        now[0] = T0 + 183 * 86400
+        svc.retain()
+        before = len(calls)
+        svc.poll_tracker()
+        self.assertEqual(len(calls), before)
+        svc.close()
+
     def test_a_not_due_check_does_not_park_its_sprint_as_waiting_on_the_owner(self):
         now = [datetime(2026, 11, 16, tzinfo=timezone.utc).timestamp()]
         item = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
@@ -1607,6 +1642,16 @@ class BindTest(Case):
             with self.assertRaises(OSError):
                 service.ConsoleService(self.store, self.registry, port=held.getsockname()[1])
         self.assertFalse(self.store.exists())
+
+
+def sprint_entry(svc):
+    view = json.loads(svc.view_bytes)
+    for entry in view["entries"]:
+        for project in entry.get("projects", [entry]):
+            if project["project_id"] == "owner/p00":
+                (shown,) = project["sprints"]
+                return shown
+    raise AssertionError("sprint not listed")
 
 
 class DeliveryTest(Case):
@@ -1668,13 +1713,7 @@ class DeliveryTest(Case):
         self.assertEqual(json.loads(gone[0][4]), {"run_id": "wf_t1", "session_id": self.sid})
 
     def sprint_of(self, svc):
-        view = json.loads(svc.view_bytes)
-        for entry in view["entries"]:
-            for project in entry.get("projects", [entry]):
-                if project["project_id"] == "owner/p00":
-                    (shown,) = project["sprints"]
-                    return shown
-        raise AssertionError("sprint not listed")
+        return sprint_entry(svc)
 
     def test_a_sprint_keeps_its_runs_last_stage_after_the_run_leaves(self):
         sid = self.svc.state_goal("owner/p00", "make the importer resumable")
@@ -1921,6 +1960,299 @@ class DeliveryTest(Case):
         patterns["/srv/p00"] = "issue-<num>-<slug>"
         svc.poll_deliveries()
         self.assertEqual(self.runs(svc)[0]["issues"][0]["stage_text"], "building task 1 of 3")
+
+
+class Script:
+    """A pull reader returning or raising its steps in order and repeating the last one."""
+
+    def __init__(self, *steps):
+        self.steps = list(steps)
+        self.calls = []
+
+    def __call__(self, slug, pattern, *, cancelled):
+        self.calls.append((slug, pattern))
+        step = self.steps.pop(0) if len(self.steps) > 1 else self.steps[0]
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+RUNNING = (movement.PullRequest(40, frozenset({858}), True, None),)
+NO_LOCAL = movement.LocalReading((), False)
+
+
+class MovementTest(Case):
+    def setUp(self):
+        super().setUp()
+        self.now = 1_800_000_000.0
+
+    def open(self, reader, local_reader=lambda root, pattern: NO_LOCAL, **kwargs):
+        support.write_registry(self.registry, [{"project_id": "owner/p00", "root": "/srv/p00"}])
+        svc = service.ConsoleService(
+            self.store, self.registry, port=0, session_dirs=lambda: [self.sessions],
+            profile_dirs=lambda: [], repo_of=lambda cwd: cwd,
+            branch_pattern_of=lambda repo: "issue-<num>-<slug>", dispatch=lambda job: job(),
+            clock=lambda: self.now, slug_of=lambda root: "owner/p00", pull_reader=reader,
+            local_reader=local_reader, write_sleep=lambda seconds: None,
+            monotonic=lambda: 0.0, **kwargs)
+        self.addCleanup(svc.close)
+        return svc
+
+    def running_sprint(self, svc):
+        sid = svc.state_goal("owner/p00", "make the importer resumable")
+        secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p00", sid, 1)
+        svc.send_report(sid, secret, {
+            "status": "one slice is queued", "phase": "running", "milestone": "Importer resumes",
+            "tracker_url": "https://github.com/owner/p00/milestone/3",
+            "issues": [{"issue": 858, "stage": "queued"}], "inbox": [],
+            "next": "start the resume slice"})
+        return datetime.fromisoformat(support.log_rows(self.store)[-1][1]).timestamp()
+
+    def poll(self, svc):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            svc.poll_movement()
+        return errors.getvalue()
+
+    def test_a_failed_forge_read_keeps_the_last_reading_for_the_quiet_window(self):
+        self.now = 1_800_000_000.0
+        reader = Script(RUNNING, *[ForgeError("gh_timeout", "deadline passed")] * 6,
+                        RuntimeError("boom"))
+        svc = self.open(reader)
+        t = self.running_sprint(svc)
+        self.now = t + 10 * 60
+        self.poll(svc)
+        self.assertEqual(len(reader.calls), 1)
+        self.now = t + 20 * 60
+        errors = self.poll(svc)
+        self.assertEqual(len(reader.calls), 1 + 6)
+        self.assertIn("console: movement_read_failed owner/p00 ForgeError: gh_timeout", errors)
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["state"], shown["ball"], shown["now_text"]),
+                         ("on_track", "manager", "waiting for CI on its pull request"))
+        self.assertNotIn("may be stuck", json.dumps(shown))
+        self.now = t + 22 * 60
+        self.poll(svc)
+        self.assertEqual(len(reader.calls), 1 + 6 + 1)
+        self.assertEqual(sprint_entry(svc)["ball"], "manager")
+        self.now = t + 26 * 60
+        self.poll(svc)
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 16 min \u2014 may be stuck"))
+        self.assertEqual(shown["ball"], "nobody")
+
+    def test_a_short_network_drop_inside_a_read_is_ridden_out(self):
+        self.now = 1_800_000_000.0
+        reader = Script(ForgeError("gh_failed", "HTTP 502", transient=True), RUNNING)
+        svc = self.open(reader)
+        t = self.running_sprint(svc)
+        self.now = t + 20 * 60
+        errors = self.poll(svc)
+        self.assertEqual(len(reader.calls), 2)
+        self.assertNotIn("movement_read_failed", errors)
+        self.assertEqual(sprint_entry(svc)["now_text"], "waiting for CI on its pull request")
+
+    def test_only_a_project_with_a_running_sprint_is_read(self):
+        reader = Script(())
+        svc = self.open(reader)
+        self.poll(svc)
+        self.assertEqual(reader.calls, [])
+        sid = svc.state_goal("owner/p00", "make the importer resumable")
+        self.poll(svc)
+        self.assertEqual(reader.calls, [("owner/p00", "issue-<num>-<slug>")])
+        svc.withdraw_goal("owner/p00", sid)
+        self.poll(svc)
+        self.assertEqual(len(reader.calls), 1)
+
+    def test_the_movement_thread_reads_at_once_and_close_joins_it(self):
+        read = threading.Event()
+
+        def reader(slug, pattern, *, cancelled):
+            read.set()
+            while not cancelled():
+                time.sleep(0.01)
+            time.sleep(1.5)
+            return RUNNING
+
+        svc = self.open(reader, movement_seconds=3600)
+        self.running_sprint(svc)
+        svc.start()
+        self.assertTrue(read.wait(5))
+        svc.close()
+        self.assertFalse([t for t in threading.enumerate() if t.name == service.MOVEMENT_THREAD])
+        other = self.open(None)
+        other.start()
+        self.assertFalse([t for t in threading.enumerate() if t.name == service.MOVEMENT_THREAD])
+
+    def test_a_local_read_that_fails_still_reads_the_forge(self):
+        self.now = 1_800_000_000.0
+
+        def broken(root, pattern):
+            raise OSError("gone")
+
+        svc = self.open(Script(RUNNING), local_reader=broken)
+        t = self.running_sprint(svc)
+        self.now = t + 20 * 60
+        errors = self.poll(svc)
+        self.assertIn("console: movement_local_failed owner/p00 OSError: gone", errors)
+        self.assertEqual(sprint_entry(svc)["now_text"], "waiting for CI on its pull request")
+
+    def test_an_invalid_release_reading_is_reported_once_and_moves_nothing(self):
+        self.now = 1_800_000_000.0
+        invalid = movement.LocalReading((), False, ("rel_01890a5d-ac96-7abc-8def-0123456789ab",))
+        readings = [invalid, invalid, NO_LOCAL, invalid]
+        svc = self.open(Script(()), local_reader=lambda root, pattern: readings.pop(0))
+        t = self.running_sprint(svc)
+        self.now = t + 20 * 60
+        line = "console: movement_release_invalid owner/p00 rel_01890a5d-ac96-7abc-8def-0123456789ab"
+        errors = ""
+        for _ in range(4):
+            errors += self.poll(svc)
+            shown = sprint_entry(svc)
+            self.assertEqual((shown["ball"], shown["state"]), ("nobody", "quiet"))
+        self.assertEqual(errors.count(line), 2)
+
+
+class SpendServiceTest(Case):
+    NOW = 1_800_000_000.0
+    SID = "00000000-0000-4000-8000-0000000000aa"
+
+    def setUp(self):
+        super().setUp()
+        self.today = datetime.fromtimestamp(self.NOW, timezone.utc).date().isoformat()
+
+    @property
+    def projects(self):
+        return self.sessions.parent / "projects"
+
+    def write_transcript(self, projects=None):
+        path = (projects or self.projects) / "-srv-p00" / f"{self.SID}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = {"type": "assistant", "sessionId": self.SID, "cwd": "/srv/p00",
+                "timestamp": f"{self.today}T10:00:00.000Z",
+                "message": {"id": "msg_1", "model": "claude-sonnet-4-6",
+                            "usage": {"input_tokens": 42}}}
+        path.write_text(json.dumps(line) + "\n")
+        os.utime(path, (self.NOW, self.NOW))
+        return path
+
+    def begin(self, **kwargs):
+        self.write_transcript()
+        kwargs.setdefault("clock", lambda: self.NOW)
+        kwargs.setdefault("session_poll_seconds", 3600)
+        return self.start(**kwargs)
+
+    @staticmethod
+    def spend_of(svc):
+        return json.loads(svc.view_bytes)["spend"]
+
+    def test_view_spend_is_null_until_the_first_poll(self):
+        svc = self.begin()
+        self.assertIsNone(self.spend_of(svc))
+
+    def test_poll_spend_publishes_todays_spend(self):
+        svc = self.begin()
+        before = svc.version
+        svc.poll_spend()
+        days = self.spend_of(svc)["days"]
+        self.assertEqual(len(days), 30)
+        self.assertEqual(days[-1]["total"]["input"], 42)
+        self.assertGreater(svc.version, before)
+
+    def test_profiles_sharing_one_tree_count_once(self):
+        real = self.root / "real-projects"
+        self.write_transcript(real)
+        for name in ("a", "b"):
+            (self.root / name).mkdir()
+            (self.root / name / "projects").symlink_to(real)
+        svc = support.service(
+            self, self.store, self.registry,
+            session_dirs=[self.root / "a" / "sessions", self.root / "b" / "sessions"],
+            clock=lambda: self.NOW, session_poll_seconds=3600)
+        svc.poll_spend()
+        self.assertEqual(self.spend_of(svc)["days"][-1]["total"]["input"], 42)
+
+    def test_project_comes_from_the_registry(self):
+        support.write_registry(self.registry, [{"project_id": "p00", "root": "/srv/p00"}])
+        self.write_transcript()
+        svc = self.start(clock=lambda: self.NOW, session_poll_seconds=3600,
+                         repo_of=lambda cwd: "/srv/p00")
+        svc.poll_spend()
+        self.assertIn("p00", self.spend_of(svc)["days"][-1]["project"])
+
+    def test_account_survives_gone_and_restart(self):
+        log = EventLog(self.store)
+        log.append([("session.seen", None, {"session_id": self.SID, "profile": "p1"}),
+                    ("session.gone", None, {"session_id": self.SID})])
+        log.close()
+        svc = self.begin()
+        svc.poll_spend()
+        account = self.spend_of(svc)["days"][-1]["account"]
+        self.assertEqual(set(account), {"p1"})
+        self.assertEqual(account["p1"]["input"], 42)
+
+    def test_account_seen_and_gone_between_spend_polls(self):
+        self.sessions = self.root / "profiles/p1/sessions"
+        svc = self.begin()
+        support.write_session(self.sessions, pid=os.getpid(), session_id=self.SID,
+                              cwd="/srv/p00", status="busy")
+        svc.poll_sessions()
+        (self.sessions / f"{os.getpid()}.json").unlink()
+        svc.poll_sessions()
+        svc.poll_sessions()
+        kinds = [row[2] for row in support.log_rows(self.store)]
+        self.assertIn("session.gone", kinds)
+        seen = [json.loads(row[4]) for row in support.log_rows(self.store)
+                if row[2] == "session.seen"]
+        self.assertEqual(len(seen), 1)
+        svc.poll_spend()
+        account = self.spend_of(svc)["days"][-1]["account"]
+        self.assertEqual(set(account), {seen[0]["profile"]})
+        self.assertNotIn(spend.UNATTRIBUTED, account)
+
+    def test_poll_spend_appends_nothing_to_the_log(self):
+        svc = self.begin()
+        before = len(support.log_rows(self.store))
+        svc.poll_spend()
+        self.assertEqual(len(support.log_rows(self.store)), before)
+
+    def test_the_spend_thread_publishes_without_a_direct_poll(self):
+        svc = self.begin(spend_seconds=0.05)
+        self.assertTrue(wait_until(lambda: self.spend_of(svc) is not None))
+        self.assertEqual(self.spend_of(svc)["days"][-1]["total"]["input"], 42)
+
+    def test_a_failed_iteration_is_followed_by_a_successful_one(self):
+        original = spend.SpendReader.read
+        calls = []
+
+        def flaky(reader, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("boom")
+            return original(reader, *args, **kwargs)
+
+        captured = io.StringIO()
+        with mock.patch.object(spend.SpendReader, "read", autospec=True, side_effect=flaky):
+            with contextlib.redirect_stderr(captured):
+                svc = self.begin(spend_seconds=0.05)
+                self.assertTrue(wait_until(lambda: self.spend_of(svc) is not None))
+        self.assertEqual(captured.getvalue().count("console: spend_poll_failed OSError: boom\n"), 1)
+
+    def test_close_joins_the_spend_thread(self):
+        entered = threading.Event()
+
+        def slow_log():
+            entered.set()
+            time.sleep(1.5)
+
+        svc = self.start(spend_seconds=0.01, ping_log=slow_log)
+        self.assertIn(service.SPEND_THREAD, {t.name for t in threading.enumerate()})
+        self.assertTrue(entered.wait(5))
+        svc.close()
+        self.assertNotIn(service.SPEND_THREAD, {t.name for t in threading.enumerate()})
 
 
 if __name__ == "__main__":
