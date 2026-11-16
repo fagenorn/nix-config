@@ -3780,7 +3780,15 @@ def ansi_c_unquoted(text):
     as written otherwise. Quotes, backslashes and comments outside a `$'...'` are tracked as
     the segmenter does, so a `$'` inside another quote stays as it is; a `$'` with no closing
     quote is left for the segmenter to refuse."""
+    return "".join(ansi_c_pieces(text)[0])
+
+
+def ansi_c_pieces(text):
+    """`(pieces, guarded)`: the pieces `ansi_c_unquoted` joins, and the indices of those that
+    are a heredoc's delimiter redirection or body, which the shell reads as written and a
+    later rewrite of the text must therefore leave alone."""
     out = []
+    guarded = set()
     pending = []
     quote = None
     index = 0
@@ -3817,8 +3825,11 @@ def ansi_c_unquoted(text):
                 continue
             cursor, delimiter, strip_tabs, expands = read_heredoc_delimiter(text, index)
             if delimiter is None:
+                # The segmenter refuses the same text, and its bodies stay as written.
+                guarded.add(len(out))
                 out.append(text[index:])
                 break
+            guarded.add(len(out))
             out.append(text[index:cursor])
             pending.append((delimiter, strip_tabs, expands))
             index = cursor
@@ -3829,9 +3840,14 @@ def ansi_c_unquoted(text):
             end = skip_heredoc_bodies(text, index, pending)
             pending = []
             if end is None:
+                # The remainder holds bodies the scan could not read: it stays as
+                # written, so the segmenter refuses it as it does the original text
+                # and no earlier body is closed by a rewritten delimiter (issue 1173).
+                guarded.add(len(out))
                 out.append(text[index:])
                 break
             body = text[index:end]
+            guarded.add(len(out))
             if body.endswith("\n"):
                 out.append(body[:-1])
                 out.append("\n")
@@ -3864,7 +3880,7 @@ def ansi_c_unquoted(text):
             quote = character
         out.append(character)
         index += 1
-    return "".join(out)
+    return out, guarded
 
 
 def redirections_unglued(text):
@@ -3878,6 +3894,24 @@ def redirections_unglued(text):
     )
 
 
+def production_text(command):
+    """`command` as the segmenter reads it: ANSI-C words rewritten and redirection operators
+    unglued everywhere except in a heredoc's delimiter and body, so the segmenter ends each
+    body on the same line the shell does (issue 1173)."""
+    pieces, guarded = ansi_c_pieces(command)
+    out = []
+    run = []
+    for position, piece in enumerate(pieces):
+        if position in guarded:
+            out.append(redirections_unglued("".join(run)))
+            run = []
+            out.append(piece)
+        else:
+            run.append(piece)
+    out.append(redirections_unglued("".join(run)))
+    return "".join(out)
+
+
 def joined_continuations(text):
     """`text` with each backslash-newline deleted, as the shell joins the lines."""
     return text.replace("\\\n", "")
@@ -3887,7 +3921,7 @@ def production_parse(command):
     """The tokens and command-position flags of each segment of `command`, with the raw
     text of the segments after it, or None when the guard reads the command as raw text:
     it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
-    split = split_segments_with_runs(redirections_unglued(ansi_c_unquoted(command)))
+    split = split_segments_with_runs(production_text(command))
     if split is None:
         return None
     segments = split[0]
