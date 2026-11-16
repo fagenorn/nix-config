@@ -53,6 +53,8 @@ repository on the page and sees what adopting it would change, or registers it w
 
 It is also given `trust_home=Path.home()` (#1078), so the owner's Apply approval grants the folder's
 client trust in `~/.claude.json` as well as in every profile (`agent_tools.console.folder_trust`).
+It is given `trust_at_start` (#1183), so every registered project is granted its folder trust in every
+profile at start.
 
 It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
@@ -123,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             signer_out=account_remove.signer_out_for(sys.platform),
             account_remover=account_remove.remover_for(sys.platform),
             adopter=register.adopter_for(sys.platform),
-            forge=approve.forge_for(sys.platform), trust_home=Path.home(),
+            forge=approve.forge_for(sys.platform), trust_home=Path.home(), trust_at_start=True,
             activation_reader=activation.reader_for(Path(agent_tools.__file__).resolve().parent.parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots)
     except TokenError as error:
