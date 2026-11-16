@@ -163,6 +163,49 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(self.totals(reader), {Key(DAY, "s1", None, None, SESSION): expected})
         self.assertEqual(expected.input, 15)
 
+    def test_a_repeated_message_id_keeps_the_larger_usage(self):
+        self.transcript("s1", assistant("A", DAY, input=3, output=1),
+                        assistant("A", DAY, input=3, output=50),
+                        assistant("A", DAY, input=2, output=7))
+        reader = self.reader()
+        reader.read([self.projects], SINCE)
+        (tokens,) = self.totals(reader).values()
+        self.assertEqual((tokens.input, tokens.output), (3, 50))
+        self.assertAlmostEqual(tokens.dollars, spend.priced(
+            "claude-sonnet-4-6", {"input_tokens": 3, "output_tokens": 50}).dollars)
+
+    def test_a_later_poll_raises_a_message_already_counted(self):
+        path = self.transcript("s1", assistant("A", DAY, output=1))
+        reader = self.reader()
+        reader.read([self.projects], SINCE)
+        with open(path, "ab") as handle:
+            handle.write(assistant("A", DAY, output=50))
+        reader.read([self.projects], SINCE)
+        (tokens,) = self.totals(reader).values()
+        self.assertEqual(tokens.output, 50)
+
+    def test_changing_the_directory_alias_does_not_reread(self):
+        real = self.tmp / "real" / "projects"
+        (real / "-srv-p00").mkdir(parents=True)
+        path = real / "-srv-p00" / "s1.jsonl"
+        path.write_bytes(assistant("A", DAY, input=4))
+        links = []
+        for name in ("a", "b"):
+            (self.tmp / name).mkdir()
+            (self.tmp / name / "projects").symlink_to(real)
+            links.append(self.tmp / name / "projects")
+        reader = self.reader()
+        reader.read(links, SINCE)
+        before = self.opener.bytes
+        line = assistant("B", DAY, input=2)
+        with open(path, "ab") as handle:
+            handle.write(line)
+        reader.read([links[1]], SINCE)
+        self.assertEqual(self.opener.bytes - before, len(line))
+        reader.read(links[::-1], SINCE)
+        self.assertEqual(self.opener.bytes - before, len(line))
+        self.assertEqual(sum(t.input for t in self.totals(reader).values()), 6)
+
     def test_agent_transcript_keyed_by_run_and_agent(self):
         run = self.run_dir()
         (run / "journal.jsonl").write_text(

@@ -12,7 +12,8 @@ The tree, under every `projects` directory (`<config>/projects`):
 - `<slug>/<sid>/subagents/workflows/<run>/` holds `journal.jsonl` and one `agent-<id>.jsonl` per
   workflow agent (source `AGENT`, run key `(<sid>, <run>)`, agent id from the file name). The
   journal is read first, so an agent's label is known before its transcript is.
-- Two `projects` paths with one `os.path.realpath` are walked once; the first is kept.
+- Two `projects` paths with one `os.path.realpath` are walked once, and always through that real
+  path, so a file's cursor survives a change of alias or of order.
 
 Incremental: every file goes through one `deliveries.JournalReader`, so a second `read` opens only
 a file whose size moved and reads only its new bytes. A file whose modification date (UTC) is before
@@ -26,9 +27,10 @@ The key: `Key(day, session, run, agent, source)`, `day` the UTC date of the mess
 `session` the line's `sessionId` (None when absent or empty). `totals` sums `Tokens` per key.
 
 - A line with `type == "assistant"` and a `message` that holds a str `id`, a usage `priced` accepts
-  and a parsable str `timestamp` is counted when its day is `>= since` and its id was not seen: one
-  message id is one count across every file and every read (the transcript writes one line per
-  content block of a message, all with the same usage). Seen ids and totals of days before `since`
+  and a parsable str `timestamp` is counted when its day is `>= since`: one message id is one count
+  across every file and every read (the transcript writes one line per content block of a message,
+  and a streamed message repeats its id with growing usage). A repeat raises the count to the larger
+  of each usage field, under the key of the first record, and never lowers it. Seen ids and totals of days before `since`
   are dropped at each `read`.
 - `priced(model, usage)` is the `Tokens` of one usage object, dollars from
   `hosts.model_pricing.usage_cost`; `approximate` is true when the model is not a known price row.
@@ -257,6 +259,34 @@ def _day(timestamp: object) -> str | None:
         return None
 
 
+@dataclass(frozen=True)
+class _Message:
+    """What one assistant message id has counted so far: where, its merged usage, its tokens."""
+
+    day: str
+    key: Key
+    usage: dict
+    tokens: Tokens
+
+
+def _larger(first: dict, second: dict) -> dict:
+    """The usage whose every count is the larger of the two (both already validated by `priced`)."""
+    merged = {field: max(first.get(field) or 0, second.get(field) or 0)
+              for field in _TOKEN_FIELDS}
+    splits = [usage["cache_creation"] for usage in (first, second)
+              if isinstance(usage.get("cache_creation"), dict)]
+    if splits:
+        merged["cache_creation"] = {field: max(split.get(field) or 0 for split in splits)
+                                    for field in _SPLIT_FIELDS}
+    return merged
+
+
+def _difference(after: Tokens, before: Tokens) -> Tokens:
+    return Tokens(after.input - before.input, after.cache_write - before.cache_write,
+                  after.cache_read - before.cache_read, after.output - before.output,
+                  after.dollars - before.dollars, after.approximate)
+
+
 class _Walk:
     """What one `read` listed, and which directories it could not list."""
 
@@ -276,7 +306,7 @@ class SpendReader:
         self._repo_of = repo_of
         self._scandir = scandir
         self._totals: dict[Key, Tokens] = {}
-        self._seen: dict[str, str] = {}
+        self._seen: dict[str, _Message] = {}
         self._pings: dict[tuple[str, str], str] = {}
         self._journals: dict[tuple[str, str], dict[str, str]] = {}
         self._top_phases: dict[tuple[str, str], set[str]] = {}
@@ -298,7 +328,7 @@ class SpendReader:
             if real in walked:
                 continue
             walked.add(real)
-            self._walk_projects(Path(projects), since, walk)
+            self._walk_projects(Path(real), since, walk)
         if ping_log is not None:
             self._read_pings(Path(ping_log), since)
         for path in sorted(self._known - walk.listed):
@@ -420,11 +450,22 @@ class SpendReader:
             return
         tokens = priced(message.get("model"), message.get("usage"))
         day = _day(record.get("timestamp"))
-        if tokens is None or day is None or day < since or message["id"] in self._seen:
+        if tokens is None or day is None or day < since:
             return
-        self._seen[message["id"]] = day
-        key = Key(day, sid if isinstance(sid, str) and sid else None, run, agent, source)
-        self._totals[key] = self._totals.get(key, Tokens()) + tokens
+        earlier = self._seen.get(message["id"])
+        if earlier is None:
+            key = Key(day, sid if isinstance(sid, str) and sid else None, run, agent, source)
+            self._seen[message["id"]] = _Message(day, key, message["usage"], tokens)
+            self._totals[key] = self._totals.get(key, Tokens()) + tokens
+            return
+        # A streamed message repeats its id with growing usage: keep each field's maximum.
+        usage = _larger(earlier.usage, message["usage"])
+        raised = priced(message.get("model"), usage)
+        if raised is None:
+            return
+        self._seen[message["id"]] = _Message(earlier.day, earlier.key, usage, raised)
+        self._totals[earlier.key] = self._totals.get(earlier.key, Tokens()) + _difference(
+            raised, earlier.tokens)
 
     def _read_pings(self, path: Path, since: str) -> None:
         chunk = self._lines.read(path)
@@ -446,7 +487,7 @@ class SpendReader:
 
     def _prune(self, since: str) -> None:
         self._totals = {key: value for key, value in self._totals.items() if key.day >= since}
-        self._seen = {ident: day for ident, day in self._seen.items() if day >= since}
+        self._seen = {ident: seen for ident, seen in self._seen.items() if seen.day >= since}
         self._pings = {ident: day for ident, day in self._pings.items() if day >= since}
 
 
