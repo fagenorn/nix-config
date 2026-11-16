@@ -1563,7 +1563,7 @@ function projectLine(entry) {
   }
   return line;
 }
-// A not-due owner check (#1129, ADR-console-049): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
+// A not-due owner check (#1129, ADR-console-051): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
 function waitLine(wait, tag) {
   const line = el(tag, "wait");
   if (typeof wait.until === "string") {

@@ -1,4 +1,4 @@
-# ADR-console-049 — An owner check that is not due is one waiting line, not a card
+# ADR-console-051 — An owner check that is not due is one waiting line, not a card
 
 - **Status:** accepted
 - **Decided in:** #1129
