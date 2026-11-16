@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -10,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import activation
+from agent_tools.console import activation, view
 from agent_tools.console.activation import (
     Activation, blob_id, console_files, origin_files, reader_for, reading)
 from agent_tools.project_contract import resolve_project
@@ -212,6 +213,46 @@ class ActivationReadingTest(Trees):
         (self.package_root / "agent_tools/console/view.py").write_text("VALUE = 9\n")
         with mock.patch.object(activation, "integration_branch", lambda root: "main"):
             self.assertEqual(reader([str(self.checkout)]).changed, ())
+
+
+class ActivationViewTest(Trees):
+    def line(self, root):
+        return {"text": f"A console change merged and is not active on this host: run just switch in {root}.",
+                "command": "just switch", "root": root}
+
+    def read(self):
+        return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main")
+
+    def test_a_console_file_behind_origin_shows_the_line(self):
+        self.advance({"python/agent_tools/console/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        result = view.derive_view([], activation=self.read())
+        self.assertEqual(result["activation"], self.line(str(self.checkout)))
+
+    def test_a_matching_tree_shows_no_line(self):
+        self.assertIsNone(view.derive_view([], activation=self.read())["activation"])
+
+    def test_a_difference_outside_the_console_files_shows_no_line(self):
+        self.advance({"docs/notes.md": "more\n", "python/agent_tools/verification/other.py": "Y = 2\n"})
+        self.assertIsNone(view.derive_view([], activation=self.read())["activation"])
+
+    def test_no_reading_shows_no_line(self):
+        self.assertIsNone(view.derive_view([])["activation"])
+        self.assertIsNone(view.derive_view([], activation=None)["activation"])
+
+    def test_the_line_is_not_an_inbox_item(self):
+        result = view.derive_view(
+            [], activation=Activation("/srv/cfg", ("python/agent_tools/console/view.py",)))
+        self.assertEqual(result["statement"], view.derive_view([])["statement"])
+        self.assertEqual(result["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(json.loads(view.encode_view(result))["activation"]["root"], "/srv/cfg")
+
+    def test_the_command_is_the_justfiles_activation_recipe(self):
+        lines = (REPO_ROOT / "justfile").read_text().splitlines()
+        for attribute in ("[macos]", "[linux]"):
+            self.assertTrue(any(
+                lines[i] == attribute and lines[i + 1].startswith("switch ")
+                for i in range(len(lines) - 1)), attribute)
+        self.assertEqual(view.ACTIVATE_COMMAND, "just switch")
 
 
 if __name__ == "__main__":
