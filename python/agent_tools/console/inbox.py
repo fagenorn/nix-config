@@ -52,9 +52,10 @@ under the first root; the first candidate that opens is chosen. A candidate is n
 its realpath: the root is opened, then each component is opened with `O_NOFOLLOW` relative to its
 parent descriptor, so no symlink under a root is followed, even one swapped in after a check. A
 candidate outside every root is dropped and records nothing; a name whose every candidate inside a
-root does not exist goes to `missing_pictures` as written; any other error skips the name. A named
-folder that opens as a directory and into which no named PNG resolved contributes its direct
-entries ending `.png` (any case), sorted by name, each opened relative to the folder. A chosen file
+root does not exist (a plain file standing where a folder is named counts as not existing) goes to
+`missing_pictures` as written; any other error skips the name. A named folder that opens as a
+directory and into which no named PNG resolved directly (a PNG that a folder listing chose does not
+count) contributes its direct entries ending `.png` (any case), sorted by name, each opened relative to the folder. A chosen file
 is read only through the descriptor that opened it and is stored only when it is a regular file of
 at most `pictures.MAX_BYTES` bytes that `pictures.checked_png` accepts; otherwise it is skipped, as
 is a file whose store fails. At most `sprints.MAX_PICTURES` pictures and as many missing names are
@@ -417,11 +418,17 @@ def _open_inside(path: str, roots: Sequence[tuple[str, ...]], *, directory: bool
                 flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
             else:
                 flags = os.O_RDONLY | os.O_NOFOLLOW | _DIRECTORY
-            child = os.open(part, flags, dir_fd=current)
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except NotADirectoryError:
+                # A plain file standing where a folder is named holds nothing; a symlink does not.
+                if not stat.S_ISLNK(os.stat(part, dir_fd=current, follow_symlinks=False).st_mode):
+                    raise FileNotFoundError(part) from None
+                raise
             os.close(current)
             current = child
             if not last and not stat.S_ISDIR(os.fstat(current).st_mode):
-                raise NotADirectoryError(part)
+                raise FileNotFoundError(part)
         if directory and not stat.S_ISDIR(os.fstat(current).st_mode):
             raise NotADirectoryError(path)
         handed, current = current, -1
@@ -470,6 +477,7 @@ def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
     missing: list[str] = []
     listed: set[str] = set()
     chosen: list[str] = []
+    named_pass = True
 
     def add(path: str, fd: int) -> None:
         try:
@@ -479,7 +487,8 @@ def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
             if picture_id is None:
                 return
             listed.add(path)
-            chosen.append(path)
+            if named_pass:
+                chosen.append(path)
             found.append({"id": picture_id, "line": os.path.basename(path)[:MAX_PICTURE_LINE_CHARS],
                           "pair": None})
         finally:
@@ -510,10 +519,11 @@ def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
         if not skipped and inside and inside == absent and len(missing) < MAX_PICTURES:
             missing.append(name)
 
+    named_pass = False
     for folder in folder_paths:
         if len(found) >= MAX_PICTURES:
             break
-        if any(path.startswith(folder.rstrip(os.sep) + os.sep) for path in chosen):
+        if any(os.path.dirname(path) == folder.rstrip(os.sep) for path in chosen):
             continue
         try:
             folder_fd = _open_inside(folder, allowed, directory=True)

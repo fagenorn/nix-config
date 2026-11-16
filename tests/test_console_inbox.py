@@ -491,6 +491,29 @@ class PromptPictureTest(unittest.TestCase):
         self.assertEqual(got["pictures"], [{"id": self.ids(PIXEL), "line": "before.png", "pair": None}])
 
 
+    def test_a_source_file_named_as_a_folder_does_not_hide_a_png_under_the_root(self):
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.py").write_text("x")
+        (self.root / "shot.png").write_bytes(PIXEL)
+        got = self.attach("Changed src/app.py; see shot.png")
+        self.assertEqual(got["pictures"], [{"id": self.ids(PIXEL), "line": "shot.png", "pair": None}])
+        self.assertEqual(got["missing_pictures"], [])
+
+    def test_a_png_under_a_source_file_and_nowhere_else_is_missing(self):
+        (self.root / "src").mkdir()
+        (self.root / "src" / "app.py").write_text("x")
+        got = self.attach("Changed src/app.py; see shot.png")
+        self.assertEqual(got["pictures"], [])
+        self.assertEqual(got["missing_pictures"], ["shot.png"])
+
+    def test_a_parent_folder_is_listed_after_a_listed_subfolder(self):
+        (self.root / "shots" / "sub").mkdir()
+        (self.root / "shots" / "sub" / "a.png").write_bytes(PIXEL)
+        (self.root / "shots" / "b.png").write_bytes(WIDE)
+        got = self.attach("shots/sub/ shots/")
+        self.assertEqual([p["line"] for p in got["pictures"]], ["a.png", "b.png"])
+
+
 class ReadTest(unittest.TestCase):
     def endless(self, calls):
         def call(argv):
