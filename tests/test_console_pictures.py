@@ -21,12 +21,15 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import event_log, pictures, sprint, write_guard
+from agent_tools.console import event_log, pictures, sprint, sprints, write_guard
 from agent_tools.console.event_log import PICTURE_STORED, Event
 from agent_tools.console.pictures import SIGNATURE
 
 from . import accounts_sandbox
 from . import console_test_support as support
+from .test_console_answer import view_of
+from .test_console_messages import GOAL_TEXT, PARTS
+from .test_console_questions import APPROVE, BRIEF, JSON
 from .test_console_sprint_command import run_sprint
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -106,6 +109,20 @@ class PictureStoreTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(self.dir / picture_id).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.dir).st_mode), 0o700)
         self.assertEqual(os.listdir(self.dir), [picture_id])
+
+    def test_present_answers_only_for_a_regular_file_and_changes_nothing(self):
+        picture_id, _ = pictures.store(self.dir, PIXEL)
+        age(self.dir / picture_id, 2 * 86400)
+        before = os.stat(self.dir / picture_id).st_mtime
+        os.symlink(self.dir / picture_id, self.dir / ("e" * 64))
+        (self.dir / ("c" * 64)).mkdir()
+        self.assertTrue(pictures.present(self.dir, picture_id))
+        self.assertEqual(os.stat(self.dir / picture_id).st_mtime, before)
+        for name in ("e" * 64, "c" * 64, "d" * 64):
+            with self.subTest(name[0]):
+                self.assertFalse(pictures.present(self.dir, name))
+        with self.assertRaises(ValueError):
+            pictures.present(self.dir, "x")
 
     def test_a_second_store_writes_nothing_and_renews_the_age(self):
         picture_id, _ = pictures.store(self.dir, PIXEL)
@@ -377,6 +394,116 @@ class PictureWriteTest(PictureCase):
             with self.subTest(method):
                 status, headers, _ = support.request(svc.address, method, PICTURE)
                 self.assertEqual((status, headers["Allow"]), (405, "POST"))
+
+
+class PictureRoundTest(PictureCase):
+    Q = {"question": "Which layout reads better?", "blocks": "the card slice",
+         "options": ["the old", "the new"], "recommended": "the new"}
+
+    def approved(self, svc, project_id="owner/p01"):
+        sid = svc.state_goal(project_id, GOAL_TEXT)
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "brief": PARTS}).encode()
+        self.assertEqual(support.post_page(svc.address, BRIEF, JSON, body)[0], 200)
+        body = json.dumps({"project_id": project_id, "sprint_id": sid, "version": 1}).encode()
+        self.assertEqual(
+            support.post_page(svc.address, "/api/approve", self.own(svc, **JSON), body)[0], 204)
+        return sid
+
+    def stored(self, svc, sid, data):
+        status, _, answer = self.send(svc, sid, self.secret(sid), data)
+        self.assertEqual(status, 200)
+        return json.loads(answer)["picture"]
+
+    def ask(self, svc, sid, round_):
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "round": round_}).encode()
+        return support.post_page(svc.address, "/api/ask", JSON, body)
+
+    def round_with(self, *members):
+        return {"questions": [{**self.Q, "pictures": list(members)}]}
+
+    def own_round(self, svc):
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        b = self.stored(svc, sid, WIDE)
+        members = [{"picture": a, "line": "the card before", "pair": "before"},
+                   {"picture": b, "line": "the card after", "pair": "after"}]
+        status, _, answer = self.ask(svc, sid, self.round_with(*members))
+        self.assertEqual(status, 200, answer)
+        return sid, a, b, members
+
+    def test_a_round_with_its_own_pictures_stores_their_ids_and_lines(self):
+        svc = self.open()
+        sid, a, b, members = self.own_round(svc)
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(payload["questions"][0]["pictures"], members)
+        self.assertEqual(payload["pictures"], [a, b])
+        self.assertEqual(
+            view_of(svc)["inbox"]["open"][0]["pictures"],
+            [{"id": a, "line": "the card before", "pair": "before"},
+             {"id": b, "line": "the card after", "pair": "after"}])
+
+    def test_each_bad_picture_list_is_refused_with_its_reason_and_appends_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        other = self.approved(svc, "owner/p00")
+        w = self.stored(svc, other, WIDE)
+        gone = self.stored(svc, sid, padded(4096))
+        os.unlink(self.pictures_dir / gone)
+        before = os.stat(self.pictures_dir / a).st_mtime
+        mine = {"picture": a, "line": "one"}
+        unknown = {"picture": "f" * 64, "line": "one"}
+        cases = (
+            ("shape", "x", sprints.PICTURES_SHAPE.format(n=1)),
+            ("too many", [mine] * 9, sprints.TOO_MANY_PICTURES.format(n=1)),
+            ("file key", [{**mine, "file": "x"}], sprints.PICTURE_SHAPE.format(n=1, m=1)),
+            ("no line", [{"picture": a}], sprints.PICTURE_SHAPE.format(n=1, m=1)),
+            ("empty line", [{**mine, "line": ""}],
+             sprints.PICTURE_MEMBER.format(n=1, m=1, member="line")),
+            ("long line", [{**mine, "line": "l" * 141}],
+             sprints.LINE_TOO_LONG.format(n=1, m=1)),
+            ("pair twice", [{**mine, "pair": "before"}, {**mine, "pair": "before"}],
+             sprints.PAIR_TWICE.format(n=1, pair="before")),
+            ("unknown", [unknown], sprints.PICTURE_UNKNOWN.format(n=1, m=1)),
+            ("foreign", [{"picture": w, "line": "one"}],
+             sprints.PICTURE_FOREIGN.format(n=1, m=1)),
+            ("gone", [{"picture": gone, "line": "one"}],
+             sprints.PICTURE_UNKNOWN.format(n=1, m=1)),
+            ("second unknown", [mine, unknown], sprints.PICTURE_UNKNOWN.format(n=1, m=2)),
+        )
+        for name, listed, reason in cases:
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                status, _, body = self.assert_unchanged(
+                    svc, lambda: self.ask(svc, sid, {"questions": [{**self.Q, "pictures": listed}]}))
+                self.assertEqual((status, body), (409, reason.encode() + b"\n"))
+        self.assertEqual(self.rows("questions.asked"), [])
+        self.assertEqual(os.stat(self.pictures_dir / a).st_mtime, before)
+
+    def test_eight_pictures_with_140_character_lines_are_taken(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        status, _, answer = self.ask(
+            svc, sid, self.round_with(*[{"picture": a, "line": "l" * 140}] * 8))
+        self.assertEqual(status, 200, answer)
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(len(payload["questions"][0]["pictures"]), 8)
+        self.assertEqual(payload["pictures"], [a])
+
+    def test_a_round_picture_outlives_the_sweep(self):
+        svc = self.open()
+        sid, a, b, _ = self.own_round(svc)
+        age(self.pictures_dir / a, 2 * 86400)
+        svc.retain()
+        self.assertIn(a, self.entries())
+
+    def test_a_round_without_pictures_logs_the_old_row(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        status, _, answer = self.ask(svc, sid, {"questions": [self.Q]})
+        self.assertEqual(status, 200, answer)
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(set(payload), {"sprint_id", "goal", "blocker", "questions"})
 
 
 class PictureRetentionTest(PictureCase):

@@ -19,6 +19,12 @@ the path that is not a regular file raises `OSError`. `read(directory, id)` rais
 an id that is not 64 lowercase hex digits, and answers None for a missing file, a symlink or a
 non-regular file.
 
+Present. `present(directory, id)` is the ask route's check that a named picture is still stored: it
+raises `ValueError` for an id that is not 64 lowercase hex digits and answers True only when
+`os.lstat(directory / id)` succeeds on a regular file (a symlink, a directory, a FIFO and a missing
+entry are False). It writes nothing, not even the file's age; the caller holds the ingest lock
+that every sweep also holds, so the answer cannot go stale before the row is appended.
+
 Reference. A picture is referenced by a row whose payload `pictures` is a list holding its id:
 `referenced(events)` collects the members that are well-formed ids from every row but those of kind
 `PICTURE_STORED`, whose own payload is `entry(project, sprint_id, id)`.
@@ -122,6 +128,15 @@ def read(directory: Path, picture_id: str) -> bytes | None:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
             return None
         return handle.read()
+
+
+def present(directory: Path, picture_id: str) -> bool:
+    if not PICTURE_ID.fullmatch(picture_id):
+        raise ValueError("not a picture id")
+    try:
+        return stat.S_ISREG(os.lstat(directory / picture_id).st_mode)
+    except FileNotFoundError:
+        return False
 
 
 def referenced(events: Iterable[Event]) -> frozenset[str]:

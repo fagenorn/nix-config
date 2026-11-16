@@ -530,9 +530,15 @@ secret, round_)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then 
 `Refused(NOT_STARTED)` unless the sprint's brief is approved, `Refused(ENDED)` unless
 `sprints.takes_questions` (a stopped, closed or ended sprint asks no more), `sprints.checked_round`
 (each ask, context and option within its limit, else `Refused` names the limit and nothing is
-logged), then
+logged), then for each question `n` and picture `m` (from 1) `Refused(PICTURE_FOREIGN)` when the
+picture is not among the sprint's own stored pictures but another sprint has stored it, else
+`Refused(PICTURE_UNKNOWN)` when no sprint has, then `Refused(PICTURE_UNKNOWN)` when
+`pictures.present` finds no regular file for it (the check writes nothing and runs under the lock
+every sweep holds), then
 `Refused(ROUND_OPEN)` when a question is open and the round is not a blocker; it appends exactly one
-`questions.asked` row `{"sprint_id", "goal", "blocker", "questions"}` (the checked round), folds,
+`questions.asked` row `{"sprint_id", "goal", "blocker", "questions"}` (the checked round) plus a
+top-level `"pictures"`, the round's unique picture ids, only when the round names any (the sweep
+keeps those pictures), folds,
 publishes and returns the row's `seq` (the round's id) and the question count; it nudges nobody.
 `answer_question(project_id, sprint_id, round_id, index, choice, text)`, under the lock, raises
 `Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
@@ -4991,6 +4997,15 @@ class ConsoleService:
             self._apply(appended)
             return appended[-1].at
 
+    def _own_picture(self, sprint: sprints.SprintState, picture_id: str, n: int, m: int) -> None:
+        """Refuse a picture the sprint did not store or that is no longer a regular file."""
+        if picture_id not in sprint.pictures:
+            if any(picture_id in other.pictures for other in self._sprints.values()):
+                raise sprints.Refused(sprints.PICTURE_FOREIGN.format(n=n, m=m))
+            raise sprints.Refused(sprints.PICTURE_UNKNOWN.format(n=n, m=m))
+        if not pictures.present(self.pictures_dir, picture_id):
+            raise sprints.Refused(sprints.PICTURE_UNKNOWN.format(n=n, m=m))
+
     def ask_questions(self, sprint_id: str, secret: str, round_: dict) -> tuple[int, int]:
         """Append one `questions.asked` event for an approved sprint; the round's id and size."""
         with self._ingest:
@@ -5000,11 +5015,16 @@ class ConsoleService:
             if not sprints.takes_questions(sprint):
                 raise sprints.Refused(sprints.ENDED)
             checked = sprints.checked_round(round_)
+            for n, question in enumerate(checked["questions"], 1):
+                for m, member in enumerate(question.get("pictures", ()), 1):
+                    self._own_picture(sprint, member["picture"], n, m)
             if sprints.round_open(sprint) and not checked["blocker"]:
                 raise sprints.Refused(sprints.ROUND_OPEN)
-            appended = self.log.append([(QUESTIONS_ASKED, sprint.project_id, {
-                "sprint_id": sprint_id, "goal": sprint.goal, "blocker": checked["blocker"],
-                "questions": checked["questions"]})])
+            payload = {"sprint_id": sprint_id, "goal": sprint.goal, "blocker": checked["blocker"],
+                       "questions": checked["questions"]}
+            if listed := sprints.round_pictures(checked):
+                payload["pictures"] = listed
+            appended = self.log.append([(QUESTIONS_ASKED, sprint.project_id, payload)])
             self._apply(appended)
             return appended[-1].seq, len(checked["questions"])
 
