@@ -281,7 +281,7 @@ class PageTest(unittest.TestCase):
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
-             "/api/trust-check"},
+             "/api/trust-check", "/api/register-cancel"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -290,7 +290,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 33)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 34)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -7925,6 +7925,54 @@ class RegisterFailurePageTest(unittest.TestCase):
         self.assertEqual(len([n for n in nodes(option) if n["tag"] == "wbr"]), 2)
         plain = [n for n in nodes(lead) if has_class(n, "ot") and full(n) == "Not now"]
         self.assertEqual([n for n in nodes(plain[0]) if n["tag"] == "wbr"], [])
+
+
+class RegisterCancelPageTest(unittest.TestCase):
+    CANCELLABLE = cards([FAILED_ITEM], {**FAILED_REGISTRATION, "cancel": True})
+    REFUSED = "only a registration that was not applied yet can be cancelled"
+
+    def test_a_cancellable_registration_offers_cancel_registration_and_posts_its_root(self) -> None:
+        (snap,) = render([START, {"frame": self.CANCELLABLE},
+                          {"respond": {"status": 204, "text": ""}},
+                          {"click": "register-withdraw"}, {"snapshot": True}])
+        (button,) = registered(snap, "register-withdraw")
+        self.assertEqual(full(button), "Cancel registration")
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-cancel")
+        self.assertEqual(posted(post), {"root": "/srv/r"})
+
+    def test_no_cancel_without_the_offer(self) -> None:
+        for registration in ({**FAILED_REGISTRATION, "cancel": False}, REGISTERING):
+            with self.subTest(registration["status"], result=registration["result"]):
+                (snap,) = render([START, {"frame": cards([FAILED_ITEM], registration)},
+                                  {"snapshot": True}])
+                self.assertEqual(registered(snap, "register-withdraw"), [])
+                self.assertEqual(registered(snap, "register-close"), [])
+
+    def test_a_second_click_while_cancelling_posts_nothing(self) -> None:
+        sending, refused = render([
+            START, {"frame": self.CANCELLABLE}, {"hold": True},
+            {"click": "register-withdraw"}, {"click": "register-withdraw"}, {"snapshot": True},
+            {"release": {"status": 409, "text": self.REFUSED + "\n"}}, {"snapshot": True}])
+        self.assertEqual([p["url"] for p in sending["posts"]], ["/api/register-cancel"])
+        (busy,) = registered(sending, "register-withdraw")
+        self.assertTrue(busy["disabled"])
+        self.assertEqual([p["url"] for p in refused["posts"]], ["/api/register-cancel"])
+        (reason,) = registered(refused, "register-withdraw-reason")
+        self.assertEqual(full(reason), self.REFUSED)
+        (again,) = registered(refused, "register-withdraw")
+        self.assertFalse(again["disabled"])
+
+    def test_a_refused_cancel_can_be_tried_again(self) -> None:
+        refused, retried = render([
+            START, {"frame": self.CANCELLABLE},
+            {"respond": {"status": 409, "text": self.REFUSED + "\n"}},
+            {"click": "register-withdraw"}, {"snapshot": True},
+            {"respond": {"status": 204, "text": ""}},
+            {"click": "register-withdraw"}, {"snapshot": True}])
+        self.assertEqual(full(registered(refused, "register-withdraw-reason")[0]), self.REFUSED)
+        self.assertEqual([p["url"] for p in retried["posts"]],
+                         ["/api/register-cancel", "/api/register-cancel"])
 
 
 class PathWrapPageTest(unittest.TestCase):

@@ -305,6 +305,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-withdraw-reason { color: var(--red); margin-left: 8px; }
 .apply-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
 .register-draft li { margin-bottom: 6px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
@@ -3680,6 +3681,26 @@ function drawDraft(registration) {
   }
   return parts;
 }
+// Cancel registration: one post at a time; the refusal's text is the console's own and lasts as long as the registration it answered.
+const registerWithdraw = { key: null, posting: false, failure: "" };
+async function withdrawRegistration(registration) {
+  if (registerWithdraw.posting) return;
+  const key = registerWithdraw.key;
+  registerWithdraw.posting = true;
+  registerWithdraw.failure = "";
+  renderRegister(lastView);
+  let reason = "";
+  try {
+    const response = await fetch("/api/register-cancel", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ root: registration.root }) });
+    if (response.status !== 204) reason = (await response.text()).trim() || NO_REASON;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  registerWithdraw.posting = false;
+  if (registerWithdraw.key === key) registerWithdraw.failure = reason;
+  renderRegister(lastView);
+}
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
@@ -3693,6 +3714,12 @@ function drawRegisterResult(registration) {
   registerFields = new Map();
   if (drafted.length > 0) parts.push(...drawDraft({ ...registration, draft: drafted }));
   else registerMore = null;
+  if (registration.status === "done" && registration.cancel === true) {
+    const withdraw = actionButton("register-withdraw", "Cancel registration", () => withdrawRegistration(registration));
+    withdraw.disabled = registerWithdraw.posting;
+    parts.push(withdraw);
+    if (registerWithdraw.failure !== "") parts.push(el("span", "register-withdraw-reason", registerWithdraw.failure));
+  }
   registerResult.replaceChildren(...parts);
 }
 // Swaps parts and updates the disabled state and reason; it never replaces the path field.
@@ -3713,7 +3740,12 @@ function renderRegister(view) {
     closeChange();
     registerMore = null;
   }
-  const key = shown ? JSON.stringify(registration) + "\n" + JSON.stringify(registerChange) : "";
+  const withdrawKey = shown ? registration.root + "\n" + registration.at : null;
+  if (registerWithdraw.key !== withdrawKey) {
+    registerWithdraw.key = withdrawKey;
+    registerWithdraw.failure = "";
+  }
+  const key = shown ? JSON.stringify(registration) + "\n" + JSON.stringify(registerChange) + "\n" + JSON.stringify(registerWithdraw) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {
