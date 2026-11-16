@@ -513,6 +513,25 @@ class WatchPathSkipTest(unittest.TestCase):
         self.admin(skipped=skipped, files=NODO_DELTA)
         self.assertEqual(self.last["outcome"], "satisfied")
 
+    def test_a_config_file_written_with_dot_segments_is_the_same_file(self):
+        for config in ("./railway.toml", "/./railway.toml", "railway.toml/."):
+            with self.subTest(config=config):
+                skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                                  config=config)
+                self.admin(skipped=skipped, files=(*NODO_DELTA, "railway.toml"))
+                self.refused("watched_path_changed")
+                self.assertEqual(self.admin(skipped=skipped, files=NODO_DELTA),
+                                 ("satisfied", "skipped"))
+
+    def test_a_config_file_the_adapter_cannot_read_stays_unexplained(self):
+        for config in (123, {"path": "railway.toml"}, ["railway.toml"], "../railway.toml"):
+            with self.subTest(config=config):
+                self.admin(skipped=watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                                           config=config), files=("railway.toml",))
+                self.refused("watch_patterns_unsupported")
+        skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", config=None)
+        self.assertEqual(self.admin(skipped=skipped), ("satisfied", "skipped"))
+
     def test_a_root_directory_written_with_slashes_is_the_same_root(self):
         skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root="/admin/")
         serving = watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", root="admin")

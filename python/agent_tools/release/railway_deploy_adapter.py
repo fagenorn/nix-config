@@ -342,15 +342,23 @@ def _watch_scope(meta: dict[str, Any]) -> dict[str, Any]:
     patterns = _watch_patterns(meta.get("serviceManifest"))
     if root is None:
         root = ""
-    if isinstance(root, str):
-        segments = [part for part in root.split("/") if part not in ("", ".")]
-        root = False if ".." in segments else "/".join(segments)
-    else:
-        root = False
+    root = _clean_path(root)
+    if config is not None:
+        config = _clean_path(config)
+        config = None if config == "" else config
     return {"skipped_reason": reason if isinstance(reason, str) else None,
             "root": root,
             "patterns": patterns,
-            "config_file": config.lstrip("/") if isinstance(config, str) else None}
+            "config_file": config}
+
+
+def _clean_path(path: Any) -> str | bool:
+    """A repository-relative path without empty or `.` segments, or `False` when it is not a
+    string or climbs out with `..` (never read as absent)."""
+    if not isinstance(path, str):
+        return False
+    segments = [part for part in path.split("/") if part not in ("", ".")]
+    return False if ".." in segments else "/".join(segments)
 
 
 class _Service:
@@ -506,7 +514,8 @@ def _watch_serving(service: _Service, branch: str) -> dict[str, Any] | str:
     matched = service.rows[service.matched]  # type: ignore[index]
     if matched["skipped_reason"] != SKIP_REASON_UNWATCHED:
         return "skip_reason_unstated"
-    if matched["root"] is False or matched["patterns"] not in WHOLE_ROOT_PATTERNS:
+    if (matched["root"] is False or matched["config_file"] is False
+            or matched["patterns"] not in WHOLE_ROOT_PATTERNS):
         return "watch_patterns_unsupported"
     for row in service.rows[service.matched + 1:]:  # type: ignore[operator]
         if row["status"] == "SKIPPED":
