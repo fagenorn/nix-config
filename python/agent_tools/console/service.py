@@ -3064,6 +3064,7 @@ class ConsoleService:
             self._states.values(), self._inbox, self._health,
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
+            owner_notices=self._owner_notices,
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=cap, activation=self._activation,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,

@@ -1931,17 +1931,19 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual(by_id["p00"]["notices"], [
             {"id": 8, "sprint_id": B, "poster": "Keep the importer fast", "kind": "hand-off",
              "kind_text": "Hand-off", "text": "take the reader", "what": None,
-             "until_text": None, "to_text": "for Fix the settings page", "at": at_min(8)},
+             "until_text": None, "to_text": "for Fix the settings page", "at": at_min(8),
+             "owner": False},
             {"id": 7, "sprint_id": A, "poster": "Fix the settings page", "kind": "hand-off",
              "kind_text": "Hand-off", "text": "the importer needs a retry", "what": None,
-             "until_text": None, "to_text": "for you", "at": at_min(7)},
+             "until_text": None, "to_text": "for you", "at": at_min(7), "owner": False},
             {"id": 5, "sprint_id": B, "poster": "Keep the importer fast", "kind": "heads-up",
              "kind_text": "Heads-up", "text": "sprint ask gains a dry run", "what": None,
-             "until_text": None, "to_text": None, "at": at_min(5)},
+             "until_text": None, "to_text": None, "at": at_min(5), "owner": False},
             {"id": 3, "sprint_id": A, "poster": "Fix the settings page", "kind": "claim",
              "kind_text": "Claim", "text": "the page fold",
              "what": "python/agent_tools/console/page.html",
-             "until_text": "until the board fold lands", "to_text": None, "at": at_min(3)}])
+             "until_text": "until the board fold lands", "to_text": None, "at": at_min(3),
+             "owner": False}])
         self.assertEqual(by_id["p01"]["notices"], [])
 
     def test_a_hand_off_to_a_sprint_not_in_the_view_reads_for_another_sprint(self):
@@ -1967,6 +1969,44 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual(with_["inbox"], without["inbox"])
         self.assertEqual(with_["statement"]["inbox_items"], 0)
         self.assertEqual(with_["statement"]["headline"], "Nothing needs you")
+
+        owner = {"p00": (Notice(9, at_min(9), "heads-up", "routes are frozen until Friday"),)}
+        owned = derive_view([state("p00", 1)], sprints={A: sa}, owner_notices=owner,
+                            now_ms=T0_MS)
+
+        self.assertEqual(len(owned["entries"][0]["notices"]), 3)
+        self.assertEqual(owned["statement"], without["statement"])
+        self.assertEqual(owned["inbox"], without["inbox"])
+        self.assertEqual(owned["recent_projects"], without["recent_projects"])
+        self.assertEqual(owned["entries"][0]["open_work"], without["entries"][0]["open_work"])
+
+    def test_the_owners_open_notices_join_the_board_as_from_you(self):
+        sa = with_notices(
+            sprint(A, goal="Fix the settings page"),
+            Notice(5, at_min(5), "heads-up", "sprint ask gains a dry run"))
+        owner = {"p00": (Notice(9, at_min(9), "heads-up", "routes are frozen until Friday"),
+                         Notice(7, at_min(7), "heads-up", "taken back",
+                                withdrawn_at=at_min(8)))}
+
+        view_ = derive_view([state("p00", 1)], sprints={A: sa}, owner_notices=owner,
+                            now_ms=T0_MS + 10 * MIN)
+
+        self.assertEqual(view_["entries"][0]["notices"], [
+            {"id": 9, "sprint_id": None, "poster": "You", "kind": "heads-up",
+             "kind_text": "Heads-up", "text": "routes are frozen until Friday", "what": None,
+             "until_text": None, "to_text": None, "at": at_min(9), "owner": True},
+            {"id": 5, "sprint_id": A, "poster": "Fix the settings page", "kind": "heads-up",
+             "kind_text": "Heads-up", "text": "sprint ask gains a dry run", "what": None,
+             "until_text": None, "to_text": None, "at": at_min(5), "owner": False}])
+
+    def test_a_project_with_a_running_sprint_offers_the_post(self):
+        stopping = dataclasses.replace(sprint(C, pid="p01"), stop_at=T0)
+
+        view_ = derive_view([state("p00", 1), state("p01", 2), state("p02", 3)],
+                            sprints={A: sprint(A), C: stopping}, now_ms=T0_MS)
+
+        self.assertEqual({e["project_id"]: e["notice_post"] for e in view_["entries"]},
+                         {"p00": True, "p01": False, "p02": False})
 
     def test_the_notice_wire_is_written(self):
         doc = view.__doc__

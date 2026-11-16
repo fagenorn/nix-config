@@ -388,6 +388,25 @@ class OwnerNoticeRouteTest(Case):
     def post_page_json(self, svc, path, body):
         return support.post_page(svc.address, path, JSON, json.dumps(body).encode())
 
+    def test_withdraw_takes_the_owners_notice_off_the_board_and_the_blocks(self):
+        svc = self.open()
+        a = svc.state_goal("owner/p01", GOAL_TEXT)
+
+        def project():
+            return next(e for e in json.loads(svc.view_bytes)["entries"]
+                        if e["project_id"] == "owner/p01")
+
+        n = self.posted(svc, "owner/p01")
+        entry = project()
+        self.assertEqual([(m["id"], m["owner"], m["poster"], m["text"]) for m in entry["notices"]],
+                         [(n, True, "You", FROZEN)])
+        self.assertTrue(entry["notice_post"])
+        self.assertEqual(self.withdraw_owner(svc, "owner/p01", n)[0], 204)
+        entry = project()
+        self.assertEqual(entry["notices"], [])
+        self.assertTrue(entry["notice_post"])
+        self.assertEqual(self.listed(svc, a), [])
+
     def test_owner_notices_survive_a_restart(self):
         svc = self.open()
         a = svc.state_goal("owner/p01", GOAL_TEXT)
