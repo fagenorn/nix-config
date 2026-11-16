@@ -1287,8 +1287,53 @@ class PageNoticeTest(unittest.TestCase):
                          "Notices (3)")
         self.assertIn("take the reader", visible_text(snap["projects"]))
 
+    def test_a_long_word_or_link_is_one_cut_span_with_its_whole_text_in_its_title(self) -> None:
+        link = "https://example.com/notes/2026/11/the-importer-moves-to-the-new-reader"
+        long_poster = "Keep supercalifragilisticexpialidocious-importers fast"
+        notice = {**HEADSUP_W, "poster": long_poster, "text": "see " + link + " for the fold"}
+        (block,) = self.notice_blocks(notice)
+        words = next(n for n in nodes(block) if has_class(n, "notice-words"))
+        self.assertEqual(
+            [(c["tag"], c["cls"], full(c), c["title"]) for c in words["children"]],
+            [("span", "", "see ", None), ("span", "notice-long", link, link),
+             ("span", "", " for the fold", None)])
+        self.assertEqual(full(words), "see " + link + " for the fold")
+        sender = next(n for n in nodes(block) if has_class(n, "notice-from"))
+        (cut,) = [n for n in nodes(sender) if has_class(n, "notice-long")]
+        self.assertEqual((full(cut), cut["title"]),
+                         ("supercalifragilisticexpialidocious-importers",
+                          "supercalifragilisticexpialidocious-importers"))
+        self.assertEqual(full(sender), ", from " + long_poster)
+
+    def test_only_a_run_of_24_characters_or_more_is_cut(self) -> None:
+        (block,) = self.notice_blocks({**HEADSUP_W, "text": "a" * 23 + " " + "b" * 24})
+        self.assertEqual([full(n) for n in nodes(block) if has_class(n, "notice-long")],
+                         ["b" * 24])
+
+    def test_each_claim_path_carries_its_whole_text_in_its_title(self) -> None:
+        claim = {**CLAIM_W, "what": "python/agent_tools/console/page.html tests/test_console_page.py",
+                 "until_text": "until " + "c" * 30}
+        (block,) = self.notice_blocks(claim)
+        self.assertEqual(
+            [(full(n), n["title"]) for n in nodes(block) if n["tag"] == "code"],
+            [("python/agent_tools/console/page.html", "python/agent_tools/console/page.html"),
+             ("tests/test_console_page.py", "tests/test_console_page.py")])
+        until = next(n for n in nodes(block) if has_class(n, "notice-until"))
+        (cut,) = [n for n in nodes(until) if has_class(n, "notice-long")]
+        self.assertEqual((full(cut), cut["title"]), ("c" * 30, "c" * 30))
+
+    def test_a_cut_word_stays_on_one_line_with_an_ellipsis(self) -> None:
+        rules = css_rules(PAGE_TEXT)
+        self.assertTrue([s for s, _ in rules if {".notice .notice-long", ".notice code"}
+                         <= {x.strip() for x in s.split(",")}])
+        want = {"display": "inline-block", "max-width": "100%", "overflow": "hidden",
+                "text-overflow": "ellipsis", "white-space": "nowrap", "vertical-align": "bottom"}
+        self.assertTrue([d for d in css_decls(".notice .notice-long")
+                         if all(d.get(k) == v for k, v in want.items())])
+
     def test_the_notices_fold_uses_no_peach_and_no_new_colour(self) -> None:
-        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        link = "see https://example.com/notes/2026/11/the-importer-moves-to-the-new-reader"
+        p0 = with_notices(project(0, []), {**HANDOFF_W, "text": link}, CLAIM_W)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"open": "notices:owner/p00"},
                           {"snapshot": True}])
         item = next(n for n in nodes(snap["projects"]) if n["tag"] == "li" and any(
@@ -1297,7 +1342,7 @@ class PageNoticeTest(unittest.TestCase):
         self.assertLessEqual(
             {"line", "notices", "notice", "notice-head", "notice-who", "notice-label",
              "notice-from", "notice-age", "notice-words", "notice-claim", "notice-paths",
-             "notice-path", "notice-until"}, tokens)
+             "notice-path", "notice-until", "notice-long"}, tokens)
         self.assertNotIn("needs", tokens)
         self.assertEqual(fold_colour_faults(PAGE_TEXT, tokens), [])
         rules = css_rules(PAGE_TEXT)
@@ -1318,6 +1363,7 @@ class PageNoticeTest(unittest.TestCase):
             ".notice { --tint: var(--ov2); }",
             ".notice { border-top: 1px solid hsl(23 86% 73%); }",
             ".notice { color: var(--lav); }",
+            ".notice-long { color: var(--peach); }",
         ]
         clean = ("<style>.notice { color: var(--ov2); } .line summary:hover { background: "
                  "rgba(202, 211, 245, .05); } #list > li.line + li.line { border-top: 1px solid "
@@ -1325,7 +1371,7 @@ class PageNoticeTest(unittest.TestCase):
         for rule in faulty:
             with self.subTest(rule=rule):
                 self.assertEqual(
-                    len(fold_colour_faults("<style>" + rule + "</style>", {"notice"})), 1)
+                    len(fold_colour_faults("<style>" + rule + "</style>", {"notice", "notice-long"})), 1)
         self.assertEqual(fold_colour_faults(clean, {"notice", "line"}), [])
 
     def test_notice_words_wrap_within_the_column(self) -> None:

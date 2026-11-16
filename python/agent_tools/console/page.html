@@ -302,6 +302,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .notice-words { color: var(--text); }
 .notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 .notices-project { min-width: 0; overflow-wrap: anywhere; }
+.notice .notice-long, .notice code { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
@@ -486,6 +487,27 @@ function pathWords(node, text) {
       if (i > 0) node.appendChild(el("wbr"));
       node.appendChild(el("span", "seg", segment));
     });
+  }
+  flush();
+  return node;
+}
+// A run of LONG_WORD characters or more with no space is one cut span carrying its whole text in its title (#1133).
+const LONG_WORD = 24;
+function cutWords(node, text) {
+  let plain = "";
+  const flush = () => {
+    if (plain !== "") node.appendChild(el("span", "", plain));
+    plain = "";
+  };
+  for (const run of String(text).split(/(\s+)/)) {
+    if (/\s/.test(run) || run.length < LONG_WORD) {
+      plain += run;
+      continue;
+    }
+    flush();
+    const long = el("span", "notice-long", run);
+    long.setAttribute("title", run);
+    node.appendChild(long);
   }
   flush();
   return node;
@@ -1572,21 +1594,23 @@ function noticeLine(notice) {
   const head = el("p", "notice-head");
   const who = el("span", "notice-who");
   const label = typeof notice.to_text === "string" ? notice.kind_text + " " + notice.to_text : notice.kind_text;
-  who.appendChild(el("b", "notice-label", label));
-  who.appendChild(el("span", "notice-from", ", from " + notice.poster));
+  who.appendChild(cutWords(el("b", "notice-label"), label));
+  who.appendChild(cutWords(el("span", "notice-from"), ", from " + notice.poster));
   head.appendChild(who);
   head.appendChild(timeEl("ago", notice.at, "notice-age"));
   item.appendChild(head);
-  item.appendChild(el("p", "notice-words", notice.text));
+  item.appendChild(cutWords(el("p", "notice-words"), notice.text));
   if (typeof notice.what === "string") {
     const claim = el("p", "notice-claim");
     const paths = el("span", "notice-paths");
     notice.what.trim().split(/\s+/).forEach((path, at) => {
       if (at > 0) paths.appendChild(el("span", "", " "));
-      paths.appendChild(el("code", "notice-path", path));
+      const code = el("code", "notice-path", path);
+      code.setAttribute("title", path);
+      paths.appendChild(code);
     });
     claim.appendChild(paths);
-    if (typeof notice.until_text === "string") claim.appendChild(el("span", "notice-until", notice.until_text));
+    if (typeof notice.until_text === "string") claim.appendChild(cutWords(el("span", "notice-until"), notice.until_text));
     item.appendChild(claim);
   }
   return item;
