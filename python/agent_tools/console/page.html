@@ -330,6 +330,16 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .s-limit { color: var(--red); }
 .s-idle { color: var(--ov2); }
 #unmanaged { margin-top: 24px; }
+.pics { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; max-width: 100%; }
+.pic { margin: 0; flex: 0 1 200px; min-width: 0; max-width: 100%; }
+.pic-pair { display: flex; gap: 12px; flex: 1 1 412px; min-width: 0; max-width: 100%; }
+.pic-pair .pic { flex: 1 1 0; }
+.pic-thumb { display: block; width: 100%; padding: 0; overflow: hidden; cursor: zoom-in; background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
+.pic-thumb img { display: block; width: 100%; height: 120px; object-fit: cover; }
+.pic-thumb img[hidden] { display: none; }
+.pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
+.pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
+.pic-label { display: block; margin-bottom: 4px; font-size: .8125rem; color: var(--ov2); }
 
 @media (max-width: 1180px) {
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
@@ -344,6 +354,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .statement .sub { font-size: 1rem; }
 }
 @media (max-width: 480px) {
+  .pic-pair { flex-direction: column; }
+  .pic { flex-basis: 100%; }
   .card .q.reg, .rest .q.reg { font-size: 1rem; }
   .desk-grid { padding: 24px 16px 48px; }
   .statement h1 { font-size: 2rem; }
@@ -1978,6 +1990,98 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
+// The shared gallery for any card (ADR-console-038): each picture is fetched once with the page token and shown from an object URL.
+const pictureCache = new Map();
+function pictureSequence(pictures) {
+  if (!Array.isArray(pictures)) return [];
+  const before = pictures.find((p) => p.pair === "before");
+  const after = pictures.find((p) => p.pair === "after");
+  const paired = before !== undefined && after !== undefined;
+  const out = [];
+  for (const p of pictures) {
+    if (paired && (p === before || p === after)) {
+      if (!out.includes(before)) out.push(before, after);
+    } else out.push(p);
+  }
+  return out;
+}
+function pictureFailed(img) {
+  if (img.hidden === true) return;
+  img.hidden = true;
+  const thumb = img.parentNode;
+  thumb.appendChild(el("span", "pic-failed", "The picture could not be loaded."));
+  thumb.parentNode.className += " failed";
+}
+async function pictureFetch(id, entry) {
+  let url = null;
+  try {
+    const response = await fetch("/api/picture/" + id, { method: "GET", headers: { "X-Console-Token": token } });
+    if (response.ok) url = URL.createObjectURL(await response.blob());
+  } catch (error) {
+    url = null;
+  }
+  if (pictureCache.get(id) !== entry) {
+    if (url !== null) URL.revokeObjectURL(url);
+    return;
+  }
+  entry.url = url;
+  entry.failed = url === null;
+  for (const img of document.querySelectorAll("img.pic-img")) {
+    if (img.dataset.picture !== id) continue;
+    if (url === null) pictureFailed(img);
+    else img.src = url;
+  }
+}
+function pictureSrc(img, id) {
+  const have = pictureCache.get(id);
+  if (have === undefined) {
+    const entry = { url: null, failed: false };
+    pictureCache.set(id, entry);
+    pictureFetch(id, entry);
+  } else if (have.failed) pictureFailed(img);
+  else if (have.url !== null) img.src = have.url;
+}
+function prunePictures() {
+  const shown = new Set();
+  for (const img of document.querySelectorAll("img.pic-img")) shown.add(img.dataset.picture);
+  for (const [id, entry] of [...pictureCache]) {
+    if (shown.has(id)) continue;
+    pictureCache.delete(id);
+    if (entry.url !== null) URL.revokeObjectURL(entry.url);
+  }
+}
+function pictureFigure(key, index, picture, label) {
+  const figure = el("figure", "pic");
+  if (label !== null) figure.appendChild(el("span", "pic-label", label));
+  const thumb = el("button", "pic-thumb");
+  thumb.setAttribute("type", "button");
+  thumb.dataset.key = key + "/" + index;
+  const img = el("img", "pic-img");
+  img.setAttribute("alt", picture.line);
+  img.dataset.picture = picture.id;
+  thumb.appendChild(img);
+  figure.appendChild(thumb);
+  figure.appendChild(el("figcaption", "pic-line", picture.line));
+  pictureSrc(img, picture.id);
+  return figure;
+}
+function pictureGallery(key, pictures) {
+  const sequence = pictureSequence(pictures);
+  if (sequence.length === 0) return null;
+  const gallery = el("div", "pics");
+  for (let i = 0; i < sequence.length; i++) {
+    const one = sequence[i];
+    const next = sequence[i + 1];
+    if (one.pair === "before" && next !== undefined && next.pair === "after") {
+      const pair = el("div", "pic-pair");
+      pair.appendChild(pictureFigure(key, i, one, "Before"));
+      pair.appendChild(pictureFigure(key, i + 1, next, "After"));
+      gallery.appendChild(pair);
+      i += 1;
+    } else gallery.appendChild(pictureFigure(key, i, one, null));
+  }
+  return gallery;
+}
 // A refused registration waiting for its Retry (ADR-console-028 D10): a question card whose one option runs the registration again.
 function isRetry(item) {
   return item.reason === "register_retry";
@@ -2740,6 +2844,10 @@ function leadItem(item) {
   card.appendChild(headLine(item));
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
+  if (isQuestion(item)) {
+    const gallery = pictureGallery(itemId(item), item.pictures);
+    if (gallery !== null) card.appendChild(gallery);
+  }
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
   const state = boxState(item);
@@ -2777,6 +2885,10 @@ function itemLine(item) {
     line.appendChild(head);
   }
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
+  if (isQuestion(item)) {
+    const gallery = pictureGallery(itemId(item), item.pictures);
+    if (gallery !== null) line.appendChild(gallery);
+  }
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
@@ -3011,6 +3123,7 @@ function renderInbox(view) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
   }
+  prunePictures();
 }
 function momentLine(moment) {
   const line = el("li");

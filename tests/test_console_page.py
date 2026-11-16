@@ -281,7 +281,7 @@ class PageTest(unittest.TestCase):
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
-             "/api/trust-check", "/api/register-cancel"},
+             "/api/trust-check", "/api/register-cancel", "/api/picture/"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -290,7 +290,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 34)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 35)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -1488,7 +1488,7 @@ def question(index, text, options, recommended, **fields):
             "key": f"question/{SID}/41/{index}", "project_id": "owner/p00", "sprint_id": SID,
             "title": "make the importer resumable", "round": 41, "index": index,
             "blocker": False, "blocks": "the resume slice", "headline": text,
-            "context": None, "more_questions": 0,
+            "context": None, "more_questions": 0, "pictures": [],
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
                            "recommended_index": options.index(recommended)}],
@@ -1732,6 +1732,160 @@ class PageQuestionTest(unittest.TestCase):
         self.assertFalse(field(undone, "ans-words")["disabled"])
         (post,) = round_posts(sent)
         self.assertEqual(posted(post)["text"], "use the reader")
+
+
+A, B, C = "a" * 64, "b" * 64, "c" * 64
+PICTURED = question(0, "Which layout reads better?", ["the old", "the new"], "the new", pictures=[
+    {"id": C, "line": "the header at 1440", "pair": None},
+    {"id": A, "line": "the card before", "pair": "before"},
+    {"id": B, "line": "the card after", "pair": "after"}])
+FAILED_TEXT = "The picture could not be loaded."
+
+
+def lead_of(snap: dict) -> dict:
+    (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+    return lead
+
+
+def with_class(tree: dict, name: str) -> list:
+    return [n for n in nodes(tree) if has_class(n, name)]
+
+
+def picture_posts(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"].startswith("/api/picture/")]
+
+
+class PagePictureTest(unittest.TestCase):
+    def test_a_question_card_draws_one_thumbnail_per_picture_with_its_line(self) -> None:
+        (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual(len(with_class(lead, "pics")), 1)
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 3)
+        lines = ["the header at 1440", "the card before", "the card after"]
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")], lines)
+        self.assertEqual([n["alt"] for n in with_class(lead, "pic-img")], lines)
+        keys = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(keys, [f"owner/p00#{PICTURED['key']}/{i}" for i in range(3)])
+
+    def test_a_before_and_after_pair_sits_side_by_side_labelled(self) -> None:
+        (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        (pair,) = with_class(lead_of(snap), "pic-pair")
+        self.assertEqual([c["tag"] for c in pair["children"]], ["figure", "figure"])
+        self.assertEqual([full(n) for n in with_class(pair, "pic-label")], ["Before", "After"])
+        self.assertEqual([full(n) for n in with_class(pair, "pic-line")],
+                         ["the card before", "the card after"])
+        flipped = {**PICTURED, "pictures": [PICTURED["pictures"][2], PICTURED["pictures"][0],
+                                            PICTURED["pictures"][1]]}
+        (after,) = render([START, {"frame": frame([flipped])}, {"snapshot": True}])
+        gallery = with_class(lead_of(after), "pics")[0]
+        self.assertTrue(has_class(gallery["children"][0], "pic-pair"))
+        self.assertEqual([n["alt"] for n in with_class(gallery, "pic-img")],
+                         ["the card before", "the card after", "the header at 1440"])
+        self.assertEqual([full(n) for n in with_class(gallery, "pic-label")], ["Before", "After"])
+
+    def test_a_lone_before_is_a_plain_picture(self) -> None:
+        lone = question(0, "Which layout reads better?", ["the old", "the new"], "the new", pictures=[
+            {"id": A, "line": "the card before", "pair": "before"}])
+        (snap,) = render([START, {"frame": frame([lone])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 1)
+        self.assertEqual(with_class(lead, "pic-pair"), [])
+        self.assertEqual(with_class(lead, "pic-label"), [])
+
+    def test_a_question_without_pictures_draws_no_gallery(self) -> None:
+        (snap,) = render([START, {"frame": frame([Q0])}, {"snapshot": True}])
+        self.assertEqual(with_class(snap["inbox"], "pics"), [])
+
+    def test_an_open_question_row_shows_its_pictures_too(self) -> None:
+        second = {**PICTURED, "index": 1, "key": f"question/{SID}/41/1"}
+        (snap,) = render([START, {"frame": frame([Q0, second])}, {"snapshot": True}])
+        rows = [r for r in rows_of(snap) if with_class(r, "pic-thumb")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(with_class(rows[0], "pic-thumb")), 3)
+
+    def test_pictures_are_fetched_with_the_page_token_once_each(self) -> None:
+        steps = [START, {"frame": frame([PICTURED])}, {"snapshot": True},
+                 {"frame": frame([PICTURED])}, {"snapshot": True}]
+        (_, snap) = render(steps)
+        fetched = picture_posts(snap)
+        self.assertEqual([p["url"] for p in fetched], [f"/api/picture/{i}" for i in (C, A, B)])
+        for post in fetched:
+            self.assertEqual(post["method"], "GET")
+            self.assertEqual(post["headers"], {"X-Console-Token": "__CONSOLE_TOKEN__"})
+
+    def test_every_picture_img_shows_an_object_url(self) -> None:
+        (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        imgs = [n for n in nodes(snap["inbox"]) if n["tag"] == "img"]
+        self.assertEqual(len(imgs), 3)
+        for img in imgs:
+            self.assertTrue(img["src"].startswith("blob:console/"), img["src"])
+        self.assertEqual([m["picture"] for m in snap["object_urls"]["made"]], [C, A, B])
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"\.src\s*=\s*[\"'`]/api", text))
+        self.assertNotIn('src="/api', text)
+
+    def test_a_failed_picture_says_so_and_has_no_src(self) -> None:
+        (snap,) = render([START, {"picture_reply": {"id": C, "status": 404}},
+                          {"frame": frame([PICTURED])}, {"snapshot": True}])
+        figures = with_class(lead_of(snap), "pic")
+        self.assertTrue(has_class(figures[0], "failed"))
+        self.assertIn(FAILED_TEXT, full(figures[0]))
+        self.assertEqual([n["src"] for n in nodes(figures[0]) if n["tag"] == "img"], [None])
+        self.assertFalse(has_class(figures[1], "failed"))
+        self.assertEqual([m["picture"] for m in snap["object_urls"]["made"]], [A, B])
+
+    def test_a_picture_no_card_shows_is_revoked(self) -> None:
+        *_, last = render([START, {"frame": frame([PICTURED])}, {"snapshot": True},
+                           {"frame": frame([Q0])}, {"snapshot": True}])
+        made = [m["url"] for m in last["object_urls"]["made"]]
+        self.assertEqual(len(made), 3)
+        self.assertEqual(last["object_urls"]["revoked"], made)
+
+    def test_a_picture_fetch_does_not_take_a_queued_reply(self) -> None:
+        (snap,) = render([START, {"respond": {"status": 500, "text": "boom"}},
+                          {"frame": frame([PICTURED])}, {"key": "Enter"}, {"clock": 5000},
+                          {"snapshot": True}])
+        self.assertEqual(len(round_posts(snap)), 1)
+        self.assertEqual(len(with_class(snap["inbox"], "fail")), 1)
+
+    def test_the_gallery_wraps_and_the_pair_stacks_at_480(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+
+        def declared(block: str, selector: str) -> dict:
+            merged: dict = {}
+            for name, decls in style_rules(block):
+                if name == selector:
+                    merged.update(decls)
+            return merged
+
+        self.assertEqual(declared(style, ".pics").get("flex-wrap"), "wrap")
+        for selector in (".pic", ".pic-pair"):
+            rule = declared(style, selector)
+            self.assertEqual((rule.get("min-width"), rule.get("max-width")), ("0", "100%"), selector)
+        self.assertEqual(declared(style, ".pic-line").get("overflow-wrap"), "anywhere")
+        narrow = media_block(style, "(max-width: 480px)")
+        self.assertEqual(declared(narrow, ".pic-pair").get("flex-direction"), "column")
+
+    def test_the_pair_sits_in_one_row_on_a_desktop(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+
+        def declared(block: str, selector: str) -> dict:
+            merged: dict = {}
+            for name, decls in style_rules(block):
+                if name == selector:
+                    merged.update(decls)
+            return merged
+
+        pair = declared(top, ".pic-pair")
+        self.assertEqual(pair.get("display"), "flex")
+        self.assertIn(pair.get("flex-direction"), (None, "row"))
+        self.assertEqual(declared(top, ".pic-pair .pic").get("flex"), "1 1 0")
+        for query in ("(max-width: 1180px)", "(max-width: 900px)"):
+            self.assertNotEqual(declared(media_block(style, query), ".pic-pair").get("flex-direction"),
+                                "column", query)
 
 
 
