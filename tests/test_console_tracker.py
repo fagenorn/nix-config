@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, inbox, service, view
+from agent_tools.console import console, inbox, movement, service, view
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
@@ -316,6 +316,20 @@ class CommandTest(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(console.main(["--port", "0"]), 1)
         self.assertIs(recorded["tracker"], inbox.read_items)
+
+    def test_the_command_reads_the_pull_requests(self):
+        recorded = {}
+
+        def refuse(*args, **kwargs):
+            recorded.update(kwargs)
+            raise OSError("taken")
+
+        with mock.patch.object(service, "ConsoleService", side_effect=refuse), \
+                mock.patch.object(service, "default_store", return_value=Path("/nonexistent/store")), \
+                mock.patch.object(service, "default_registry", return_value=Path("/nonexistent/registry")), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console.main(["--port", "0"]), 1)
+        self.assertIs(recorded["pull_reader"], movement.read_pulls)
 
 
 if __name__ == "__main__":
