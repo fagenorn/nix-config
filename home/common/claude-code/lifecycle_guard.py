@@ -12,7 +12,7 @@ Standard library only: it imports nothing from the repository's helper package,
 `agent_tools`.
 
 The decisions behind the rules below are the records in `docs/areas/guard/adr/`
-(ADR-guard-001 to ADR-guard-008), and the compiler that writes the compiled
+(ADR-guard-001 to ADR-guard-011), and the compiler that writes the compiled
 policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
@@ -695,6 +695,75 @@ command, `eval`/`sh -c` source or a quoted `$(…)`/backtick substitution that
 mentions the label blocks too, while other labels, `--remove-label` and quoted
 mentions pass.
 
+Production rules
+----------------
+
+A project's declared production commands are refused outside its release path
+(issue 1149, ADR-guard-011). The rules are a derived row's optional `production`
+member, which the compiler copies from the project's contract: `changes`, the
+commands that change its production, `read_only`, the routes that only read it,
+and `release_profile`. A command `{id, argv}` is matched as the verb
+`[basename(argv[0]), *argv[1:]]`, so `/usr/local/bin/kubectl` is the word
+`kubectl`. The rules are read from the compiled policy unconfirmed: they only
+refuse, so the row check never confirms them (and never compares them), and a
+compiled policy that does not load, a row without `production` and a row with
+an empty `changes` refuse nothing.
+
+The check runs on every call after the detaching check and the base policy
+load, before any lifecycle verb is judged. It reuses the segment and token
+readings of the lifecycle verbs, and reads a leading redirection out of the way
+(`>/dev/null ./scripts/deploy.sh` runs the script) and an ANSI-C quoted word as
+its text (`$'just' switch`). The guard reads the command as raw text when
+it cannot be parsed, a segment cannot be tokenised, a command word is an
+evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`, or the program at a command
+position is in `PRODUCTION_RUNNERS` and a later word of its run is an evaluator or
+`env -S` (`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`); there a verb counts when
+its words occur in order in either raw reading, or its words joined by one
+space are a substring of the command or of the command with its quotes and
+backslashes deleted, and nothing is lifted. Otherwise a verb of two or more
+words counts at any word whose basename is its first word, when its remaining
+words occur in order in that word's run (up to the next operator), or, when an
+operator cut the run, in the rest of the segment and both raw readings of the
+later segments. A one-word verb has no later words to tell a run of it from a
+mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts
+only at a command position, or at a later word of a run whose command-position
+program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
+and the other programs that run a later word as a command). A quoted token that
+holds `$(` or a backtick, or whitespace behind a runner (`watch 'just switch'`,
+`nix-shell --run '...'`, `flock f -c '...'`), is also read as raw text alone, with no
+lift, since a
+substitution runs its text. A parsed match is lifted when its run begins with a
+read-only verb that properly extends the production verb (`kubectl get pods`
+against `kubectl`, not `just build switch` against `just switch`); raw text
+lifts nothing. The release path, `release transaction preview` and
+`release transaction run`, needs no special case: its arguments are inert for a
+one-word verb because they are not at a command position, and a chained or
+substituted production command in them still counts.
+
+Which project's rules refuse depends on the checkout: the payload cwd's
+repository (its `origin` slug). A command that hits a rule while that lookup
+times out or cannot start is refused, since an unreadable checkout is not an
+unregistered one. A command with a word, in either raw reading,
+whose basename is `cd`, `pushd`, `popd` or `chdir` may run elsewhere, so every
+declaring row judges it, the cwd repository first and then by sorted slug. That
+reading is by raw words, not command positions, because a leading redirection
+(`>/dev/null cd dir`) is read as the command word and a double-quoted
+substitution is one token. Inside a row the first rule in `changes` order that
+hits names the refusal, which is one line:
+
+    lifecycle guard: `<argv>` changes the production of <slug> (production rule
+    <id>), so it runs only through the release profile <release_profile> with
+    release transaction preview and release transaction run.
+
+Known limits: a production command reached by another name (a bare `just` that
+runs the default recipe, a script or alias), words fed on stdin, a program's own
+directory option (`env -C`, `make -C`) and a one-word command handed to a program
+outside `PRODUCTION_RUNNERS` (`ssh host kubectl apply`) are not seen. Where the
+text is read raw or behind a runner, a one-word command's name anywhere refuses,
+file arguments included. A command that mentions a directory-changing word
+anywhere is judged against every declaring project. Rewriting the compiled policy
+can remove a project's production refusals, though it still gains no authorization.
+
 Guard policy
 ------------
 
@@ -709,7 +778,9 @@ project) and the store paths of `git`, `gh` and `jq`. The compiled policy is
 the user state file `~/.agents/state/guard/policy.json`: an object with exactly
 `derived_repositories` and `derivation`. A derived row is an entry of the
 compiled policy's `derived_repositories`, keyed by the exact repository slug,
-`{default_branch, integration_branch, required_checks, evidence}`, where
+`{default_branch, integration_branch, required_checks, evidence}` with an
+optional `production` member (issue 1149: `{changes, read_only, release_profile}`,
+the project's declared production rules as command `{id, argv}` lists), where
 `required_checks` is the sorted list of check names the project's contract
 declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
 The row check is the store script `claude-guard-row-check`, which the wrapper
@@ -728,15 +799,18 @@ other, and each member has one trust rule:
     derived_repositories       compiled policy  A candidate row per slug, used
                                                 only after the row check
                                                 confirms it in this invocation.
+    production                 compiled policy  A row's declared production rules,
+                                                read unconfirmed: they only
+                                                refuse (issue 1149).
     derivation                 compiled policy  Recorded for the reader; null or
                                                 an object; the guard does not
                                                 interpret it.
 
 The guard loads the base policy on every call, after the detaching-word check.
-It opens the compiled policy only when it judges a repository-bound verb (push,
-PR creation, merge or release creation), at the point it builds the repository
-context, so a command with none of those, branch deletion included, never reads
-it. The compiled policy supplies no value the guard executes, and the guard
+It reads the compiled policy on every call that passes the detaching check and
+the base-policy load, for the production rules (issue 1149 D4), and runs the row
+check only for a repository-bound verb (push, PR creation, merge or release
+creation), when it builds the repository context. The compiled policy supplies no value the guard executes, and the guard
 runs only the base policy's three tools, the row check and the look check,
 which it finds by the absolute paths `--derive-bin` and `--look-bin` name. The compiled policy is a user-writable
 state file, because compiling at activation cannot write the store. Since issue
@@ -834,16 +908,20 @@ that is missing, unreadable, not a regular file, over that size or outside its
 schema still blocks every Bash call with `invalid policy`, because it is a
 store file the build check loaded and a bad one is an installation defect.
 
-Required checks and the schema-3 transition (issue 552). The loader demands
+Required checks and the schema transition (issues 552, 1149). The loader demands
 that a row's `required_checks` be a list of distinct non-empty strings, the
 resolver's own rule for the contract member, so a contract that resolves always
 yields a row the guard loads; any other value is a malformed row, and the whole
-compiled policy contributes no row. The compiler writes `derivation.schema_version`
-3, whose rows carry the member. A schema-2 file lacks it, so this guard reads
-that file as contributing no row; the activation step recompiles on every
-switch, so the switch that installs this guard also writes a schema-3 file. Only
-a repository that relies on a derived row for its authorization is refused,
-until the recompile this section asks for after an agent_tools change; a
+compiled policy contributes no row. The same holds for the optional
+`production` member: an object with exactly `changes`, `read_only` and
+`release_profile`, the two lists holding `{id, argv}` objects with a non-empty
+`id` and a non-empty `argv` of non-empty strings, and a non-empty
+`release_profile`; any other value drops the whole file. The compiler writes
+`derivation.schema_version` 4, whose rows may carry `production` (issue 1149);
+this guard reads a schema-3 file as before (`production` is optional). A guard
+from before issue 1149, in a session started before the switch, reads a row
+carrying `production` as malformed and drops the whole file, so a repository
+that relies on a derived row is refused until that session restarts; a
 repository authorized by an owner literal keeps its authorization.
 
 Literal and derived rows. `guard-policy compile` refuses a project whose slug is
@@ -893,6 +971,10 @@ COMPILED_POLICY_KEYS = frozenset({"derived_repositories", "derivation"})
 DERIVED_ROW_KEYS = frozenset(
     {"default_branch", "integration_branch", "required_checks", "evidence"}
 )
+# A row may also carry the project's declared production rules (issue 1149).
+DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
+PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
+PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
 POLICY_MAX_BYTES = 1 << 20
@@ -1379,8 +1461,9 @@ def split_segments_with_runs(command):
             index += 1
             continue
         if character == "\\" and index + 1 < length:
-            current.append(character)
-            current.append(command[index + 1])
+            # One element for the escaped pair, so an escaped blank is not the
+            # blank that opens a comment: `echo \ #; just switch` runs `just switch`.
+            current.append(command[index:index + 2])
             index += 2
             continue
         if quote == '"':
@@ -3282,8 +3365,16 @@ def github_slug(url):
     return slug
 
 
-def detect_repository(git_bin, cwd, timeout):
-    """Return the owner/name slug of cwd's origin remote, or None."""
+class RepositoryLookupFailed(Exception):
+    """The lookup of a checkout's origin could not run to an answer (timed out or could not
+    start), which is not the same as a checkout that names no repository."""
+
+
+def detect_repository(git_bin, cwd, timeout, strict=False):
+    """Return the owner/name slug of cwd's origin remote, or None.
+
+    With `strict`, a lookup that times out or cannot start raises `RepositoryLookupFailed`
+    instead of returning None (issue 1149 review)."""
     if not isinstance(cwd, str) or not cwd:
         return None
     try:
@@ -3294,7 +3385,11 @@ def detect_repository(git_bin, cwd, timeout):
             timeout=timeout,
             check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as error:
+        if strict:
+            raise RepositoryLookupFailed(
+                "timed out" if isinstance(error, subprocess.TimeoutExpired) else "could not start"
+            ) from error
         return None
     if child.returncode != 0:
         return None
@@ -3432,7 +3527,9 @@ def _load_json_object(path, keys):
         return None, f"cannot load {path}: {why}"
     try:
         document = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        # A document nested past the interpreter's limit raises RecursionError, which is
+        # an unloadable file like any other (issue 1149 review).
         return None, f"cannot load {path}: {error}"
     if not isinstance(document, dict) or set(document) != keys:
         return None, f"{path}: expected an object with exactly the keys {', '.join(sorted(keys))}"
@@ -3461,12 +3558,48 @@ def load_base_policy(path):
     return BasePolicy(document), None
 
 
+def production_problem(production):
+    """Why a row's `production` value is malformed, else None.
+
+    An object with exactly PRODUCTION_KEYS: `changes` and `read_only` are lists
+    (possibly empty) of objects with exactly PRODUCTION_COMMAND_KEYS, each a
+    non-empty `id` and a non-empty `argv` list of non-empty strings, and
+    `release_profile` is a non-empty string.
+    """
+    if not isinstance(production, dict) or set(production) != PRODUCTION_KEYS:
+        keys = ", ".join(sorted(PRODUCTION_KEYS))
+        return f"must be an object with exactly the keys {keys}"
+    for member in ("changes", "read_only"):
+        commands = production[member]
+        if not isinstance(commands, list):
+            return f"{member} must be a list"
+        for command in commands:
+            if not isinstance(command, dict) or set(command) != PRODUCTION_COMMAND_KEYS:
+                keys = ", ".join(sorted(PRODUCTION_COMMAND_KEYS))
+                return f"{member} entries must be objects with exactly the keys {keys}"
+            if not isinstance(command["id"], str) or not command["id"]:
+                return f"{member} entry id must be a non-empty string"
+            argv = command["argv"]
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or not all(isinstance(word, str) and word for word in argv)
+            ):
+                return f"{member} entry argv must be a non-empty list of non-empty strings"
+    profile = production["release_profile"]
+    if not isinstance(profile, str) or not profile:
+        return "release_profile must be a non-empty string"
+    return None
+
+
 def load_compiled_policy(path):
     """(rows, None) for a well-formed compiled policy at `path`, else ({}, reason).
 
     The file supplies derived rows alone: `derived_repositories` maps a repository
     slug to its row, and the guard reads a row's two branches and its required checks and leaves
-    `evidence` and `derivation` to the compiler that wrote them. The path is read
+    `evidence` and `derivation` to the compiler that wrote them. A row may also carry
+    `production`, the project's declared production rules, validated by
+    `production_problem`; a row without it loads as before. The path is read
     without blocking and only when it is a regular file of at most
     POLICY_MAX_BYTES (`_read_policy_bytes`). A file that is anything else, cannot
     be read or carries any malformed row contributes no row at all, so it is never
@@ -3481,11 +3614,14 @@ def load_compiled_policy(path):
     for repository, row in derived.items():
         if not isinstance(repository, str) or SLUG_PATTERN.fullmatch(repository) is None:
             return {}, f"{path}: derived_repositories key {repository!r} is not an owner/name slug"
-        if not isinstance(row, dict) or set(row) != DERIVED_ROW_KEYS:
+        if (
+            not isinstance(row, dict)
+            or not DERIVED_ROW_KEYS <= set(row) <= DERIVED_ROW_KEYS | DERIVED_ROW_OPTIONAL_KEYS
+        ):
             keys = ", ".join(sorted(DERIVED_ROW_KEYS))
             return {}, (
                 f"{path}: derived_repositories {repository} must be an object "
-                f"with exactly the keys {keys}"
+                f"with exactly the keys {keys} and optionally production"
             )
         for key in ("default_branch", "integration_branch"):
             branch = row[key]
@@ -3503,6 +3639,10 @@ def load_compiled_policy(path):
             )
         if not isinstance(row["evidence"], dict):
             return {}, f"{path}: derived_repositories {repository} evidence must be an object"
+        if "production" in row:
+            reason = production_problem(row["production"])
+            if reason is not None:
+                return {}, f"{path}: derived_repositories {repository} production {reason}"
     if document["derivation"] is not None and not isinstance(document["derivation"], dict):
         return {}, f"{path}: derivation must be null or an object"
     return dict(derived), None
@@ -3520,6 +3660,376 @@ def bounded_timeout(deadline, child_timeout):
     return child_timeout
 
 
+DIRECTORY_CHANGING_WORDS = frozenset({"cd", "pushd", "popd", "chdir"})
+# Programs that run a later word of their own run as a command (issue 1149 D5),
+# matched by basename. Only a one-word production verb uses it.
+PRODUCTION_RUNNERS = frozenset({
+    "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
+    "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
+    "devenv", "direnv",
+})
+PRODUCTION_ROUTE = "release transaction preview and release transaction run"
+
+
+def production_verb(argv):
+    """The words a production command is matched by: the program by basename, then the
+    arguments exactly."""
+    return [program_name(argv[0]), *argv[1:]]
+
+
+def words_in_order(words, needed):
+    """True when the exact `needed` words occur in `words` in order, not necessarily
+    adjacent; True for no needed word."""
+    position = 0
+    if not needed:
+        return True
+    for word in words:
+        if word == needed[position]:
+            position += 1
+            if position == len(needed):
+                return True
+    return False
+
+
+def production_raw_hit(text, verb):
+    """The raw-text reading of a production verb in `text`: its words in order in either
+    reading of the quotes and backslashes, or its words joined by one space a substring of
+    the text or of the text with its quotes and backslashes deleted."""
+    readings = (raw_words(text), raw_words(text, glued=True))
+    texts = (text, "".join(c for c in text if c not in RAW_GLUE_CHARS))
+    return (
+        any(verb_occurs_in_order(words, verb) for words in readings)
+        or any(" ".join(verb) in each for each in texts)
+    )
+
+
+def production_lifted(run, verb, read_only):
+    """True when `run`, the words from a match onward, begins with a read-only verb that
+    properly extends the production verb `verb`."""
+    return any(
+        len(each) > len(verb)
+        and each[:len(verb)] == verb
+        and len(run) >= len(each)
+        and program_name(run[0]) == each[0]
+        and run[1:len(each)] == each[1:]
+        for each in read_only
+    )
+
+
+REDIRECTION = re.compile(r"[0-9]*(?:&>>?|>>|>&|<&|<>|<<<|<<-?|>|<)(.*)", re.DOTALL)
+ENV_PAYLOAD_PROGRAM = "env"
+
+
+def production_flags(tokens):
+    """`command_position_flags` of `tokens` with each redirection read out of the way, as the
+    shell does: `>/dev/null ./deploy.sh` runs `./deploy.sh`, and a bare `>` or `2>` takes the
+    word after it as its target. Same result shape, over all of `tokens`."""
+    kept = []
+    skip = False
+    for index, (value, operator) in enumerate(tokens):
+        if skip:
+            skip = False
+            continue
+        redirection = None if operator else REDIRECTION.fullmatch(value)
+        if redirection is not None:
+            skip = not redirection.group(1)
+            skip = skip and index + 1 < len(tokens) and not tokens[index + 1][1]
+            continue
+        kept.append(index)
+    kept_flags, split_string = command_position_flags([tokens[index] for index in kept])
+    flags = [False] * len(tokens)
+    for index, flag in zip(kept, kept_flags):
+        flags[index] = flag
+    return flags, split_string
+
+
+def production_runner_hides_shell(tokens, flags):
+    """True when a run whose command-position program is in `PRODUCTION_RUNNERS` holds a
+    shell (`timeout 600 sh -c ...`, `devenv shell -- bash -c ...`) or an `env -S` later, since
+    the shell text it runs is one quoted token that no verb's first word matches."""
+    start = 0
+    while start < len(tokens):
+        if tokens[start][1]:
+            start += 1
+            continue
+        end = start
+        while end < len(tokens) and not tokens[end][1]:
+            end += 1
+        flagged = next((k for k in range(start, end) if flags[k]), None)
+        if flagged is not None and program_name(tokens[flagged][0]) in PRODUCTION_RUNNERS:
+            seen_env = False
+            for value, _ in tokens[flagged + 1:end]:
+                if program_name(value) in SHELL_EVALUATORS:
+                    return True
+                if program_name(value) == ENV_PAYLOAD_PROGRAM:
+                    seen_env = True
+                elif seen_env and value.startswith("-") and wrapper_option("env", value)[0] == "payload":
+                    return True
+        start = end
+    return False
+
+
+ANSI_C_ESCAPES = {"'": "'", "\\": "\\", '"': '"', "n": "\n", "t": "\t"}
+
+
+def ansi_c_unquoted(text):
+    """`text` with each `$'...'` rewritten as the plain single-quoted word the shell reads
+    it as, and the `$` of each `$"..."` deleted, so `$'just'` reads as `just` rather than
+    `$just` and `$'it\\'s'` keeps its escaped quote inside the string. A backslash escape
+    inside `$'...'` is decoded when it is one of `\\'`, `\\\\`, `\\"`, `\\n` and `\\t` and kept
+    as written otherwise. Quotes, backslashes and comments outside a `$'...'` are tracked as
+    the segmenter does, so a `$'` inside another quote stays as it is; a `$'` with no closing
+    quote is left for the segmenter to refuse."""
+    out = []
+    pending = []
+    quote = None
+    index = 0
+    length = len(text)
+    while index < length:
+        character = text[index]
+        if quote == "'":
+            out.append(character)
+            quote = None if character == "'" else quote
+            index += 1
+            continue
+        if character == "\\" and index + 1 < length:
+            out.append(text[index:index + 2])
+            index += 2
+            continue
+        if quote == '"':
+            out.append(character)
+            quote = None if character == '"' else quote
+            index += 1
+            continue
+        if character == "#" and (
+            not out or out[-1] in " \t\n" or out[-1] in SEGMENT_SEPARATORS
+        ):
+            while index < length and text[index] != "\n":
+                out.append(text[index])
+                index += 1
+            continue
+        if character == "<" and text.startswith("<<", index):
+            # A heredoc body is skipped as the segmenter skips it, so an apostrophe in
+            # it never opens a quote here that the segmenter does not see.
+            if text.startswith("<<<", index):
+                out.append("<<<")
+                index += 3
+                continue
+            cursor, delimiter, strip_tabs, expands = read_heredoc_delimiter(text, index)
+            if delimiter is None:
+                out.append(text[index:])
+                break
+            out.append(text[index:cursor])
+            pending.append((delimiter, strip_tabs, expands))
+            index = cursor
+            continue
+        if character == "\n" and pending:
+            out.append(character)
+            index += 1
+            end = skip_heredoc_bodies(text, index, pending)
+            pending = []
+            if end is None:
+                out.append(text[index:])
+                break
+            body = text[index:end]
+            if body.endswith("\n"):
+                out.append(body[:-1])
+                out.append("\n")
+            else:
+                out.append(body)
+            index = end
+            continue
+        if text.startswith("$'", index):
+            cursor = index + 2
+            body = []
+            while cursor < length and text[cursor] != "'":
+                if text[cursor] == "\\" and cursor + 1 < length:
+                    body.append(ANSI_C_ESCAPES.get(text[cursor + 1], text[cursor:cursor + 2]))
+                    cursor += 2
+                else:
+                    body.append(text[cursor])
+                    cursor += 1
+            if cursor >= length:
+                out.append(text[index:])
+                break
+            out.append("'" + "".join(body).replace("'", "'\\''") + "'")
+            index = cursor + 1
+            continue
+        if text.startswith('$"', index):
+            out.append('"')
+            quote = '"'
+            index += 2
+            continue
+        if character in "'\"":
+            quote = character
+        out.append(character)
+        index += 1
+    return "".join(out)
+
+
+def redirections_unglued(text):
+    """`text` with the `&` of a redirection operator (`2>&1`, `&>file`, `<&3`) deleted, so
+    the segmenter does not cut the command there and leave the redirection's target as a
+    command word. Only the `&` goes, and a quoted `&` was inert, so no word is hidden. The
+    `|` of a noclobber `>|` goes for the same reason, so the segmenter does not cut there."""
+    return (
+        text.replace("&>>", ">>").replace("&>", ">").replace(">&", ">").replace("<&", "<")
+        .replace(">|", ">")
+    )
+
+
+def joined_continuations(text):
+    """`text` with each backslash-newline deleted, as the shell joins the lines."""
+    return text.replace("\\\n", "")
+
+
+def production_parse(command):
+    """The tokens and command-position flags of each segment of `command`, with the raw
+    text of the segments after it, or None when the guard reads the command as raw text:
+    it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
+    split = split_segments_with_runs(redirections_unglued(ansi_c_unquoted(command)))
+    if split is None:
+        return None
+    segments = split[0]
+    parsed = []
+    for position, segment in enumerate(segments):
+        tokens = tokenize_segment(segment)
+        if tokens is None:
+            return None
+        flags, split_string = production_flags(tokens)
+        if split_string or any(
+            flag and program_name(value) in SHELL_EVALUATORS
+            for flag, (value, _) in zip(flags, tokens)
+        ) or production_runner_hides_shell(tokens, flags):
+            return None
+        parsed.append((tokens, flags, "\n".join(segments[position + 1:])))
+    return parsed
+
+
+def production_hits(command, rules):
+    """(hits, certain) for `command` against `rules`, a map of slug to its `production`
+    member: the `(slug, index into changes)` pairs the shell would run, and False for
+    `certain` when any word of either raw reading is a directory change (issue 1149 D5 to
+    D7). A mention as another program's argument never hits a one-word verb."""
+    raw = joined_continuations(command)
+    verbs = {
+        slug: (
+            [production_verb(change["argv"]) for change in rule["changes"]],
+            [production_verb(change["argv"]) for change in rule["read_only"]],
+        )
+        for slug, rule in rules.items()
+    }
+    certain = not any(
+        program_name(word) in DIRECTORY_CHANGING_WORDS
+        for words in (raw_words(raw), raw_words(raw, glued=True))
+        for word in words
+    )
+    hits = set()
+    parsed = production_parse(command)
+    if parsed is None:
+        for slug, (changes, _) in verbs.items():
+            for index, verb in enumerate(changes):
+                if production_raw_hit(raw, verb):
+                    hits.add((slug, index))
+        return hits, certain
+    for tokens, flags, later in parsed:
+        later = joined_continuations(later)
+        later_words = (raw_words(later), raw_words(later, glued=True))
+        for value, operator in tokens:
+            if not operator and ("$(" in value or "`" in value):
+                for slug, (changes, _) in verbs.items():
+                    for index, verb in enumerate(changes):
+                        if production_raw_hit(value, verb):
+                            hits.add((slug, index))
+        start = 0
+        while start < len(tokens):
+            if tokens[start][1]:
+                start += 1
+                continue
+            end = start
+            while end < len(tokens) and not tokens[end][1]:
+                end += 1
+            flagged = next((k for k in range(start, end) if flags[k]), None)
+            runner = program_name(tokens[flagged][0]) if flagged is not None else None
+            cut = end < len(tokens)
+            if flagged is not None and runner in PRODUCTION_RUNNERS:
+                # Shell text a runner takes as one word (`watch 'just switch'`,
+                # `nix-shell --run '...'`, `flock f -c '...'`) is read as raw text.
+                for value, _ in tokens[flagged + 1:end]:
+                    if any(character.isspace() for character in value):
+                        for slug, (changes, _) in verbs.items():
+                            for index, verb in enumerate(changes):
+                                if production_raw_hit(value, verb):
+                                    hits.add((slug, index))
+            for i in range(start, end):
+                name = program_name(tokens[i][0])
+                run = [token[0] for token in tokens[i:end]]
+                after = [token[0] for token in tokens[i + 1:] if not token[1]]
+                for slug, (changes, read_only) in verbs.items():
+                    for index, verb in enumerate(changes):
+                        if (slug, index) in hits or name != verb[0]:
+                            continue
+                        if len(verb) == 1:
+                            matched = flags[i] or (
+                                flagged is not None and i > flagged
+                                and runner in PRODUCTION_RUNNERS
+                            )
+                        else:
+                            matched = words_in_order(run[1:], verb[1:]) or (
+                                cut and any(
+                                    words_in_order(after + words, verb[1:])
+                                    for words in later_words
+                                )
+                            )
+                        if matched and not production_lifted(run, verb, read_only):
+                            hits.add((slug, index))
+            start = end
+    return hits, certain
+
+
+def production_refusal_text(slug, rule, release_profile):
+    """The one sentence that refuses a production command (issue 1149 D8)."""
+    return (
+        f"`{shown_value(shlex.join(rule['argv']))}` changes the production of {slug} "
+        f"(production rule {shown_value(rule['id'])}), so it runs only through the "
+        f"release profile {shown_value(release_profile)} with {PRODUCTION_ROUTE}."
+    )
+
+
+def production_problem_for(command, rows, cwd, git_bin, timeout):
+    """The reason to refuse `command` as a production command, or None.
+
+    Only a row whose `production` has a `changes` entry takes part. With no hit nothing
+    runs; with one, `detect_repository` names the payload cwd's repository. A command that
+    may change directory is judged against every declaring row, that repository first,
+    then by sorted slug; otherwise only that repository's rules refuse. Inside a row the
+    first rule in `changes` order that hits names the refusal.
+    """
+    rules = {
+        slug: row["production"] for slug, row in rows.items()
+        if row.get("production") and row["production"]["changes"]
+    }
+    if not rules:
+        return None
+    hits, certain = production_hits(command, rules)
+    if not hits:
+        return None
+    try:
+        here = detect_repository(git_bin, cwd, timeout, strict=True)
+    except RepositoryLookupFailed as error:
+        return (f"the repository lookup {error} for a command that may change the production "
+                "of a declared project, so the guard cannot judge it")
+    order = [here] if here in rules else []
+    if not certain:
+        order += sorted(slug for slug in rules if slug != here)
+    for slug in order:
+        for index, change in enumerate(rules[slug]["changes"]):
+            if (slug, index) in hits:
+                return production_refusal_text(slug, change, rules[slug]["release_profile"])
+    return None
+
+
+
 class Context:
     """Injected dependencies plus one repository's facts, resolved once per
     directory or per named repository (issue 400 D8, issue 418 D4).
@@ -3529,10 +4039,9 @@ class Context:
     context (issue 418 D5): the repository is the slug a PR creation or merge
     names with `--repo`, no checkout is read for it (`cwd` is None, no `git`
     child runs), and the base branch is its row's `default_branch` once the row
-    check confirms the row. Building a context is the one place the compiled
-    policy is opened and the one place the row check runs, so a command with no
-    push, PR creation, merge or release creation never reads the first or
-    starts the second.
+    check confirms the row. Building a context is the one place the row check
+    runs, so a command with no push, PR creation, merge or release creation never starts the row check; the
+    compiled policy is also read once before it, for the production rules.
     """
 
     def __init__(self, args, base, cwd, deadline, repository=None):
@@ -5425,6 +5934,19 @@ def main():
         args.gh_bin = base.gh_bin
     if args.jq_bin is None:
         args.jq_bin = base.jq_bin
+
+    # Issue 1149 D4, D10: the compiled policy is read on every call that passes the
+    # detaching check and the base policy, for the production rules.
+    rows, _reason = load_compiled_policy(args.policy)
+    try:
+        refusal = production_problem_for(
+            command, rows, payload.get("cwd"), args.git_bin,
+            bounded_timeout(started + INVOCATION_DEADLINE_SECONDS,
+                            args.child_timeout_seconds))
+    except DeadlineExhausted:
+        return block(DEADLINE_REFUSAL)
+    if refusal is not None:
+        return block(refusal)
 
     operations = guarded_operations(command)
     for operation, _segment, problem, _directory in operations:
