@@ -1728,6 +1728,18 @@ class SprintWaitViewTest(unittest.TestCase):
         self.assertEqual(shown["ball"], "manager")
         self.assertEqual(shown["now_text"], "waiting for a release step")
 
+    def test_a_shown_merge_refusal_is_read_before_any_wait_sentence(self):
+        now = self.now
+        refused = reported(with_manager(started(A)), R, status="merge refused: checks not green")
+        for label, movement in (("CI", moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),),
+                                              read_ms=now - MIN)),
+                                ("a commit", moving(branches=((5, now - 5 * MIN),))),
+                                ("a release", moving(release_ms=now - MIN))):
+            with self.subTest(label):
+                shown = self.shown(movement, sprint_state=refused)
+                self.assertEqual(shown["state"], "on_track")
+                self.assertEqual(shown["now_text"], "merge refused: checks not green")
+
     def test_every_signal_finished_and_twenty_quiet_minutes_reads_may_be_stuck(self):
         now = self.now
         for label, quiet_min, ball in (("twenty minutes", 20, "nobody"),

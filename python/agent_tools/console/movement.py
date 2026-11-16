@@ -6,11 +6,13 @@ arguments; `branch_updates` and `release_reading` only read files, start no proc
 Pull requests. One GraphQL query (`PULLS_QUERY`, `pulls_argv`) asks for the `MAX_PULLS` most recently
 updated open pull requests with the head commit's `committedDate` and its check contexts counted by state. `read_pulls`
 makes exactly one `call`, with `pulls_argv(slug)`, and asks `cancelled()` before it; when cancelled it
-raises `ForgeError("cancelled")` and makes no call. A pull request is `running` when the head commit has a `CheckRun` counted
+raises `ForgeError("cancelled")` and makes no call. With no `call` the transport is
+`forge_api.gh_json(argv, cancelled=cancelled)`, which kills the `gh` process group in flight as soon
+as `cancelled()` is true and raises `ForgeError("cancelled")`. A pull request is `running` when the head commit has a `CheckRun` counted
 in a state of `RUNNING_CHECKS` (queued, in progress or pending) or a `StatusContext` counted in a state
 of `RUNNING_STATUSES`, however many other contexts it has, since the counts cover every context and not
 a first page of them. A check in `WAITING` is held on a person (a deployment environment's reviewer),
-not running CI, so it does not count (ADR-console-047 D6); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
+not running CI, so it does not count (ADR-console-049 D6); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
 `deliveries.branch_issue(pattern, headRefName)` (when not None) united with `body_issues(body)`, which
 matches `(?<![\\w/])#(\\d+)\\b`, so `owner/repo#6` and `abc#6` name nothing. `committed_ms` is the head
 commit's `committedDate` in epoch milliseconds, None with no commit. An answer of another shape raises
@@ -33,8 +35,9 @@ in progress when it is not in `TERMINALS` and not `HELD_FOR_A_PERSON`. No store 
 The fold. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
 (a failed read) the result keeps `previous.pulls` and `previous.read_ms` unchanged. With `pulls` given,
 `read_ms = now_ms`, and each read pull becomes a `PullMovement` with its read `issues` and
-`committed_ms` and `running_ms = now_ms` when it is `running`, else the `running_ms` of the previous
-pull with the same number (None if none). A previous pull absent from the read (merged, closed, or past
+`committed_ms` (the larger of it and the previous pull's, so a rewritten head never moves it back,
+as the branch fold keeps the larger time) and `running_ms = now_ms` when it is `running`, else the
+`running_ms` of the previous pull with the same number (None if none). A previous pull absent from the read (merged, closed, or past
 the newest `MAX_PULLS`) is kept exactly as it was, its times never refreshed, so its last movement ages
 out under the quiet window like a run that ended. `branches` is the union of `previous.branches` and
 `local.branches` by issue, the larger time winning, ascending by issue: a deleted branch keeps its last
@@ -214,11 +217,15 @@ def pulls_from_answer(answer: object, pattern: str | None) -> tuple[PullRequest,
 
 
 def read_pulls(slug: str, pattern: str | None, *,
-               call: Callable[[list[str]], Any] = forge_api.gh_json,
+               call: Callable[[list[str]], Any] | None = None,
                cancelled: Callable[[], bool] = lambda: False) -> tuple[PullRequest, ...]:
-    """The open pull requests of one repository in one call; raises `forge_api.ForgeError`."""
+    """The open pull requests of one repository in one call; raises `forge_api.ForgeError`. With no
+    `call` the production transport runs, which ends the call in flight once `cancelled()` is true."""
     if cancelled():
         raise ForgeError("cancelled")
+    if call is None:
+        def call(argv: list[str]) -> Any:
+            return forge_api.gh_json(argv, cancelled=cancelled)
     return pulls_from_answer(call(pulls_argv(slug)), pattern)
 
 
@@ -307,8 +314,10 @@ def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | No
         for pull in pulls:
             seen = old.get(pull.number)
             running_ms = now_ms if pull.running else (None if seen is None else seen.running_ms)
-            fresh[pull.number] = PullMovement(pull.number, pull.issues, running_ms,
-                                              pull.committed_ms)
+            committed = pull.committed_ms
+            if seen is not None and seen.committed_ms is not None:
+                committed = seen.committed_ms if committed is None else max(committed, seen.committed_ms)
+            fresh[pull.number] = PullMovement(pull.number, pull.issues, running_ms, committed)
         kept = tuple(sorted({**old, **fresh}.values(), key=lambda p: p.number))
         read_ms = now_ms
     branches = dict(before.branches)

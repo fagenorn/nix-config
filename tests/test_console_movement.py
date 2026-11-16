@@ -5,10 +5,13 @@ Run: just agent-workflow-tests
 
 import copy
 import json
+import os
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import movement
 from agent_tools.console.movement import (
@@ -64,6 +67,24 @@ class PullsTest(unittest.TestCase):
             movement.read_pulls("owner/p00", PATTERN, call=stub, cancelled=lambda: True)
         self.assertEqual(caught.exception.code, "cancelled")
         self.assertEqual(len(calls), 1)
+
+    def test_the_production_transport_is_ended_in_flight_by_a_cancellation(self):
+        with tempfile.TemporaryDirectory() as home:
+            gh = Path(home, "gh")
+            gh.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+            gh.chmod(0o755)
+            asked = []
+
+            def cancelled():
+                asked.append(time.monotonic())
+                return len(asked) > 2
+
+            with mock.patch.dict(os.environ, {"PATH": home + os.pathsep + os.environ["PATH"]}):
+                started = time.monotonic()
+                with self.assertRaises(ForgeError) as caught:
+                    movement.read_pulls("owner/p00", PATTERN, cancelled=cancelled)
+            self.assertEqual(caught.exception.code, "cancelled")
+            self.assertLess(time.monotonic() - started, 10)
 
     def test_only_a_check_still_queued_or_running_counts_however_many_have_finished(self):
         def running(check_runs, statuses=()):
@@ -212,6 +233,19 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(kept.read_ms, 1000)
         self.assertEqual(movement.merged(None, None, 5000, LocalReading((), False)),
                          ProjectMovement())
+
+    def test_a_rewritten_head_never_moves_a_pulls_commit_time_back(self):
+        first = movement.merged(None, (PullRequest(40, frozenset({4}), False, 5000),), 6000,
+                                LocalReading((), False))
+        back = movement.merged(first, (PullRequest(40, frozenset({4}), False, 1000),), 7000,
+                               LocalReading((), False))
+        self.assertEqual(back.pulls[0].committed_ms, 5000)
+        none = movement.merged(first, (PullRequest(40, frozenset({4}), False, None),), 8000,
+                               LocalReading((), False))
+        self.assertEqual(none.pulls[0].committed_ms, 5000)
+        newer = movement.merged(back, (PullRequest(40, frozenset({4}), False, 9000),), 9500,
+                                LocalReading((), False))
+        self.assertEqual(newer.pulls[0].committed_ms, 9000)
 
     def test_a_release_keeps_the_time_it_was_last_seen_in_progress(self):
         a = movement.merged(None, None, 1000, LocalReading((), True))
