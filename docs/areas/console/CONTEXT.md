@@ -101,6 +101,10 @@ _Avoid_: activity feed, changelog
 One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005). The run reads as one sentence of counts by stage, its issues and stages shown when its line is opened.
 _Avoid_: sprint, job
 
+**Spend**:
+The tokens (input, cache writes, cache reads, output) and estimated list-price dollars the host's sessions and delivery runs used, read from their transcripts and shown per day for 30 days by session, project, sprint, run, phase, account and aspect (ADR-console-047).
+_Avoid_: cost, usage
+
 **Limit reading**:
 The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
 _Avoid_: usage

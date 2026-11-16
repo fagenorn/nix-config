@@ -99,6 +99,7 @@
 | Row check | Guard |
 | Session | Console |
 | Sign-in state | Console |
+| Spend | Console |
 | Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |
