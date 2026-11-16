@@ -200,6 +200,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .st-dim { color: var(--ov2); }
 .sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
+.sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
+.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; color: var(--sub1); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.sprint-check:hover, .sprint-check:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -403,6 +406,8 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
+  .sprint-checks { padding-left: 0; }
+  .sprint-check { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -736,6 +741,12 @@ function fillSprint(item, entry, sprint) {
     sprintRedraw -= 1;
   }
 }
+function openCheckCard(check) {
+  const card = inboxCards.get(check.project_id + "#" + check.key);
+  if (card === undefined || !card.isConnected) return;
+  if (card.tabIndex !== 0) card.tabIndex = -1;
+  card.focus();
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
@@ -789,6 +800,16 @@ function drawSprint(item, entry, sprint) {
   words.appendChild(age);
   head.appendChild(words);
   item.appendChild(head);
+  const checks = sprint.checks || [];
+  if (checks.length > 0) {
+    const list = el("ul", "sprint-checks");
+    for (const check of checks) {
+      const line = el("li", "");
+      line.appendChild(actionButton("sprint-check", check.text, () => openCheckCard(check)));
+      list.appendChild(line);
+    }
+    item.appendChild(list);
+  }
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -2020,6 +2041,7 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
+let inboxCards = new Map();
 let keyHint = null;
 let hintHost = null;
 function itemId(item) {
@@ -3275,6 +3297,7 @@ function drawInbox(view) {
     }
     section.appendChild(rest);
   }
+  inboxCards = cardOf;
   const answered = view.inbox.answered;
   if (answered.length > 0) {
     const done = el("ul", "done");
