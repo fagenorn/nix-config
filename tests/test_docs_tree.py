@@ -1755,5 +1755,42 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(sum(1 for line in out if line.startswith("| #")), 80)
 
 
+    def test_the_land_queue_proposal_keeps_every_required_check(self):
+        protection = json.loads((REPO_ROOT / ".github/branch-protection.json").read_text(encoding="utf-8"))
+        contexts = [c["context"] for c in protection["required_status_checks"]["checks"]]
+        text = (REPO_ROOT / LAND_QUEUE_DOC).read_text(encoding="utf-8")
+        lines = land_queue_section(text, "Measurements").splitlines()
+        at = lines.index("| Figure | Median | p90 | Max | Sum |")
+        summary = {}
+        for line in lines[at + 2 :]:
+            if not line.startswith("|"):
+                break
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            summary[cells[0]] = cells[1]
+        self.assertIn("\n## Proposal\n", text)
+        self.assertIn("\n## Alternatives considered\n", text)
+        proposal = land_queue_section(text, "Proposal")
+        alternatives = land_queue_section(text, "Alternatives considered")
+        m = re.search(
+            r"(?m)^\*\*Expected saving per queued pull request:\*\* at most (\d+\.\d) min per landing ahead of it \(the median of `([^`]+)`\)",
+            proposal,
+        )
+        self.assertEqual(len(contexts), 3)
+        for context in contexts:
+            self.assertIn(context, proposal)
+        self.assertIn("`strict`", proposal)
+        self.assertIn("`.github/branch-protection.json`", proposal)
+        self.assertIsNotNone(m)
+        self.assertIn(m[2], ("AWT before test step (min)", "Green to merge (min)", "Handoff (min)"))
+        self.assertEqual(m[1], summary[m[2]])
+        if m[2] == "Handoff (min)":
+            self.assertIn("its own hold is unchanged", proposal)
+            self.assertIn("`python/agent_tools/claims/forge_land_lock.py`", proposal)
+        else:
+            self.assertIn(f"its own hold is at most {m[1]} min shorter", proposal)
+            self.assertIn("`forge-claim land` is unchanged", proposal)
+        self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

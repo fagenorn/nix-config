@@ -280,3 +280,22 @@ for row in provenance:
     print("| " + " | ".join(row) + " |")
 PY
 ```
+
+## Proposal
+
+Three speed-ups have a saving per landing that the summary table gives as the median of one row, and each keeps the three required checks and the head they run on. A shortens the `Agent Workflow Tests` job's steps before its test step (median 0.2 minutes, `.github/workflows/ci.yaml` only). B shortens the holder's wait for green and merge (median 0.7 minutes, the delivery programs). C shortens the gap between one merge and the next waiter's start (median 1.4 minutes, one lock file). A quarter of the median Hold of 14.0 minutes is 3.5 minutes, and none of the three reaches it, so the one with the largest saving is proposed: C.
+
+**What changes.** The first waiter finds a closed lock only at a whole 120 second poll, because a merge leaves the lock's oid unchanged and the 20 second ref reads do not see it (ADR-claims-012, "The grace." and "Poll rate." bullets). A follow-up makes that waiter notice the merge sooner, so its start is not up to a poll late. The file that follow-up changes is `python/agent_tools/claims/forge_land_lock.py`. The forge-clock order of ADR-claims-012 and the CAS lock of ADR-claims-004 are kept: only how soon the first waiter looks again changes, never who is first or how the lock is taken. `.github/branch-protection.json` does not change, and neither does the sync-under-the-lock step. This document only proposes it; adopting it is a later issue.
+
+**Expected saving per queued pull request:** at most 1.4 min per landing ahead of it (the median of `Handoff (min)`). A pull request with k landings ahead of it waits at most k x 1.4 minutes less, and its own hold is unchanged: the lock hold of each holder is the same length, and the saving is the gap between one landing and the next waiter's start, which the estimated Hold (it starts at the previous merge) shows and the lock hold does not. For the 16 Nov case of five queued pull requests, the last one waits at most 5 x 1.4 = 7.0 minutes less. The figure is an upper bound, since a handoff cannot fall to zero, and it is the median: the p90 handoff is 5.8 minutes and one landing (#1159) took 83.0.
+
+**Why every required check still runs on a head up to date with `main`.** `Nix Eval`, `Agent Workflow Tests` and `Instruction Budget` stay required by `.github/branch-protection.json` with `strict` true. The holder still syncs under the lock and merges with `--match-head-commit` at the synced head. C changes only when the next holder starts, not which head the checks run on, so no merge is gated differently; merge safety keeps coming from the required status checks on the pull request (`.agents/knowledge/rejections/ungated-agent-merges.md`).
+
+## Alternatives considered
+
+- **A, a shorter set-up before the test step.** Saving at most 0.2 minutes per landing (the median of `AWT before test step (min)`), and it shortens each holder's own hold. It changes `.github/workflows/ci.yaml` only, but it is the smallest saving of the three: the one large value (3.5 minutes, #1175) is not typical.
+- **B, a shorter wait between green and merge.** Saving at most 0.7 minutes per landing (the median of `Green to merge (min)`; the 1175.8 minute maximum is one outlier). It changes the delivery programs rather than one file, and its saving is smaller than C's.
+- **A faster suite, `SUITE_RUNNER_JOBS`, a larger runner, or the `nix shell` realization inside the test step.** The test step is almost all of the check (median 8.5 minutes), but no column splits it further, so saving not measured here; each needs its own measurement before it can be proposed.
+- **GitHub's merge queue (`merge_group`).** It replaces the lock and the up-to-date rule with the forge's queue, and changes branch protection, the CI triggers and the delivery programs. Saving not measured here, and a much larger change than one lock file.
+- **Landing several queued pull requests as one batch with one CI cycle.** A merged head would no longer be tested alone and a red batch needs bisecting; less safe, and saving not measured here.
+- **Dropping `strict`, or skipping the sync when the new commits on `main` touch other files.** Unsafe: the merged head would not be tested on top of the current `main`, which is what the required checks are there to prove.
