@@ -15,7 +15,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import contract_draft, plan_questions, register
+from agent_tools.console import approve, contract_draft, plan_questions, register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
 
@@ -413,6 +413,14 @@ CODE_WORDS = ("adopt.", "platform.", "adopt_failure", "not_integrated", "timed_o
 
 
 class NextStepTest(unittest.TestCase):
+    def test_a_failed_discard_before_a_plan_says_try_again(self):
+        error = adopt_error("adopt.discard.failed",
+                            "the retained worktree of this plan could not be removed")
+        self.assertEqual(register.summary("/x/r", error)["note"], register.DISCARD_STEP)
+        self.assertEqual(register.DISCARD_STEP,
+                         "Choose Try again to remove the copy the last attempt left on this "
+                         "computer and plan again.")
+
     def test_a_missing_manifest_says_the_cause_once_and_the_step_once(self):
         error = {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
             {"pointer": "", "message": "the installed platform manifest was not found"}]}
@@ -431,6 +439,13 @@ class NextStepTest(unittest.TestCase):
                 other = {**error, "repair_id": repair_id}
                 self.assertEqual(register.summary("/srv/r", {"error": other})["note"],
                                  register.MANIFEST_STEP)
+
+    def test_a_failed_plan_for_a_missing_platform_names_just_switch(self):
+        plan = {"error": {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+            {"pointer": "", "message": register.MANIFEST_ABSENT}]}}
+        row = register.summary("/x/r", plan)
+        self.assertEqual(row["note"], "Run just switch on this computer to install them, then "
+                                      "choose Try again.")
 
     def test_any_other_manifest_failure_keeps_its_own_reason(self):
         cases = (
@@ -474,7 +489,7 @@ class NextStepTest(unittest.TestCase):
 
     def test_no_failure_text_names_a_command_hash_or_path(self):
         forbidden = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
-        banned = ("adopt-project", "resolve-project", "just switch", "in a terminal:")
+        banned = ("adopt-project", "resolve-project", "in a terminal:")
         root = "/srv/a b/app"
         rows = [register.failed(root, kind, verb)
                 for kind in (*register.RUN_KINDS, "ValueError") for verb in ("plan", "register")]
@@ -578,6 +593,71 @@ class FailureCardTest(unittest.TestCase):
                      b'{"root": "/r\\u0007", "choice": "try_again"}'):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 register.parse_confirm_request(body)
+
+
+class LegacyNoteTest(unittest.TestCase):
+    def test_latest_reads_an_old_manifest_note_in_the_new_words(self):
+        old = ("Switch this computer to its current configuration to install them, then choose "
+               "Try again.")
+        self.assertEqual(register.LEGACY_NOTES, {old: register.MANIFEST_STEP})
+        row = register.summary("/srv/a", {"error": {
+            "code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+                {"pointer": "", "message": register.MANIFEST_ABSENT}]}})
+        found = register.latest([Event(1, "t1", register.ENDED, None, {**row, "note": old})])
+        self.assertEqual(found["note"], register.MANIFEST_STEP)
+
+
+class CancelFoldTest(unittest.TestCase):
+    def ended_event(self, seq, root="/x/r", plan_id="P"):
+        row = {**register.summary(root, plan_doc(state="ready")), "plan_id": plan_id}
+        return Event(seq, f"t{seq}", register.ENDED, None, row)
+
+    def cancel_event(self, seq, root="/x/r", plan_id="P"):
+        row = register.cancelled_row(root, plan_id)
+        return Event(seq, f"t{seq}", row[0], None, row[2])
+
+    def test_a_cancel_row_folds_the_registration_away(self):
+        self.assertEqual(register.cancelled_row("/x/r", "P"),
+                         ("registration.cancelled", None,
+                          {"by": "owner", "root": "/x/r", "plan_id": "P"}))
+        self.assertEqual(register.CANCELLED, "registration.cancelled")
+        ended = self.ended_event(1)
+        self.assertIsNotNone(register.latest([ended]))
+        self.assertIsNone(register.latest([ended, self.cancel_event(2)]))
+        again = self.ended_event(3)
+        self.assertEqual(register.latest([ended, self.cancel_event(2), again])["at"], "t3")
+        for other in (self.cancel_event(2, root="/x/other"), self.cancel_event(2, plan_id="Q"),
+                      Event(2, "t2", register.CANCELLED, None, {"root": "/x/r", "plan_id": "P"})):
+            with self.subTest(other=other.payload):
+                self.assertEqual(register.latest([ended, other])["at"], "t1")
+        state = register.latest([ended])
+        self.assertIsNone(register.latest([self.cancel_event(2)], state))
+        self.assertIsNotNone(state)
+
+    def test_cancellable_before_apply_only(self):
+        planned = {"result": "planned"}
+        self.assertFalse(register.cancellable(None, None))
+        self.assertTrue(register.cancellable(planned, None))
+        self.assertTrue(register.cancellable({"result": "failed"}, None))
+        self.assertFalse(register.cancellable({"result": "registered"}, None))
+        self.assertTrue(register.cancellable(planned, {"step": "apply_failed"}))
+        for step in ("applied", "push_failed", "open_failed", "opened"):
+            with self.subTest(step=step):
+                self.assertFalse(register.cancellable(planned, {"step": step}))
+
+    def test_parse_cancel_request(self):
+        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r"}'), "/x/r")
+        for body in (b'{"root": "/x/r", "choice": "register"}', b'{}', b'{"root": ""}',
+                     b'{"root": 3}', b'{"root": "/x\nr"}', b'{"root": "/x\u007fr"}',
+                     b'not json', b'\xff', b'[]'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                register.parse_cancel_request(body)
+        self.assertEqual(register.CANCEL_REFUSED,
+                         "only a registration that was not applied yet can be cancelled")
+        self.assertEqual(
+            register.CANCEL_DISCARD_FAILED,
+            "The copy that the failed attempt left on this computer could not be removed, so the "
+            "registration was not cancelled. Choose Cancel registration to try again.")
 
 
 class RowTest(unittest.TestCase):
@@ -698,8 +778,8 @@ class RowTest(unittest.TestCase):
         running = register.view_entry("/x/sample-app", None)
         self.assertIsNone(running["draft"])
         self.assertIsNone(running["draft_more"])
-        self.assertEqual(len(running), 20)
-        self.assertEqual(len(entry), 20)
+        self.assertEqual(len(running), 21)
+        self.assertEqual(len(entry), 21)
         full = contract_draft.draft("/x/sample-app", {
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
@@ -768,7 +848,7 @@ class RowTest(unittest.TestCase):
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
             "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
             "refused": None, "draft": None, "draft_more": None, "adoption": None,
-            "approve": None})
+            "approve": None, "cancel": False})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
@@ -777,12 +857,15 @@ class RowTest(unittest.TestCase):
             "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
             "line": "Register r: ready to apply", "refused": None, "draft": None,
-            "draft_more": None, "adoption": None, "approve": None})
+            "draft_more": None, "adoption": None, "approve": None, "cancel": False})
+        self.assertTrue(register.view_entry(None, latest, cancel=True)["cancel"])
+        self.assertFalse(register.view_entry("/srv/r", None, cancel=True)["cancel"])
         self.assertIsNone(register.view_entry(None, None))
 
     def test_view_entry_carries_the_adoption_and_its_action(self):
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
-        adoption = {"status": "done", "headline": "The adoption of r was applied."}
+        adoption = {"status": "done", "headline": "The adoption of r was applied.",
+                    "note": None}
         shown = register.view_entry(None, latest, adoption=adoption, approve="retry")
         self.assertEqual((shown["adoption"], shown["approve"]), (adoption, "retry"))
         self.assertEqual(shown["line"], "The adoption of r was applied.")
@@ -790,6 +873,50 @@ class RowTest(unittest.TestCase):
         running = register.view_entry("/srv/r", latest, adoption=adoption, approve="approve")
         self.assertEqual((running["adoption"], running["approve"]), (None, None))
         self.assertEqual(running["line"], "Planning the adoption of r\u2026")
+
+    def opened_adoption(self, pull_state, note=None):
+        found = approve.entry(
+            {"step": "opened", "plan_id": "p1", "root": "/srv/r", "project_id": "o/r",
+             "branch": "adopt-bbbbbbbbbbbb", "commit": "c" * 40, "base": "develop",
+             "pull_request": {"number": 7, "url": "https://example.test/pull/7"},
+             "reason": None, "note": None, "kept": None, "at": "t", "pull_state": pull_state,
+             "pull_at": "t"},
+            running=False, name="r")
+        return {**found, "note": note}
+
+    def drafted_latest(self):
+        full = contract_draft.draft("/x/r", {
+            "remotes": [("origin", "git@github.com:sample-owner/r.git")],
+            "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
+        return {**register.summary("/srv/r", plan_doc(state="ready", open_questions=0)),
+                "lines": ["moves 1 agent file under .agents/"], "draft": full, "at": "t"}
+
+    def test_view_entry_with_an_adoption_holds_one_sentence_and_no_lines(self):
+        latest = {**register.summary("/srv/r", plan_doc(state="ready")),
+                  "lines": ["moves 1 agent file under .agents/"], "at": "t"}
+        waiting = register.view_entry(None, latest, adoption=self.opened_adoption("open"),
+                                      approve=None)
+        self.assertEqual(waiting["lines"], [])
+        self.assertEqual(waiting["line"], "The pull request of r is not ready to merge yet.")
+        closed = register.view_entry(
+            None, latest, adoption=self.opened_adoption("closed", approve.CLOSED_NOTE),
+            approve=None)
+        self.assertEqual(closed["lines"], [])
+        self.assertEqual(closed["line"], closed["adoption"]["headline"] + " " + approve.CLOSED_NOTE)
+        self.assertEqual(register.view_entry(None, latest)["lines"], latest["lines"])
+
+    def test_view_entry_with_an_adoption_draws_no_draft(self):
+        latest = self.drafted_latest()
+        alone = register.view_entry(None, latest)
+        self.assertTrue(alone["draft"])
+        self.assertTrue(any(entry["more"] for entry in alone["draft"]))
+        self.assertIsNotNone(alone["draft_more"])
+        for state in ("open", "ready"):
+            with self.subTest(state=state):
+                shown = register.view_entry(None, latest, adoption=self.opened_adoption(state),
+                                            approve=None)
+                self.assertIsNone(shown["draft"])
+                self.assertIsNone(shown["draft_more"])
 
 
 FAKE = """#!/bin/sh
@@ -841,6 +968,18 @@ class AdopterTest(unittest.TestCase):
         self.assertEqual(self.args.read_text().splitlines(),
                          ["apply --plan-id sha256:aa",
                           "apply --plan-id sha256:aa --acknowledge-deletions"])
+
+    def test_apply_discards_the_retained_copy_when_asked(self):
+        adopter = self.adopter()
+        adopter.apply("sha256:aa", acknowledge_deletions=True, discard_retained=True)
+        adopter.apply("sha256:aa", acknowledge_deletions=True)
+        self.assertEqual(self.args.read_text().splitlines(),
+                         ["apply --plan-id sha256:aa --acknowledge-deletions --discard-retained",
+                          "apply --plan-id sha256:aa --acknowledge-deletions"])
+
+    def test_discard_runs_the_discard_subcommand(self):
+        self.adopter().discard("sha256:aa")
+        self.assertEqual(self.args.read_text().splitlines(), ["discard --plan-id sha256:aa"])
 
     def test_apply_has_its_own_timeout(self):
         self.assertEqual(register.APPLY_TIMEOUT, 1800)

@@ -281,7 +281,7 @@ class PageTest(unittest.TestCase):
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
-             "/api/trust-check"},
+             "/api/trust-check", "/api/register-cancel"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -290,7 +290,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 33)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 34)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -507,7 +507,7 @@ class PageTest(unittest.TestCase):
                 self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 4)
         lines = self.text.splitlines()
         (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
         self.assertIn("isHttps(", lines[at - 1] + lines[at])
@@ -515,9 +515,8 @@ class PageTest(unittest.TestCase):
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
         self.assertEqual(self.text.count("link.href = item.url;"), 1)
-        self.assertEqual(self.text.count("link.href = adoption.url;"), 1)
+        self.assertNotIn("adoption.url", self.text)
         self.assertEqual(self.text.count("if (isHttps(item.url)) {"), 1)
-        self.assertEqual(self.text.count("if (isHttps(adoption.url)) {"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
 
 
@@ -2054,7 +2053,7 @@ class PageInboxGlanceTest(unittest.TestCase):
         (snap,) = render([START, {"frame": frame([first, second])}, {"snapshot": True}])
         inbox = snap["inbox"]
         (head,) = [n for n in nodes(inbox) if n["tag"] == "h2" and has_class(n, "q")]
-        self.assertEqual(head["text"], "Which database?")
+        self.assertEqual(full(head), "Which database?")
         self.assertEqual(full(inbox).count("and 2 more questions"), 1)
         (rest,) = [n for n in nodes(inbox) if has_class(n, "rest")]
         self.assertNotIn("more question", full(rest))
@@ -2208,7 +2207,7 @@ class PageCardTest(unittest.TestCase):
                 primaries = [n for n in nodes(card) if has_class(n, "primary")]
                 self.assertEqual(len(primaries), 1)
                 self.assertEqual(primaries[0]["tag"], "button")
-                self.assertEqual(primaries[0]["text"], label)
+                self.assertEqual(full(primaries[0]), label)
                 self.assertEqual([c for c in primaries[0]["children"] if c["tag"] == "kbd"], [])
 
     def test_the_lead_card_holds_its_held_work_under_the_options_and_its_link_under_detail(self) -> None:
@@ -6925,7 +6924,8 @@ PUSH_FAILED_ADOPTION = {
             "push, then choose Try again.",
     "url": None}
 FAILED_SHOWN = {**READY_SHOWN, "approve": "retry", "adoption": PUSH_FAILED_ADOPTION,
-                "line": PUSH_FAILED_ADOPTION["headline"]}
+                "lines": [],
+                "line": PUSH_FAILED_ADOPTION["headline"] + " " + PUSH_FAILED_ADOPTION["note"]}
 TRY_ITEM = {
     **APPLY_ITEM, "key": APPLY_ITEM["key"] + "/2026-11-15T08:05:00+00:00",
     "headline": PUSH_FAILED_ADOPTION["headline"], "why": PUSH_FAILED_ADOPTION["note"],
@@ -6953,8 +6953,7 @@ CONFIRM_ITEM = {
 
 FAILED_HEADLINE = ("The adoption plan for r could not start: the agent platform's files are not "
                    "installed on this host.")
-FAILED_WHY = ("Switch this computer to its current configuration to install them, then choose "
-              "Try again.")
+FAILED_WHY = "Run just switch on this computer to install them, then choose Try again."
 FAILED_ITEM = {
     "type": "inbox_item", "reason": "register_failed",
     "key": "register-failed//srv/r/2026-11-15T08:00:00+00:00",
@@ -7029,30 +7028,14 @@ class RegisterControlTest(unittest.TestCase):
         self.assertEqual(registered(snap, "register-close"), [])
         self.assertEqual([n for n in nodes(snap["register"]) if n["tag"] == "li"], [])
 
-    def test_a_done_registration_shows_its_line_and_lines_and_close_hides_it(self) -> None:
+    def test_a_done_registration_shows_its_line_and_lines_and_no_close(self) -> None:
         done = {**frame([]), "registration": REGISTERED}
-        shown, closed, again, fresh = render([
-            START, {"frame": done}, {"snapshot": True},
-            {"click": "register-close"}, {"snapshot": True},
-            {"frame": done}, {"snapshot": True},
-            {"frame": {**frame([]), "registration": {**REGISTERED, "at": "2026-11-15T09:00:00+00:00"}}},
-            {"snapshot": True}])
+        (shown,) = render([START, {"frame": done}, {"snapshot": True}])
         (result,) = registered(shown, "register-result")
         self.assertEqual(
             [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
-            [REGISTERED["line"], *REGISTERED["lines"], "Close"])
-        self.assertEqual(full(registered(shown, "register-close")[0]), "Close")
-        for snap in (closed, again):
-            self.assertEqual(registered(snap, "register-result"), [])
-        self.assertEqual(len(registered(fresh, "register-result")), 1)
-
-    def test_close_on_the_register_box_posts_nothing_and_leaves_the_card(self) -> None:
-        (snap,) = render([
-            START, {"frame": cards([CONFIRM_ITEM], WAITING_SHOWN)},
-            {"click": "register-close"}, {"snapshot": True}])
-        self.assertEqual(snap["posts"], [])
-        self.assertEqual(registered(snap, "register-result"), [])
-        self.assertIn("Register it", full(snap["inbox"]))
+            [REGISTERED["line"], *REGISTERED["lines"]])
+        self.assertEqual(registered(shown, "register-close"), [])
 
     def test_with_no_project_the_register_control_still_shows(self) -> None:
         (snap,) = render([START, {"frame": {**frame([]), "registration": None}}, {"snapshot": True}])
@@ -7121,32 +7104,36 @@ class RegisterControlTest(unittest.TestCase):
         self.assertNotIn("adopt-project", shown)
         self.assertNotIn("adopt-project apply", shown)
 
-    def test_an_approved_adoption_shows_its_headline_as_the_one_line_then_its_lines_note_and_link(self) -> None:
-        def drawn(adoption: dict) -> dict:
-            (snap,) = render([
-                START, {"frame": {**frame([]), "registration": {
-                    **READY_SHOWN, "approve": None, "adoption": adoption,
-                    "line": adoption["headline"]}}},
-                {"snapshot": True}])
-            return snap
-        snap = drawn(OPENED_ADOPTION)
-        (line,) = registered(snap, "register-line")
-        self.assertEqual(full(line), OPENED_ADOPTION["headline"])
-        self.assertEqual(registered(snap, "register-adoption-headline"), [])
-        (lines,) = registered(snap, "register-adoption-lines")
-        self.assertEqual([full(n) for n in lines["children"] if n["tag"] == "li"],
-                         OPENED_ADOPTION["lines"])
-        (link,) = [n for n in nodes(registered(snap, "register-adoption")[0]) if n["tag"] == "a"]
-        self.assertTrue(has_class(link, "register-pr-link"))
-        self.assertEqual(full(link), "Open the pull request")
-        self.assertEqual(link["href"], OPENED_ADOPTION["url"])
-        noted = drawn({**OPENED_ADOPTION, "note": "The branch is kept."})
-        self.assertIn("The branch is kept.",
-                      [full(n) for n in registered(noted, "register-note")])
-        for url in (None, "javascript:alert(1)"):
-            plain = drawn({**OPENED_ADOPTION, "url": url})
-            self.assertEqual([n for n in nodes(registered(plain, "register-adoption")[0])
-                              if n["tag"] == "a"], [])
+    def test_an_open_or_ready_adoption_is_one_sentence_with_no_lines_link_or_close(self) -> None:
+        for sentence in ("The pull request of r is not ready to merge yet.",
+                         "The pull request of r is ready to merge."):
+            with self.subTest(sentence=sentence):
+                (snap,) = render([
+                    START, {"frame": {**frame([]), "registration": {
+                        **READY_SHOWN, "approve": None, "lines": [],
+                        "adoption": {**OPENED_ADOPTION, "lines": [], "note": None,
+                                     "url": "https://github.com/o/r/pull/7"},
+                        "line": sentence}}},
+                    {"snapshot": True}])
+                (result,) = registered(snap, "register-result")
+                drawn = [n for n in nodes(result)[1:] if n["tag"] in ("p", "li", "a", "button")]
+                self.assertEqual([(n["tag"], full(n)) for n in drawn], [("p", sentence)])
+                self.assertTrue(has_class(drawn[0], "register-line"))
+
+    def test_an_adoption_with_a_drafted_contract_draws_no_draft_rows(self) -> None:
+        sentence = "The pull request of r is not ready to merge yet."
+        (snap,) = render([
+            START, {"frame": {**frame([]), "registration": {
+                **READY_SHOWN, "approve": None, "lines": [], "draft": None, "draft_more": None,
+                "adoption": {**OPENED_ADOPTION, "lines": [], "note": None,
+                             "url": "https://github.com/o/r/pull/7"},
+                "line": sentence}}},
+            {"snapshot": True}])
+        for name in ("register-draft", "draft-more", "draft-change", "draft-pick"):
+            self.assertEqual(registered(snap, name), [], name)
+        (result,) = registered(snap, "register-result")
+        drawn = [n for n in nodes(result)[1:] if n["tag"] in ("p", "li", "a", "button")]
+        self.assertEqual([(n["tag"], full(n)) for n in drawn], [("p", sentence)])
 
     def test_at_480_the_plan_question_cards_fit(self) -> None:
         try:
@@ -7602,10 +7589,10 @@ class RegisterCardPageTest(unittest.TestCase):
         (result,) = registered(snap, "register-result")
         self.assertEqual(
             [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
-            [ASKING["line"], *ASKING["lines"], "Close"])
+            [ASKING["line"], *ASKING["lines"]])
         self.assertEqual(
             sorted(n["cls"] for n in nodes(snap["register"]) if n["tag"] == "button"),
-            ["register-close", "register-open"])
+            ["register-open"])
         self.assertEqual([n for n in nodes(snap["register"]) if has_class(n, "opt")], [])
 
     def test_a_single_option_card_offers_the_option_as_its_action(self) -> None:
@@ -7940,6 +7927,222 @@ class RegisterFailurePageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(plain[0]) if n["tag"] == "wbr"], [])
 
 
+class RegisterCancelPageTest(unittest.TestCase):
+    CANCELLABLE = cards([FAILED_ITEM], {**FAILED_REGISTRATION, "cancel": True})
+    REFUSED = "only a registration that was not applied yet can be cancelled"
+
+    def test_a_cancellable_registration_offers_cancel_registration_and_posts_its_root(self) -> None:
+        (snap,) = render([START, {"frame": self.CANCELLABLE},
+                          {"respond": {"status": 204, "text": ""}},
+                          {"click": "register-withdraw"}, {"snapshot": True}])
+        (button,) = registered(snap, "register-withdraw")
+        self.assertEqual(full(button), "Cancel registration")
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-cancel")
+        self.assertEqual(posted(post), {"root": "/srv/r"})
+
+    def test_no_cancel_without_the_offer(self) -> None:
+        for registration in ({**FAILED_REGISTRATION, "cancel": False}, REGISTERING):
+            with self.subTest(registration["status"], result=registration["result"]):
+                (snap,) = render([START, {"frame": cards([FAILED_ITEM], registration)},
+                                  {"snapshot": True}])
+                self.assertEqual(registered(snap, "register-withdraw"), [])
+                self.assertEqual(registered(snap, "register-close"), [])
+
+    def test_a_second_click_while_cancelling_posts_nothing(self) -> None:
+        sending, refused = render([
+            START, {"frame": self.CANCELLABLE}, {"hold": True},
+            {"click": "register-withdraw"}, {"click": "register-withdraw"}, {"snapshot": True},
+            {"release": {"status": 409, "text": self.REFUSED + "\n"}}, {"snapshot": True}])
+        self.assertEqual([p["url"] for p in sending["posts"]], ["/api/register-cancel"])
+        (busy,) = registered(sending, "register-withdraw")
+        self.assertTrue(busy["disabled"])
+        self.assertEqual([p["url"] for p in refused["posts"]], ["/api/register-cancel"])
+        (reason,) = registered(refused, "register-withdraw-reason")
+        self.assertEqual(full(reason), self.REFUSED)
+        (again,) = registered(refused, "register-withdraw")
+        self.assertFalse(again["disabled"])
+
+    def test_a_refused_cancel_can_be_tried_again(self) -> None:
+        refused, retried = render([
+            START, {"frame": self.CANCELLABLE},
+            {"respond": {"status": 409, "text": self.REFUSED + "\n"}},
+            {"click": "register-withdraw"}, {"snapshot": True},
+            {"respond": {"status": 204, "text": ""}},
+            {"click": "register-withdraw"}, {"snapshot": True}])
+        self.assertEqual(full(registered(refused, "register-withdraw-reason")[0]), self.REFUSED)
+        self.assertEqual([p["url"] for p in retried["posts"]],
+                         ["/api/register-cancel", "/api/register-cancel"])
+
+
+class PathWrapPageTest(unittest.TestCase):
+    ID = "example/sample-app"
+    ID_ITEM = {**ADOPTION_ITEM, "project_id": ID,
+               "headline": f"The adoption of {ID} is ready to merge"}
+    SOLE = "Change it to .agents/artifacts/specs/design.md"
+    SOLE_ITEM = register_item(3, {**Q_REFERENCE, "options": [{"value": "rewrite", "label": SOLE}]})
+    ID_FAILED = {**FAILED_ITEM, "headline": f"The adoption plan for {ID} could not start: try again."}
+    PICK_LINE = "design specs are kept in .agents/artifacts/specs"
+    PICK_DRAFT = {
+        **DRAFTED, "draft_more": "1 more setting",
+        "draft": [DRAFTED["draft"][0],
+                  {"field": "specs-path", "line": PICK_LINE, "value": ".agents/artifacts/specs",
+                   "options": [{"value": ".agents/artifacts/plans",
+                                "label": "Keep them under .agents/artifacts/plans"},
+                               {"value": "none", "label": "Not kept anywhere"}],
+                   "text": True, "more": True, "placeholder": "the path"}]}
+
+    @staticmethod
+    def segs(n: dict) -> list:
+        return [full(c) for c in nodes(n) if has_class(c, "seg")]
+
+    @staticmethod
+    def wbrs(n: dict) -> int:
+        return len([c for c in nodes(n) if c["tag"] == "wbr"])
+
+    def test_a_project_id_in_the_ready_card_breaks_only_at_its_slash(self) -> None:
+        (snap,) = render([START, {"frame": cards([self.ID_ITEM], READY_SHOWN)}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (q,) = [n for n in nodes(card) if n["tag"] == "p" and has_class(n, "q")]
+        self.assertEqual(self.segs(q), ["example/", "sample-app"])
+        self.assertEqual(self.wbrs(q), 1)
+        self.assertEqual(full(q), self.ID_ITEM["headline"])
+        (meta,) = [n for n in nodes(card) if n["tag"] == "p" and has_class(n, "meta")]
+        self.assertEqual(self.segs(meta), ["example/", "sample-app"])
+
+    def test_a_sole_option_button_breaks_only_at_slashes(self) -> None:
+        (snap,) = render([START, {"frame": cards([self.SOLE_ITEM], ASKING)}, {"snapshot": True}])
+        (send,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "button" and has_class(n, "send")]
+        self.assertEqual(self.segs(send), [".agents/", "artifacts/", "specs/", "design.md"])
+        self.assertEqual(self.wbrs(send), 3)
+        self.assertEqual(full(send), self.SOLE)
+        # `.send` is an inline-flex row: its direct children are flex items, so the words sit in
+        # one inline span (a single item) or each slash would gain the button's gap.
+        (words,) = send["children"]
+        self.assertEqual(words["tag"], "span")
+        self.assertEqual(full(words), self.SOLE)
+
+    def test_a_register_ask_and_title_break_only_at_slashes(self) -> None:
+        (snap,) = render([START, {"frame": cards([self.ID_FAILED], FAILED_REGISTRATION)},
+                          {"snapshot": True}])
+        (ask,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "h2" and has_class(n, "reg")]
+        self.assertEqual(self.segs(ask), ["example/", "sample-app"])
+        self.assertEqual(full(ask), self.ID_FAILED["headline"])
+
+    def test_an_expanded_draft_breaks_its_paths_only_at_slashes(self) -> None:
+        shown, changing = render([
+            START, {"frame": cards([], self.PICK_DRAFT)}, {"open": "draft-more"}, {"snapshot": True},
+            {"click": "draft-pick"}, {"snapshot": True}])
+        (pick,) = registered(shown, "draft-pick")
+        self.assertEqual(self.segs(pick), [".agents/", "artifacts/", "specs"])
+        self.assertEqual(self.wbrs(pick), 2)
+        self.assertEqual(full(pick), self.PICK_LINE)
+        self.assertEqual(pick["label"], "Change: " + self.PICK_LINE)
+        options = registered(changing, "draft-option")
+        self.assertEqual([full(n) for n in options],
+                         ["Keep them under .agents/artifacts/plans", "Not kept anywhere"])
+        self.assertEqual(self.segs(options[0]), [".agents/", "artifacts/", "plans"])
+        self.assertEqual(self.segs(options[1]), [])
+
+    def test_a_segment_is_an_atomic_inline_block(self) -> None:
+        style = PAGE.read_text(encoding="utf-8")
+        style = style[style.index("<style>"):style.index("</style>")]
+        base = style_rules(style[:style.index("@media")])
+        seg = {}
+        for selector, decls in base:
+            if selector == ".seg":
+                seg.update(decls)
+        self.assertEqual({k: seg.get(k) for k in ("display", "max-width", "overflow-wrap")},
+                         {"display": "inline-block", "max-width": "100%", "overflow-wrap": "anywhere"})
+
+    def test_every_card_ask_uses_the_full_width(self) -> None:
+        style = PAGE.read_text(encoding="utf-8")
+        style = style[style.index("<style>"):style.index("</style>")]
+        base = style_rules(style[:style.index("@media")])
+        for selector in (".card .q", ".card .q.reg", ".rest .q.reg"):
+            with self.subTest(selector=selector):
+                wraps = [d.get("text-wrap") for s, d in base if s == selector and "text-wrap" in d]
+                self.assertNotIn("balance", wraps)
+        self.assertIn("pretty", [d.get("text-wrap") for s, d in base if s == ".card .q"])
+
+    def test_at_480_no_path_or_id_breaks_inside_a_segment(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const tops = (range) => [...new Set([...range.getClientRects()].map((r) => Math.round(r.top)))];
+          const lines = (node) => {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            return tops(range).length;
+          };
+          const room = (node) => {
+            let up = node.parentElement;
+            while (up && getComputedStyle(up).display.startsWith('inline')) up = up.parentElement;
+            const css = getComputedStyle(up);
+            return up.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+          };
+          const natural = (seg) => {
+            const keep = [seg.style.maxWidth, seg.style.whiteSpace];
+            seg.style.maxWidth = 'none';
+            seg.style.whiteSpace = 'nowrap';
+            const width = seg.getBoundingClientRect().width;
+            [seg.style.maxWidth, seg.style.whiteSpace] = keep;
+            return width;
+          };
+          const segs = [...document.querySelectorAll('.seg')].map((seg) => ({
+            text: seg.textContent, lines: lines(seg), natural: natural(seg), room: room(seg)}));
+          const asks = [];
+          for (const q of document.querySelectorAll('#inbox .q')) {
+            const range = document.createRange();
+            range.selectNodeContents(q);
+            const byTop = new Map();
+            for (const r of range.getClientRects()) {
+              const key = Math.round(r.top);
+              const got = byTop.get(key) || [Infinity, -Infinity];
+              byTop.set(key, [Math.min(got[0], r.left), Math.max(got[1], r.right)]);
+            }
+            if (byTop.size < 2) continue;
+            const widest = Math.max(...[...byTop.values()].map(([a, b]) => b - a));
+            asks.push({text: q.textContent, widest, width: q.clientWidth});
+          }
+          return {segs, asks};
+        }"""
+        items = [self.ID_ITEM, self.SOLE_ITEM, self.ID_FAILED]
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), **cards(items, self.PICK_DRAFT)})
+                page.evaluate("() => { document.querySelector('#register .draft-more').open = true; }")
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        found = {s["text"] for s in got["segs"]}
+        for text in ("example/", "sample-app", ".agents/", "artifacts/", "specs"):
+            self.assertIn(text, found)
+        oversized = [s for s in got["segs"] if s["natural"] > s["room"]]
+        self.assertEqual(oversized, [])
+        for seg in got["segs"]:
+            self.assertEqual(seg["lines"], 1, seg)
+        for ask in got["asks"]:
+            self.assertGreaterEqual(ask["widest"], 0.85 * ask["width"], ask)
+
+
 TRUST_ITEM = {
     "type": "inbox_item", "reason": "trust_failed",
     "key": "trust/work//srv/r/2026-11-15T10:00:00+00:00",
@@ -8003,6 +8206,19 @@ class RegisterApplyPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/plan-defer")
         self.assertEqual(posted(post), {"plan_id": PLAN_A})
 
+    def test_turn_signed_commits_off_posts_the_draft_change(self) -> None:
+        item = {**APPLY_ITEM, "questions": [{**APPLY_ITEM["questions"][0], "options": [
+            "Apply it again", "Turn signed commits off", "Not now"]}],
+            "values": ["apply", "signing_off", "not_now"]}
+        (snap,) = render([START, {"frame": cards([item], READY_SHOWN)},
+                          {"respond": {"status": 204, "text": ""}}, {"key": "2"},
+                          {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": item["plan_id"], "id": "contract-draft",
+                                        "subject": "commit-signed", "value": "no"})
+        self.assertIn("Answered, turning signed commits off", full(snap["inbox"]))
+
     def test_a_failed_step_card_offers_try_again(self) -> None:
         (snap,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, {"snapshot": True}])
         (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
@@ -8022,10 +8238,9 @@ class RegisterApplyPageTest(unittest.TestCase):
             labels = {full(n) for n in nodes(snap["register"]) if n["tag"] == "button"}
             self.assertEqual(labels & {"Approve", "Try again", "Apply it", "Apply it again"}, set())
             if shown is FAILED_SHOWN:
-                (note,) = registered(snap, "register-note")
-                self.assertEqual(full(note), PUSH_FAILED_ADOPTION["note"])
+                self.assertEqual(registered(snap, "register-note"), [])
                 (line,) = registered(snap, "register-line")
-                self.assertEqual(full(line), PUSH_FAILED_ADOPTION["headline"])
+                self.assertEqual(full(line), FAILED_SHOWN["line"])
 
     def test_a_refused_apply_shows_its_reason_on_the_card(self) -> None:
         reason = "only a ready plan can be approved"

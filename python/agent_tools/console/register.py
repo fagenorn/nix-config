@@ -29,7 +29,8 @@ Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=
 <subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4, then
 `--contract-draft <contract>` when `contract` is given: ADR-console-031) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
-"--plan-id", plan_id]` with `--acknowledge-deletions` added when asked (`apply`, #1054), the command
+"--plan-id", plan_id]` with `--acknowledge-deletions` and then `--discard-retained` added when asked
+(`apply`, #1054, #1088) or `[*command, "discard", "--plan-id", plan_id]` (`discard`, #1088), the command
 defaulting to the `adopt_project` sibling module. Each runs with no shell, in its own process group
 (`manager.run_in_own_group`), `stdin` and `stderr` to `DEVNULL`, `stdout` piped, `env=dict(environ)`
 when `environ` is given (else the console's own) and `timeout` (`RUN_TIMEOUT`, 300 seconds; an apply
@@ -71,13 +72,14 @@ words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), ne
 
 Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
 failed, a refused or unconfirmed registration, a run that raised) carries one plain line in `note`
-saying what the owner can do next, never an error code, a command, a hash or a path (#1085). `plain(text)` is
+saying what the owner can do next, never an error code, a hash or a path, and no command but `just switch` (#1085). `plain(text)` is
 the text, or the empty string when `FORBIDDEN` (`--plan-id`, `sha256:`, a run of twelve hex digits, an
 absolute path) finds any in it: a child's raw message is shown only through it, so a message that holds one falls back to
 `could not be made.` or `was not registered.`. `next_step(root, error, verb)` reads the
-error's `repair_id`: `adopt.manifest.*` with the not-found message says to switch this computer to its current
-configuration to install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
-cause the headline gave); `adopt.registration.no_remote`
+error's `repair_id`: `adopt.manifest.*` with the not-found message says to run `just switch` on this computer to
+install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
+cause the headline gave; `LEGACY_NOTES` shows a stored note in the earlier words as it is today and `latest`
+applies it, never rewriting the log); `adopt.registration.no_remote`
 says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
 default branch) says the origin needs a published default branch, not another origin;
 `adopt.git.remote_unreachable` and
@@ -107,6 +109,16 @@ run is under way, else the one inbox item of reason `register_failed` (key `regi
 the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, values `TRY_VALUE` then `LATER_VALUE`).
 `parse_confirm_request` takes `TRY_VALUE` as a third choice. `NOT_WAITING` is the text of
 a confirmation for a root that is not the waiting one.
+
+Cancel (#1088, ADR-console-037). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
+plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
+None when a valid cancel row names the folded row's root and plan id (a cancel naming another, or
+malformed, changes nothing; a later `registration.ended` row starts a new registration).
+`parse_cancel_request(body)` is exactly `{"root"}`, a non-empty string with no character below 0x20 and
+no 0x7F (`ValueError` otherwise). `cancellable(latest, adoption)` is true when `latest` is not None,
+its `result` is not `registered` and the plan's folded adoption is None or `apply_failed`.
+`CANCEL_REFUSED` and `CANCEL_DISCARD_FAILED` are the service's refusals. `view_entry` carries `cancel`
+(false for a running entry, the `cancel` argument for a done one).
 
 Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
 project contract: `result` and `state` `drafting`, `project_id` the draft's project-id value (None
@@ -160,6 +172,7 @@ from agent_tools.console import contract_draft, event_log, folder_trust, manager
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
+CANCELLED = event_log.REGISTRATION_CANCELLED
 RUN_TIMEOUT = 300
 APPLY_TIMEOUT = 1800
 GIT_TIMEOUT = 10
@@ -189,8 +202,14 @@ RUN_WORDS = {
 }
 UNEXPECTED = "it stopped unexpectedly"
 AGAIN = "choose Try again."
-MANIFEST_STEP = ("Switch this computer to its current configuration to install them, then "
-                 + AGAIN)
+MANIFEST_STEP = "Run just switch on this computer to install them, then " + AGAIN
+# A note an earlier release stored for its manifest step, shown in today's words and never rewritten.
+LEGACY_NOTES = {
+    "Switch this computer to its current configuration to install them, then choose Try again.":
+        MANIFEST_STEP,
+}
+DISCARD_STEP = ("Choose Try again to remove the copy the last attempt left on this computer and "
+                "plan again.")
 VERB_WORDS = {"plan": "plan the adoption of", "register": "register",
               "apply": "apply the adoption of"}
 FORBIDDEN = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
@@ -222,6 +241,9 @@ LATER_NOTE = "Not registered. Press Register again to register it."
 TRY_OPTION = "Try again"
 TRY_VALUE = "try_again"
 NOT_WAITING = "that project is not waiting to be registered"
+CANCEL_REFUSED = "only a registration that was not applied yet can be cancelled"
+CANCEL_DISCARD_FAILED = ("The copy that the failed attempt left on this computer could not be removed, "
+                         "so the registration was not cancelled. Choose Cancel registration to try again.")
 
 
 def not_directory(path: str) -> str:
@@ -398,6 +420,8 @@ def next_step(root: str, error: Mapping, verb: str) -> str:
     repair_id = str(error.get("repair_id") or "")
     if _is_manifest(error):
         return MANIFEST_STEP
+    if repair_id == "adopt.discard.failed":
+        return DISCARD_STEP
     return NEXT_STEPS.get(repair_id) or unknown_step(name_of(root), verb)
 
 
@@ -526,6 +550,11 @@ def ended(payload: Mapping) -> tuple[str, None, dict]:
 def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
     found = state
     for event in events:
+        cancelled = event_log.cancelled_registration(event)
+        if cancelled is not None:
+            if found is not None and cancelled == (found["root"], found["plan_id"]):
+                found = None
+            continue
         if event.kind != ENDED:
             continue
         try:
@@ -533,6 +562,8 @@ def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict
         except ValueError:
             continue
         found = {**DEFAULTS, **payload, "at": event.at}
+        if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
+            found["note"] = LEGACY_NOTES[found["note"]]
         if isinstance(found["draft"], list) and isinstance(found["root"], str):
             found["draft"] = contract_draft.refresh(found["root"], found["draft"])
             if found["result"] == "drafting":
@@ -606,6 +637,31 @@ def parse_confirm_request(body: bytes) -> tuple[str, str]:
     return root, choice
 
 
+def cancelled_row(root: str, plan_id: str | None) -> tuple[str, None, dict]:
+    return (CANCELLED, None, {"by": "owner", "root": root, "plan_id": plan_id})
+
+
+def parse_cancel_request(body: bytes) -> str:
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != {"root"}:
+        raise ValueError("wrong members")
+    root = value["root"]
+    if not isinstance(root, str) or not root:
+        raise ValueError("wrong types")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
+        raise ValueError("control character")
+    return root
+
+
+def cancellable(latest: Mapping | None, adoption: Mapping | None) -> bool:
+    """True for a registration the owner may cancel: not registered and not applied yet."""
+    return (latest is not None and latest["result"] != "registered"
+            and (adoption is None or adoption["step"] == "apply_failed"))
+
+
 def again_headline(name: str) -> str:
     return f"Planning the adoption of {name} again with your answer…"
 
@@ -625,7 +681,7 @@ def line_of(latest: Mapping) -> str:
 
 def view_entry(running: str | None, latest: Mapping | None, *, again: bool = False,
                refusal: Mapping | None = None, adoption: Mapping | None = None,
-               approve: str | None = None) -> dict | None:
+               approve: str | None = None, cancel: bool = False) -> dict | None:
     if running is not None:
         name = name_of(running)
         headline = again_headline(name) if again else f"Planning the adoption of {name}\u2026"
@@ -633,22 +689,28 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
                 "result": None, "outcome": None, "headline": headline,
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
                 "questions": [], "refusal": None, "line": headline, "refused": None,
-                "draft": None, "draft_more": None, "adoption": None, "approve": None}
+                "draft": None, "draft_more": None, "adoption": None, "approve": None,
+                "cancel": False}
     if latest is None:
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
     draft = latest.get("draft")
+    if adoption is not None:
+        lines, draft = [], None
+        line = adoption["headline"] + (" " + adoption["note"] if adoption["note"] else "")
+    else:
+        lines, line = latest["lines"], line_of(latest)
     return {"root": latest["root"], "name": name_of(latest["root"]),
             "project_id": latest["project_id"], "status": "done", "result": latest["result"],
             "outcome": latest["outcome"], "headline": latest["headline"],
-            "lines": latest["lines"], "note": latest["note"], "at": latest["at"],
+            "lines": lines, "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
             "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
-            "line": line_of(latest) if adoption is None else adoption["headline"],
+            "line": line,
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
             "draft_more": contract_draft.more_line(draft) if isinstance(draft, list) else None,
-            "adoption": adoption, "approve": approve}
+            "adoption": adoption, "approve": approve, "cancel": cancel}
 
 
 class RunFailed(Exception):
@@ -685,11 +747,17 @@ class Adopter:
             arguments += ["--plan-id", plan_id]
         return self._run(arguments, cancel, self._timeout)
 
-    def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False) -> dict:
+    def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False,
+              discard_retained: bool = False) -> dict:
         arguments = ["apply", "--plan-id", plan_id]
         if acknowledge_deletions:
             arguments.append("--acknowledge-deletions")
+        if discard_retained:
+            arguments.append("--discard-retained")
         return self._run(arguments, cancel, self._apply_timeout)
+
+    def discard(self, plan_id: str, cancel=None) -> dict:
+        return self._run(["discard", "--plan-id", plan_id], cancel, self._timeout)
 
     def _run(self, arguments: list[str], cancel, timeout: float) -> dict:
         env = dict(self._environ) if self._environ is not None else None

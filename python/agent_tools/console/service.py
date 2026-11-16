@@ -32,6 +32,7 @@ stream `Content-Length`):
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
+    POST /api/register-cancel 204, a JSON body, the page cancels a registration that was not applied yet (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -243,6 +244,27 @@ and dispatches the run: the folder's trust is granted in every profile (`_grant_
 child. Nothing is granted or registered before this answer. Any other exception is `console:
 register_confirm_failed <Type>` and 500 `registering failed`.
 
+`POST /api/register-cancel` (#1088, ADR-console-037) is the owner's Cancel registration of the shown
+registration, which was not applied yet or whose apply failed. It takes exactly `{"root"}` with
+`MAX_REGISTER_CANCEL_BYTES` (4096) and `register.parse_cancel_request`: 400 `bad registration cancel`.
+The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
+<reason>`, appending nothing, in this order: while a run is under way, `register.running`; when the shown
+registration is none or names another root, `register.NOT_WAITING`; when `register.cancellable` is false
+for it and its adoption (an applied, pushed or opened one), `register.CANCEL_REFUSED`. When the plan's
+adoption is `apply_failed`, or the shown failure names no plan id, the service looks at every plan of the
+root whose apply failed: `approve.left_behind` finds any copy that attempt kept (its failure record, its
+directory or its branch, whichever remains), and the service claims the run, has `Adopter.discard` remove
+each outside the lock and releases the claim; an `error` result, a `register.RunFailed` or no adopter refuses
+with `register.CANCEL_DISCARD_FAILED` and appends nothing. With no kept copy no child runs. Then it appends
+one `registration.cancelled` row (`register.cancelled_row`) for the shown plan id, and one more for each
+other failed apply of the root, clears the answer's refusal and answers `204`: the registration, deferral,
+adoption and folder-trust folds each drop what the rows name (so registering the same repository again
+offers a fresh Apply it, and its Check again cards are gone), after a restart too. A Check again under way
+when the cancel lands writes nothing and logs no row (`console: trust_grant_skipped cancelled`), so it cannot
+bring the cancelled card back. It writes no file of
+its own, grants no trust and reads no registry. Any other exception is `console: register_cancel_failed
+<Type>` and 500 `cancelling failed`.
+
 A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
 reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
 entries the request already read, and, while any field of the draft is open, appends one
@@ -299,7 +321,9 @@ grants nothing. `close` waits for a grant under way, so its row is kept, and a g
 after `close` began writes nothing (`console: trust_grant_skipped closing`). A result for a profile that no longer exists when the row is
 published (an account removal finished meanwhile) is dropped, and a grant left with no result appends
 nothing. The run applies the plan (`Adopter.apply`,
-acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
+acknowledging deletions only when the shown plan lists them; Apply it again passes
+`--discard-retained`, and a plan run first has `adopt-project discard` remove every copy kept by a
+failed apply of the same repository, so no copy is left behind unnamed) and appends `adoption.step` `applied`,
 pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
@@ -1143,12 +1167,14 @@ ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
+REGISTER_CANCEL_PATH = "/api/register-cancel"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
+    REGISTER_CANCEL_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1159,6 +1185,7 @@ MAX_ADOPTION_REGISTER_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
 MAX_REGISTER_CONFIRM_BYTES = 4096
 MAX_TRUST_CHECK_BYTES = 4096
+MAX_REGISTER_CANCEL_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1728,6 +1755,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _register_cancel_request(self, console: "ConsoleService") -> bool:
+        """Carry out Cancel registration; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_REGISTER_CANCEL_BYTES)
+        if body is None:
+            return False
+        try:
+            root = register.parse_cancel_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration cancel")
+            return False
+        try:
+            console.cancel_registration(root)
+        except sprints.Refused as error:
+            print(f"console: register_cancel_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: register_cancel_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "cancelling failed")
+            return False
+        return True
+
     def _trust_check_request(self, console: "ConsoleService") -> bool:
         """Carry out the Check again answer; True when the shared 204 is to be sent."""
         body = self._json_body(MAX_TRUST_CHECK_BYTES)
@@ -2241,6 +2290,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._trust_check_request(console):
                 return
+        elif route == REGISTER_CANCEL_PATH:
+            self.close_connection = True
+            if not self._register_cancel_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2423,6 +2476,7 @@ class ConsoleService:
         self._trust_home = None if trust_home is None else Path(trust_home)
         self._trust_granter = trust_granter
         self._grants_running = 0
+        self._cancelled: dict[str, int] = {}
         self._approving = False
         self._enrolling: set[str] = set()
         self._approval_workers: list[threading.Thread] = []
@@ -2651,6 +2705,9 @@ class ConsoleService:
 
     def _publish(self) -> None:
         adoption, action, apply_items = self._approval_view()
+        latest = self._registration
+        cancel = (self._registering is None and latest is not None
+                  and register.cancellable(latest, self._adoptions.get(latest["plan_id"])))
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
@@ -2664,7 +2721,7 @@ class ConsoleService:
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
-                approve=action),
+                approve=action, cancel=cancel),
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
@@ -3194,6 +3251,67 @@ class ConsoleService:
                 self._publish()
             raise
 
+    def cancel_registration(self, root: str) -> None:
+        """Cancel the shown registration of `root` before apply; refusals are `sprints.Refused`.
+
+        Every failed apply of the root is cleaned and forgotten, not only the shown plan's: a shown
+        failure can carry no plan id while an earlier attempt still keeps its copy (#1088).
+        """
+        with self._ingest:
+            latest = self._cancellable(root)
+            failed = self._failed_applies(root)
+        pending = [plan_id for plan_id in failed if approve.left_behind(plan_id, root)]
+        if pending:
+            with self._ingest:
+                if self._cancellable(root) is not latest:
+                    raise sprints.Refused(register.NOT_WAITING)
+                self._registering = root
+                self._publish()
+            try:
+                if self._adopter is None:
+                    refused = True
+                else:
+                    refused = any("error" in self._adopter.discard(plan_id, cancel=self._stop)
+                                  for plan_id in pending)
+            except register.RunFailed:
+                refused = True
+            except BaseException:
+                with self._ingest:
+                    self._registering = None
+                    self._publish()
+                raise
+            with self._ingest:
+                self._registering = None
+                if refused:
+                    self._publish()
+            if refused:
+                raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+        with self._ingest:
+            if self._cancellable(root) is not latest:
+                raise sprints.Refused(register.NOT_WAITING)
+            plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
+                                             if one != latest["plan_id"])]
+            self._cancelled[root] = self._cancelled.get(root, 0) + 1
+            self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
+            self._answer_refusal = None
+            self._publish()
+
+    def _failed_applies(self, root: str) -> list[str]:
+        """The plan ids of `root` whose apply failed, held under the ingest lock."""
+        return sorted(plan_id for plan_id, found in self._adoptions.items()
+                      if found["root"] == root and found["step"] == "apply_failed")
+
+    def _cancellable(self, root: str) -> dict:
+        """The shown registration of `root` when it may be cancelled, held under the ingest lock."""
+        if self._registering is not None:
+            raise sprints.Refused(register.running(register.name_of(self._registering)))
+        latest = self._registration
+        if latest is None or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        if not register.cancellable(latest, self._adoptions.get(latest["plan_id"])):
+            raise sprints.Refused(register.CANCEL_REFUSED)
+        return latest
+
     def _check_answerable(self, root: str, choice: str) -> dict:
         """The registration row `choice` answers for `root`, held under the ingest lock.
 
@@ -3219,7 +3337,12 @@ class ConsoleService:
         """
         verb = "plan"
         try:
-            if not os.path.lexists(os.path.join(root, ".agents/project.json")):
+            left = self._discard_left(root)
+            if left is not None:
+                self._log_registration_error({"root": root, "verb": "discard",
+                                              "error": left["error"]})
+                payload = register.summary(root, left)
+            elif not os.path.lexists(os.path.join(root, ".agents/project.json")):
                 reading = self._draft_reader(root)
                 fields = contract_draft.draft(root, reading, entries=entries)
                 payload = self._plan_draft(root, fields, [])
@@ -3305,6 +3428,28 @@ class ConsoleService:
                 self._publish()
             raise
 
+    def _discard_left(self, root: str) -> dict | None:
+        """Remove every copy a failed apply of `root` kept; the first failure's error document.
+
+        A plan run of the root leaves those copies behind, so each is discarded first (#1088).
+        With none kept, no child runs.
+        """
+        with self._ingest:
+            plan_ids = sorted(plan_id for plan_id, found in self._adoptions.items()
+                              if found["root"] == root and found["step"] == "apply_failed")
+        for plan_id in plan_ids:
+            if not approve.left_behind(plan_id, root):
+                continue
+            try:
+                result = self._adopter.discard(plan_id, cancel=self._stop)
+            except register.RunFailed:
+                result = {"error": {
+                    "code": "adopt_failure", "repair_id": approve.DISCARD_REPAIR,
+                    "violations": [{"pointer": "", "message": approve.DISCARD_REASON}]}}
+            if "error" in result:
+                return result
+        return None
+
     def _write_draft(self, fields: list[dict]) -> Path:
         directory = agent_platform.ensure_directory(agent_platform.state_root() / "console" / "drafts")
         handle, name = tempfile.mkstemp(dir=directory, suffix=".json")
@@ -3360,22 +3505,27 @@ class ConsoleService:
         payload = None
         text = None
         try:
-            if changed is not None:
-                result = self._plan_draft(root, changed, answers, refusals=True)
+            left = self._discard_left(root)
+            if left is not None:
+                self._log_answer_error({"root": root, "discard": left["error"]})
+                payload = register.summary(root, left)
             else:
-                result = self._plan_with(root, draft, answers)
-                refused = (contract_draft.refused_field(result["error"])
-                           if draft is not None and "error" in result else None)
-                if refused is not None:
-                    result = register.drafting(
-                        root, contract_draft.mark_refused(draft, *refused), answers)
-                elif "error" not in result:
-                    result = register.summary(root, result, draft=draft)
-            if "error" in result:
-                self._log_answer_error({"root": root, "error": result["error"]})
-                text = plan_questions.refusal_text(result["error"])
-            else:
-                payload = result
+                if changed is not None:
+                    result = self._plan_draft(root, changed, answers, refusals=True)
+                else:
+                    result = self._plan_with(root, draft, answers)
+                    refused = (contract_draft.refused_field(result["error"])
+                               if draft is not None and "error" in result else None)
+                    if refused is not None:
+                        result = register.drafting(
+                            root, contract_draft.mark_refused(draft, *refused), answers)
+                    elif "error" not in result:
+                        result = register.summary(root, result, draft=draft)
+                if "error" in result:
+                    self._log_answer_error({"root": root, "error": result["error"]})
+                    text = plan_questions.refusal_text(result["error"])
+                else:
+                    payload = result
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
@@ -3464,7 +3614,7 @@ class ConsoleService:
 
     def _grant_trust(self, cause: str, root: str, project: str,
                      profiles: Sequence[tuple[str, Path]] | None = None,
-                     slot: str | None = None) -> list[tuple[str, str]]:
+                     slot: str | None = None, epoch: int | None = None) -> list[tuple[str, str]]:
         """Grant the folder's client trust in every target and log one `trust.granted` row.
 
         The key is read from `root` every time. The row names the key, or `slot` when the caller
@@ -3474,10 +3624,17 @@ class ConsoleService:
 
         The row is kept even when `close` has begun, the files being written already; a grant that
         starts after `close` began writes nothing. `close` waits for every grant under way.
+
+        A retry passes the `epoch` it read of the root's cancellations (#1088): once the owner has
+        cancelled the root's registration, nothing is written and no row is logged, so a Check again
+        that was under way cannot bring the cancelled card back.
         """
         with self._ingest:
             if self._closed:
                 print("console: trust_grant_skipped closing", file=sys.stderr)
+                return []
+            if epoch is not None and self._cancelled.get(root, 0) != epoch:
+                print("console: trust_grant_skipped cancelled", file=sys.stderr)
                 return []
             self._grants_running += 1
         try:
@@ -3500,6 +3657,9 @@ class ConsoleService:
             named = slot if slot is not None else (
                 key if key is not None else os.path.realpath(root))
             with self._ingest:
+                if epoch is not None and self._cancelled.get(root, 0) != epoch:
+                    print("console: trust_grant_skipped cancelled", file=sys.stderr)
+                    return []
                 present = self._read_profiles()
                 results = [(name, result) for name, result in results
                            if name == "default" or name in present]
@@ -3527,11 +3687,12 @@ class ConsoleService:
         """
         with self._ingest:
             failed = self._trust_failures.get((root, profile))
+            epoch = self._cancelled.get(root, 0)
         found = [pair for pair in folder_trust.targets(self._trust_home, self._profile_dirs())
                  if pair[0] == profile]
         if failed is None or not found:
             raise sprints.Refused(folder_trust.NOT_FAILED)
-        self._grant_trust("check", root, failed["project"], found, slot=root)
+        self._grant_trust("check", root, failed["project"], found, slot=root, epoch=epoch)
 
     def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
         final = None
@@ -3572,11 +3733,13 @@ class ConsoleService:
         name = register.name_of(root)
         acknowledge = approve.acknowledges(shown)
         resume = adoption is not None and adoption["step"] in approve.RESUMABLE
+        again = adoption is not None and adoption["step"] == "apply_failed"
         if resume:
             branch, commit, base = adoption["branch"], adoption["commit"], adoption["base"]
         else:
             try:
-                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge)
+                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge,
+                                             discard_retained=again)
             except register.RunFailed as error:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "failure": error.kind, "cause": repr(error.__cause__)})

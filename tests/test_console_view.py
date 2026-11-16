@@ -2298,6 +2298,14 @@ class RegisterFailureViewTest(unittest.TestCase):
         self.assertEqual(asked["registration"]["line"], "x")
         self.assertEqual(derive_view([], registration=entry)["registration"], entry)
 
+    def test_a_reduced_registration_keeps_its_cancel(self):
+        entry = {**reg([]), "root": "/srv/r", "name": "r", "line": "x", "lines": ["writes a"],
+                 "note": "n", "adoption": None, "cancel": True}
+        card = {**APPLY_ITEM, "root": "/srv/r"}
+        shown = derive_view([], registration=entry, apply_items=[card])["registration"]
+        self.assertEqual((shown["line"], shown["cancel"]), ("Register r: needs you", True))
+        self.assertTrue(derive_view([], registration=entry)["registration"]["cancel"])
+
     def test_an_apply_card_clears_the_drafted_settings_beside_the_work_line(self):
         lines = [{"field": "project-id", "line": "Project id: o/r (read from the remote)",
                   "value": "o/r", "options": [], "text": True}]
@@ -2331,6 +2339,20 @@ class RegisterFailureViewTest(unittest.TestCase):
         elsewhere = derive_view([state("p01", 1)], registration=entry)
         self.assertEqual(elsewhere["registration"], entry)
 
+    def test_an_adoption_work_line_is_one_sentence(self):
+        opened = step_payload("opened", plan_id="p1", root="/srv/sample-app",
+                              branch="adopt-bbbbbbbbbbbb", commit="c" * 40,
+                              pull_request={"number": 7,
+                                            "url": "https://github.com/o/sample-app/pull/7"})
+        adoption = approve.entry({**opened, "at": "t", "pull_state": "open", "pull_at": "t"},
+                                 running=False, name="sample-app")
+        latest = {**register.summary("/srv/sample-app", plan_doc(state="ready")),
+                  "lines": ["moves 1 agent file under .agents/"], "at": "t"}
+        entry = register.view_entry(None, latest, adoption=adoption, approve=None)
+        shown = derive_view([], registration=entry)["registration"]
+        self.assertEqual(len(re.findall(r"[.!?](?=\s|$)", shown["line"])), 1)
+        self.assertEqual(shown["lines"], [])
+
     def test_an_open_pull_request_reads_in_words_and_the_statement_says_adoption_under_way(self):
         opened = step_payload("opened", plan_id="p1", root="/srv/sample-app",
                               branch="adopt-bbbbbbbbbbbb", commit="c" * 40,
@@ -2342,7 +2364,7 @@ class RegisterFailureViewTest(unittest.TestCase):
         entry = register.view_entry(None, latest, adoption=adoption, approve=None)
         shown = derive_view([], registration=entry)
         self.assertEqual(shown["registration"]["line"],
-                         "sample-app: waiting for its pull request to be ready to merge")
+                         "The pull request of sample-app is not ready to merge yet.")
         self.assertEqual(shown["registration"]["adoption"]["lines"], [])
         self.assertEqual(shown["registration"]["adoption"]["url"],
                          "https://github.com/o/sample-app/pull/7")

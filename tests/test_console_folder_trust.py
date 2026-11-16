@@ -391,6 +391,28 @@ class RowTest(unittest.TestCase):
                       payload={"by": "owner", "profile": "work"})
         self.assertEqual(folder_trust.failures([other]), {})
 
+    def test_a_cancel_drops_that_roots_trust_failures(self):
+        def granted(seq, root):
+            row = folder_trust.granted_row("apply", "p", root, [("work", "failed")])
+            return Event(seq=seq, at=f"t{seq}", kind=row[0], project=None, payload=row[2])
+
+        def cancel(seq, root, payload=None):
+            return Event(seq=seq, at=f"t{seq}", kind=event_log.REGISTRATION_CANCELLED,
+                         project=None,
+                         payload=payload or {"by": "owner", "root": root, "plan_id": "P"})
+
+        events = [granted(1, "/x/r"), granted(2, "/x/s")]
+        self.assertEqual(set(folder_trust.failures([*events, cancel(3, "/x/r")])),
+                         {("/x/s", "work")})
+        self.assertEqual(set(folder_trust.failures([cancel(3, "/x/r")],
+                                                   folder_trust.failures(events))),
+                         {("/x/s", "work")})
+        self.assertEqual(len(folder_trust.failures([*events, cancel(3, "/x/other")])), 2)
+        bad = cancel(3, "/x/r", {"root": "/x/r", "plan_id": "P"})
+        self.assertEqual(len(folder_trust.failures([*events, bad])), 2)
+        later = folder_trust.failures([*events, cancel(3, "/x/r"), granted(4, "/x/r")])
+        self.assertEqual(set(later), {("/x/r", "work"), ("/x/s", "work")})
+
     def test_removing_the_account_drops_its_failed_pairs_only_when_it_is_gone(self):
         def removal(seq, profile, outcome, kind=None):
             return Event(seq=seq, at=f"t{seq}", kind=event_log.ACCOUNT_REMOVAL, project=None,
