@@ -80,7 +80,7 @@ const ISSUE = args && args.issue
 if (!REPO || !ISSUE) return { stage: 'args', error: 'repo_root and issue are required' }
 const MODE = args.mode === undefined ? 'ship' : args.mode
 if (!['plan', 'ready', 'ship'].includes(MODE)) return { stage: 'args', error: 'mode must be plan, ready or ship' }
-const CONT = args.cont || null
+let CONT = args.cont || null
 if (args.lane !== undefined && !['standard', 'direct'].includes(args.lane)) return { stage: 'args', error: 'lane must be standard or direct' }
 if (CONT && args.lane && args.lane !== (CONT.lane || 'standard')) return { stage: 'args', error: 'a cont keeps its lane; start again without cont: setup re-adopts the branch and the claim' }
 const LANE = args.lane || (CONT && CONT.lane) || 'standard'
@@ -100,6 +100,12 @@ if (LOOK_ANSWER !== null) {
     ? typeof LOOK_ANSWER.head === 'string' && /^[0-9a-f]{40}$/.test(LOOK_ANSWER.head) && (LOOK_ANSWER.message === undefined || (typeof LOOK_ANSWER.message === 'string' && /^[A-Za-z0-9._:\/@+-]+$/.test(LOOK_ANSWER.message)))
     : LOOK_ANSWER.answer === 'changes' && typeof LOOK_ANSWER.words === 'string' && LOOK_ANSWER.words.trim() !== '' && LOOK_ANSWER.words.length <= 2000)
   if (!sound) return { stage: 'args', error: 'look must be {answer: approve, head, message?} or {answer: changes, words}' }
+}
+// The owner's changes answer rejects the approved head: the approval leaves the cont here, before any stop, so every stop of this resume (a setup, amend,
+// blocked, dirty or plan stop that returns the cont as it came, or the fix itself) carries a cont with no approval and a resume with no look cannot land that head.
+if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes' && CONT && CONT.look && typeof CONT.look === 'object' && CONT.look.approved !== undefined) {
+  const { approved: _revoked, ...unapproved } = CONT.look
+  CONT = { ...CONT, look: unapproved }
 }
 // #813: a setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never takes the trial model.
 const DEFAULT_CLERK_MODEL = 'sonnet'
@@ -730,12 +736,6 @@ const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, mes
 const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved } : {}) } : null)
 let lookAt = lookOf(CONT && CONT.look)
 let approvedHead = lookAt && lookAt.approved ? lookAt.approved : null
-// The owner's changes answer rejects the approved head: the approval is revoked here, at once, so every stop of this resume (dirty, plan,
-// owner-answer, claim-lost, the fix itself) carries a cont with no approval and a resume with no look cannot land the head they rejected.
-if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
-  approvedHead = null
-  if (lookAt) lookAt = { pr: lookAt.pr, head: lookAt.head }
-}
 let LOOK_STOP = MARKED && approvedHead === null
 // #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
 // own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.

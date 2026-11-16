@@ -10471,6 +10471,24 @@ class LookResumeTest(unittest.TestCase):
         for lock_step in ("pr", "land-unlock", "merge"):
             self.assertNotIn(lock_step, got)
 
+    def test_a_changes_answer_that_stops_in_setup_or_on_a_bad_amend_returns_a_cont_with_no_approval(self):
+        # These stops return the caller's cont as it came, before the changes round: it must carry no approval, or a resume with no look lands the rejected head.
+        changes = {"answer": "changes", "words": "make the label bold"}
+        stops = {
+            "setup": (dict(ARGS, cont=self.approved_cont(), look=changes), dict(RESUME, setup={"look": MARKED, "head": SHA, "merge_strategy": None})),
+            "amend": (dict(ARGS, cont=self.approved_cont(), look=changes, amend=[]), RESUME),
+        }
+        for stage, (args, patch) in stops.items():
+            with self.subTest(stage=stage):
+                stopped, _ = run(args=args, patch=patch)
+                self.assertEqual(stopped["stage"], stage)
+                self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": SHA})
+                result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch=RESUME)
+                got = labels(calls)
+                self.assertEqual(result["stage"], "awaiting-look")
+                for lock_step in ("pr", "land-unlock", "merge"):
+                    self.assertNotIn(lock_step, got)
+
     def test_a_changes_answer_renews_the_claim_before_the_fix_and_edits_nothing_when_it_is_lost(self):
         patch = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})
         _, calls = run(args=dict(ARGS, cont=self.look_cont(), look={"answer": "changes", "words": "make the label bold"}), patch=patch)
