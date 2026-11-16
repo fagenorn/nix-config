@@ -4568,6 +4568,18 @@ class PageSprintBlockTest(unittest.TestCase):
                 self.assertEqual(approvals(snap), [])
                 self.assertEqual(answers(snap), [])
 
+    def test_the_check_line_sits_the_same_at_every_width_and_reads_as_a_link(self) -> None:
+        (style, top) = page_css()
+        media = re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style)
+        self.assertEqual([m for m in media if ".sprint-check" in m], [])
+        lists = css_declared(top, ".sprint-checks")
+        self.assertEqual(lists.get("padding"), "0 0 0 28px")
+        line = css_declared(top, ".sprint-check")
+        self.assertEqual(line.get("color"), "var(--lav)")
+        self.assertEqual(line.get("text-decoration"), "underline")
+        self.assertEqual(line.get("text-underline-offset"), "3px")
+        self.assertNotIn("min-height", line)
+
     def test_a_check_line_with_no_card_does_nothing(self) -> None:
         (before, after) = render([
             START, {"frame": with_check([])}, {"snapshot": True},
