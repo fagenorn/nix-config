@@ -8381,6 +8381,56 @@ class PageCheckPictureTest(unittest.TestCase):
             self.assertEqual(with_class(snap["inbox"], name), [], name)
 
 
+def review_item(key: str, **fields) -> dict:
+    return item(key, reason="held-review", kind="owner-review", answers=["passed", "note"],
+                detail="", paid=False, confirm="", version="v1-" + key, check_id="", reading="",
+                pictures=PIC_CHECK["pictures"], missing_pictures=[],
+                headline="The card looks right at 1440 and 480 px", **fields)
+
+
+class PageReviewTest(unittest.TestCase):
+    def test_a_review_card_offers_approve_and_not_yet_and_shows_its_pictures(self) -> None:
+        first, second = render([
+            START, {"frame": frame([review_item("A"), check_item("B", "manual-check")])},
+            {"snapshot": True}, {"click": "ans-passed"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        lead = lead_of(first)
+        (approve,) = with_class(lead, "ans-passed")
+        (not_yet,) = with_class(lead, "ans-note")
+        self.assertEqual(full(approve), "Approve")
+        self.assertEqual(full(not_yet), "Not yet")
+        self.assertEqual(field(first, "note-text")["placeholder"], "What is not right yet")
+        self.assertEqual(with_class(lead, "confirm-text"), [])
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
+        self.assertIn("The card looks right at 1440 and 480 px", full(lead))
+        for cls, texts in (("ans-passed", ["Approve", "Passed"]), ("ans-failed", ["Failed"]),
+                           ("ans-note", ["Not yet", "Send note"])):
+            self.assertEqual([full(n) for n in with_class(first["inbox"], cls)], texts, cls)
+        (post,) = checks(second)
+        self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A",
+                                        "answer": "passed", "version": "v1-A"})
+
+    def test_a_manual_check_keeps_passed_failed_and_send_note(self) -> None:
+        (snap,) = render([START, {"frame": frame([check_item("B", "manual-check")])},
+                          {"snapshot": True}])
+        self.assertEqual(ans_buttons(snap), {"ans-passed": "Passed", "ans-failed": "Failed",
+                                             "ans-note": "Send note"})
+        self.assertEqual(field(snap, "note-text")["placeholder"], "Write a note")
+
+    def test_not_yet_sends_the_note_and_keeps_the_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([review_item("A")])},
+            {"type": {"class": "note-text", "text": "The 480 px card cuts the text."}},
+            {"click": "ans-note"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        (post,) = checks(snap)
+        self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A", "answer": "note",
+                                        "version": "v1-A", "note": "The 480 px card cuts the text."})
+        self.assertIn("Note sent.", full(snap["inbox"]))
+        (not_yet,) = with_class(snap["inbox"], "ans-note")
+        self.assertEqual(full(not_yet), "Not yet")
+
+
 
 def captioned(lines: list) -> dict:
     return {**PIC_CHECK, "pictures": [{"id": f"{n + 1:064x}", "line": line, "pair": None}

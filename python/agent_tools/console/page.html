@@ -2974,6 +2974,7 @@ const ANSWER_LABELS = {
   approval: { approve: "Approve" },
   "paid-approval": { approve: "Approve" },
   "stale-check": { keep: "Keep waiting", drop: "Accept without the host" },
+  "owner-review": { passed: "Approve" },
 };
 function draftOf(key) {
   return drafts.get(key) || { value: "", start: 0, end: 0 };
@@ -2997,8 +2998,9 @@ function typedArea(cls, label, placeholder) {
   return area;
 }
 function noteBox(item, state, box) {
-  const area = typedArea("note-text", "Note", "Write a note");
-  const send = actionButton("ans-note", "Send note", () => {
+  const review = item.kind === "owner-review";
+  const area = typedArea("note-text", "Note", review ? "What is not right yet" : "Write a note");
+  const send = actionButton("ans-note", review ? "Not yet" : "Send note", () => {
     const text = area.value;
     if (text.trim() === "") return;
     if (startCheck(item, state, "note", { note: text })) redraw();
