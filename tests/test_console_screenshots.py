@@ -41,9 +41,9 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_eleven_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 11)
-        self.assertEqual(shots.STATES[-1], "spend-page")
+    def test_the_set_is_twelve_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 12)
+        self.assertEqual(shots.STATES[-2:], ("owner-check", "spend-page"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -243,6 +243,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 elif state == "finished-list":
                     self.assertGreaterEqual(len(ended), 2)
                     self.assertTrue(any(s["closing"] for s in ended))
+                elif state == "owner-check":
+                    self.assertEqual([s["ball"] for s in running], ["manager"])
+                    self.assertEqual(running[0]["now_text"], "building 1 of 3: the upload form")
+                    self.assertEqual(
+                        [c["text"] for c in running[0]["checks"]],
+                        ["Your check: Do the before and after pictures read well?"])
+                    self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
                 days = (view["spend"] or {"days": []})["days"]
@@ -260,7 +267,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
 
 class ScreenshotCaptureTest(unittest.TestCase):
-    def test_the_command_writes_twenty_two_pngs_and_nothing_scrolls_sideways(self) -> None:
+    def test_the_command_writes_twenty_four_pngs_and_nothing_scrolls_sideways(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -286,7 +293,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
                 names, sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS))
-            self.assertEqual(len(names), 22)
+            self.assertEqual(len(names), 24)
             for path in out.iterdir():
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 

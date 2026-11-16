@@ -202,6 +202,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .st-dim { color: var(--ov2); }
 .sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
+.sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
+.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -425,6 +427,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
+  .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -779,6 +782,14 @@ function fillSprint(item, entry, sprint) {
     sprintRedraw -= 1;
   }
 }
+function focusCard(card) {
+  if (card === undefined || !card.isConnected) return;
+  if (card.tabIndex !== 0) card.tabIndex = -1;
+  card.focus();
+}
+function openCheckCard(check) {
+  focusCard(inboxCards.get(check.project_id + "#" + check.key));
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
@@ -832,6 +843,16 @@ function drawSprint(item, entry, sprint) {
   words.appendChild(age);
   head.appendChild(words);
   item.appendChild(head);
+  const checks = sprint.checks || [];
+  if (checks.length > 0) {
+    const list = el("ul", "sprint-checks");
+    for (const check of checks) {
+      const line = el("li", "");
+      line.appendChild(actionButton("sprint-check", check.text, () => openCheckCard(check)));
+      list.appendChild(line);
+    }
+    item.appendChild(list);
+  }
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -2138,6 +2159,7 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
+let inboxCards = new Map();
 let keyHint = null;
 let hintHost = null;
 function itemId(item) {
@@ -3300,6 +3322,8 @@ function drawInbox(view) {
   const held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  // A card the owner focused from a check line is rebuilt by every redraw, so its item key is kept and the replacement card is focused again.
+  const heldCard = [...inboxCards].find(([, card]) => card === active);
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
@@ -3418,6 +3442,7 @@ function drawInbox(view) {
     }
     section.appendChild(rest);
   }
+  inboxCards = cardOf;
   const answered = view.inbox.answered;
   if (answered.length > 0) {
     const done = el("ul", "done");
@@ -3445,6 +3470,8 @@ function drawInbox(view) {
   if (again !== undefined) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
+  } else if (heldCard !== undefined) {
+    focusCard(cardOf.get(heldCard[0]));
   }
 }
 function momentLine(moment) {
@@ -4431,7 +4458,8 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const focused = event.target && event.target.tagName;
-  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT"].includes(focused)) return;
+  // A card focused by its sprint's check line (openCheckCard) is ARTICLE or LI: the answer keys stay with it, not with the unrelated item currentEntry would pick.
+  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT", "ARTICLE", "LI"].includes(focused)) return;
   if (event.target && event.target.isContentEditable === true) return;
   if (event.key === "a") {
     openAccounts();
