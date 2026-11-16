@@ -320,6 +320,22 @@ class PageRouteTest(Case):
         self.assertEqual(int(headers["Content-Length"]), len(body))
         self.assertEqual(support.request(svc.address, "GET", "/missing")[0], 404)
 
+    def test_the_policy_admits_object_url_images_and_nothing_else_new(self):
+        svc = self.start()
+        _, headers, _ = support.request(svc.address, "GET", "/")
+        policy = {}
+        for part in headers["Content-Security-Policy"].split(";"):
+            name, _, value = part.strip().partition(" ")
+            policy[name] = value
+        self.assertEqual(
+            set(policy),
+            {"default-src", "script-src", "style-src", "connect-src", "img-src",
+             "base-uri", "form-action", "frame-ancestors"})
+        self.assertEqual(policy["img-src"], "data: blob:")
+        self.assertEqual(policy["connect-src"], "'self'")
+        self.assertEqual(policy["default-src"], "'none'")
+        self.assertEqual(policy["frame-ancestors"], "'none'")
+
 
 class MethodTest(Case):
     def test_only_the_hook_route_takes_a_write(self):

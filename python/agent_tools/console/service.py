@@ -582,7 +582,8 @@ not fully match `pictures.PICTURE_ID`, is 400 `bad picture id`. The file is read
 `pictures_dir / <id>` through `pictures.read`: an unknown id, a symlink, a non-regular file or an
 unreadable file is 404 `this picture is not known`. Success is 200 `image/png`, the stored bytes,
 `X-Content-Type-Options: nosniff` and `Cache-Control: private`; a refusal keeps
-`Cache-Control: no-store`. The token appears in no header or body. The page and `CSP` are unchanged.
+`Cache-Control: no-store`. The token appears in no header or body. The page draws a picture from an object URL, so
+CSP's img-src is data: blob: (ADR-console-038).
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -1129,7 +1130,7 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
-       "connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; "
+       "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
 PAGE: bytes = Path(__file__).with_name("page.html").read_bytes()
 BACKLOG = 16
