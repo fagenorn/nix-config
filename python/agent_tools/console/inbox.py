@@ -36,7 +36,7 @@ closed by a line starting with three backticks or `~~~`) is never read, an empty
 and only the first reading is taken: a later `Reading:` stays in the detail. Every other prompt has
 `reading` `""` and its detail unchanged.
 
-Pictures (#1112, ADR-console-043). `attach_pictures(item, roots, pictures_dir, home=None)` returns a
+Pictures (#1112, ADR-console-044). `attach_pictures(item, roots, pictures_dir, home=None)` returns a
 copy of a verification item with two more members, `pictures` (`[{"id", "line", "pair": None}]`, the
 stored pictures the prompt names) and `missing_pictures` (the PNG names it gives that exist nowhere
 under the roots). It reads the text `question`, `detail` and `reading` joined by a newline and never

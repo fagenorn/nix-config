@@ -1948,7 +1948,7 @@ function checkLabel(item) {
 function isOwnerCheck(item) {
   return typeof item.check_id === "string";
 }
-// An owner check's pictures (ADR-console-043) reuse the shared gallery and viewer of ADR-console-038.
+// An owner check's pictures (ADR-console-044) reuse the shared gallery and viewer of ADR-console-038.
 function checkPictures(node, item) {
   const gallery = pictureGallery(itemId(item), item.pictures);
   if (gallery !== null) node.appendChild(gallery);
