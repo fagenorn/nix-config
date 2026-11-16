@@ -66,6 +66,8 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Look approval | Delivery |
+| Look marker | Delivery |
 | Manager | Console |
 | Marker | Claims |
 | Message | Console |

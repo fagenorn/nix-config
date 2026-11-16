@@ -32,6 +32,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.verification.verify_answer",  # answer, inbox, service
     }),
     "delivery": frozenset({
+        "agent_tools.claims.forge_markers",  # look_marker, look_approval
         "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
     }),
     "guard": frozenset({
