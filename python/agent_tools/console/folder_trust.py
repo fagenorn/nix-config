@@ -63,7 +63,8 @@ through the same protocol and returns `REMOVED`, `ABSENT` (no file, or no entry:
 
 Row. `granted_row(cause, project, root, results)` is `("trust.granted", None, {"by": "owner",
 "cause": cause, "project": project, "root": root, "profiles": [{"profile", "result"}, ...]})`,
-one per grant the owner approved; `ValueError` unless `cause` is in `CAUSES`, `project` and `root`
+one per grant the owner approved, or per registered project at the console's start (cause
+`console-start`, #1183); `ValueError` unless `cause` is in `CAUSES`, `project` and `root`
 are non-empty strings, every result is in `RESULTS` and every profile is `default` or accepted by
 `account_add.refusal`. The kind is not in `KEPT_KINDS`. No file content is logged.
 `failures(events, state=None)` folds a copy of `state`: for each valid row (re-validated with
@@ -132,7 +133,8 @@ REMOVED = "removed"
 ABSENT = "absent"
 ATTEMPTS = 5
 GIT_TIMEOUT = 10
-CAUSES = ("apply", "register", "account", "check")
+START_CAUSE = "console-start"
+CAUSES = ("apply", "register", "account", "check", START_CAUSE)
 KEPT_PREFIX = ".claude.json.trust-kept-"
 TEMP_PREFIX = ".claude.json.trust-"
 CHECK_OPTION = "Check again"

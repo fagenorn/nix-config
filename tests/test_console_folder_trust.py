@@ -361,6 +361,10 @@ class RowTest(unittest.TestCase):
                                {"by": "owner", "cause": "apply", "project": "p", "root": "/r",
                                 "profiles": [{"profile": "default", "result": "granted"},
                                              {"profile": "work", "result": "failed"}]}))
+        self.assertEqual(folder_trust.START_CAUSE, "console-start")
+        self.assertEqual(
+            folder_trust.granted_row("console-start", "p", "/r", [("default", "already")])[2]["cause"],
+            "console-start")
         for args in (("other", "p", "/r", [("work", "granted")]),
                      ("apply", "p", "/r", [("work", "maybe")]),
                      ("apply", "p", "/r", [("Bad Name", "granted")]),
