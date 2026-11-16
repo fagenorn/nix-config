@@ -103,7 +103,11 @@ counts in `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "brief", "key": "brief/<sprint id>", "project_id",
      "sprint_id", "title", "version": <int>, "brief": {"title", "done", "excluded", "slices",
-     "risks", "asks"}, "answered": false, "waiting_since": "<time the brief was sent>"}
+     "risks", "asks"}, "pictures": [{"id", "line", "pair"}], "answered": false,
+     "waiting_since": "<time the brief was sent>"}
+
+`pictures` is `_picture_entries(brief.pictures)`, `[]` for a brief with none, each line cut to
+`MAX_PICTURE_LINE_CHARS` and never refused; `brief` holds the six parts only.
 
 Every item names its sprint by `title` (`sprints.sprint_title`: the brief's title, else the goal's
 first sentence, at most 60 characters) and none carries the goal: the sprint entry is the only
@@ -349,7 +353,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "closing": null | {"at", "summary", "first_line", "differently",
                                          "landed": [<int>], "held": [<int>], "dropped": [<int>],
                                          "counts_text": "<text>"},
-                      "state_until": "<time>" | null}
+                      "state_until": "<time>" | null,
+                      "pictures": [{"id", "line", "pair"}, ...]}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "delivered" | "read",
@@ -398,7 +403,8 @@ A shown sprint reads its manager's latest report (`SprintState.report`); with no
 only: `progress`, `progress_text`, `status`, `status_at` and `next` are null whatever its last report
 said, and each of `issues`, ordered by number, is an issue of the closing with its closing stage
 (`landed`, `held` or `dropped`) and `stage_text` `landed`, `held for verification` or `dropped`;
-`milestone` and `tracker_url` stay the report's. Each reported issue, ordered by number, has an effective
+`milestone` and `tracker_url` stay the report's. The report's pictures are shown only while its
+status is (a report and no closing), as `pictures`, else `[]`. Each reported issue, ordered by number, has an effective
 `stage`: the report's own when it is `landed` or `held` (an outcome the manager reported is kept
 against any run), else the stage of the sprint's observation of that issue (`SprintState.observed`),
 where a run's `done` reads `closed out` and any other run stage is that stage with its
@@ -523,6 +529,7 @@ from agent_tools.console.sprints import (
     Closing,
     Message,
     Question,
+    QuestionPicture,
     PendingStop,
     SprintState,
     age_text,
@@ -951,6 +958,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                       if state.stop_reason is not None and state.stopped_at is None else None),
         "closing": None if state.closing is None else _closing_entry(state.closing),
         "state_until": quota.until if name == QUOTA else None,
+        "pictures": _picture_entries(report.pictures) if progressing else [],
     }
 
 
@@ -1011,11 +1019,17 @@ def _inbox_entry(record: InboxRecord,
             "more_questions": more, "answered_at": record.answered_at}
 
 
+def _picture_entries(pictures: Iterable[QuestionPicture]) -> list[dict]:
+    return [{"id": p.picture, "line": cut(p.line, MAX_PICTURE_LINE_CHARS), "pair": p.pair}
+            for p in pictures]
+
+
 def _brief_entry(sprint: SprintState) -> dict:
     brief = sprint.brief
     return {"type": "inbox_item", "reason": "brief", "key": f"brief/{sprint.sprint_id}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint), "version": brief.version, "brief": brief.parts,
+            "pictures": _picture_entries(brief.pictures),
             "answered": False, "waiting_since": brief.sent_at}
 
 
@@ -1035,8 +1049,7 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "chosen": None, "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
                            "recommended_index": question.options.index(question.recommended)}],
-            "pictures": [{"id": p.picture, "line": cut(p.line, MAX_PICTURE_LINE_CHARS),
-                          "pair": p.pair} for p in question.pictures],
+            "pictures": _picture_entries(question.pictures),
             "items": [], "answers": [], "answered": False, "waiting_since": question.at}
 
 

@@ -1030,13 +1030,27 @@ class FirstScreenViewTest(unittest.TestCase):
 
 
 class BriefViewTest(unittest.TestCase):
+    def test_a_briefs_pictures_reach_its_entry_cut(self):
+        sid = "a" * 16
+        s = briefed(sprint(sid))
+        plain = derive_view([state("p00", 1)], sprints={sid: s})
+        self.assertEqual(plain["inbox"]["open"][0]["pictures"], [])
+        s = dataclasses.replace(s, brief=dataclasses.replace(s.brief, pictures=(
+            QuestionPicture("a" * 64, "l" * 200, "before"), QuestionPicture("b" * 64, "x"))))
+        item = derive_view([state("p00", 1)], sprints={sid: s})["inbox"]["open"][0]
+        self.assertEqual(item["pictures"], [
+            {"id": "a" * 64, "line": cut("l" * 200, 140), "pair": "before"},
+            {"id": "b" * 64, "line": "x", "pair": None}])
+        self.assertNotIn("pictures", item["brief"])
+
     def test_a_waiting_brief_is_one_open_item_counted_in_the_statement(self):
         sid = "a" * 16
         view = derive_view([state("p00", 1)], sprints={sid: briefed(sprint(sid), version=2)})
         self.assertEqual(view["inbox"]["open"], [{
             "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
             "project_id": "p00", "sprint_id": sid, "title": "Ship the importer",
-            "version": 2, "brief": PARTS, "answered": False, "waiting_since": "t9"}])
+            "version": 2, "brief": PARTS, "pictures": [], "answered": False,
+            "waiting_since": "t9"}])
         self.assertEqual(view["statement"]["inbox_items"], 1)
         self.assertEqual(view["statement"]["headline"], "1 thing needs you")
         self.assertEqual(view["statement"]["sentence"], BRIEF_SENTENCE)
@@ -1301,6 +1315,17 @@ class SprintQuotaViewTest(unittest.TestCase):
 
 
 class SprintReportViewTest(unittest.TestCase):
+    def test_a_reports_pictures_reach_the_sprint_entry_cut(self):
+        it = reported(started(A), R)
+        self.assertEqual(entry(line(it, R + MIN))["pictures"], [])
+        it = dataclasses.replace(it, report=dataclasses.replace(
+            it.report, pictures=(QuestionPicture("c" * 64, "m" * 150),)))
+        self.assertEqual(entry(line(it, R + MIN))["pictures"],
+                         [{"id": "c" * 64, "line": cut("m" * 150, 140), "pair": None}])
+        self.assertEqual(entry(line(started(A), R + MIN))["pictures"], [])
+        ended = closed(it, R + MIN, ((12, "landed"),))
+        self.assertEqual(entry(line(ended, R + 2 * MIN))["pictures"], [])
+
     def test_the_line_counts_landed_in_delivery_queued_and_held(self):
         it = reported(started(A), R, issues=SEVEN)
         shown = entry(line(it, T0_MS + 5 * MIN))
@@ -1670,7 +1695,7 @@ class SprintViewTest(unittest.TestCase):
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "sessions": [], "messages": [], "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
-            "state_until": None}])
+            "state_until": None, "pictures": []}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),
