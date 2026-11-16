@@ -410,6 +410,21 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn("ADR-console-045", self.doc(path))
 
+    def test_the_owner_check_caption_decision_is_recorded(self):
+        adr = self.doc(
+            "docs/areas/console/adr/047-an-owner-check-card-captions-its-pictures-and-reads-its-reading-under-the-question.md"
+        )
+        for needle in (
+            "#1131", "Before, 1440 px", "Owner check viewer, 480 px", "OWNER-CHECK-VIEWER-480.png",
+            "sentence case", "Picture", "Reading:", "note box", "full file name",
+            "ADR-console-038", "ADR-console-045", "1440", "480",
+        ):
+            self.assertIn(needle, adr)
+        self.assertIn(
+            "ADR-console-047",
+            self.doc("docs/areas/console/adr/045-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"),
+        )
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
@@ -423,6 +438,27 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("**Sign-in state**:", self.doc("docs/areas/console/CONTEXT.md"))
         self.assertIn("ADR-console-022", self.doc(
             "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
+
+    def test_the_console_merge_refusal_decision_is_recorded(self):
+        path = "docs/areas/console/adr/048-a-merge-refused-by-the-guard-shows-once-in-the-sprints-line.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first,
+            "# ADR-console-048 — A merge refused by the guard shows once in the sprint's line, "
+            "never as a question")
+        adr = self.doc(path)
+        for needle in ("#1115", "merge refused: <reason>", "status line", "`sprint ask`", "inbox",
+                       "last seen", "digest", "A merge in <title> was refused: <reason>",
+                       "closed out", "ADR-console-014", "ADR-console-019", "ADR-console-042",
+                       "docs/areas/guard/adr/"):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        self.assertNotIn("stalled", adr)
+        raw = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text()
+        entry = raw[raw.index("**Report**:"):].split("\n\n")[0]
+        for needle in ("ADR-console-048", "merge refused"):
+            with self.subTest(needle):
+                self.assertIn(needle, entry)
 
     def test_the_console_approval_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
@@ -1276,7 +1312,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1119"))
+        self.assertTrue(decided.endswith(", #1133"))
+        self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
+        self.assertIn('"Hand-off for you, from <title>"', adr)
+        self.assertIn("its paths in the code style", adr)
+        self.assertIn("cut with an ellipsis, its whole text in its title (#1133)", adr)
+        self.assertNotIn("each open notice is one plain Overlay 2 line", adr)
         context = self.doc("docs/areas/console/CONTEXT.md")
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn('"Notices (n)" fold', notice)

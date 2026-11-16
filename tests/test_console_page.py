@@ -1061,19 +1061,24 @@ def times(tree: dict) -> dict:
 
 CLAIM_W = {
     "id": 3, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "claim",
-    "kind_text": "claims", "text": "the page fold",
+    "kind_text": "Claim", "text": "the page fold",
     "what": "python/agent_tools/console/page.html", "until_text": "until the board fold lands",
     "to_text": None, "at": utc(12 * 60000),
 }
 HANDOFF_W = {
     "id": 7, "sprint_id": "a" * 16, "poster": "Fix the settings page", "kind": "hand-off",
-    "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+    "kind_text": "Hand-off", "text": "the importer needs a retry", "what": None,
     "until_text": None, "to_text": "for you", "at": utc(3 * 60000),
 }
 HEADSUP_W = {
     "id": 8, "sprint_id": "b" * 16, "poster": "Keep the importer fast", "kind": "heads-up",
-    "kind_text": "heads-up", "text": "take the reader", "what": None, "until_text": None,
+    "kind_text": "Heads-up", "text": "take the reader", "what": None, "until_text": None,
     "to_text": None, "at": utc(60000),
+}
+HANDOFF_SPRINT_W = {
+    "id": 9, "sprint_id": "b" * 16, "poster": "Keep the importer fast", "kind": "hand-off",
+    "kind_text": "Hand-off", "text": "the reader is yours", "what": None, "until_text": None,
+    "to_text": "for Fix the settings page", "at": utc(2 * 60000),
 }
 PAGE_TEXT = PAGE.read_text()
 ALLOWED = {"--text", "--sub1", "--sub0", "--ov2", "--hair", "--s0", "--s1", "--s2", "--base",
@@ -1100,6 +1105,15 @@ def css_rules(text: str) -> list:
         css = re.sub(r"(?s)/\*.*?\*/", "", body)
         rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
     return rules
+
+
+def css_decls(selector: str) -> list:
+    return [
+        {p.strip(): v.strip() for p, _, v in (d.partition(":") for d in body.split(";"))
+         if p.strip()}
+        for sel, body in css_rules(PAGE_TEXT)
+        if selector in [x.strip() for x in sel.split(",")]
+    ]
 
 
 def fold_colour_faults(text: str, tokens: set) -> list:
@@ -1173,20 +1187,95 @@ class PageNoticeTest(unittest.TestCase):
         self.assertEqual([n["key"] for n in folds(quiet)], ["notices:owner/p03"])
         self.assertEqual([n["key"] for n in folds(snap["projects"])], ["notices:owner/p03"])
 
-    def test_an_opened_fold_lists_each_notice_as_one_plain_line(self) -> None:
-        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+    def notice_blocks(self, *notices: dict) -> list:
+        p0 = with_notices(project(0, []), *notices)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"open": "notices:owner/p00"},
                           {"snapshot": True}])
         (fold,) = folds(snap["projects"])
-        lines = [n for n in nodes(fold) if n["tag"] == "li" and has_class(n, "notice")]
+        return [n for n in nodes(fold) if n["tag"] == "li" and has_class(n, "notice")]
+
+    def test_an_opened_fold_draws_each_notice_as_its_own_block(self) -> None:
+        blocks = self.notice_blocks(HEADSUP_W, HANDOFF_SPRINT_W, HANDOFF_W, CLAIM_W)
+        self.assertEqual(len(blocks), 4)
         self.assertEqual(
-            [[full(c) for c in li["children"]] for li in lines],
-            [["Fix the settings page", "hand-off", "the importer needs a retry", "for you",
-              "3 min ago"],
-             ["Fix the settings page", "claims", "python/agent_tools/console/page.html",
-              "the page fold", "until the board fold lands", "12 min ago"]])
-        for li in lines:
-            self.assertEqual(li["children"][-1]["tag"], "time")
+            [[c["cls"] for c in b["children"]] for b in blocks],
+            [["notice-head", "notice-words"]] * 3 + [["notice-head", "notice-words", "notice-claim"]])
+        heads = [b["children"][0] for b in blocks]
+        for head in heads:
+            self.assertEqual([(c["tag"], c["cls"]) for c in head["children"]],
+                             [("span", "notice-who"), ("time", "notice-age")])
+        whos = [head["children"][0] for head in heads]
+        for who in whos:
+            self.assertEqual([(c["tag"], c["cls"]) for c in who["children"]],
+                             [("b", "notice-label"), ("span", "notice-from")])
+        self.assertEqual([full(who) for who in whos], [
+            "Heads-up, from Keep the importer fast",
+            "Hand-off for Fix the settings page, from Keep the importer fast",
+            "Hand-off for you, from Fix the settings page",
+            "Claim, from Fix the settings page"])
+        self.assertEqual([head["children"][1]["text"] for head in heads],
+                         ["1 min ago", "2 min ago", "3 min ago", "12 min ago"])
+        self.assertEqual([full(b["children"][1]) for b in blocks], [
+            "take the reader", "the reader is yours", "the importer needs a retry",
+            "the page fold"])
+
+    def test_a_claim_block_has_a_third_line_of_paths_and_until(self) -> None:
+        claim = {**CLAIM_W,
+                 "what": "python/agent_tools/console/page.html tests/test_console_page.py"}
+        heads_up, hand_off, claim_block = self.notice_blocks(HEADSUP_W, HANDOFF_W, claim)
+        third = claim_block["children"][2]
+        self.assertEqual(third["cls"], "notice-claim")
+        self.assertEqual([(c["tag"], c["cls"]) for c in third["children"]],
+                         [("span", "notice-paths"), ("span", "notice-until")])
+        codes = [n for n in nodes(third) if n["tag"] == "code"]
+        self.assertEqual([full(n) for n in codes],
+                         ["python/agent_tools/console/page.html", "tests/test_console_page.py"])
+        self.assertTrue(all(has_class(n, "notice-path") for n in codes))
+        self.assertEqual(full(third["children"][0]),
+                         "python/agent_tools/console/page.html tests/test_console_page.py")
+        self.assertEqual(full(third["children"][1]), "until the board fold lands")
+        for other in (heads_up, hand_off):
+            self.assertEqual(len(other["children"]), 2)
+            self.assertEqual([n for n in nodes(other) if n["tag"] == "code"], [])
+
+    def test_a_claim_area_in_words_is_plain_text_and_only_paths_take_the_code_chip(self) -> None:
+        area = "the console page's notices fold"
+        mixed = "page.html, view.py and python/agent_tools/"
+        for what, chips in ((area, []), (mixed, ["page.html", "view.py", "python/agent_tools/"])):
+            (block,) = self.notice_blocks({**CLAIM_W, "what": what})
+            paths = next(n for n in nodes(block) if has_class(n, "notice-paths"))
+            codes = [n for n in nodes(paths) if n["tag"] == "code"]
+            self.assertEqual([(full(n), n["title"]) for n in codes], [(c, c) for c in chips])
+            self.assertEqual(full(paths), what)
+
+    def test_only_its_words_set_a_hand_off_for_you_apart(self) -> None:
+        for_sprint, for_you, heads_up = self.notice_blocks(HANDOFF_SPRINT_W, HANDOFF_W, HEADSUP_W)
+
+        def classes(b: dict) -> list:
+            return sorted(t for n in nodes(b) for t in n["cls"].split())
+
+        self.assertEqual(classes(for_you), classes(for_sprint))
+        self.assertEqual(classes(for_you), classes(heads_up))
+        label = next(n for n in nodes(for_you) if has_class(n, "notice-label"))
+        self.assertEqual(full(label), "Hand-off for you")
+        for b in (for_sprint, for_you, heads_up):
+            self.assertFalse([n for n in nodes(b) if has_class(n, "needs")])
+
+    def test_notice_blocks_stand_apart_with_the_age_at_the_end_of_the_first_line(self) -> None:
+        def some(selector: str, **want: str) -> bool:
+            return any(all(d.get(k) == v for k, v in want.items()) for d in css_decls(selector))
+
+        self.assertTrue(some(".notice + .notice", **{"margin-top": "12px"}))
+        self.assertTrue(some(".notice-head", display="flex"))
+        self.assertFalse([d for d in css_decls(".notice-head") if d.get("flex-wrap") == "wrap"])
+        self.assertTrue(some(".notice-who", flex="1 1 auto", **{"min-width": "0"}))
+        for selector in (".notice-who", ".notice-label", ".notice-from"):
+            self.assertFalse([d for d in css_decls(selector) if "display" in d], selector)
+        self.assertTrue(some(".notice-head .notice-age", **{"margin-left": "auto"}, flex="none",
+                             color="var(--ov2)"))
+        self.assertTrue(some(".notice-words", color="var(--text)"))
+        self.assertTrue(some(".notice code", background="var(--mantle)",
+                             **{"white-space": "nowrap"}))
 
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
@@ -1208,14 +1297,62 @@ class PageNoticeTest(unittest.TestCase):
                          "Notices (3)")
         self.assertIn("take the reader", visible_text(snap["projects"]))
 
+    def test_a_long_word_or_link_is_one_cut_span_with_its_whole_text_in_its_title(self) -> None:
+        link = "https://example.com/notes/2026/11/the-importer-moves-to-the-new-reader"
+        long_poster = "Keep supercalifragilisticexpialidocious-importers fast"
+        notice = {**HEADSUP_W, "poster": long_poster, "text": "see " + link + " for the fold"}
+        (block,) = self.notice_blocks(notice)
+        words = next(n for n in nodes(block) if has_class(n, "notice-words"))
+        self.assertEqual(
+            [(c["tag"], c["cls"], full(c), c["title"]) for c in words["children"]],
+            [("span", "", "see ", None), ("span", "notice-long", link, link),
+             ("span", "", " for the fold", None)])
+        self.assertEqual(full(words), "see " + link + " for the fold")
+        sender = next(n for n in nodes(block) if has_class(n, "notice-from"))
+        (cut,) = [n for n in nodes(sender) if has_class(n, "notice-long")]
+        self.assertEqual((full(cut), cut["title"]),
+                         ("supercalifragilisticexpialidocious-importers",
+                          "supercalifragilisticexpialidocious-importers"))
+        self.assertEqual(full(sender), ", from " + long_poster)
+
+    def test_only_a_run_of_24_characters_or_more_is_cut(self) -> None:
+        (block,) = self.notice_blocks({**HEADSUP_W, "text": "a" * 23 + " " + "b" * 24})
+        self.assertEqual([full(n) for n in nodes(block) if has_class(n, "notice-long")],
+                         ["b" * 24])
+
+    def test_each_claim_path_carries_its_whole_text_in_its_title(self) -> None:
+        claim = {**CLAIM_W, "what": "python/agent_tools/console/page.html tests/test_console_page.py",
+                 "until_text": "until " + "c" * 30}
+        (block,) = self.notice_blocks(claim)
+        self.assertEqual(
+            [(full(n), n["title"]) for n in nodes(block) if n["tag"] == "code"],
+            [("python/agent_tools/console/page.html", "python/agent_tools/console/page.html"),
+             ("tests/test_console_page.py", "tests/test_console_page.py")])
+        until = next(n for n in nodes(block) if has_class(n, "notice-until"))
+        (cut,) = [n for n in nodes(until) if has_class(n, "notice-long")]
+        self.assertEqual((full(cut), cut["title"]), ("c" * 30, "c" * 30))
+
+    def test_a_cut_word_stays_on_one_line_with_an_ellipsis(self) -> None:
+        rules = css_rules(PAGE_TEXT)
+        self.assertTrue([s for s, _ in rules if {".notice .notice-long", ".notice code"}
+                         <= {x.strip() for x in s.split(",")}])
+        want = {"display": "inline-block", "max-width": "100%", "overflow": "hidden",
+                "text-overflow": "ellipsis", "white-space": "nowrap", "vertical-align": "bottom"}
+        self.assertTrue([d for d in css_decls(".notice .notice-long")
+                         if all(d.get(k) == v for k, v in want.items())])
+
     def test_the_notices_fold_uses_no_peach_and_no_new_colour(self) -> None:
-        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        link = "see https://example.com/notes/2026/11/the-importer-moves-to-the-new-reader"
+        p0 = with_notices(project(0, []), {**HANDOFF_W, "text": link}, CLAIM_W)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"open": "notices:owner/p00"},
                           {"snapshot": True}])
         item = next(n for n in nodes(snap["projects"]) if n["tag"] == "li" and any(
             c["key"] == "notices:owner/p00" for c in n["children"]))
         tokens = {t for n in nodes(item) for t in n["cls"].split()}
-        self.assertLessEqual({"line", "notices", "notice", "notice-poster", "seg"}, tokens)
+        self.assertLessEqual(
+            {"line", "notices", "notice", "notice-head", "notice-who", "notice-label",
+             "notice-from", "notice-age", "notice-words", "notice-claim", "notice-paths",
+             "notice-path", "notice-until", "notice-long"}, tokens)
         self.assertNotIn("needs", tokens)
         self.assertEqual(fold_colour_faults(PAGE_TEXT, tokens), [])
         rules = css_rules(PAGE_TEXT)
@@ -1236,6 +1373,7 @@ class PageNoticeTest(unittest.TestCase):
             ".notice { --tint: var(--ov2); }",
             ".notice { border-top: 1px solid hsl(23 86% 73%); }",
             ".notice { color: var(--lav); }",
+            ".notice-long { color: var(--peach); }",
         ]
         clean = ("<style>.notice { color: var(--ov2); } .line summary:hover { background: "
                  "rgba(202, 211, 245, .05); } #list > li.line + li.line { border-top: 1px solid "
@@ -1243,8 +1381,34 @@ class PageNoticeTest(unittest.TestCase):
         for rule in faulty:
             with self.subTest(rule=rule):
                 self.assertEqual(
-                    len(fold_colour_faults("<style>" + rule + "</style>", {"notice"})), 1)
+                    len(fold_colour_faults("<style>" + rule + "</style>", {"notice", "notice-long"})), 1)
         self.assertEqual(fold_colour_faults(clean, {"notice", "line"}), [])
+
+    def test_the_closed_notices_fold_shows_the_reports_disclosure_arrow(self) -> None:
+        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        snap = render([self.begin, {"frame": view([p0])}, {"snapshot": True}])[-1]
+        (fold,) = folds(snap["projects"])
+        self.assertFalse(fold["open"])
+        summary = fold["children"][0]
+        self.assertEqual(summary["tag"], "summary")
+        self.assertEqual([n for n in nodes(summary) if n["tag"] == "svg"], [])
+        for sel in (".sprint-detail summary", ".finished-list > summary"):
+            with self.subTest(selector=sel):
+                found = css_decls(sel)
+                self.assertTrue(found)
+                for d in found:
+                    for prop in ("display", "list-style", "list-style-type"):
+                        self.assertNotIn(prop, d)
+        selectors = [x.strip() for s, _ in css_rules(PAGE_TEXT) for x in s.split(",")]
+        for sel in (".sprint-detail summary::-webkit-details-marker",
+                    ".finished-list > summary::-webkit-details-marker"):
+            self.assertFalse([x for x in selectors if sel in x])
+        self.assertTrue([d for d in css_decls(".line.notices summary")
+                         if d.get("display") == "revert" and d.get("list-style") == "revert"])
+        self.assertTrue([d for d in css_decls(".line.notices summary::-webkit-details-marker")
+                         if d.get("display") == "revert"])
+        self.assertTrue([d for d in css_decls(".notices-project")
+                         if d.get("margin-left") == "10px"])
 
     def test_notice_words_wrap_within_the_column(self) -> None:
         rules = css_rules(PAGE_TEXT)
@@ -8164,13 +8328,13 @@ PIC_CHECK = check_item("P", "manual-check", headline=DEMO_QUESTION, check_id="A3
 
 
 class PageCheckPictureTest(unittest.TestCase):
-    def test_a_check_card_draws_one_thumbnail_per_picture_with_its_file_name(self) -> None:
+    def test_a_check_card_draws_one_thumbnail_per_picture_with_its_caption(self) -> None:
         (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
         lead = lead_of(snap)
         self.assertEqual(len(with_class(lead, "pics")), 1)
         self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
         self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
-                         ["before-1440.png", "after-1440.png"])
+                         ["Before, 1440 px", "After, 1440 px"])
         keys = [n["key"] for n in with_class(lead, "pic-thumb")]
         self.assertEqual(keys, [f"owner/p00#{PIC_CHECK['key']}/{i}" for i in range(2)])
 
@@ -8198,16 +8362,6 @@ class PageCheckPictureTest(unittest.TestCase):
         self.assertEqual(full(line), "gone.png was not found on this host.")
         self.assertEqual(with_class(lead, "pic-img"), [])
 
-    def test_a_reading_shows_above_the_answers(self) -> None:
-        read = {**PIC_CHECK, "reading": "the watts on the plug meter"}
-        (snap,) = render([START, {"frame": frame([read])}, {"snapshot": True}])
-        (reading,) = with_class(lead_of(snap), "reading")
-        self.assertEqual(full(reading), "Reading: the watts on the plug meter")
-        (box,) = [n for n in nodes(snap["inbox"]) if has_class(n, "abox")]
-        kids = box["children"]
-        self.assertLess(next(i for i, c in enumerate(kids) if c is reading),
-                        next(i for i, c in enumerate(kids) if has_class(c, "act")))
-
     def test_an_open_viewer_closes_when_the_checks_picture_file_changes(self) -> None:
         swapped = {**PIC_CHECK, "pictures": [{"id": C, "line": "before-1440.png", "pair": None},
                                              {"id": B, "line": "after-1440.png", "pair": None}]}
@@ -8226,6 +8380,114 @@ class PageCheckPictureTest(unittest.TestCase):
         for name in ("pics", "pic-missing", "reading"):
             self.assertEqual(with_class(snap["inbox"], name), [], name)
 
+
+
+def captioned(lines: list) -> dict:
+    return {**PIC_CHECK, "pictures": [{"id": f"{n + 1:064x}", "line": line, "pair": None}
+                                      for n, line in enumerate(lines)]}
+
+
+class PageCheckCaptionTest(unittest.TestCase):
+    def test_each_file_name_reads_as_its_caption(self) -> None:
+        table = [
+            ("before-1440.png", "Before, 1440 px"),
+            ("after-1440.png", "After, 1440 px"),
+            ("owner-check-viewer-480.png", "Owner check viewer, 480 px"),
+            ("OWNER-CHECK-VIEWER-480.png", "Owner check viewer, 480 px"),
+            ("Owner_Check-Viewer-480.png", "Owner check viewer, 480 px"),
+            ("Settings-PAGE.Wide.PNG", "Settings page wide"),
+            ("AFTER_480PX.PNG", "After, 480 px"),
+            ("card-before.png", "Before"),
+            ("before-after-1440.png", "Before, 1440 px"),
+            ("shots/after-480.png", "After, 480 px"),
+            ("C:\\shots\\Card-1440.png", "Card, 1440 px"),
+            ("settings__page--wide.png", "Settings page wide"),
+            ("release.notes.v2.png", "Release notes v2"),
+            ("2026-11-16-card.png", "2026 11 16 card"),
+            ("beforehand-1440.png", "Beforehand, 1440 px"),
+            ("480.png", "Picture, 480 px"),
+            ("__.png", "Picture"),
+            ("card-(before)-1440.png", "Before, 1440 px"),
+            ("[After] card (480px).png", "After, 480 px"),
+            ("(owner) check,.png", "Owner check"),
+            ("(--).png", "Picture"),
+        ]
+        lines = [line for line, _ in table]
+        captions = [caption for _, caption in table]
+        (snap,) = render([START, {"frame": frame([captioned(lines)])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(snap), "pic-line")], captions)
+        self.assertEqual([n["alt"] for n in with_class(lead_of(snap), "pic-img")], captions)
+        for c in captions:
+            self.assertTrue("/" not in c and "\\" not in c and not c.lower().endswith(".png"), c)
+
+    def test_a_check_row_captions_its_pictures_too(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE, PIC_CHECK])}, {"snapshot": True}])
+        (row,) = [r for r in rows_of(snap) if with_class(r, "pic-thumb")]
+        self.assertEqual([full(n) for n in with_class(row, "pic-line")],
+                         ["Before, 1440 px", "After, 1440 px"])
+
+    def test_the_viewer_shows_the_full_file_name(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"snapshot": True}])
+        (current,) = with_class(snap["viewer"], "viewer-pic")
+        (line,) = with_class(current, "pic-line")
+        self.assertEqual(full(line), "before-1440.png")
+        (img,) = with_class(current, "viewer-img")
+        self.assertEqual(img["alt"], "before-1440.png")
+
+    def test_a_question_picture_keeps_a_file_name_line(self) -> None:
+        asked = question(0, "Which layout reads better?", ["the old", "the new"], "the new",
+                         pictures=[{"id": A, "line": "before-1440.png", "pair": None}])
+        (snap,) = render([START, {"frame": frame([asked])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(snap), "pic-line")],
+                         ["before-1440.png"])
+        (img,) = with_class(lead_of(snap), "pic-img")
+        self.assertEqual(img["alt"], "before-1440.png")
+
+    def test_owner_check_pictures_named_before_and_after_are_not_a_pair(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
+        self.assertEqual(with_class(lead_of(snap), "pic-pair"), [])
+        self.assertEqual(with_class(lead_of(snap), "pic-label"), [])
+
+
+READ_CHECK = {**PIC_CHECK, "reading": "the watts on the plug meter", "missing_pictures": ["gone.png"]}
+
+
+def index_of(kids: list, cls: str) -> int:
+    return next(i for i, c in enumerate(kids) if has_class(c, cls))
+
+
+class PageCheckReadingTest(unittest.TestCase):
+    def test_the_reading_sits_directly_under_the_question_on_the_lead_card(self) -> None:
+        (snap,) = render([START, {"frame": frame([READ_CHECK])}, {"snapshot": True}])
+        kids = lead_of(snap)["children"]
+        q = index_of(kids, "q")
+        self.assertTrue(has_class(kids[q + 1], "reading"))
+        self.assertEqual(full(kids[q + 1]), "Reading: the watts on the plug meter")
+        self.assertLess(q + 1, index_of(kids, "pics"))
+        self.assertLess(index_of(kids, "pics"), index_of(kids, "pic-missing"))
+        self.assertLess(index_of(kids, "pic-missing"), index_of(kids, "abox"))
+        self.assertEqual(len(with_class(lead_of(snap), "reading")), 1)
+        box = kids[index_of(kids, "abox")]
+        self.assertEqual(with_class(box, "reading"), [])
+        self.assertTrue(with_class(box, "note-text"))
+
+    def test_a_reading_without_pictures_still_follows_the_question(self) -> None:
+        bare = {**READ_CHECK, "pictures": [], "missing_pictures": []}
+        (snap,) = render([START, {"frame": frame([bare])}, {"snapshot": True}])
+        kids = lead_of(snap)["children"]
+        q = index_of(kids, "q")
+        self.assertTrue(has_class(kids[q + 1], "reading"))
+        self.assertLess(q + 1, index_of(kids, "abox"))
+
+    def test_a_check_row_reads_its_reading_right_after_its_head(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE, READ_CHECK])}, {"snapshot": True}])
+        (row,) = [r for r in rows_of(snap) if with_class(r, "reading")]
+        kids = row["children"]
+        h = index_of(kids, "row-head")
+        self.assertTrue(has_class(kids[h + 1], "reading"))
+        self.assertLess(h + 1, index_of(kids, "pics"))
+        self.assertEqual(with_class(kids[index_of(kids, "abox")], "reading"), [])
 
 
 class LapsedResetPageTest(unittest.TestCase):
