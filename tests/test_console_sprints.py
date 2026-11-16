@@ -1450,6 +1450,131 @@ def refusal(round_):
     return str(caught.exception)
 
 
+A, B = "a" * 64, "b" * 64
+
+
+class RoundPictureTest(unittest.TestCase):
+    def with_pictures(self, pictures):
+        return {"questions": [{**QUESTION, "pictures": pictures}]}
+
+    def test_a_round_keeps_its_pictures_stripped_with_a_pair_only_when_given(self):
+        checked = sprints.checked_round(self.with_pictures(
+            [{"picture": A, "line": " the card before ", "pair": "before"},
+             {"picture": B, "line": "the header"}]))
+        self.assertEqual(checked["questions"][0]["pictures"],
+                         [{"picture": A, "line": "the card before", "pair": "before"},
+                          {"picture": B, "line": "the header"}])
+        empty = sprints.checked_round(self.with_pictures([]))
+        self.assertNotIn("pictures", empty["questions"][0])
+
+    def test_each_bad_picture_list_is_refused_with_its_reason(self):
+        def member(m, name):
+            return sprints.PICTURE_MEMBER.format(n=1, m=m, member=name)
+        shape = sprints.PICTURE_SHAPE.format(n=1, m=1)
+        nine = [{"picture": A, "line": "l"}] * 9
+        cases = [
+            ("x", sprints.PICTURES_SHAPE.format(n=1)),
+            (nine, sprints.TOO_MANY_PICTURES.format(n=1)),
+            (["x"], shape),
+            ([{"picture": A, "line": "l", "file": "p.png"}], shape),
+            ([{"picture": A}], shape),
+            ([{"picture": "A" * 64, "line": "l"}], member(1, "picture")),
+            ([{"picture": A, "line": " "}], member(1, "line")),
+            ([{"picture": A, "line": "a\nb"}], member(1, "line")),
+            ([{"picture": A, "line": "l" * 141}], sprints.LINE_TOO_LONG.format(n=1, m=1)),
+            ([{"picture": A, "line": "l", "pair": "middle"}], member(1, "pair")),
+            ([{"picture": A, "line": "l", "pair": "before"},
+              {"picture": B, "line": "l", "pair": "before"}],
+             sprints.PAIR_TWICE.format(n=1, pair="before")),
+            ([{"picture": A, "line": "l"}, {"picture": "bad", "line": "l"}], member(2, "picture")),
+        ]
+        for pictures, reason in cases:
+            with self.subTest(reason=reason):
+                self.assertEqual(refusal(self.with_pictures(pictures)), reason)
+
+    LOOKS = ("Judge the screenshots in /tmp/shots", "Is the screenshot right?",
+             "Compare the SCREEN SHOT with the old one", "Read /tmp/out/card.PNG first",
+             "See card.png, then pick", "Look in /work/screenshots/after please",
+             "Which looks better, the Screenshots folder one?")
+
+    def test_a_question_naming_screenshots_without_a_picture_is_refused(self):
+        for text in self.LOOKS:
+            for member in ("question", "context"):
+                round_ = {"questions": [{**QUESTION, member: text}]}
+                with self.subTest(text=text, member=member):
+                    self.assertEqual(refusal(round_), sprints.LOOK_WITHOUT_PICTURE.format(
+                        n=1, ask=round_["questions"][0]["question"]))
+        for pictures in ([], None):
+            question = {**QUESTION, "question": self.LOOKS[0]}
+            if pictures is not None:
+                question["pictures"] = pictures
+            with self.subTest(pictures=pictures):
+                self.assertIn("attach the pictures with pictures",
+                              refusal({"questions": [question]}))
+
+    def test_the_refusal_names_the_first_such_question(self):
+        round_ = {"questions": [QUESTION, {**QUESTION, "question": "Is card.png fine?"},
+                                {**QUESTION, "question": "The screenshot?"}]}
+        self.assertEqual(refusal(round_), sprints.LOOK_WITHOUT_PICTURE.format(
+            n=2, ask="Is card.png fine?"))
+        self.assertTrue(refusal(round_).startswith('question 2 "Is card.png fine?"'))
+
+    def test_a_picture_or_a_question_naming_none_is_taken(self):
+        shot = [{"picture": A, "line": "the card"}]
+        for text in self.LOOKS:
+            with self.subTest(text=text):
+                got = sprints.checked_round(
+                    {"questions": [{**QUESTION, "question": text, "pictures": shot}]})
+                self.assertEqual(got["questions"][0]["pictures"], shot)
+        for text in ("Is the layout right?", "Use the png format?", "Ship the screen now?"):
+            with self.subTest(text=text):
+                sprints.checked_round({"questions": [{**QUESTION, "question": text}]})
+
+    def test_a_logged_round_and_withheld_files_skip_the_picture_rule(self):
+        round_ = {"questions": [{**QUESTION, "question": self.LOOKS[0]}]}
+        self.assertEqual(sprints.checked_round(round_, limits=False)["questions"][0]["question"],
+                         self.LOOKS[0])
+        self.assertEqual(sprints.checked_round(round_, files_withheld=True)
+                         ["questions"][0]["question"], self.LOOKS[0])
+
+    def test_eight_pictures_and_a_140_character_line_are_taken(self):
+        pictures = [{"picture": A, "line": "l" * 140}] + [{"picture": B, "line": "l"}] * 7
+        checked = sprints.checked_round(self.with_pictures(pictures))
+        self.assertEqual(len(checked["questions"][0]["pictures"]), 8)
+
+    def test_a_logged_round_takes_a_long_line_but_not_a_ninth_picture(self):
+        long_line = sprints.checked_round(
+            self.with_pictures([{"picture": A, "line": "l" * 500}]), limits=False)
+        self.assertEqual(len(long_line["questions"][0]["pictures"][0]["line"]), 500)
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_round(self.with_pictures([{"picture": A, "line": "l"}] * 9),
+                                  limits=False)
+        self.assertEqual(str(caught.exception), sprints.TOO_MANY_PICTURES.format(n=1))
+
+    def test_the_fold_keeps_each_sprints_stored_pictures_and_a_questions_pictures(self):
+        rows = [*approved_rows(),
+                Event(4, at(4), event_log.PICTURE_STORED, "owner/p00",
+                      {"picture": A, "sprint_id": SID}),
+                Event(5, at(5), event_log.PICTURE_STORED, "owner/p00",
+                      {"picture": "bad", "sprint_id": SID}),
+                asked(6, SID, [{**QUESTION, "pictures": [{"picture": A, "line": "l",
+                                                         "pair": "after"}]}], pictures=[A])]
+        state = sprints.sprint_states(rows)[SID]
+        self.assertEqual(state.pictures, frozenset({A}))
+        self.assertEqual(state.questions[0].pictures,
+                         (sprints.QuestionPicture(A, "l", "after"),))
+
+    def test_round_pictures_lists_unique_ids_in_order(self):
+        def picture(ident):
+            return {"picture": ident, "line": "l"}
+        checked = sprints.checked_round(
+            {"questions": [{**QUESTION, "pictures": [picture(B), picture(A)]},
+                           {**SECOND, "pictures": [picture(A)]}]})
+        self.assertEqual(sprints.round_pictures(checked), [B, A])
+        self.assertEqual(sprints.round_pictures(sprints.checked_round({"questions": [QUESTION]})),
+                         [])
+
+
 class RoundCheckTest(unittest.TestCase):
     def test_a_question_needs_two_to_four_options_and_a_recommendation(self):
         def with_(**changes):
@@ -1571,10 +1696,13 @@ class RoundParseTest(unittest.TestCase):
             return json.dumps({"sprint_id": SID, "secret": "s3cret", "round": ROUND,
                                **changes}).encode()
 
-        self.assertEqual(sprints.parse_ask_request(ask()), (SID, "s3cret", ROUND))
+        self.assertEqual(sprints.parse_ask_request(ask()), (SID, "s3cret", ROUND, False))
+        self.assertEqual(sprints.parse_ask_request(ask(dry_run=True)),
+                         (SID, "s3cret", ROUND, True))
         withheld = json.dumps({"sprint_id": SID, "secret": "s3cret"}).encode()
         for body in (withheld, ask(round=[]), ask(round={**ROUND, "why": 1}), ask(sprint_id="ABC"),
                      ask(secret=5), ask(extra=1),
+                     ask(dry_run=False), ask(dry_run=1), ask(dry_run="true"), ask(dry_run=None),
                      b'{"sprint_id": "' + SID.encode() + b'", "secret": "a", "secret": "b", '
                      b'"round": {}}'):
             with self.subTest(body=body[:50]), self.assertRaises(ValueError):

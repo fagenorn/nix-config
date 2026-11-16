@@ -63,6 +63,26 @@
 // and an isConnected getter (true when its parentNode chain reaches the root). A snapshot
 // node carries hidden (bool) and expanded (its aria-expanded attribute, null when unset), and
 // the snapshot adds accounts and accounts_body (each a node or null) beside account_add.
+// A fetch of a URL starting /api/picture/ is answered by the harness itself: it is recorded
+// in posts like every fetch but never takes from the replies queue or a hold, and answers
+// {status, ok, text(), blob()} with the status of the latest {picture_reply: {id, status}}
+// step for that id (default 200) and a blob() that resolves to {picture: id}. A URL global
+// has createObjectURL(blob), which returns "blob:console/" + n (n from 1) and records
+// {url, picture: blob.picture} in made, and revokeObjectURL(url), which records url in
+// revoked. A snapshot node adds src (an IMG's src property, else null) and alt (its alt
+// attribute, else null), and the snapshot adds viewer (the #viewer node or null) and
+// object_urls: {made, revoked}. A click, focus_on or key step's "on" takes an optional
+// nth (0-based, default 0) choosing among the matches in document order; fewer matches
+// throw.
+// A key step also takes shiftKey (default false) and passes it on the event. document.body is
+// root, whose direct children are the page's id'd elements (#viewer among them). A snapshot
+// node adds inert (true only when the element's inert property is true), and Elem.focus() does
+// nothing when the element or any ancestor through parentNode has inert true, as a browser
+// refuses focus inside an inert subtree. The harness still performs no native activation and no
+// native focus move: a key never clicks the focused button and Tab never moves focus by itself;
+// both are checked in a browser.
+// window has scrollY (default 0) and scrollTo(x, y), which sets scrollY to y; a {scroll: y}
+// step sets scrollY as the owner scrolling would, and a snapshot adds scroll_y.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -121,6 +141,7 @@ class Elem {
   }
   focus() {
     if (this.disabled === true) return; // a browser does not focus a disabled control
+    for (let n = this; n; n = n.parentNode) if (n.inert === true) return; // nor inside an inert subtree
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
@@ -284,16 +305,36 @@ function listen(target) {
 function fire(target, name, extra) {
   for (const fn of listeners[target][name] || []) fn(Object.assign({ type: name }, extra));
 }
-const window = { addEventListener: listen("window") };
+const window = { addEventListener: listen("window"), scrollY: 0, scrollTo(x, y) { this.scrollY = y; } };
 const posts = [];
 const replies = [];
 const held = [];
+const pictureStatus = new Map();
+const object_urls = { made: [], revoked: [] };
+const URL = {
+  createObjectURL(blob) {
+    const url = "blob:console/" + (object_urls.made.length + 1);
+    object_urls.made.push({ url, picture: blob.picture });
+    return url;
+  },
+  revokeObjectURL(url) {
+    object_urls.revoked.push(url);
+  },
+};
 function fetch(url, options) {
   const post = {
     url, method: options.method, headers: options.headers, keepalive: options.keepalive,
   };
   if (options.body !== undefined) post.body = options.body;
   posts.push(post);
+  if (url.startsWith("/api/picture/")) {
+    const id = url.slice("/api/picture/".length);
+    const status = pictureStatus.has(id) ? pictureStatus.get(id) : 200;
+    return Promise.resolve({
+      status, ok: status >= 200 && status < 300,
+      text: () => Promise.resolve(""), blob: () => Promise.resolve({ picture: id }),
+    });
+  }
   if (url === "/api/looked") return Promise.resolve({});
   const reply = replies.length > 0 ? replies.shift() : { status: 204, text: "" };
   if (reply.reject) return Promise.reject(new Error("the console did not answer"));
@@ -336,6 +377,7 @@ const settle = async () => {
 const document = {
   addEventListener: listen("document"),
   hasFocus: () => state.focused,
+  body: root,
   get activeElement() {
     return state.active && attached(root).includes(state.active) ? state.active : null;
   },
@@ -370,13 +412,15 @@ class EventSource {
 
 vm.runInNewContext(script, {
   document, window, fetch, EventSource, Date: HarnessDate, JSON, String, Math, Number, Array, Object, console,
-  setTimeout, clearTimeout,
+  setTimeout, clearTimeout, URL,
 });
 
 function node(n) {
   return {
     tag: n.tagName.toLowerCase(),
     cls: n.className,
+    src: n.tagName === "IMG" && n.src !== undefined ? n.src : null,
+    alt: n.attributes.alt === undefined ? null : n.attributes.alt,
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
     placeholder: n.attributes.placeholder === undefined ? null : n.attributes.placeholder,
@@ -385,6 +429,7 @@ function node(n) {
     width: n.style.width === undefined ? null : n.style.width,
     open: n.open,
     hidden: n.hidden === true,
+    inert: n.inert === true,
     expanded: n.attributes["aria-expanded"] === undefined ? null : n.attributes["aria-expanded"],
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
@@ -419,9 +464,9 @@ function scopeOf(step) {
   return fold;
 }
 
-function byClass(cls, scope) {
-  const found = attached(scope).find((n) => n.className.split(/\s+/).includes(cls));
-  if (!found) throw new Error("no element with class " + cls);
+function byClass(cls, scope, nth = 0) {
+  const found = attached(scope).filter((n) => n.className.split(/\s+/).includes(cls))[nth];
+  if (!found) throw new Error("no element with class " + cls + " at " + nth);
   return found;
 }
 
@@ -447,10 +492,10 @@ async function run() {
       runDueTimers();
     } else if ("key" in step) {
       let prevented = false;
-      const own = step.on === undefined ? null : byClass(step.on, root);
+      const own = step.on === undefined ? null : byClass(step.on, root, step.nth);
       const event = {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
-        shiftKey: false, repeat: false, preventDefault() { prevented = true; },
+        shiftKey: step.shiftKey === true, repeat: false, preventDefault() { prevented = true; },
         target: own !== null ? own
           : step.follow === true ? (document.activeElement || { tagName: "BODY", isContentEditable: false })
           : step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
@@ -464,7 +509,7 @@ async function run() {
       target.blur();
       for (const fn of target.listeners.blur || []) fn({ type: "blur", target, relatedTarget: related });
     } else if ("click" in step) {
-      const target = byClass(step.click, scopeOf(step));
+      const target = byClass(step.click, scopeOf(step), step.nth);
       if (target.disabled !== true) {
         for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
       }
@@ -479,8 +524,12 @@ async function run() {
       for (const fn of target.listeners.input || []) fn({ type: "input", target });
     } else if ("select" in step) {
       byClass(step.select.cls, scopeOf(step)).setSelectionRange(step.select.start, step.select.end);
+    } else if ("scroll" in step) {
+      window.scrollY = step.scroll;
     } else if ("focus_on" in step) {
-      byClass(step.focus_on, scopeOf(step)).focus();
+      byClass(step.focus_on, scopeOf(step), step.nth).focus();
+    } else if ("picture_reply" in step) {
+      pictureStatus.set(step.picture_reply.id, step.picture_reply.status);
     } else if ("respond" in step) {
       replies.push(step.respond);
     } else if ("fail_fetch" in step) {
@@ -518,12 +567,15 @@ async function run() {
         accounts: byId("accounts") ? node(byId("accounts")) : null,
         accounts_body: byId("accounts-body") ? node(byId("accounts-body")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
+        viewer: byId("viewer") ? node(byId("viewer")) : null,
+        object_urls: { made: object_urls.made.slice(), revoked: object_urls.revoked.slice() },
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
         field: field === null || (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") ? null : {
           cls: field.className, value: field.value, start: field.selectionStart,
           end: field.selectionEnd,
         },
         focus_count: state.focusCount,
+        scroll_y: window.scrollY,
         key_prevented: state.keyPrevented,
         posts: posts.slice(),
       });

@@ -288,7 +288,7 @@ class PageTest(unittest.TestCase):
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
-             "/api/trust-check", "/api/register-cancel"},
+             "/api/trust-check", "/api/register-cancel", "/api/picture/"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -297,7 +297,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 34)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 35)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -1495,7 +1495,7 @@ def question(index, text, options, recommended, **fields):
             "key": f"question/{SID}/41/{index}", "project_id": "owner/p00", "sprint_id": SID,
             "title": "make the importer resumable", "round": 41, "index": index,
             "blocker": False, "blocks": "the resume slice", "headline": text,
-            "context": None, "more_questions": 0,
+            "context": None, "more_questions": 0, "pictures": [],
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
                            "recommended_index": options.index(recommended)}],
@@ -1739,6 +1739,428 @@ class PageQuestionTest(unittest.TestCase):
         self.assertFalse(field(undone, "ans-words")["disabled"])
         (post,) = round_posts(sent)
         self.assertEqual(posted(post)["text"], "use the reader")
+
+
+A, B, C = "a" * 64, "b" * 64, "c" * 64
+PICTURED = question(0, "Which layout reads better?", ["the old", "the new"], "the new", pictures=[
+    {"id": C, "line": "the header at 1440", "pair": None},
+    {"id": A, "line": "the card before", "pair": "before"},
+    {"id": B, "line": "the card after", "pair": "after"}])
+FAILED_TEXT = "The picture could not be loaded."
+
+
+def lead_of(snap: dict) -> dict:
+    (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+    return lead
+
+
+def with_class(tree: dict, name: str) -> list:
+    return [n for n in nodes(tree) if has_class(n, name)]
+
+
+def picture_posts(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"].startswith("/api/picture/")]
+
+
+def page_css() -> tuple:
+    """The page's whole style block and its top level with every @media block removed."""
+    (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+    return style, re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+
+
+def css_declared(block: str, selector: str) -> dict:
+    merged: dict = {}
+    for name, decls in style_rules(block):
+        if name == selector:
+            merged.update(decls)
+    return merged
+
+
+class PagePictureTest(unittest.TestCase):
+    def test_a_question_card_draws_one_thumbnail_per_picture_with_its_line(self) -> None:
+        (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual(len(with_class(lead, "pics")), 1)
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 3)
+        lines = ["the header at 1440", "the card before", "the card after"]
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")], lines)
+        self.assertEqual([n["alt"] for n in with_class(lead, "pic-img")], lines)
+        keys = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(keys, [f"owner/p00#{PICTURED['key']}/{i}" for i in range(3)])
+
+    def test_a_before_and_after_pair_sits_side_by_side_labelled(self) -> None:
+        (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        (pair,) = with_class(lead_of(snap), "pic-pair")
+        self.assertEqual([c["tag"] for c in pair["children"]], ["figure", "figure"])
+        self.assertEqual([full(n) for n in with_class(pair, "pic-label")], ["Before", "After"])
+        self.assertEqual([full(n) for n in with_class(pair, "pic-line")],
+                         ["the card before", "the card after"])
+        flipped = {**PICTURED, "pictures": [PICTURED["pictures"][2], PICTURED["pictures"][0],
+                                            PICTURED["pictures"][1]]}
+        (after,) = render([START, {"frame": frame([flipped])}, {"snapshot": True}])
+        gallery = with_class(lead_of(after), "pics")[0]
+        self.assertTrue(has_class(gallery["children"][0], "pic-pair"))
+        self.assertEqual([n["alt"] for n in with_class(gallery, "pic-img")],
+                         ["the card before", "the card after", "the header at 1440"])
+        self.assertEqual([full(n) for n in with_class(gallery, "pic-label")], ["Before", "After"])
+
+    def test_a_lone_before_is_a_plain_picture(self) -> None:
+        lone = question(0, "Which layout reads better?", ["the old", "the new"], "the new", pictures=[
+            {"id": A, "line": "the card before", "pair": "before"}])
+        (snap,) = render([START, {"frame": frame([lone])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual(len(with_class(lead, "pic-thumb")), 1)
+        self.assertEqual(with_class(lead, "pic-pair"), [])
+        self.assertEqual(with_class(lead, "pic-label"), [])
+
+    def test_a_question_without_pictures_draws_no_gallery(self) -> None:
+        (snap,) = render([START, {"frame": frame([Q0])}, {"snapshot": True}])
+        self.assertEqual(with_class(snap["inbox"], "pics"), [])
+
+    def test_an_open_question_row_shows_its_pictures_too(self) -> None:
+        second = {**PICTURED, "index": 1, "key": f"question/{SID}/41/1"}
+        (snap,) = render([START, {"frame": frame([Q0, second])}, {"snapshot": True}])
+        rows = [r for r in rows_of(snap) if with_class(r, "pic-thumb")]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(with_class(rows[0], "pic-thumb")), 3)
+
+    def test_pictures_are_fetched_with_the_page_token_once_each(self) -> None:
+        steps = [START, {"frame": frame([PICTURED])}, {"snapshot": True},
+                 {"frame": frame([PICTURED])}, {"snapshot": True}]
+        (_, snap) = render(steps)
+        fetched = picture_posts(snap)
+        self.assertEqual([p["url"] for p in fetched], [f"/api/picture/{i}" for i in (C, A, B)])
+        for post in fetched:
+            self.assertEqual(post["method"], "GET")
+            self.assertEqual(post["headers"], {"X-Console-Token": "__CONSOLE_TOKEN__"})
+
+    def test_every_picture_img_shows_an_object_url(self) -> None:
+        (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        imgs = [n for n in nodes(snap["inbox"]) if n["tag"] == "img"]
+        self.assertEqual(len(imgs), 3)
+        for img in imgs:
+            self.assertTrue(img["src"].startswith("blob:console/"), img["src"])
+        self.assertEqual([m["picture"] for m in snap["object_urls"]["made"]], [C, A, B])
+        text = PAGE.read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"\.src\s*=\s*[\"'`]/api", text))
+        self.assertNotIn('src="/api', text)
+
+    def test_a_failed_picture_says_so_and_has_no_src(self) -> None:
+        (snap,) = render([START, {"picture_reply": {"id": C, "status": 404}},
+                          {"frame": frame([PICTURED])}, {"snapshot": True}])
+        figures = with_class(lead_of(snap), "pic")
+        self.assertTrue(has_class(figures[0], "failed"))
+        self.assertIn(FAILED_TEXT, full(figures[0]))
+        self.assertEqual([n["src"] for n in nodes(figures[0]) if n["tag"] == "img"], [None])
+        self.assertFalse(has_class(figures[1], "failed"))
+        self.assertEqual([m["picture"] for m in snap["object_urls"]["made"]], [A, B])
+
+    def test_a_picture_no_card_shows_is_revoked(self) -> None:
+        *_, last = render([START, {"frame": frame([PICTURED])}, {"snapshot": True},
+                           {"frame": frame([Q0])}, {"snapshot": True}])
+        made = [m["url"] for m in last["object_urls"]["made"]]
+        self.assertEqual(len(made), 3)
+        self.assertEqual(last["object_urls"]["revoked"], made)
+
+    def test_a_picture_fetch_does_not_take_a_queued_reply(self) -> None:
+        (snap,) = render([START, {"respond": {"status": 500, "text": "boom"}},
+                          {"frame": frame([PICTURED])}, {"key": "Enter"}, {"clock": 5000},
+                          {"snapshot": True}])
+        self.assertEqual(len(round_posts(snap)), 1)
+        self.assertEqual(len(with_class(snap["inbox"], "fail")), 1)
+
+    def test_the_gallery_wraps_and_the_pair_stacks_at_480(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+
+        def declared(block: str, selector: str) -> dict:
+            merged: dict = {}
+            for name, decls in style_rules(block):
+                if name == selector:
+                    merged.update(decls)
+            return merged
+
+        self.assertEqual(declared(style, ".pics").get("flex-wrap"), "wrap")
+        for selector in (".pic", ".pic-pair"):
+            rule = declared(style, selector)
+            self.assertEqual((rule.get("min-width"), rule.get("max-width")), ("0", "100%"), selector)
+        self.assertEqual(declared(style, ".pic-line").get("overflow-wrap"), "anywhere")
+        narrow = media_block(style, "(max-width: 480px)")
+        self.assertEqual(declared(narrow, ".pic-pair").get("flex-direction"), "column")
+
+    def test_a_thumbnail_follows_its_pictures_shape_up_to_a_bound(self) -> None:
+        style, top = page_css()
+        image = css_declared(top, ".pic-thumb img")
+        self.assertEqual((image.get("width"), image.get("height")), ("100%", "auto"))
+        self.assertEqual(image.get("object-fit"), "contain")
+        self.assertEqual(image.get("max-height"), "180px")
+        narrow = media_block(style, "(max-width: 480px)")
+        self.assertEqual(css_declared(narrow, ".pic-thumb img").get("max-height"), "240px")
+        self.assertEqual(css_declared(top, ".pic-pair").get("align-items"), "flex-start")
+        self.assertEqual(css_declared(narrow, ".pic-pair").get("align-items"), "stretch")
+
+    def test_a_thumbnails_letterbox_is_a_light_tint_of_the_card(self) -> None:
+        _, top = page_css()
+        for selector in (".pic-thumb", ".pic-thumb img"):
+            fill = css_declared(top, selector).get("background", "")
+            if fill in ("", "none", "transparent"):
+                continue
+            tint = re.fullmatch(r"rgba\(\s*\d+,\s*\d+,\s*\d+,\s*(\.\d+|0\.\d+)\)", fill)
+            self.assertIsNotNone(tint, selector + " " + fill)
+            self.assertLessEqual(float(tint.group(1)), .35, selector)
+
+    def test_the_pair_sits_in_one_row_on_a_desktop(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+
+        def declared(block: str, selector: str) -> dict:
+            merged: dict = {}
+            for name, decls in style_rules(block):
+                if name == selector:
+                    merged.update(decls)
+            return merged
+
+        pair = declared(top, ".pic-pair")
+        self.assertEqual(pair.get("display"), "flex")
+        self.assertIn(pair.get("flex-direction"), (None, "row"))
+        self.assertEqual(declared(top, ".pic-pair .pic").get("flex"), "1 1 0")
+        for query in ("(max-width: 1180px)", "(max-width: 900px)"):
+            self.assertNotEqual(declared(media_block(style, query), ".pic-pair").get("flex-direction"),
+                                "column", query)
+
+
+class PageViewerTest(unittest.TestCase):
+    opened = [START, {"frame": frame([PICTURED])}]
+
+    @staticmethod
+    def count(snap: dict) -> str:
+        (count,) = with_class(snap["viewer"], "viewer-count")
+        return full(count)
+
+    def test_a_click_opens_the_viewer_on_that_picture(self) -> None:
+        (snap,) = render(self.opened + [{"click": "pic-thumb"}, {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+        self.assertEqual(self.count(snap), "1 of 3")
+        (img,) = with_class(snap["viewer"], "viewer-img")
+        made = {m["picture"]: m["url"] for m in snap["object_urls"]["made"]}
+        self.assertEqual(img["src"], made[C])
+        (line,) = with_class(snap["viewer"], "pic-line")
+        self.assertEqual(full(line), "the header at 1440")
+        self.assertEqual(snap["active"], "viewer")
+
+    def test_enter_on_a_thumbnail_opens_it(self) -> None:
+        (snap,) = render(self.opened + [
+            {"focus_on": "pic-thumb", "nth": 1},
+            {"key": "Enter", "on": "pic-thumb", "nth": 1, "follow": True}, {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+        self.assertEqual(self.count(snap), "2 of 3")
+        self.assertTrue(snap["key_prevented"])
+
+    def test_a_focused_thumbnail_keeps_focus_through_an_unrelated_frame(self) -> None:
+        (snap,) = render(self.opened + [
+            {"focus_on": "pic-thumb", "nth": 1}, {"frame": frame([PICTURED])}, {"snapshot": True}])
+        self.assertEqual(snap["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertTrue(focused["key"].endswith("/1"), focused["key"])
+
+    def test_arrows_move_between_the_cards_pictures_and_stop_at_the_ends(self) -> None:
+        right = {"key": "ArrowRight", "follow": True}
+        left = {"key": "ArrowLeft", "follow": True}
+        first, second, third = render(self.opened + [
+            {"click": "pic-thumb", "nth": 1}, right, {"snapshot": True}, right, {"snapshot": True},
+            left, left, left, {"snapshot": True}])
+        self.assertEqual(self.count(first), "3 of 3")
+        self.assertEqual(self.count(second), "3 of 3")
+        self.assertEqual(self.count(third), "1 of 3")
+        for snap, cls, disabled in ((first, "viewer-next", True), (second, "viewer-next", True),
+                                    (third, "viewer-prev", True), (third, "viewer-next", False)):
+            (button,) = with_class(snap["viewer"], cls)
+            self.assertEqual(button["disabled"], disabled, cls)
+
+    def test_a_pair_shows_side_by_side_in_the_viewer(self) -> None:
+        before, after, single = render(self.opened + [
+            {"click": "pic-thumb", "nth": 1}, {"snapshot": True},
+            {"key": "ArrowRight", "follow": True}, {"snapshot": True},
+            {"key": "Escape", "follow": True}, {"click": "pic-thumb", "nth": 0}, {"snapshot": True}])
+        for snap, current in ((before, 0), (after, 1)):
+            (pair,) = with_class(snap["viewer"], "viewer-pair")
+            self.assertEqual([full(n) for n in with_class(pair, "pic-label")], ["Before", "After"])
+            figures = with_class(pair, "viewer-pic")
+            self.assertEqual([has_class(f, "current") for f in figures],
+                             [i == current for i in range(2)])
+            self.assertEqual([with_class(f, "viewer-img")[0]["alt"] for f in figures],
+                             ["the card before", "the card after"])
+        self.assertEqual(with_class(single["viewer"], "viewer-pair"), [])
+
+    def test_escape_closes_and_returns_focus_to_the_thumbnail(self) -> None:
+        (snap,) = render(self.opened + [
+            {"click": "pic-thumb", "nth": 1}, {"key": "ArrowRight", "follow": True},
+            {"key": "Escape", "follow": True}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+        self.assertEqual([c for c in snap["viewer"]["children"]], [])
+        self.assertEqual(snap["active"], "pic-thumb")
+        (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
+        self.assertTrue(focused["key"].endswith("/2"), focused["key"])
+        self.assertTrue(snap["key_prevented"])
+
+    def test_page_keys_do_nothing_while_the_viewer_is_open(self) -> None:
+        body = {"key": "1", "target": "BODY"}
+        (control,) = render(self.opened + [body, {"snapshot": True}])
+        self.assertTrue(picked(control)[0].endswith("the old"))
+        with self.subTest("digit"):
+            (snap,) = render(self.opened + [{"click": "pic-thumb"}, body, {"snapshot": True}])
+            self.assertTrue(picked(snap)[0].endswith("the new"))
+            self.assertFalse(snap["viewer"]["hidden"])
+        with self.subTest("enter"):
+            (snap,) = render(self.opened + [
+                {"click": "pic-thumb"}, {"key": "Enter", "target": "BODY"}, {"clock": 5000},
+                {"snapshot": True}])
+            self.assertEqual(round_posts(snap), [])
+            self.assertFalse(snap["viewer"]["hidden"])
+
+    def test_the_viewer_closes_when_its_card_leaves(self) -> None:
+        (snap,) = render(self.opened + [{"click": "pic-thumb"}, {"frame": frame([Q0])},
+                                        {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+        self.assertFalse(snap["inbox"]["inert"])
+
+    def test_the_viewer_buttons_work_by_click(self) -> None:
+        moved, closed = render(self.opened + [
+            {"click": "pic-thumb"}, {"click": "viewer-next"}, {"snapshot": True},
+            {"click": "viewer-close"}, {"snapshot": True}])
+        self.assertEqual(self.count(moved), "2 of 3")
+        self.assertTrue(closed["viewer"]["hidden"])
+
+    def test_the_viewer_pair_is_a_row_and_stacks_at_480(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+
+        def declared(block: str, selector: str) -> dict:
+            merged: dict = {}
+            for name, decls in style_rules(block):
+                if name == selector:
+                    merged.update(decls)
+            return merged
+
+        pair = declared(top, ".viewer-pair")
+        self.assertEqual(pair.get("display"), "flex")
+        self.assertIn(pair.get("flex-direction"), (None, "row"))
+        narrow = media_block(style, "(max-width: 480px)")
+        self.assertEqual(declared(narrow, ".viewer-pair").get("flex-direction"), "column")
+        image = declared(top, ".viewer img")
+        self.assertEqual((image.get("max-width"), image.get("object-fit")), ("100%", "contain"))
+
+    def test_the_gallery_and_viewer_are_one_shared_piece(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        for needle in ("function pictureGallery(", "function openViewer(", 'id="viewer"'):
+            self.assertEqual(text.count(needle), 1, needle)
+        for name in ("leadItem", "itemLine"):
+            start = text.index("function " + name + "(")
+            body = text[start:text.index("\nfunction ", start + 1)]
+            self.assertIn("pictureGallery(", body, name)
+
+    def test_tab_and_shift_tab_stay_inside_the_viewer(self) -> None:
+        tab = {"key": "Tab", "follow": True}
+        start, one, two, back = render(self.opened + [
+            {"click": "pic-thumb"}, {"snapshot": True}, tab, {"snapshot": True}, tab,
+            {"snapshot": True}, {"key": "Tab", "shiftKey": True, "follow": True}, {"snapshot": True}])
+        self.assertEqual([s["active"] for s in (start, one, two, back)],
+                         ["viewer", "viewer-next", "viewer-close", "viewer-next"])
+        for snap in (one, two, back):
+            self.assertTrue(snap["key_prevented"])
+        first, second = render(self.opened + [
+            {"click": "pic-thumb", "nth": 1}, tab, {"snapshot": True}, tab, {"snapshot": True}])
+        self.assertEqual([first["active"], second["active"]], ["viewer-prev", "viewer-next"])
+        (last,) = render(self.opened + [
+            {"click": "pic-thumb"}, {"key": "Tab", "shiftKey": True, "follow": True}, {"snapshot": True}])
+        self.assertEqual(last["active"], "viewer-close")
+
+    def test_arrows_move_the_picture_and_leave_focus_where_it_is(self) -> None:
+        right = {"key": "ArrowRight", "follow": True}
+        opened, moved = render(self.opened + [
+            {"click": "pic-thumb"}, {"snapshot": True}, right, {"snapshot": True}])
+        self.assertEqual([opened["active"], moved["active"]], ["viewer", "viewer"])
+        self.assertEqual(moved["focus_count"], opened["focus_count"])
+        self.assertEqual(self.count(moved), "2 of 3")
+        held, kept, ended = render(self.opened + [
+            {"click": "pic-thumb", "nth": 1}, {"focus_on": "viewer-next"}, {"snapshot": True},
+            {"key": "ArrowLeft", "follow": True}, {"snapshot": True}, right, right, {"snapshot": True}])
+        self.assertEqual([held["active"], kept["active"]], ["viewer-next", "viewer-next"])
+        self.assertEqual(kept["focus_count"], held["focus_count"])
+        self.assertEqual(self.count(kept), "1 of 3")
+        self.assertEqual(self.count(ended), "3 of 3")
+        self.assertEqual(ended["active"], "viewer")
+        _, top = page_css()
+        self.assertEqual(css_declared(top, ".viewer:focus-visible").get("outline"), "none")
+
+    def test_the_viewer_controls_share_one_bar_that_stays_in_view(self) -> None:
+        (snap,) = render(self.opened + [{"click": "pic-thumb", "nth": 1}, {"snapshot": True}])
+        (bar,) = with_class(snap["viewer"], "viewer-bar")
+        self.assertEqual([c["cls"] for c in bar["children"]],
+                         ["viewer-prev", "viewer-count", "viewer-next", "viewer-close"])
+        self.assertEqual([full(c) for c in bar["children"]], ["Previous", "2 of 3", "Next", "Close"])
+        self.assertEqual(len(with_class(snap["viewer"], "viewer-stage")), 1)
+        style, top = page_css()
+        row = css_declared(top, ".viewer-bar")
+        self.assertEqual(row.get("display"), "flex")
+        self.assertIn(row.get("flex-direction"), (None, "row"))
+        self.assertIn(row.get("flex-wrap"), (None, "nowrap"))
+        self.assertEqual(row.get("flex"), "none")
+        host = css_declared(top, ".viewer")
+        self.assertEqual((host.get("display"), host.get("flex-direction")), ("flex", "column"))
+        self.assertNotIn(host.get("overflow-y", host.get("overflow")), ("auto", "scroll"))
+        self.assertEqual(css_declared(top, ".viewer-stage").get("overflow"), "auto")
+        narrow = media_block(style, "(max-width: 480px)")
+        tall = css_declared(narrow, ".viewer-bar button").get("min-height", "0px")
+        self.assertGreaterEqual(int(tall.removesuffix("px")), 44)
+
+    def test_the_viewer_shows_its_pictures_at_the_top_of_the_stage(self) -> None:
+        _, top = page_css()
+        stage = css_declared(top, ".viewer-stage")
+        self.assertIn(stage.get("align-items"), (None, "flex-start", "start"))
+        placed = css_declared(top, ".viewer-stage > *").get("margin", "")
+        self.assertEqual(placed.split()[0], "0", placed)
+        self.assertNotIn(placed, ("auto", "auto auto"))
+
+    def test_closing_the_viewer_restores_the_page_scroll(self) -> None:
+        (snap,) = render(self.opened + [
+            {"scroll": 640}, {"click": "pic-thumb", "nth": 1}, {"scroll": 0},
+            {"key": "Escape", "follow": True}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+        self.assertEqual(snap["scroll_y"], 640)
+
+    def test_the_viewer_is_opaque_and_the_page_behind_it_does_not_scroll(self) -> None:
+        _, top = page_css()
+        tokens = css_declared(top, ":root")
+        for selector in (".viewer", ".viewer-bar"):
+            fill = css_declared(top, selector).get("background", "")
+            token = re.fullmatch(r"var\((--[a-z0-9]+)\)", fill)
+            self.assertIsNotNone(token, selector + " " + fill)
+            self.assertRegex(tokens.get(token.group(1), ""), r"^#[0-9a-f]{6}$", selector)
+        self.assertEqual(css_declared(top, "html:has(#viewer:not([hidden]))").get("overflow"), "hidden")
+
+    def test_the_page_behind_the_viewer_is_inert(self) -> None:
+        shown, closed = render(self.opened + [
+            {"click": "pic-thumb"}, {"snapshot": True}, {"key": "Escape", "follow": True},
+            {"snapshot": True}])
+        self.assertTrue(shown["inbox"]["inert"])
+        self.assertTrue(shown["projects"]["inert"])
+        self.assertFalse(shown["viewer"]["inert"])
+        self.assertFalse(closed["inbox"]["inert"])
+        self.assertFalse(closed["projects"]["inert"])
+
+    def test_enter_and_space_on_a_viewer_button_are_left_to_the_button(self) -> None:
+        enter, space = render(self.opened + [
+            {"click": "pic-thumb"}, {"focus_on": "viewer-next"},
+            {"key": "Enter", "follow": True}, {"snapshot": True},
+            {"key": " ", "follow": True}, {"snapshot": True}])
+        for snap in (enter, space):
+            self.assertFalse(snap["key_prevented"])
+            self.assertEqual(self.count(snap), "1 of 3")
+            self.assertFalse(snap["viewer"]["hidden"])
+            self.assertEqual(round_posts(snap), [])
 
 
 

@@ -21,12 +21,15 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import event_log, pictures, sprint, write_guard
+from agent_tools.console import event_log, pictures, service, sprint, sprints, write_guard
 from agent_tools.console.event_log import PICTURE_STORED, Event
 from agent_tools.console.pictures import SIGNATURE
 
 from . import accounts_sandbox
 from . import console_test_support as support
+from .test_console_answer import view_of
+from .test_console_messages import GOAL_TEXT, PARTS
+from .test_console_questions import APPROVE, BRIEF, JSON
 from .test_console_sprint_command import run_sprint
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -106,6 +109,20 @@ class PictureStoreTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(self.dir / picture_id).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(self.dir).st_mode), 0o700)
         self.assertEqual(os.listdir(self.dir), [picture_id])
+
+    def test_present_answers_only_for_a_regular_file_and_changes_nothing(self):
+        picture_id, _ = pictures.store(self.dir, PIXEL)
+        age(self.dir / picture_id, 2 * 86400)
+        before = os.stat(self.dir / picture_id).st_mtime
+        os.symlink(self.dir / picture_id, self.dir / ("e" * 64))
+        (self.dir / ("c" * 64)).mkdir()
+        self.assertTrue(pictures.present(self.dir, picture_id))
+        self.assertEqual(os.stat(self.dir / picture_id).st_mtime, before)
+        for name in ("e" * 64, "c" * 64, "d" * 64):
+            with self.subTest(name[0]):
+                self.assertFalse(pictures.present(self.dir, name))
+        with self.assertRaises(ValueError):
+            pictures.present(self.dir, "x")
 
     def test_a_second_store_writes_nothing_and_renews_the_age(self):
         picture_id, _ = pictures.store(self.dir, PIXEL)
@@ -214,6 +231,24 @@ class PictureCase(Case):
 
     def secret(self, sid):
         return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
+
+    def approved(self, svc, project_id="owner/p01"):
+        sid = svc.state_goal(project_id, GOAL_TEXT)
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "brief": PARTS}).encode()
+        self.assertEqual(support.post_page(svc.address, BRIEF, JSON, body)[0], 200)
+        body = json.dumps({"project_id": project_id, "sprint_id": sid, "version": 1}).encode()
+        self.assertEqual(
+            support.post_page(svc.address, "/api/approve", self.own(svc, **JSON), body)[0], 204)
+        return sid
+
+    def write(self, name, data):
+        path = self.store.parent / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        return path
+
+    def secret_file(self, sid, text=None):
+        return self.write("mine-secret", (text or self.secret(sid)).encode())
 
     def send(self, svc, sid, secret, body, **extra):
         headers = {"Content-Type": "image/png", "X-Console-Sprint": sid,
@@ -379,6 +414,164 @@ class PictureWriteTest(PictureCase):
                 self.assertEqual((status, headers["Allow"]), (405, "POST"))
 
 
+class PictureRoundTest(PictureCase):
+    Q = {"question": "Which layout reads better?", "blocks": "the card slice",
+         "options": ["the old", "the new"], "recommended": "the new"}
+
+    def stored(self, svc, sid, data):
+        status, _, answer = self.send(svc, sid, self.secret(sid), data)
+        self.assertEqual(status, 200)
+        return json.loads(answer)["picture"]
+
+    def ask(self, svc, sid, round_):
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "round": round_}).encode()
+        return support.post_page(svc.address, "/api/ask", JSON, body)
+
+    def round_with(self, *members):
+        return {"questions": [{**self.Q, "pictures": list(members)}]}
+
+    def own_round(self, svc):
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        b = self.stored(svc, sid, WIDE)
+        members = [{"picture": a, "line": "the card before", "pair": "before"},
+                   {"picture": b, "line": "the card after", "pair": "after"}]
+        status, _, answer = self.ask(svc, sid, self.round_with(*members))
+        self.assertEqual(status, 200, answer)
+        return sid, a, b, members
+
+    def test_a_round_with_its_own_pictures_stores_their_ids_and_lines(self):
+        svc = self.open()
+        sid, a, b, members = self.own_round(svc)
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(payload["questions"][0]["pictures"], members)
+        self.assertEqual(payload["pictures"], [a, b])
+        self.assertEqual(
+            view_of(svc)["inbox"]["open"][0]["pictures"],
+            [{"id": a, "line": "the card before", "pair": "before"},
+             {"id": b, "line": "the card after", "pair": "after"}])
+
+    def test_a_question_naming_screenshots_with_no_picture_is_refused_and_appends_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        rows = support.log_rows(self.store)
+        ask = "Judge the screenshots in /tmp/shots"
+        status, _, answer = self.ask(svc, sid, {"questions": [{**self.Q, "question": ask}]})
+        self.assertEqual((status, answer.strip()), (
+            409, sprints.LOOK_WITHOUT_PICTURE.format(n=1, ask=ask).encode()))
+        self.assertIn(b"pictures", answer)
+        for member in ("question", "context"):
+            for text in ("Is card.png right?", "Look in /x/screenshots/y"):
+                with self.subTest(member=member, text=text):
+                    got = self.ask(svc, sid, {"questions": [{**self.Q, member: text}]})
+                    self.assertEqual(got[0], 409)
+        self.assertEqual(support.log_rows(self.store), rows)
+        status, _, answer = self.ask(svc, sid, self.round_with_question(
+            ask, {"picture": a, "line": "the shots folder"}))
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(len(self.rows("questions.asked")), 1)
+
+    def test_a_question_naming_nothing_to_look_at_is_accepted_without_pictures(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        status, _, answer = self.ask(svc, sid, {"questions": [self.Q]})
+        self.assertEqual(status, 200, answer)
+
+    def round_with_question(self, ask, *members):
+        return {"questions": [{**self.Q, "question": ask, "pictures": list(members)}]}
+
+    def test_a_dry_run_with_withheld_files_does_not_refuse_the_look_rule(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "dry_run": True,
+                           "round": {"questions": [{**self.Q, "question": "Judge the screenshots"}]}}
+                          ).encode()
+        status, _, answer = support.post_page(svc.address, "/api/ask", JSON, body)
+        self.assertEqual((status, json.loads(answer)), (200, {"questions": 1}))
+
+    def test_a_dry_run_checks_a_round_and_writes_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        rows = support.log_rows(self.store)
+
+        def dry(round_, **changes):
+            body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "round": round_,
+                               "dry_run": True, **changes}).encode()
+            return support.post_page(svc.address, "/api/ask", JSON, body)
+        status, _, answer = dry(self.round_with({"picture": a, "line": "the header"}))
+        self.assertEqual((status, json.loads(answer)), (200, {"questions": 1}))
+        status, _, answer = dry(self.round_with({"picture": "f" * 64, "line": "the header"}))
+        self.assertEqual((status, answer.strip()),
+                         (409, sprints.PICTURE_UNKNOWN.format(n=1, m=1).encode()))
+        self.assertEqual(dry(self.round_with(), dry_run=False)[0], 400)
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_each_bad_picture_list_is_refused_with_its_reason_and_appends_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        other = self.approved(svc, "owner/p00")
+        w = self.stored(svc, other, WIDE)
+        gone = self.stored(svc, sid, padded(4096))
+        os.unlink(self.pictures_dir / gone)
+        before = os.stat(self.pictures_dir / a).st_mtime
+        mine = {"picture": a, "line": "one"}
+        unknown = {"picture": "f" * 64, "line": "one"}
+        cases = (
+            ("shape", "x", sprints.PICTURES_SHAPE.format(n=1)),
+            ("too many", [mine] * 9, sprints.TOO_MANY_PICTURES.format(n=1)),
+            ("file key", [{**mine, "file": "x"}], sprints.PICTURE_SHAPE.format(n=1, m=1)),
+            ("no line", [{"picture": a}], sprints.PICTURE_SHAPE.format(n=1, m=1)),
+            ("empty line", [{**mine, "line": ""}],
+             sprints.PICTURE_MEMBER.format(n=1, m=1, member="line")),
+            ("long line", [{**mine, "line": "l" * 141}],
+             sprints.LINE_TOO_LONG.format(n=1, m=1)),
+            ("pair twice", [{**mine, "pair": "before"}, {**mine, "pair": "before"}],
+             sprints.PAIR_TWICE.format(n=1, pair="before")),
+            ("unknown", [unknown], sprints.PICTURE_UNKNOWN.format(n=1, m=1)),
+            ("foreign", [{"picture": w, "line": "one"}],
+             sprints.PICTURE_FOREIGN.format(n=1, m=1)),
+            ("gone", [{"picture": gone, "line": "one"}],
+             sprints.PICTURE_UNKNOWN.format(n=1, m=1)),
+            ("second unknown", [mine, unknown], sprints.PICTURE_UNKNOWN.format(n=1, m=2)),
+        )
+        for name, listed, reason in cases:
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                status, _, body = self.assert_unchanged(
+                    svc, lambda: self.ask(svc, sid, {"questions": [{**self.Q, "pictures": listed}]}))
+                self.assertEqual((status, body), (409, reason.encode() + b"\n"))
+        self.assertEqual(self.rows("questions.asked"), [])
+        self.assertEqual(os.stat(self.pictures_dir / a).st_mtime, before)
+
+    def test_eight_pictures_with_140_character_lines_are_taken(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        status, _, answer = self.ask(
+            svc, sid, self.round_with(*[{"picture": a, "line": "l" * 140}] * 8))
+        self.assertEqual(status, 200, answer)
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(len(payload["questions"][0]["pictures"]), 8)
+        self.assertEqual(payload["pictures"], [a])
+
+    def test_a_round_picture_outlives_the_sweep(self):
+        svc = self.open()
+        sid, a, b, _ = self.own_round(svc)
+        age(self.pictures_dir / a, 2 * 86400)
+        svc.retain()
+        self.assertIn(a, self.entries())
+
+    def test_a_round_without_pictures_logs_the_old_row(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        status, _, answer = self.ask(svc, sid, {"questions": [self.Q]})
+        self.assertEqual(status, 200, answer)
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(set(payload), {"sprint_id", "goal", "blocker", "questions"})
+
+
 class PictureRetentionTest(PictureCase):
     def stored(self, svc, sid, body):
         status, _, answer = self.send(svc, sid, self.secret(sid), body)
@@ -428,6 +621,31 @@ class PictureRetentionTest(PictureCase):
         svc.retain()
         self.assertEqual(self.rows("test.reference"), [])
         self.assertEqual(self.entries(), [])
+
+    def test_a_round_picture_stays_the_sprints_after_retention_and_a_restart(self):
+        now = ["2026-01-01T00:00:00.000000+00:00"]
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(log_clock=lambda: now[0])
+        sid = self.approved(svc)
+        picture_id = self.stored(svc, sid, PIXEL)
+        member = {"picture": picture_id, "line": "the header"}
+        round_ = {"questions": [{**PictureRoundTest.Q, "pictures": [member]}]}
+
+        def ask(blocker):
+            body = json.dumps({"sprint_id": sid, "secret": self.secret(sid),
+                               "round": {**round_, "blocker": blocker}}).encode()
+            return support.post_page(svc.address, "/api/ask", JSON, body)
+        self.assertEqual(ask(False)[0], 200)
+        now[0] = "2026-04-02T00:00:00.000000+00:00"
+        svc.retain()
+        self.assertEqual(self.rows(PICTURE_STORED), [])
+        self.assertEqual(len(self.rows("questions.asked")), 1)
+        svc.close()
+        svc = self.start(log_clock=lambda: now[0])
+        self.assertEqual(self.entries(), [picture_id])
+        status, _, answer = ask(True)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(len(self.rows("questions.asked")), 2)
 
     def test_the_start_pass_sweeps_too(self):
         support.write_registry(self.registry, support.entries(2))
@@ -582,15 +800,6 @@ class PictureReadTest(PictureCase):
 
 
 class PictureCommandTest(PictureCase):
-    def write(self, name, data):
-        path = self.store.parent / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        return path
-
-    def secret_file(self, sid, text=None):
-        return self.write("mine-secret", (text or self.secret(sid)).encode())
-
     def run_picture(self, svc, sid, file, secret_file, **kwargs):
         return run_sprint("picture", "--sprint", sid, "--secret-file", secret_file, "--file", file,
                           "--port", svc.address[1], **kwargs)
@@ -694,6 +903,186 @@ class PictureCommandTest(PictureCase):
                 self.assertIn(needle, doc)
 
 
+class PictureAskTest(PictureCase):
+    Q = PictureRoundTest.Q
+
+    def round_file(self, round_):
+        return self.write("round.json", json.dumps(round_).encode())
+
+    def ask(self, svc, sid, round_):
+        return run_sprint("ask", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--round-file", self.round_file(round_), "--port", svc.address[1])
+
+    def test_ask_uploads_each_file_and_the_round_names_the_ids(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        before, after = self.write("before.png", PIXEL), self.write("after.png", WIDE)
+        a, b = hashlib.sha256(PIXEL).hexdigest(), hashlib.sha256(WIDE).hexdigest()
+        round_ = {"questions": [{**self.Q, "pictures": [
+            {"file": str(before), "line": "the card before", "pair": "before"},
+            {"file": str(after), "line": "the card after", "pair": "after"}]}]}
+        got = self.ask(svc, sid, round_)
+        ((payload, _),) = self.rows("questions.asked")
+        (seq,) = [row[0] for row in support.log_rows(self.store) if row[2] == "questions.asked"]
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual(got.stdout, f"sprint: round {seq} sent, 1 question\n")
+        self.assertEqual(payload["questions"][0]["pictures"],
+                         [{"picture": a, "line": "the card before", "pair": "before"},
+                          {"picture": b, "line": "the card after", "pair": "after"}])
+        self.assertEqual(payload["pictures"], [a, b])
+        self.assertEqual(len(self.rows("picture.stored")), 2)
+        self.assertEqual(self.entries(), sorted([a, b]))
+
+    def test_ask_with_a_bad_picture_list_exits_1_and_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        before = self.write("before.png", PIXEL)
+        cases = (
+            ("nine", [{"file": str(before), "line": "the card"}] * 9,
+             sprints.TOO_MANY_PICTURES.format(n=1)),
+            ("no line", [{"file": str(before)}], sprints.PICTURE_SHAPE.format(n=1, m=1)),
+            ("long line", [{"file": str(before), "line": "l" * 141}],
+             sprints.LINE_TOO_LONG.format(n=1, m=1)),
+        )
+        for name, value, reason in cases:
+            with self.subTest(name):
+                got = self.assert_unchanged(
+                    svc, lambda: self.ask(svc, sid, {"questions": [{**self.Q, "pictures": value}]}))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (1, "", f"sprint: refused before sending: {reason}\n"))
+                self.assertEqual(self.rows("picture.stored"), [])
+                self.assertEqual(self.rows("questions.asked"), [])
+                self.assertEqual(self.entries(), [])
+
+    def test_ask_with_an_unreadable_or_oversize_file_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        big = self.write("big.png", padded(2 * 1024 * 1024 + 1))
+        missing = self.store.parent / "none.png"
+
+        def pictures_of(*files):
+            return {"questions": [{**self.Q, "pictures": [
+                {"file": str(f), "line": "a card"} for f in files]}]}
+        for name, files in (("missing", (missing,)), ("oversize second", (good, big))):
+            with self.subTest(name):
+                got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, pictures_of(*files)))
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+                if name == "missing":
+                    self.assertTrue(got.stderr.startswith("sprint: cannot read"), got.stderr)
+                else:
+                    self.assertEqual(
+                        got.stderr, f"sprint: cannot send {big}: it is larger than 2 MiB\n")
+                self.assertEqual(self.rows("picture.stored"), [])
+                self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_ask_with_a_refused_picture_exits_1_and_sends_no_round(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        renamed = self.write("renamed.png", JPEG)
+        got = self.ask(svc, sid, {"questions": [{**self.Q, "pictures": [
+            {"file": str(renamed), "line": "a card"}]}]})
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 400: " + pictures.SIGNATURE_WRONG + "\n"))
+        self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_ask_with_a_round_too_large_once_ids_are_named_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        line = "\u00e9" * 140
+        round_ = {"questions": [
+            {**self.Q, "pictures": [{"file": str(good), "line": line}] * 8} for _ in range(10)]}
+        got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, round_))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused before sending: the round is larger than "
+            f"{service.MAX_ASK_BYTES} bytes\n"))
+        self.assertEqual(self.rows("picture.stored"), [])
+        self.assertEqual(self.rows("questions.asked"), [])
+        self.assertEqual(self.entries(), [])
+
+    def test_a_mixed_round_with_an_unknown_picture_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        other = self.approved(svc, "owner/p01")
+        foreign = self.stored(svc, other, WIDE)
+        for name, member in (("unknown", "f" * 64), ("another sprint's", foreign)):
+            round_ = {"questions": [{**self.Q, "pictures": [
+                {"file": str(good), "line": "the file"},
+                {"picture": member, "line": "the named one"}]}]}
+            with self.subTest(name):
+                before = self.entries()
+                rows = len(self.rows("picture.stored"))
+                got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, round_))
+                self.assertEqual((got.returncode, got.stdout), (1, ""))
+                self.assertTrue(got.stderr.startswith("sprint: refused 409: "), got.stderr)
+                self.assertEqual(len(self.rows("picture.stored")), rows)
+                self.assertEqual(self.entries(), before)
+                self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_a_mixed_round_with_an_open_round_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        self.assertEqual(self.ask(svc, sid, {"questions": [self.Q]}).returncode, 0)
+        good = self.write("good.png", WIDE)
+        round_ = {"questions": [{**self.Q, "pictures": [
+            {"file": str(good), "line": "the file"}, {"picture": a, "line": "the named one"}]}]}
+        got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, round_))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", f"sprint: refused 409: {sprints.ROUND_OPEN}\n"))
+        self.assertEqual(len(self.rows("picture.stored")), 1)
+
+    def test_a_mixed_round_with_a_known_picture_is_sent_whole(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        good = self.write("good.png", WIDE)
+        b = hashlib.sha256(WIDE).hexdigest()
+        got = self.ask(svc, sid, {"questions": [{**self.Q, "pictures": [
+            {"file": str(good), "line": "the file"}, {"picture": a, "line": "the named one"}]}]})
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(payload["pictures"], [b, a])
+
+    def test_ask_refuses_a_look_question_without_a_picture_and_takes_it_with_a_file(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        ask = "Judge the screenshots in /tmp/shots"
+        got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, {"questions": [
+            {**self.Q, "question": ask}]}))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: " + sprints.LOOK_WITHOUT_PICTURE.format(n=1, ask=ask)
+            + "\n"))
+        shot = self.write("shot.png", PIXEL)
+        got = self.ask(svc, sid, {"questions": [{**self.Q, "question": ask, "pictures": [
+            {"file": str(shot), "line": "the shots"}]}]})
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual(len(self.rows("questions.asked")), 1)
+
+    def test_ask_passes_an_already_sent_id_through(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        got = self.ask(svc, sid, {"questions": [{**self.Q, "pictures": [
+            {"picture": a, "line": "the header"}]}]})
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(payload["questions"][0]["pictures"], [{"picture": a, "line": "the header"}])
+
+    def stored(self, svc, sid, data):
+        status, _, answer = self.send(svc, sid, self.secret(sid), data)
+        self.assertEqual(status, 200)
+        return json.loads(answer)["picture"]
+
+    def test_the_ask_docstring_states_the_picture_upload(self):
+        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
+        for needle in ("pictures", "file", "uploads"):
+            with self.subTest(needle):
+                self.assertIn(needle, doc)
+
+
 class PictureDocsTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((ROOT / path).read_text().split())
@@ -741,3 +1130,31 @@ class PictureDocsTest(unittest.TestCase):
                        "bad picture id", "404", "Sec-Fetch-Site"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
+
+    def test_adr_038_records_the_question_pictures(self):
+        name = ("docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-"
+                "and-full-size-in-a-viewer.md")
+        self.assertEqual(
+            (ROOT / name).read_text().splitlines()[0],
+            "# ADR-console-038 — A manager's question shows its pictures on the card and full "
+            "size in a viewer")
+        text = self.doc(name)
+        for needle in ("#1090", "8", "140", "before", "after", "X-Console-Token", "object URL",
+                       "blob:", "Escape", "inert", "480", "ADR-console-002", "ADR-console-019",
+                       "ADR-console-033", "ADR-console-036", "#1091"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        adr = "docs/areas/console/adr/"
+        amended = "- **Status:** accepted; amended by ADR-console-038"
+        for path in ("019-a-managers-questions-arrive-as-inbox-items.md",
+                     "036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"):
+            with self.subTest(path):
+                lines = (ROOT / adr / path).read_text().splitlines()
+                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
+        lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
+        status = next(r for r in lines if r.startswith("- **Status:**"))
+        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038"), status)
+        context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
+        for term in ("**Question round**:", "**Picture**:"):
+            entry = context[context.index(term):].split("\n\n")[0]
+            self.assertIn("ADR-console-038", entry, term)

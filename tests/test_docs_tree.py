@@ -572,7 +572,7 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-037"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
-                 "ADR-console-035"),
+                 "ADR-console-035, ADR-console-038"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -605,7 +605,8 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
-                                          "ADR-console-032, ADR-console-033, ADR-console-035")):
+                                          "ADR-console-032, ADR-console-033, ADR-console-035, "
+                                          "ADR-console-038")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -681,7 +682,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                  "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
-                 "ADR-console-033, ADR-console-035"),
+                 "ADR-console-033, ADR-console-035, ADR-console-038"),
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
                  "- **Status:** accepted; amended by ADR-console-033")):
@@ -1150,6 +1151,22 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("amended by ADR-console-037", self.doc(
             "docs/areas/console/adr/035-every-registration-failure-is-a-counted-card-and-a-"
             "finished-registration-leaves-only-its-project.md"))
+
+    def test_adr_console_039_records_the_look_question_rule(self):
+        path = "docs/areas/console/adr/039-a-question-about-look-or-layout-carries-its-pictures.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-039 \u2014 A question about look or layout carries "
+                                "its pictures")
+        adr = self.doc(path)
+        for needle in ("#1092", "screenshot", ".png", "`screenshots` segment", "no picture",
+                       "attach the pictures with pictures, or reword it", "ADR-console-015",
+                       "ADR-console-019", "ADR-console-038"):
+            self.assertIn(needle, adr)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        entry = context.split("**Question round**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn("A question whose ask or context names screenshots, a `.png` file or a "
+                      "screenshots folder must carry a picture, or the round is refused with "
+                      "the question named (ADR-console-039).", entry)
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")

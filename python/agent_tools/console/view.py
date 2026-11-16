@@ -228,14 +228,16 @@ is none. Its entry is
      "blocks": "<text>", "headline": "<ask>", "context": "<text>" | null, "more_questions": 0,
      "questions": [{"question": "<ask>", "options": [<str>, ...], "chosen": null,
                     "recommended": "<option>", "recommended_index": <int>}],
+     "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
 
 The texts are shown cut, never refused, though a round logged before the limits can exceed them
 (ADR-console-027): the ask and the headline to `MAX_ASK_CHARS` (140), `context` to
 `MAX_CONTEXT_CHARS` (400), each option and the recommendation to `MAX_OPTION_CHARS` (80), each
-with `sprints.cut`. `recommended_index` is the recommendation's index among the logged options, so
-it names the right option even when two cut options read the same; the owner's answer is still an
-option index into the full logged options.
+with `sprints.cut`; each picture's line to `MAX_PICTURE_LINE_CHARS` (140), and `pictures`
+is `[]` when the question has none. `recommended_index` is the recommendation's index among the
+logged options, so it names the right option even when two cut options read the same; the owner's
+answer is still an option index into the full logged options.
 
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
@@ -549,6 +551,7 @@ from agent_tools.console.sprints import (
     MAX_ASK_CHARS,
     MAX_CONTEXT_CHARS,
     MAX_OPTION_CHARS,
+    MAX_PICTURE_LINE_CHARS,
     MESSAGE_APPROVED,
     NO_PROGRESS_TEXT,
     NUDGE_ACTION_TEXT,
@@ -1249,6 +1252,8 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "chosen": None, "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
                            "recommended_index": question.options.index(question.recommended)}],
+            "pictures": [{"id": p.picture, "line": cut(p.line, MAX_PICTURE_LINE_CHARS),
+                          "pair": p.pair} for p in question.pictures],
             "items": [], "answers": [], "answered": False, "waiting_since": question.at}
 
 
