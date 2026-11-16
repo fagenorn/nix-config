@@ -204,7 +204,9 @@ followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-ze
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
-`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the report's status line.
+`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the stage phrase
+(`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
+line and never shortened.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
@@ -488,13 +490,19 @@ BALL_OWNER = "owner"
 BALL_NOBODY = "nobody"
 BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
              BALL_NOBODY: "nothing running, may be stuck"}
-NOW_STOPPING_TEXT = "Finishing what is mid-merge, then stopping."
-NOW_ANSWER_TEXT = "The manager is waiting for an answer in its terminal."
-NOW_PERMISSION_TEXT = "The manager is waiting for a permission in its terminal."
-NOW_DRAFTING_TEXT = "Drafting the brief."
-NOW_BRIEF_TEXT = "The brief waits for your approval."
-NOW_QUOTA_TEXT = "Waiting for its account's usage to reset."
-NOW_STARTING_TEXT = "Starting the work."
+NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
+NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
+NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
+NOW_DRAFTING_TEXT = "drafting the brief"
+NOW_BRIEF_TEXT = "waiting for your approval of the brief"
+NOW_QUESTION_TEXT = "waiting for your answer: {question}"
+NOW_DECISION_TEXT = "waiting for your decision on the tracker"
+NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
+NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
+NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
+NOW_STARTING_TEXT = "starting the work"
+NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
+NOW_QUIET_TEXT = "last seen {phrase}"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 

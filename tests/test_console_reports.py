@@ -11,8 +11,9 @@ import unittest
 from agent_tools.console import service, sprints
 from agent_tools.console.deliveries import QUIET_AFTER_MS, IssueStage
 from agent_tools.console.sprints import (
-    BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DRAFTING_TEXT, NOW_PERMISSION_TEXT,
-    NOW_QUOTA_TEXT, NOW_STARTING_TEXT, NOW_STOPPING_TEXT)
+    BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DECISION_TEXT, NOW_DRAFTING_TEXT,
+    NOW_NO_PROGRESS_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_STALLED_TEXT,
+    NOW_STARTING_TEXT, NOW_STOPPING_TEXT, Question)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -279,7 +280,7 @@ class SprintBallViewTest(unittest.TestCase):
         self.assertEqual((shown["ball"], shown["ball_text"]),
                          ("nobody", "nothing running, may be stuck"))
         self.assertNotEqual(shown["state_text"], "on track")
-        self.assertEqual(shown["now_text"], "two slices are building")
+        self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
 
     def test_a_working_manager_session_reads_manager_working_past_the_threshold(self):
         s = reported(with_manager(started(A)), T0_MS)
@@ -337,7 +338,7 @@ class SprintBallViewTest(unittest.TestCase):
             (with_manager(started(A)), [], {"capacity": out()}, NOW_QUOTA_TEXT),
             (stopping, [], {}, NOW_STOPPING_TEXT),
             (stopping, [waiting], {}, NOW_STOPPING_TEXT),
-            (reported(started(A), T0_MS), [], {}, "two slices are building"),
+            (reported(started(A), T0_MS), [], {}, "building 1 of 7: Importer resumes"),
         )
         for s, sessions, extra, text in table:
             with self.subTest(text=text, sessions=len(sessions)):
@@ -345,6 +346,68 @@ class SprintBallViewTest(unittest.TestCase):
                 self.assertEqual(shown["now_text"], text)
                 self.assertIn(shown["ball"], BALL_TEXT)
                 self.assertEqual(shown["ball_text"], BALL_TEXT[shown["ball"]])
+
+    def test_the_now_sentence_names_the_leading_stage_its_count_and_the_milestone(self):
+        run = observed(reported(started(A), T0_MS, issues=((4, "queued"),)), T0_MS + MIN,
+                       IssueStage(4, "building"))
+        cases = (
+            (reported(started(A), T0_MS, issues=((1, "building"), (2, "building"), (3, "queued"))),
+             T0_MS + MIN, "building 2 of 3: Importer resumes"),
+            (reported(started(A), T0_MS, issues=((1, "planning"), (2, "building"))),
+             T0_MS + MIN, "building 1 of 2: Importer resumes"),
+            (reported(started(A), T0_MS, issues=((1, "queued"), (2, "queued"))),
+             T0_MS + MIN, "queued 2 of 2: Importer resumes"),
+            (reported(started(A), T0_MS, issues=((1, "landed"), (2, "held"))),
+             T0_MS + MIN, "landed 1 of 2: Importer resumes"),
+            (reported(started(A), T0_MS, issues=()), T0_MS + MIN, "Importer resumes"),
+            (run, T0_MS + 2 * MIN, "building 1 of 1: Importer resumes"),
+        )
+        for s, now, text in cases:
+            with self.subTest(text=text):
+                self.assertEqual(self.shown(s, now)["now_text"], text)
+
+    def test_a_sprint_waiting_on_you_says_what_it_waits_for(self):
+        question = Question(1, 0, iso(T0_MS), False, "Which store should the checkpoint use?",
+                            "the first slice", ("the database", "a file"), "the database")
+        cases = (
+            (dataclasses.replace(reported(started(A), T0_MS), questions=(question,)), None,
+             "waiting for your answer: Which store should the checkpoint use?"),
+            (reported(started(A), T0_MS, inbox=(9,)),
+             {("p00", "k9"): open_item("p00", "k9", 9)}, NOW_DECISION_TEXT),
+            (dataclasses.replace(reported(started(A), T0_MS), stalled="launch failed"), None,
+             NOW_STALLED_TEXT),
+            (dataclasses.replace(reported(started(A), T0_MS), no_progress_at=iso(T0_MS)), None,
+             NOW_NO_PROGRESS_TEXT),
+        )
+        for s, records, text in cases:
+            with self.subTest(text=text):
+                shown = self.shown(s, T0_MS + MIN, records=records)
+                self.assertEqual((shown["ball"], shown["now_text"]), ("owner", text))
+
+    def test_the_now_sentence_is_never_the_status_line_for_any_ball(self):
+        status = "Working on ship the importer"
+        s = reported(with_manager(started(A)), T0_MS, status=status)
+        question = Question(1, 0, iso(T0_MS), False, "Which store should the checkpoint use?",
+                            "the first slice", ("the database", "a file"), "the database")
+        cases = (
+            (self.shown(s, T0_MS + MIN), "manager"),
+            (self.shown(s, PAST, manager_session("idle")), "nobody"),
+            (self.shown(dataclasses.replace(s, questions=(question,)), T0_MS + MIN), "owner"),
+        )
+        for shown, ball in cases:
+            with self.subTest(ball=ball):
+                self.assertEqual(shown["ball"], ball)
+                self.assertTrue(shown["now_text"])
+                self.assertNotEqual(shown["now_text"], status)
+                self.assertFalse(shown["now_text"].startswith("Working on"))
+
+    def test_a_long_milestone_is_kept_whole(self):
+        milestone = " ".join(["word"] * 80)
+        s = reported(started(A), T0_MS)
+        s = dataclasses.replace(s, report=dataclasses.replace(s.report, milestone=milestone))
+        text = self.shown(s, T0_MS + MIN)["now_text"]
+        self.assertEqual(text, "building 1 of 7: " + milestone)
+        self.assertNotIn("\u2026", text)
 
     def test_an_ended_sprint_has_no_ball_and_no_now_sentence(self):
         stopped = dataclasses.replace(started(A), stopped_at=iso(T0_MS))

@@ -431,8 +431,16 @@ time, the report's time, the fold's `moved_ms`) is below `QUIET_AFTER_MS`; else 
 running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, then for
 a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owner asked to change,
-`NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; a quota wait,
-`NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else the report's status line.
+`NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
+`NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
+`NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
+wait, `NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else the stage phrase, `NOW_STAGE_TEXT`:
+the leading stage, its issue count, the total and the report's whole milestone (just the milestone
+when the report names no issue), prefixed by `NOW_QUIET_TEXT` when the ball is `nobody`. The
+leading stage is the non-final, non-queued stage the most issues hold (a tie goes to the later in
+`REPORT_STAGES`); with none, `queued`; with none, `landed` when any landed, else the most common
+remaining stage. The sentence is never the status line and never shortened (the page holds it to
+two lines).
 `ended_at` is `sprints.ended_at` for every route to done (a stop, a closing, or a latest report of
 phase `done`), so the `done` state and `ended_at` never disagree; `stoppable` is true exactly when
 the sprint has no stop request, is not stopped and has not ended; `stop_text` is `STOP_FAILED_TEXT`
@@ -543,9 +551,15 @@ from agent_tools.console.sprints import (
     NOT_PICKED_UP_TEXT,
     NOW_ANSWER_TEXT,
     NOW_BRIEF_TEXT,
+    NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
+    NOW_NO_PROGRESS_TEXT,
     NOW_PERMISSION_TEXT,
+    NOW_QUESTION_TEXT,
+    NOW_QUIET_TEXT,
     NOW_QUOTA_TEXT,
+    NOW_STAGE_TEXT,
+    NOW_STALLED_TEXT,
     NOW_STARTING_TEXT,
     NOW_STOPPING_TEXT,
     ON_TRACK,
@@ -560,6 +574,7 @@ from agent_tools.console.sprints import (
     QUOTA_TEXT,
     REPLIED,
     REPLIED_TEXT,
+    REPORT_STAGES,
     RETRY_ACTION_TEXT,
     SENT,
     SENT_ENDED_TEXT,
@@ -954,10 +969,35 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     return BALL_MANAGER if now_ms - max(moves) < QUIET_AFTER_MS else BALL_NOBODY
 
 
-def sprint_now(state: SprintState, quota: Wait | None,
-               listed: Collection[str]) -> str | None:
+def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str:
+    """The stage a running sprint leads with, its issue count, the total and the whole milestone;
+    just the milestone when the report names no issue. The stage is the non-final, non-queued one
+    held by the most issues (a tie goes to the later in `REPORT_STAGES`, a stage outside it ranks
+    lowest); with none, `queued`; with none, `landed` when any issue landed, else the most common
+    remaining stage (a tie goes to the alphabetically first)."""
+    if not stages:
+        return milestone
+    counts = Counter(stage for _, stage, _ in stages)
+    final = (LANDED, HELD, DROPPED, CLOSED_OUT)
+    leading = [stage for stage in counts if stage not in final and stage != QUEUED]
+    if leading:
+        stage = max(leading, key=lambda name: (
+            counts[name], REPORT_STAGES.index(name) if name in REPORT_STAGES else -1))
+    elif QUEUED in counts:
+        stage = QUEUED
+    elif LANDED in counts:
+        stage = LANDED
+    else:
+        stage = min(counts, key=lambda name: (-counts[name], name))
+    return NOW_STAGE_TEXT.format(stage=stage, count=counts[stage], total=len(stages),
+                                 milestone=milestone)
+
+
+def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
+               stages: Sequence[tuple[int, str, str]], ball: str | None) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
-    ended; the first rule that holds, in the order the view docstring gives."""
+    ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`
+    and `ball` are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -971,11 +1011,20 @@ def sprint_now(state: SprintState, quota: Wait | None,
         return NOW_DRAFTING_TEXT
     if brief.decision == NONE:
         return NOW_BRIEF_TEXT
+    if questions := open_questions(state):
+        return NOW_QUESTION_TEXT.format(question=questions[0].question)
+    if waiting > 0:
+        return NOW_DECISION_TEXT
+    if state.stalled is not None:
+        return NOW_STALLED_TEXT
+    if state.no_progress_at is not None:
+        return NOW_NO_PROGRESS_TEXT
     if quota is not None:
         return NOW_QUOTA_TEXT
     if report is None:
         return NOW_STARTING_TEXT
-    return report.status
+    phrase = _stage_phrase(stages, report.milestone)
+    return NOW_QUIET_TEXT.format(phrase=phrase) if ball == BALL_NOBODY else phrase
 
 
 def _is_new(message: Message, looked: str | None) -> bool:
@@ -1061,7 +1110,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "state_text": text,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
-        "now_text": sprint_now(state, quota, listed),
+        "now_text": sprint_now(state, quota, listed, waiting, stages, ball),
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,

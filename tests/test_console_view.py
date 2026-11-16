@@ -1651,7 +1651,7 @@ class SprintViewTest(unittest.TestCase):
             "type": "sprint", "sprint_id": "a" * 16,
             "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief",
-            "ball": "manager", "ball_text": "manager working", "now_text": "Drafting the brief.",
+            "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
             "stated_at": T0, "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
