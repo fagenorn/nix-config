@@ -511,7 +511,9 @@ function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
   const reported = typeof sprint.status === "string";
-  fold.appendChild(el("summary", "", reported ? "Show the report" : "Show the goal"));
+  // A sprint whose closing report arrived while it is still stopping has no ended_at yet: its fold keeps the report.
+  const closed = sprint.closing !== null && typeof sprint.closing === "object";
+  fold.appendChild(el("summary", "", reported || closed ? "Show the report" : "Show the goal"));
   if (reported) fold.appendChild(el("p", "report-status", sprint.status));
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
   if (typeof sprint.progress_text === "string") {
@@ -541,6 +543,10 @@ function sprintDetail(sprint) {
   if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
   if (typeof sprint.milestone === "string") {
     fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
+  }
+  if (closed) {
+    fold.appendChild(closingReport(sprint));
+    return fold;
   }
   const tracker = trackerLink(sprint);
   if (tracker !== null) fold.appendChild(tracker);

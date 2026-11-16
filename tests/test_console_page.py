@@ -4310,6 +4310,25 @@ class PageSprintEndTest(unittest.TestCase):
         (line,) = sprint_lines(snap)
         self.assertEqual([full(n) for n in of_class(line, "span", "stop-fail")], [text])
 
+    def test_a_stopping_sprint_with_a_closing_report_keeps_the_report_in_its_fold(self) -> None:
+        closing = {**CLOSING, "landed": [12, 14], "held": [15]}
+        stopping = {**SPRINT, "state": "stopping", "state_text": "stopping", "stoppable": False,
+                    "ended_at": None, "status": None, "closing": closing,
+                    "tracker_url": "https://github.com/owner/p00/milestone/3"}
+        (snap,) = render([
+            START, {"frame": with_sprints([stopping])}, {"open": "sprint:" + "a" * 16},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        (fold,) = of_class(line, "details", "sprint-detail")
+        shown = visible_text(fold)
+        for expected in (CLOSING["summary"], "Next time: cut smaller slices",
+                         "1 landed, 1 dropped", "Landed: #12, #14", "Held: #15"):
+            self.assertIn(expected, shown)
+        self.assertEqual(len(of_class(fold, "a", "tracker")), 1)
+        (label,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(label), "Show the report")
+
     def test_a_projects_finished_sprints_join_the_one_finished_list(self) -> None:
         finished = {"label": "Finished sprints", "count": 1, "sprints": [DONE_SPRINT]}
         (snap,) = render([
