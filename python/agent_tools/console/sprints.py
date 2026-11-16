@@ -450,6 +450,38 @@ reads `{"sprint_id", "secret", "notice": <object>}` and returns `(sprint_id, sec
 `parse_withdraw_notice_request(body)` reads `{"sprint_id", "secret", "notice": <int >= 1>}` and
 returns `(sprint_id, secret, notice_id)`; both are as strict as `parse_ask_request`.
 
+The owner posts a notice too (#1120, ADR-console-053): a heads-up to every sprint of one project,
+information only. It reuses the two kept rows with the project in the project column and no
+`sprint_id` member, so the sprint fold never sees it:
+
+    notice.posted     {"poster": "owner", "notice": {"kind": "heads-up", "text"}}
+    notice.withdrawn  {"poster": "owner", "notice": <int>}
+
+`owner_notices(events, states=None)` folds them into every owner notice per project id (withdrawn
+ones included, `states` a dict of tuples carried between calls). A row is an owner row when its
+payload has no `sprint_id` and `"poster": "owner"` and its project column is a non-empty string;
+any other row, and any owner row of another shape, changes nothing. A posted row adds `Notice(seq,
+at, "heads-up", text)` only when `checked_notice` accepts its `notice` and its kind is `heads-up`; a
+withdrawn row whose `notice` is an int (not a bool) naming an open owner notice of the same project
+sets `withdrawn_at` to the row's `at`. Folding in one call, one row per call or in any split gives
+equal results. `open_owner_notices(folded, project_id)` is the project's notices not withdrawn, in
+id order. `postable_owner_notice(project_id, text, registered, project_sprints, folded)` refuses,
+in order: an unregistered project (`UNREGISTERED`); no sprint of the project that `takes_notices`
+(`OWNER_NOTICE_NO_SPRINT`); `checked_notice` of a heads-up of the text (`NOTICE_MEMBER`,
+`NOTICE_TOO_LONG`); a sixth open owner notice (`OWNER_NOTICE_LIMIT`, `MAX_OPEN_OWNER_NOTICES`); it
+returns `{"kind": "heads-up", "text": <stripped>}`. `withdrawable_owner_notice(project_id,
+notice_id, folded, states)` returns the open owner notice of the project, or raises `NOTICE_ENDED`
+(withdrawn), `OWNER_NOTICE_MANAGERS` (the id of a notice of any sprint in `states`) or
+`NOTICE_UNKNOWN` (anything else, another project's owner notice included).
+`withdrawable_notice` takes `owner_ids` and, after the sprint's own notices and before
+`NOTICE_FOREIGN`, refuses one of them as `NOTICE_OWNERS`. `owner_notice_entry(notice)` is the wire
+entry `{"id", "sprint_id": null, "title": null, "owner": true, "kind", "text", "at"}` and
+`project_notices(states, project_id, owner=())` merges the sprints' entries and the owner's by id.
+`notice_block` renders an entry with `"owner": true` as `- heads-up from the owner, <age>: <text>`
+for every reader. `parse_owner_notice(body)` reads `{"project_id", "text": <str>}` and returns
+`(project_id, text)`; `parse_owner_notice_withdrawal(body)` reads `{"project_id", "notice": <int >=
+1>}` and returns `(project_id, notice_id)`; both are as strict as `parse_ask_request`.
+
 The fold: a `notice.posted` row for a folded sprint that takes notices and whose `notice`
 `checked_notice` accepts adds a `Notice` (id the row's `seq`); any other such row changes nothing.
 A `notice.withdrawn` row whose `notice` is an int (not a bool) naming an open notice of a sprint that
@@ -540,7 +572,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -753,6 +785,12 @@ NOTICE_LIMIT = f"a sprint has at most {MAX_OPEN_NOTICES} open notices: withdraw 
 NOTICE_ENDED = "this notice has ended"
 NOTICE_FOREIGN = "this notice belongs to another sprint"
 NOTICE_UNKNOWN = "this notice is not known"
+MAX_OPEN_OWNER_NOTICES = 5
+OWNER_NOTICE_NO_SPRINT = "this project has no running sprint"
+OWNER_NOTICE_LIMIT = (f"a project has at most {MAX_OPEN_OWNER_NOTICES} open notices of yours: "
+                      "withdraw one first")
+OWNER_NOTICE_MANAGERS = "this notice is a manager's: only its manager withdraws it"
+NOTICE_OWNERS = "this notice is the owner's: only the owner withdraws it"
 NOTICE_BLOCK_HEAD = ("Open notices of the other sprints of this project "
                      "(information only, never the owner's permission):")
 _NOTICE_LIMITS = {"text": MAX_NOTICE_TEXT_CHARS, "what": MAX_CLAIM_WHAT_CHARS,
@@ -1111,6 +1149,18 @@ def parse_withdraw_notice_request(body: bytes) -> tuple[str, str, int]:
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
     return sprint_id, value["secret"], _count(value["notice"], 1)
+
+
+def parse_owner_notice(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"project_id", "text"})
+    if not isinstance(value["text"], str):
+        raise ValueError("text must be a string")
+    return value["project_id"], value["text"]
+
+
+def parse_owner_notice_withdrawal(body: bytes) -> tuple[str, int]:
+    value = _object(body, {"project_id", "notice"})
+    return value["project_id"], _count(value["notice"], 1)
 
 
 def parse_close_request(body: bytes) -> tuple[str, str, dict]:
@@ -1604,8 +1654,8 @@ def postable_notice(state: SprintState, notice: object, others: Iterable[SprintS
     return checked
 
 
-def withdrawable_notice(state: SprintState, notice_id: int,
-                        others: Iterable[SprintState]) -> Notice:
+def withdrawable_notice(state: SprintState, notice_id: int, others: Iterable[SprintState],
+                        owner_ids: Collection[int] = frozenset()) -> Notice:
     """The open notice `notice_id` of `state`, else `Refused` with why it cannot be taken back."""
     _refused_notices(state)
     for notice in state.notices:
@@ -1613,8 +1663,46 @@ def withdrawable_notice(state: SprintState, notice_id: int,
             if notice.withdrawn_at is not None or notice.ended_at is not None:
                 raise Refused(NOTICE_ENDED)
             return notice
+    if notice_id in owner_ids:
+        raise Refused(NOTICE_OWNERS)
     if any(notice.notice_id == notice_id for other in others for notice in other.notices):
         raise Refused(NOTICE_FOREIGN)
+    raise Refused(NOTICE_UNKNOWN)
+
+
+def open_owner_notices(folded: Mapping[str, tuple[Notice, ...]],
+                       project_id: str) -> tuple[Notice, ...]:
+    """The project's owner notices not withdrawn, in id order."""
+    return tuple(sorted((notice for notice in folded.get(project_id, ())
+                         if notice.withdrawn_at is None), key=lambda notice: notice.notice_id))
+
+
+def postable_owner_notice(project_id: str, text: object, registered: bool,
+                          project_sprints: Iterable[SprintState],
+                          folded: Mapping[str, tuple[Notice, ...]]) -> dict:
+    """The heads-up the owner may post to the project now, else `Refused` with why not."""
+    if not registered:
+        raise Refused(UNREGISTERED)
+    if not any(state.project_id == project_id and takes_notices(state)
+               for state in project_sprints):
+        raise Refused(OWNER_NOTICE_NO_SPRINT)
+    checked = checked_notice({"kind": "heads-up", "text": text})
+    if len(open_owner_notices(folded, project_id)) >= MAX_OPEN_OWNER_NOTICES:
+        raise Refused(OWNER_NOTICE_LIMIT)
+    return checked
+
+
+def withdrawable_owner_notice(project_id: str, notice_id: int,
+                              folded: Mapping[str, tuple[Notice, ...]],
+                              states: Iterable[SprintState]) -> Notice:
+    """The open owner notice `notice_id` of the project, else `Refused` with why it cannot end."""
+    for notice in folded.get(project_id, ()):
+        if notice.notice_id == notice_id:
+            if notice.withdrawn_at is not None:
+                raise Refused(NOTICE_ENDED)
+            return notice
+    if any(notice.notice_id == notice_id for state in states for notice in state.notices):
+        raise Refused(OWNER_NOTICE_MANAGERS)
     raise Refused(NOTICE_UNKNOWN)
 
 
@@ -1629,10 +1717,17 @@ def notice_entry(state: SprintState, notice: Notice) -> dict:
     return entry
 
 
-def project_notices(states: Iterable[SprintState], project_id: str) -> list[dict]:
-    """The open notices of the project's sprints, in id order."""
-    return sorted((notice_entry(state, notice) for state in states
-                   if state.project_id == project_id for notice in open_notices(state)),
+def owner_notice_entry(notice: Notice) -> dict:
+    return {"id": notice.notice_id, "sprint_id": None, "title": None, "owner": True,
+            "kind": notice.kind, "text": notice.text, "at": notice.at}
+
+
+def project_notices(states: Iterable[SprintState], project_id: str,
+                    owner: Iterable[Notice] = ()) -> list[dict]:
+    """The open notices of the project's sprints and the owner's, in id order."""
+    return sorted([*(notice_entry(state, notice) for state in states
+                     if state.project_id == project_id for notice in open_notices(state)),
+                   *(owner_notice_entry(notice) for notice in owner)],
                   key=lambda entry: entry["id"])
 
 
@@ -1644,6 +1739,10 @@ def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str
     """The open notices of the other sprints as a head and one `- ` line each, or `""`."""
     lines = []
     for entry in entries:
+        if entry.get("owner") is True:
+            lines.append(f"- heads-up from the owner, "
+                         f"{ago_text(now_ms - _ms(entry['at']))}: {_one_line(entry['text'])}")
+            continue
         if entry["sprint_id"] == sprint_id:
             continue
         title, text = _one_line(entry["title"]), _one_line(entry["text"])
@@ -1737,6 +1836,40 @@ def _folded_notice(state: SprintState, event: Event) -> SprintState:
         replace(notice, withdrawn_at=event.at)
         if notice.notice_id == notice_id and notice.withdrawn_at is None
         and notice.ended_at is None else notice for notice in state.notices))
+
+
+def _is_owner_row(event: Event) -> bool:
+    payload = event.payload
+    return ("sprint_id" not in payload and payload.get("poster") == NOTICE_OWNER
+            and isinstance(event.project, str) and bool(event.project))
+
+
+def owner_notices(events: Iterable[Event],
+                  states: Mapping[str, tuple[Notice, ...]] | None = None
+                  ) -> dict[str, tuple[Notice, ...]]:
+    """Every owner notice per project id, withdrawn ones included: no row touches a sprint."""
+    folded = dict(states or {})
+    for event in events:
+        if event.kind not in (NOTICE_POSTED, NOTICE_WITHDRAWN) or not _is_owner_row(event):
+            continue
+        project_id = event.project
+        notices = folded.get(project_id, ())
+        if event.kind == NOTICE_POSTED:
+            try:
+                checked = checked_notice(event.payload.get("notice"))
+            except Refused:
+                continue
+            if checked["kind"] == "heads-up":
+                folded[project_id] = (*notices,
+                                      Notice(event.seq, event.at, "heads-up", checked["text"]))
+            continue
+        notice_id = event.payload.get("notice")
+        if _id(notice_id) and any(notice.notice_id == notice_id for notice in notices):
+            folded[project_id] = tuple(
+                replace(notice, withdrawn_at=event.at)
+                if notice.notice_id == notice_id and notice.withdrawn_at is None else notice
+                for notice in notices)
+    return folded
 
 
 def _ended_notices(state: SprintState, at: str) -> SprintState:

@@ -696,7 +696,7 @@ class DocumentedTest(unittest.TestCase):
 
     def test_the_notice_rules_are_written(self):
         for name in ("notice.posted", "notice.withdrawn", "checked_notice", "postable_notice",
-                     "notice_block"):
+                     "notice_block", "owner_notices", "postable_owner_notice"):
             self.assertIn(name, sprints.__doc__)
 
 
@@ -2478,6 +2478,140 @@ class NoticeFoldTest(unittest.TestCase):
         self.assertEqual(full, stepwise)
         self.assertEqual(full, split)
         self.assertEqual(full[SA].notices[0].ended_at, at(5))
+
+
+def owner_posted(seq, text, project="o/a", **payload):
+    return Event(seq, at(seq), NOTICE_POSTED, project,
+                 {"poster": "owner", "notice": {"kind": "heads-up", "text": text}, **payload})
+
+
+def owner_taken(seq, notice_id, project="o/a", **payload):
+    return Event(seq, at(seq), NOTICE_WITHDRAWN, project,
+                 {"poster": "owner", "notice": notice_id, **payload})
+
+
+class OwnerNoticeTest(unittest.TestCase):
+    FRIDAY = "routes are frozen until Friday"
+
+    def folded(self, *rows):
+        return sprints.owner_notices(rows)
+
+    def test_an_owner_row_folds_to_an_open_owner_notice_of_its_project(self):
+        rows = [owner_posted(10, " routes are frozen until Friday "),
+                owner_posted(11, "other", project="o/b")]
+        folded = sprints.owner_notices(rows)
+        self.assertEqual(sprints.open_owner_notices(folded, "o/a"),
+                         (Notice(10, at(10), "heads-up", self.FRIDAY),))
+        self.assertEqual(sprints.open_owner_notices(folded, "o/c"), ())
+
+    def test_a_malformed_owner_row_changes_nothing(self):
+        base = [owner_posted(1, "keep")]
+        bad = {
+            "claim": Event(11, at(11), NOTICE_POSTED, "o/a",
+                           {"poster": "owner", "notice": {**CLAIM}}),
+            "too long": owner_posted(11, "x" * 281),
+            "has a sprint": owner_posted(11, "t", sprint_id=SA),
+            "not the owner": Event(11, at(11), NOTICE_POSTED, "o/a",
+                                   {"poster": "manager", "notice": HEADS_UP}),
+            "no project": owner_posted(11, "t", project=None),
+            "a bool names it": owner_taken(11, True),
+            "another project's": owner_taken(11, 1, project="o/b"),
+        }
+        for name, row in bad.items():
+            with self.subTest(name):
+                self.assertEqual(sprints.owner_notices([*base, row]), sprints.owner_notices(base))
+        states = sprints.sprint_states([stated(1, "o/a", SA, "g"), owner_posted(11, "t")])
+        self.assertEqual(states[SA].notices, ())
+
+    def test_a_withdrawal_ends_only_that_owner_notice_and_folds_the_same_in_any_split(self):
+        rows = [owner_posted(10, "one"), owner_posted(11, "two"), owner_taken(12, 10)]
+        folded = sprints.owner_notices(rows)
+        self.assertEqual([notice.notice_id for notice in sprints.open_owner_notices(folded, "o/a")],
+                         [11])
+        self.assertEqual(folded["o/a"][0].withdrawn_at, at(12))
+        self.assertEqual(sprints.owner_notices(rows[2:], sprints.owner_notices(rows[:2])), folded)
+        stepwise = {}
+        for row in rows:
+            stepwise = sprints.owner_notices([row], stepwise)
+        self.assertEqual(stepwise, folded)
+
+    def test_postable_owner_notice_refuses_in_order(self):
+        sprint_a = open_sprint(SA)
+        sprint_b = replace(open_sprint(SB, "o/b"), stop_at=at(2))
+        sprint_list = [sprint_a, sprint_b]
+
+        def refusal(project, text, folded=None, registered=True):
+            return notice_refusal(sprints.postable_owner_notice, project, text, registered,
+                                  sprint_list, folded or {})
+
+        self.assertEqual(refusal("o/a", "t", registered=False), sprints.UNREGISTERED)
+        self.assertEqual(refusal("o/b", "t"), sprints.OWNER_NOTICE_NO_SPRINT)
+        self.assertEqual(refusal("o/c", "t"), sprints.OWNER_NOTICE_NO_SPRINT)
+        for text in ("   ", "a\nb"):
+            self.assertEqual(refusal("o/a", text), "the notice has no valid text")
+        self.assertEqual(refusal("o/a", "x" * 281), "the notice's text is over 280 characters")
+        five = sprints.owner_notices([owner_posted(n, "t") for n in range(10, 15)])
+        self.assertEqual(refusal("o/a", "t", five), sprints.OWNER_NOTICE_LIMIT)
+        four = sprints.owner_notices([owner_posted(n, "t") for n in range(10, 14)])
+        self.assertEqual(sprints.postable_owner_notice("o/a", "x" * 280, True, sprint_list, four),
+                         {"kind": "heads-up", "text": "x" * 280})
+
+    def test_withdrawable_owner_notice_names_why_it_cannot_end(self):
+        folded = sprints.owner_notices([owner_posted(10, "t"), owner_posted(11, "t"),
+                                        owner_taken(13, 11), owner_posted(12, "t", project="o/b")])
+        states = [replace(open_sprint(SA), notices=(Notice(7, at(7), "heads-up", "t"),))]
+
+        def refusal(project, notice_id):
+            return notice_refusal(sprints.withdrawable_owner_notice, project, notice_id, folded,
+                                  states)
+
+        self.assertEqual(sprints.withdrawable_owner_notice("o/a", 10, folded, states).notice_id, 10)
+        self.assertEqual(refusal("o/a", 11), sprints.NOTICE_ENDED)
+        self.assertEqual(refusal("o/a", 7), sprints.OWNER_NOTICE_MANAGERS)
+        self.assertEqual(refusal("o/a", 12), sprints.NOTICE_UNKNOWN)
+        self.assertEqual(refusal("o/a", 999), sprints.NOTICE_UNKNOWN)
+
+    def test_a_manager_cannot_withdraw_the_owners_notice(self):
+        state = open_sprint(SA)
+        self.assertEqual(notice_refusal(sprints.withdrawable_notice, state, 10, [], {10}),
+                         sprints.NOTICE_OWNERS)
+        self.assertEqual(notice_refusal(sprints.withdrawable_notice, state, 10, []),
+                         sprints.NOTICE_UNKNOWN)
+
+    def test_project_notices_merges_the_owners_entries_in_id_order(self):
+        state = replace(open_sprint(SA), notices=(Notice(7, at(7), "heads-up", "mine"),))
+        owner = [Notice(9, at(9), "heads-up", "owned"), Notice(5, at(5), "heads-up", "first")]
+        entries = sprints.project_notices([state], "o/a", owner)
+        self.assertEqual([entry["id"] for entry in entries], [5, 7, 9])
+        self.assertEqual(entries[2], {"id": 9, "sprint_id": None, "title": None, "owner": True,
+                                      "kind": "heads-up", "text": "owned", "at": at(9)})
+        self.assertEqual(sprints.project_notices([state], "o/a")[0]["sprint_id"], SA)
+
+    def test_the_owners_line_reads_from_the_owner_for_every_reader(self):
+        entry = sprints.owner_notice_entry(Notice(4, at(1), "heads-up", self.FRIDAY))
+        now = sprints._ms(at(1)) + 3 * 60_000
+        expected = (sprints.NOTICE_BLOCK_HEAD
+                    + "\n- heads-up from the owner, 3 min ago: routes are frozen until Friday")
+        for reader in (SA, SB):
+            self.assertEqual(sprints.notice_block([entry], reader, now), expected)
+        spaced = {**entry, "text": "a\nb  c"}
+        self.assertTrue(sprints.notice_block([spaced], SA, now).endswith(": a b c"))
+
+    def test_the_owner_requests_parse_strictly(self):
+        self.assertEqual(sprints.parse_owner_notice(b'{"project_id":"o/a","text":"t"}'),
+                         ("o/a", "t"))
+        for body in (b'{"project_id":"o/a","text":"t","x":1}', b'{"project_id":"o/a"}',
+                     b'{"project_id":"o/a","text":1}', b'{"project_id":"","text":"t"}'):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    sprints.parse_owner_notice(body)
+        self.assertEqual(
+            sprints.parse_owner_notice_withdrawal(b'{"project_id":"o/a","notice":3}'), ("o/a", 3))
+        for notice in (b"0", b"true", b'"3"'):
+            with self.subTest(notice=notice):
+                with self.assertRaises(ValueError):
+                    sprints.parse_owner_notice_withdrawal(
+                        b'{"project_id":"o/a","notice":' + notice + b"}")
 
 
 class NoticeBlockTest(unittest.TestCase):

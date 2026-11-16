@@ -19,6 +19,8 @@ APPROVE = "/api/approve"
 NOTICE = "/api/notice"
 NOTICES = "/api/notices"
 WITHDRAW_NOTICE = "/api/withdraw-notice"
+OWNER_NOTICE = "/api/owner-notice"
+OWNER_WITHDRAW = "/api/owner-notice-withdraw"
 JSON = {"Content-Type": "application/json"}
 CLAIM = {"kind": "claim", "text": " the page fold ", "what": "python/agent_tools/console/page.html",
          "until": "the board fold lands"}
@@ -244,3 +246,210 @@ class NoticeRouteTest(Case):
         svc.close()
         again = self.start()
         self.assertEqual([entry["kind"] for entry in self.listed(again, a)], ["claim"])
+
+
+FROZEN = "routes are frozen until Friday"
+
+
+class OwnerNoticeRouteTest(Case):
+    """The owner posts and withdraws a heads-up from the page (#1120, ADR-console-053)."""
+
+    def open(self, **kwargs):
+        support.write_registry(self.registry, support.entries(2))
+        return self.start(**kwargs)
+
+    def secret(self, sid):
+        return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
+
+    def owner(self, svc, path, body, **headers):
+        return support.post_page(svc.address, path, {**JSON, **(headers or self.own(svc))},
+                                 json.dumps(body).encode())
+
+    def post_owner(self, svc, project_id, text, **headers):
+        return self.owner(svc, OWNER_NOTICE, {"project_id": project_id, "text": text}, **headers)
+
+    def withdraw_owner(self, svc, project_id, notice_id, **headers):
+        return self.owner(svc, OWNER_WITHDRAW,
+                          {"project_id": project_id, "notice": notice_id}, **headers)
+
+    def posted(self, svc, project_id, text=FROZEN):
+        status, _, body = self.post_owner(svc, project_id, text)
+        self.assertEqual((status, body), (204, b""))
+        return self.rows("notice.posted")[-1][0]
+
+    def listed(self, svc, sid):
+        status, _, body = support.post_page(svc.address, NOTICES, JSON, json.dumps(
+            {"sprint_id": sid, "secret": self.secret(sid)}).encode())
+        self.assertEqual(status, 200, body)
+        return json.loads(body)["notices"]
+
+    def rows(self, kind):
+        return [row for row in support.log_rows(self.store) if row[2] == kind]
+
+    def refused(self, svc, send, status, reason):
+        got = self.assert_unchanged(svc, send)
+        self.assertEqual((got[0], got[2]), (status, reason.encode() + b"\n"))
+
+    def test_a_posted_owner_notice_is_stored_and_listed_as_the_owners(self):
+        svc = self.open()
+        a = svc.state_goal("owner/p01", GOAL_TEXT)
+        b = svc.state_goal("owner/p01", OTHER_GOAL)
+        c = svc.state_goal("owner/p00", GOAL_TEXT)
+        before = len(support.log_rows(self.store))
+        status, _, body = self.owner(svc, OWNER_NOTICE, {
+            "project_id": "owner/p01", "text": " routes are frozen until Friday "}, **self.own(svc))
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(len(support.log_rows(self.store)), before + 1)
+        (seq, at, kind, project, payload), = self.rows("notice.posted")
+        self.assertEqual((kind, project), ("notice.posted", "owner/p01"))
+        self.assertEqual(json.loads(payload), {
+            "poster": "owner", "notice": {"kind": "heads-up", "text": FROZEN}})
+        for sid in (a, b):
+            self.assertEqual(self.listed(svc, sid), [{
+                "at": at, "id": seq, "kind": "heads-up", "owner": True, "sprint_id": None,
+                "text": FROZEN, "title": None}])
+        self.assertEqual(self.listed(svc, c), [])
+
+    def test_an_owner_notice_is_refused_without_the_token_or_from_another_origin(self):
+        svc = self.open()
+        svc.state_goal("owner/p01", GOAL_TEXT)
+        origin = f"http://127.0.0.1:{svc.address[1]}"
+        bodies = {OWNER_NOTICE: {"project_id": "owner/p01", "text": FROZEN},
+                  OWNER_WITHDRAW: {"project_id": "owner/p01", "notice": 1}}
+        for path, body in bodies.items():
+            for name, headers, reason in (
+                    ("no token", {"Origin": origin}, "token refused"),
+                    ("wrong token", {"Origin": origin, "X-Console-Token": "nope"},
+                     "token refused"),
+                    ("foreign origin", {"Origin": "http://evil.example",
+                                        "X-Console-Token": self.token()}, "origin refused"),
+                    ("no origin", {"X-Console-Token": self.token()}, "origin refused")):
+                with self.subTest(path=path, case=name):
+                    self.refused(svc, lambda: self.owner(svc, path, body, **headers), 403, reason)
+
+    def test_an_owner_notice_over_its_bounds_or_a_sixth_is_refused_with_the_reason(self):
+        svc = self.open()
+        svc.state_goal("owner/p01", GOAL_TEXT)
+        for name, project, text, reason in (
+                ("long", "owner/p01", "x" * 281, "the notice's text is over 280 characters"),
+                ("blank", "owner/p01", "  ", "the notice has no valid text"),
+                ("line break", "owner/p01", "a\nb", "the notice has no valid text"),
+                ("unregistered", "owner/p99", "t", sprints.UNREGISTERED),
+                ("no sprint", "owner/p00", "t", sprints.OWNER_NOTICE_NO_SPRINT)):
+            with self.subTest(name):
+                self.refused(svc, lambda: self.post_owner(svc, project, text), 409, reason)
+        for name, body in (("no text", {"project_id": "owner/p01"}),
+                           ("text not a string", {"project_id": "owner/p01", "text": 3})):
+            with self.subTest(name):
+                self.refused(svc, lambda: self.owner(svc, OWNER_NOTICE, body, **self.own(svc)),
+                             400, "bad owner notice")
+        first = self.posted(svc, "owner/p01", "x" * 280)
+        for _ in range(4):
+            self.posted(svc, "owner/p01")
+        with self.subTest("sixth"):
+            self.refused(svc, lambda: self.post_owner(svc, "owner/p01", "one more"),
+                         409, sprints.OWNER_NOTICE_LIMIT)
+        self.assertEqual(self.withdraw_owner(svc, "owner/p01", first)[0], 204)
+        self.assertEqual(self.post_owner(svc, "owner/p01", "one more")[0], 204)
+
+    def test_withdraw_ends_the_owners_notice_and_refuses_what_it_cannot_end(self):
+        svc = self.open()
+        a = svc.state_goal("owner/p01", GOAL_TEXT)
+        svc.state_goal("owner/p00", GOAL_TEXT)
+        n1 = self.posted(svc, "owner/p01")
+        status, _, body = self.post_page_json(svc, NOTICE, {
+            "sprint_id": a, "secret": self.secret(a), "notice": HEADS_UP})
+        self.assertEqual(status, 200, body)
+        m = json.loads(body)["notice"]
+        self.assertEqual(self.withdraw_owner(svc, "owner/p01", n1)[0], 204)
+        (_, _, _, project, payload), = self.rows("notice.withdrawn")
+        self.assertEqual((project, json.loads(payload)), ("owner/p01", {
+            "poster": "owner", "notice": n1}))
+        self.assertEqual([entry["id"] for entry in self.listed(svc, a)], [m])
+        n2 = self.posted(svc, "owner/p01")
+        for name, send, status, reason in (
+                ("again", lambda: self.withdraw_owner(svc, "owner/p01", n1), 409,
+                 sprints.NOTICE_ENDED),
+                ("a managers", lambda: self.withdraw_owner(svc, "owner/p01", m), 409,
+                 sprints.OWNER_NOTICE_MANAGERS),
+                ("unknown", lambda: self.withdraw_owner(svc, "owner/p01", 999), 409,
+                 sprints.NOTICE_UNKNOWN),
+                ("another project's", lambda: self.withdraw_owner(svc, "owner/p00", n2), 409,
+                 sprints.NOTICE_UNKNOWN),
+                ("by a manager", lambda: self.post_page_json(svc, WITHDRAW_NOTICE, {
+                    "sprint_id": a, "secret": self.secret(a), "notice": n2}), 409,
+                 sprints.NOTICE_OWNERS),
+                ("zero", lambda: self.owner(svc, OWNER_WITHDRAW, {
+                    "project_id": "owner/p01", "notice": 0}, **self.own(svc)), 400,
+                 "bad owner notice withdrawal")):
+            with self.subTest(name):
+                self.refused(svc, send, status, reason)
+
+    def post_page_json(self, svc, path, body):
+        return support.post_page(svc.address, path, JSON, json.dumps(body).encode())
+
+    def test_withdraw_takes_the_owners_notice_off_the_board_and_the_blocks(self):
+        svc = self.open()
+        a = svc.state_goal("owner/p01", GOAL_TEXT)
+
+        def project():
+            return next(e for e in json.loads(svc.view_bytes)["entries"]
+                        if e["project_id"] == "owner/p01")
+
+        n = self.posted(svc, "owner/p01")
+        entry = project()
+        self.assertEqual([(m["id"], m["owner"], m["poster"], m["text"]) for m in entry["notices"]],
+                         [(n, True, "You", FROZEN)])
+        self.assertTrue(entry["notice_post"])
+        self.assertEqual(self.withdraw_owner(svc, "owner/p01", n)[0], 204)
+        entry = project()
+        self.assertEqual(entry["notices"], [])
+        self.assertTrue(entry["notice_post"])
+        self.assertEqual(self.listed(svc, a), [])
+
+    def test_owner_notices_survive_a_restart(self):
+        svc = self.open()
+        a = svc.state_goal("owner/p01", GOAL_TEXT)
+        gone = self.posted(svc, "owner/p01", "first")
+        kept = self.posted(svc, "owner/p01", "second")
+        self.assertEqual(self.withdraw_owner(svc, "owner/p01", gone)[0], 204)
+        svc.close()
+        again = self.start()
+        self.assertEqual([(entry["id"], entry["text"]) for entry in self.listed(again, a)],
+                         [(kept, "second")])
+
+    def test_a_new_managers_first_prompt_carries_the_owners_notice(self):
+        support.sign_in(self.store, "work")
+        launches, queued = support.Launches(), support.Queued()
+        svc = self.open(launcher=launches, dispatch=queued,
+                        profile_dirs=[support.profile_dir(self.store, "work")])
+        svc.state_goal("owner/p01", GOAL_TEXT)
+        queued.run_next()
+        self.posted(svc, "owner/p01")
+        svc.state_goal("owner/p01", OTHER_GOAL)
+        queued.run_next()
+        prompt = launches.calls[-1].prompt
+        line = "- heads-up from the owner, just now: routes are frozen until Friday"
+        self.assertIn(line, prompt.splitlines())
+        self.assertLess(prompt.index(line), prompt.index("The goal: "))
+        self.assertEqual(support.goal_of(prompt), OTHER_GOAL)
+
+    def test_the_owner_routes_print_neither_the_text_nor_the_token(self):
+        svc = self.open()
+        svc.state_goal("owner/p01", GOAL_TEXT)
+        private = "a private plan"
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self.post_owner(svc, "owner/p00", private)[0], 409)
+            self.assertEqual(self.post_owner(svc, "owner/p01", private + "x" * 300)[0], 409)
+            n = self.posted(svc, "owner/p01", private)
+            self.assertEqual(self.withdraw_owner(svc, "owner/p01", n + 100)[0], 409)
+        output = stderr.getvalue()
+        lines = output.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertTrue(lines[0].startswith("console: owner_notice_refused owner/p00 "), lines[0])
+        self.assertTrue(lines[1].startswith("console: owner_notice_refused owner/p01 "), lines[1])
+        self.assertTrue(lines[2].startswith("console: owner_notice_withdraw_refused owner/p01 "),
+                        lines[2])
+        for leaked in (private, self.token()):
+            self.assertNotIn(leaked, output)

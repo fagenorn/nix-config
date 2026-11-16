@@ -707,7 +707,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037"),
+                         "ADR-console-037, ADR-console-053"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052"),
@@ -741,7 +741,7 @@ class DocsTreeTest(unittest.TestCase):
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
-                                          "ADR-console-036, ADR-console-037"),
+                                          "ADR-console-036, ADR-console-037, ADR-console-053"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052")):
@@ -778,7 +778,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037"),
+                         "ADR-console-037, ADR-console-053"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
@@ -1395,6 +1395,34 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-046", notice)
         self.assertIn("ADR-console-044", notice)
+
+    def test_the_owner_notice_decision_is_recorded(self):
+        base = "docs/areas/console/adr/"
+        path = (base + "053-the-owner-posts-and-withdraws-a-notice-to-every-manager-of-a-"
+                "project.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-053 \u2014 The owner posts and withdraws a notice "
+                                "to every manager of a project")
+        adr = self.doc(path)
+        for needle in ("#1120", '"poster": "owner"', "POST /api/owner-notice",
+                       "POST /api/owner-notice-withdraw", "280", "5",
+                       "heads-up from the owner", "notice.nudged", "never approval",
+                       "ADR-console-008", "ADR-console-016", "ADR-console-044",
+                       "ADR-console-046"):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        adr008 = self.doc(base + "008-only-the-page-writes-with-a-token-and-its-origin.md")
+        self.assertIn("POST /api/owner-notice-withdraw", adr008)
+        self.assertIn("ADR-console-053", adr008)
+        self.assertIn("amended by ADR-console-053", self.doc(
+            base + "044-a-manager-posts-lists-and-withdraws-short-notices-for-its-project.md"))
+        self.assertIn("amended by ADR-console-053", self.doc(
+            base + "046-the-notice-board-shows-each-manager-its-projects-open-notices-and-never-"
+            "approves-anything.md"))
+        self.assertIn("Post a notice", self.doc(base + "002-the-desk-page-design-rules.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn("ADR-console-053", notice)
 
     def test_the_notices_fold_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")

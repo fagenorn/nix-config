@@ -268,6 +268,7 @@ class NudgeServiceTest(MessageRouteTest):
         self.nudges = []
         self.outcomes = []
         self.listed = {}
+        self.during = []
         self.now = [T0]
 
     def log_clock(self):
@@ -275,6 +276,8 @@ class NudgeServiceTest(MessageRouteTest):
 
     def nudger(self, sent):
         self.nudges.append(sent)
+        if self.during:
+            self.during.pop(0)()
         outcome = self.outcomes.pop(0) if self.outcomes else None
         if outcome is not None:
             raise nudge.NudgeFailed(outcome)
@@ -301,6 +304,165 @@ class NudgeServiceTest(MessageRouteTest):
 
     def name(self, sid):
         return manager.session_name("owner/p01", sid)
+
+    def started(self, svc, project, session_id, goal):
+        """A sprint of `project` whose manager is started and listed as running under `session_id`."""
+        sid = svc.state_goal(project, goal)
+        self.queued.run_next()
+        self.listed[session_id] = sessions.Observation(
+            session_id, "/srv/" + project.split("/")[1], 1, "idle", None,
+            manager.session_name(project, sid), None)
+        return sid
+
+    def drain(self):
+        while self.queued.jobs:
+            self.queued.run_next()
+
+    def notice_nudged(self):
+        return [json.loads(row[4]) for row in support.log_rows(self.store)
+                if row[2] == "notice.nudged"]
+
+    def kinds_after_start(self):
+        return [row[2] for row in support.log_rows(self.store)
+                if row[2] in ("sprint.nudged", "notice.nudged")]
+
+    def test_an_owner_notice_nudges_each_running_manager_of_its_project_once(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        b = self.started(svc, "owner/p01", "s-2", "second goal")
+        self.started(svc, "owner/p00", "s-3", "third goal")
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.drain()
+        self.assertEqual(
+            sorted((x.sprint_id, x.route, x.session_id) for x in self.nudges),
+            sorted([(a, "relay", "s-1"), (b, "relay", "s-2")]))
+        self.assertNotIn("frozen", repr(self.nudges))
+        self.assertEqual(
+            sorted(self.notice_nudged(), key=lambda row: row["sprint_id"]),
+            sorted([{"sprint_id": a, "notice": n, "route": "relay", "ok": True},
+                    {"sprint_id": b, "notice": n, "route": "relay", "ok": True}],
+                   key=lambda row: row["sprint_id"]))
+        self.assertEqual(self.nudged(), [])
+        svc.withdraw_owner_notice("owner/p01", n)
+        self.assertEqual(self.queued.jobs, [])
+        self.assertEqual(len(self.nudges), 2)
+
+    def test_a_queued_message_nudge_covers_the_notice_and_a_manager_not_started_gets_none(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        c = self.started(svc, "owner/p01", "s-3", "third goal")
+        svc.send_message("owner/p01", c, TEXT)
+        b = svc.state_goal("owner/p01", "second goal")
+        before = len(self.queued.jobs)
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.assertEqual(len(self.queued.jobs), before + 1)
+        self.drain()
+        by_sprint = {}
+        for sent in self.nudges:
+            by_sprint.setdefault(sent.sprint_id, []).append(sent.route)
+        self.assertEqual(by_sprint, {a: ["relay"], c: ["relay"]})
+        self.assertEqual(self.notice_nudged(), [
+            {"sprint_id": a, "notice": n, "route": "relay", "ok": True}])
+        self.assertEqual([row["sprint_id"] for _, row in self.nudged()], [c])
+        self.assertNotIn(b, by_sprint)
+
+    def test_a_message_stored_during_a_notice_nudge_is_nudged_right_after(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        message = svc.send_message("owner/p01", a, TEXT)
+        self.drain()
+        self.assertEqual([(x.sprint_id, x.route) for x in self.nudges],
+                         [(a, "relay"), (a, "relay")])
+        self.assertEqual(self.kinds_after_start(), ["notice.nudged", "sprint.nudged"])
+        self.assertEqual(self.notice_nudged(), [
+            {"sprint_id": a, "notice": n, "route": "relay", "ok": True}])
+        self.assertEqual([row["through"] for _, row in self.nudged()], [message])
+
+    def test_a_notice_posted_after_the_inbox_read_of_a_running_nudge_is_nudged_after_it(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        svc.send_message("owner/p01", a, TEXT)
+        posted = []
+        self.during = [lambda: posted.append(
+            svc.post_owner_notice("owner/p01", "routes are frozen until Friday"))]
+        self.drain()
+        self.assertEqual(len(self.nudges), 2)
+        self.assertEqual(self.kinds_after_start(), ["sprint.nudged", "notice.nudged"])
+        self.assertTrue(self.nudged()[0][1]["ok"])
+        self.assertEqual(self.notice_nudged(), [
+            {"sprint_id": a, "notice": posted[0], "route": "relay", "ok": True}])
+
+    def test_a_failed_message_nudge_leaves_the_notice_its_own_nudge(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        svc.send_message("owner/p01", a, TEXT)
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.outcomes = ["boom"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.drain()
+        self.assertEqual(len(self.nudges), 2)
+        self.assertEqual(self.kinds_after_start(), ["sprint.nudged", "notice.nudged"])
+        self.assertEqual(self.nudged()[0][1]["ok"], False)
+        self.assertEqual(self.nudged()[0][1]["reason"], "boom")
+        self.assertEqual(self.notice_nudged(), [
+            {"sprint_id": a, "notice": n, "route": "relay", "ok": True}])
+
+    def test_a_notice_due_while_another_reservation_holds_the_sprint_is_sent_by_renudge(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        svc._nudging.add(a)
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.assertEqual(self.queued.jobs, [])
+        svc._nudging.discard(a)
+        svc.renudge()
+        self.drain()
+        self.assertEqual([(x.sprint_id, x.route) for x in self.nudges], [(a, "relay")])
+        self.assertEqual(self.notice_nudged(), [
+            {"sprint_id": a, "notice": n, "route": "relay", "ok": True}])
+
+    def test_a_failed_notice_nudge_is_recorded_and_counts_no_failure(self):
+        svc = self.begin()
+        a = self.started(svc, "owner/p01", "s-1", "first goal")
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.outcomes = ["boom"]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.drain()
+        self.assertEqual(self.notice_nudged(), [
+            {"sprint_id": a, "notice": n, "route": "relay", "ok": False, "reason": "boom"}])
+        self.assertEqual(self.sprint_state(svc, a).failed_nudges, 0)
+        self.assertIn(f"console: notice_nudge_failed {a} boom", stderr.getvalue())
+        self.now[0] += 120
+        svc.renudge()
+        self.drain()
+        self.assertEqual(len(self.nudges), 1)
+
+    def test_no_nudger_means_no_notice_nudge(self):
+        svc = self.begin(nudger=None)
+        self.started(svc, "owner/p01", "s-1", "first goal")
+        svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.assertEqual(self.queued.jobs, [])
+        self.assertEqual(self.notice_nudged(), [])
+        self.assertEqual(svc._notice_due, {})
+
+    def test_a_notice_due_for_a_sprint_whose_project_was_unregistered_is_dropped_not_looped(self):
+        svc = self.begin()
+        sid = self.started(svc, "owner/p01", "s-1", "first goal")
+        svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        support.write_registry(self.registry, support.entries(2)[:1])
+        svc.refresh()
+        self.assertNotIn("owner/p01", svc._states)
+        for _ in range(200):
+            if not self.queued.jobs:
+                break
+            self.queued.run_next()
+        self.assertEqual(self.queued.jobs, [])
+        self.assertEqual(svc._notice_due, {})
+        self.assertNotIn(sid, svc._nudging)
+        self.assertEqual(self.nudges, [])
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
 
     def test_a_message_to_a_running_manager_is_relayed_with_the_fixed_sentence_only(self):
         svc = self.begin()

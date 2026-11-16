@@ -343,7 +343,7 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
-"notices": [<notice entry>, ...]}`; a group entry is
+"notices": [<notice entry>, ...], "notice_post": <bool>}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
@@ -351,7 +351,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
                       "kind": "claim" | "heads-up" | "hand-off", "kind_text": "<text>",
                       "text": "<text>", "what": "<text>" | null, "until_text": "<text>" | null,
-                      "to_text": "<text>" | null, "at": "<time>"}
+                      "to_text": "<text>" | null, "at": "<time>", "owner": <bool>}
     <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
@@ -552,6 +552,14 @@ is a hand-off: then `NOTICE_OWNER_TEXT` when it is to the owner, `NOTICE_FOR_TEX
 of the target when it is to a sprint in the given sprints, else `NOTICE_OTHER_TEXT`. `at` is the
 notice's own time, unchanged: the page ages it with its own clock. A notice is never an inbox item
 and changes no count, headline, sentence or `stale` (#1119).
+Every entry carries `owner`, false for a sprint's notice. The project's open owner notices
+(`owner_notices`, a map from project id to its folded owner notices, default none; only
+`open_owner_notices` of them, so never a withdrawn one) join the same list, ordered by `id` with the
+sprints' ones: an owner entry is `{"id", "sprint_id": null, "poster": NOTICE_YOU_TEXT, "kind":
+"heads-up", "kind_text": "Heads-up", "text", "what": null, "until_text": null, "to_text": null,
+"at", "owner": true}` (#1120). Every project entry also carries `notice_post`: true when one of its
+open (not finished) sprints `takes_notices`, so the page offers the owner's post, and false for a
+quiet project, one whose only sprints are finished or stopping, and every entry in a quiet group.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -668,6 +676,7 @@ from agent_tools.console.sprints import (
     UNREACHABLE_TEXT,
     Closing,
     Message,
+    Notice,
     Question,
     QuestionPicture,
     PendingStop,
@@ -682,8 +691,10 @@ from agent_tools.console.sprints import (
     message_state,
     open_questions,
     open_notices,
+    open_owner_notices,
     progress_text,
     sprint_title,
+    takes_notices,
     unreachable,
 )
 from agent_tools.verification import verify_owner
@@ -704,6 +715,7 @@ NOTICE_UNTIL_TEXT = "until {until}"
 NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
+NOTICE_YOU_TEXT = "You"
 
 _RANK = {state: rank for rank, state in enumerate(
     (WAITING_ANSWER, WAITING_PERMISSION, WORKING, LIMIT, IDLE))}
@@ -1369,7 +1381,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    capacity: Mapping = EMPTY,
                    nudges: bool = True, looked: str | None = None,
                    movement: ProjectMovement | None = None,
-                   notices: Sequence[Mapping] = ()) -> dict:
+                   notices: Sequence[Mapping] = (), notice_post: bool = False) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement)
@@ -1388,6 +1400,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                               "sprints": entries(finished)}),
         "outside_sprints": _line(sessions, deliveries, now_ms),
         "notices": [dict(n) for n in notices],
+        "notice_post": notice_post,
     }
 
 
@@ -1399,10 +1412,11 @@ def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
     return NOTICE_OTHER_TEXT
 
 
-def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str]) -> list[dict]:
-    """The open notices of `group`'s sprints as page entries, newest first."""
+def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str],
+                    owner: Iterable[Notice] = ()) -> list[dict]:
+    """The open notices of `group`'s sprints and the owner's as page entries, newest first."""
     found = [(n, s) for s in group for n in open_notices(s)]
-    return [{
+    entries = [{
         "id": n.notice_id,
         "sprint_id": s.sprint_id,
         "poster": titles[s.sprint_id],
@@ -1413,7 +1427,22 @@ def _notice_entries(group: Iterable[SprintState], titles: Mapping[str, str]) -> 
         "until_text": (NOTICE_UNTIL_TEXT.format(until=n.until) if n.kind == "claim" else None),
         "to_text": (_notice_to_text(n.to, titles) if n.kind == "hand-off" else None),
         "at": n.at,
-    } for n, s in sorted(found, key=lambda pair: -pair[0].notice_id)]
+        "owner": False,
+    } for n, s in found]
+    entries.extend({
+        "id": n.notice_id,
+        "sprint_id": None,
+        "poster": NOTICE_YOU_TEXT,
+        "kind": n.kind,
+        "kind_text": NOTICE_KIND_TEXT[n.kind],
+        "text": n.text,
+        "what": None,
+        "until_text": None,
+        "to_text": None,
+        "at": n.at,
+        "owner": True,
+    } for n in owner)
+    return sorted(entries, key=lambda entry: -entry["id"])
 
 
 def _sentence(count: int, adopting: bool = False) -> str:
@@ -1587,6 +1616,7 @@ def derive_view(
     looked: str | None = None,
     movement: Mapping[str, ProjectMovement] | None = None,
     activation: Activation | None = None,
+    owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
 ) -> dict:
     states = list(states)
@@ -1702,8 +1732,10 @@ def derive_view(
                 owned[project_id] = [s for s in owned[project_id] if s.name != name]
 
     titles = {s.sprint_id: sprint_title(s) for s in (sprints or {}).values()}
-    notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles)
+    notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles,
+                                    open_owner_notices(owner_notices or {}, pid))
                for pid in registered}
+    notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
 
     def is_active(state: ProjectState) -> bool:
         return (state.open_work > 0 or bool(owned.get(state.project_id))
@@ -1719,12 +1751,14 @@ def derive_view(
                               open_by_project.get(s.project_id, ()),
                               finished.get(s.project_id, ()), capacity, nudges, looked,
                               (movement or {}).get(s.project_id),
-                              notices=notices[s.project_id])
+                              notices=notices[s.project_id],
+                              notice_post=notice_post[s.project_id])
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
                                     nudges=nudges, looked=looked,
-                                    notices=notices[s.project_id])
+                                    notices=notices[s.project_id],
+                                    notice_post=notice_post[s.project_id])
                      for s in quiet]
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
