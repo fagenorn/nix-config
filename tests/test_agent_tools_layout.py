@@ -21,8 +21,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.agent_platform",  # owner_actions
     }),
     "console": frozenset({
-        "agent_tools.project_contract.agent_platform",  # service
-        "agent_tools.project_contract.resolve_project",  # deliveries
+        "agent_tools.project_contract.agent_platform",  # service, permission
+        "agent_tools.project_contract.resolve_project",  # deliveries, permission
         "agent_tools.project_contract.adopt_inspection",  # plan_questions
         "agent_tools.project_contract.adopt_planning",  # contract_draft
         "agent_tools.project_contract.adopt_apply",  # approve
