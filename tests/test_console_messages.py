@@ -822,6 +822,20 @@ class MessageLifeViewTest(unittest.TestCase):
                                message_row(7, event_log.SPRINT_READ, {"through": 6})),
                          [("text", "picked_up")])
 
+    def test_the_approval_member_keeps_a_read_approval_that_messages_leaves_out(self):
+        self.assertIsNone(life(message_rows(messaged_row(3, TEXT)), AT + 60_000)["approval"])
+        self.assertEqual(life(approval(), AT + 60_000)["approval"]["state"], "sent")
+        read = message_row(5, event_log.SPRINT_READ, {"through": 4})
+        row = life(approval(read), AT + 60_000)
+        self.assertEqual(row["messages"], [])
+        self.assertEqual((row["approval"]["kind"], row["approval"]["state"],
+                          row["approval"]["at"], row["approval"]["read_at"]),
+                         ("approved", "picked_up", message_at(4), message_at(5)))
+        later = [messaged_row(6, TEXT)] + [
+            messaged_row(seq, TEXT) for seq in range(7, 20)]
+        newest = life(approval(read, *later), AT + 60_000)
+        self.assertEqual(newest["approval"]["id"], row["approval"]["id"])
+
     def test_a_picked_up_change_request_still_shows(self):
         rows = message_rows(
             message_row(3, event_log.BRIEF_SENT, {"version": 1, "goal": "g", "brief": PARTS}),

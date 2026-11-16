@@ -469,7 +469,7 @@ permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`)
 and every older one whose reply is `new`, oldest first (so a reply to an old message is never
 cut); an approval the manager picked up without a reply is left out and takes no slot, while one
-it replied to stays, its reply `new` until a later look and listed in `new_replies`. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
+it replied to stays, its reply `new` until a later look and listed in `new_replies`. `approval` is the sprint's earliest approval message as one `messages` entry (same members), whether or not `messages` shows it, else null: the read receipt the verify check reads, which the presentation filter must not hide. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
 sent, else `sent`; a nudge never changes it. The pick-up is the minute form (`PICKUP_MINUTE_TEXT`)
 exactly when `derive_view(..., nudges=True)` (default; the service passes whether it has a nudger)
 and the sprint's manager is a `started` row, else the turn form (`PICKUP_TURN_TEXT`). `state_text` is
@@ -1061,6 +1061,14 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
             "reply_at": message.reply_at, "new": _is_new(message, looked)}
 
 
+def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
+                    looked: str | None, ended: bool) -> dict | None:
+    """The sprint's earliest approval as a message entry, whether or not `messages` shows it (a
+    read approval with no reply is left out of `messages`), else None."""
+    first = next((m for m in state.messages if m.kind == MESSAGE_APPROVED), None)
+    return None if first is None else _message_entry(first, now_ms, minute, retry, looked, ended)
+
+
 def _closing_entry(closing: Closing) -> dict:
     by_stage = {stage: sorted(issue for issue, row in closing.issues if row == stage)
                 for stage in (LANDED, HELD, DROPPED)}
@@ -1139,6 +1147,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)
                      for m in _shown_messages(state.messages, looked)],
+        "approval": _approval_entry(state, now_ms, minute, retry, looked, ended is not None),
         "tell_text": (None if ended is not None
                       else TELL_MINUTE_TEXT if minute else TELL_TURN_TEXT),
         "reach_text": UNREACHABLE_TEXT if unreachable(state) else None,

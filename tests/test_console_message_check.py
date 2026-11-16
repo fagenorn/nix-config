@@ -14,11 +14,13 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from agent_tools.console import manager, message_check, sprints
+from agent_tools.console import event_log, manager, message_check, sprints
 from agent_tools.console.manager import StopFailed
 from agent_tools.console.message_check import GOAL
 from agent_tools.console.sessions import Observation
 from tests.test_console_manager_check import Registry, Time
+from tests.test_console_messages import AT, approval as approval_rows, life
+from tests.test_console_view import message_at, message_row
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,12 +44,14 @@ def approval(state="sent", read=None, at=APPROVED_AT):
             "reply_at": None}
 
 
-def view(*, sprint=True, state="started", text=None, messages=(), reach=None, brief=None,
+def view(*, sprint=True, state="started", text=None, approved=None, reach=None, brief=None,
          managers=True, members=True):
     row = {"sprint_id": SID, "goal": GOAL, "stated_at": STATED, "manager_state": state,
            "manager_text": text}
     if members:
-        row.update(messages=list(messages), reach_text=reach)
+        # The real view lists an approval the manager read without replying in `approval` only.
+        listed = [] if approved is None or approved["state"] == "picked_up" else [approved]
+        row.update(messages=listed, approval=approved, reach_text=reach)
     items = [] if brief is None else [{"key": "brief/" + SID, "version": brief,
                                        "waiting_since": STATED}]
     return {"managers": managers,
@@ -162,14 +166,33 @@ class MessageCheckTest(unittest.TestCase):
 
     def test_a_replied_approval_counts_as_read(self):
         code, out = self.run_check(self.stated_views(
-            view(brief=1), view(messages=[approval()]),
-            view(messages=[approval("replied", later(40))])))
+            view(brief=1), view(approved=approval()),
+            view(approved=approval("replied", later(40)))))
         self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
+
+    def test_an_approval_the_real_view_hides_after_a_read_without_a_reply_is_met(self):
+        for reply in (None, [message_row(6, event_log.SPRINT_ANSWERED,
+                                         {"message": 4, "reply": "read and noted"})]):
+            with self.subTest(replied=reply is not None):
+                rows = approval_rows(
+                    message_row(5, event_log.SPRINT_READ, {"through": 4}), *(reply or []))
+                row = {**life(rows, AT + 600_000), "sprint_id": SID, "goal": GOAL,
+                       "stated_at": STATED}
+                if reply is None:
+                    self.assertEqual(row["messages"], [])
+                body = {"managers": True, "inbox": {"open": [], "answered": []},
+                        "entries": [{"type": "project", "project_id": "owner/p01",
+                                     "sprints": [row]}]}
+                code, out = self.run_check(self.stated_views(body))
+                read = datetime.fromisoformat(message_at(5)) - datetime.fromisoformat(message_at(4))
+                self.assertEqual((code, out), (0, {"read_seconds": int(read.total_seconds()),
+                                                   "status": "met"}))
+                self.assertEqual(self.posts("/api/approve"), [])
 
     def test_a_met_finish_stops_then_removes_then_withdraws(self):
         code, out = self.run_check(self.stated_views(
-            view(brief=1), view(messages=[approval()]),
-            view(messages=[approval("picked_up", later(40))])))
+            view(brief=1), view(approved=approval()),
+            view(approved=approval("picked_up", later(40)))))
         self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
         self.assertEqual(self.posts("/api/goal"), [{"project_id": "owner/p01", "goal": GOAL}])
         self.assertEqual(self.posts("/api/approve"),
@@ -190,7 +213,7 @@ class MessageCheckTest(unittest.TestCase):
 
     def test_a_not_met_finish_removes_before_it_withdraws(self):
         code, _ = self.run_check(self.stated_views(
-            view(messages=[approval()], reach="manager not reachable")))
+            view(approved=approval(), reach="manager not reachable")))
         self.assertEqual(code, 1)
         stop = self.events.index(("stop", "s-1", "work"))
         removed = self.events.index(("remove", "s-1", "work"))
@@ -201,8 +224,8 @@ class MessageCheckTest(unittest.TestCase):
     def test_a_failed_removal_keeps_the_outcome_and_the_next_run_removes_the_recorded_session(self):
         self.failing_removes = 1
         code, out = self.run_check(self.stated_views(
-            view(brief=1), view(messages=[approval()]),
-            view(messages=[approval("picked_up", later(40))])))
+            view(brief=1), view(approved=approval()),
+            view(approved=approval("picked_up", later(40)))))
         self.assertEqual((code, out), (75, {
             "reason": "the test manager's session is not removed yet: the removal failed",
             "sprint_id": SID, "status": "waiting"}))
@@ -211,7 +234,7 @@ class MessageCheckTest(unittest.TestCase):
         saved = json.loads(self.state_file.read_text())
         self.assertEqual(saved["outcome"], {"code": 0, "reason": None, "seconds": 40})
         self.assertEqual(saved["stopped"], [{"session_id": "s-1", "profile": "work"}])
-        code, out = self.run_check([view(messages=[approval("picked_up", later(40))])],
+        code, out = self.run_check([view(approved=approval("picked_up", later(40)))],
                                    registry=Registry({}))
         self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
         self.assertEqual([e for e in self.events if e[0] == "stop"], [])
@@ -228,8 +251,8 @@ class MessageCheckTest(unittest.TestCase):
     def test_a_removal_with_no_time_left_is_left_to_the_next_run_with_the_stop_recorded(self):
         self.stop_seconds = 600
         code, out = self.run_check(self.stated_views(
-            view(brief=1), view(messages=[approval()]),
-            view(messages=[approval("picked_up", later(40))])))
+            view(brief=1), view(approved=approval()),
+            view(approved=approval("picked_up", later(40)))))
         self.assertEqual((code, out), (75, {
             "reason": "the test manager's session is not removed yet: "
                       + manager.OUT_OF_TIME_TEXT,
@@ -242,7 +265,7 @@ class MessageCheckTest(unittest.TestCase):
         self.assertEqual(saved["outcome"], {"code": 0, "reason": None, "seconds": 40})
         self.assertEqual(saved["stopped"], [{"session_id": "s-1", "profile": "work"}])
         self.stop_seconds = 0
-        code, out = self.run_check([view(messages=[approval("picked_up", later(40))])],
+        code, out = self.run_check([view(approved=approval("picked_up", later(40)))],
                                    registry=Registry({}))
         self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
         self.assertEqual([e for e in self.events if e[0] == "remove"], [("remove", "s-1", "work")])
@@ -251,23 +274,23 @@ class MessageCheckTest(unittest.TestCase):
     def test_a_replaced_version_answered_409_is_followed_by_approving_the_new_one(self):
         code, out = self.run_check(
             self.stated_views(view(brief=1), view(brief=2),
-                              view(messages=[approval("picked_up", later(30))])),
+                              view(approved=approval("picked_up", later(30)))),
             statuses={"/api/approve": [409, 204]})
         self.assertEqual([post["version"] for post in self.posts("/api/approve")], [1, 2])
         self.assertEqual((code, out["read_seconds"]), (0, 30))
 
     def test_a_409_whose_approval_shows_in_the_view_is_not_approved_again(self):
         code, out = self.run_check(
-            self.stated_views(view(brief=1), view(messages=[approval()]),
-                              view(messages=[approval("picked_up", later(25))])),
+            self.stated_views(view(brief=1), view(approved=approval()),
+                              view(approved=approval("picked_up", later(25)))),
             statuses={"/api/approve": [409]})
         self.assertEqual(len(self.posts("/api/approve")), 1)
         self.assertEqual((code, out["read_seconds"]), (0, 25))
 
     def test_an_approval_the_console_never_answered_is_sent_again_not_called_refused(self):
         code, out = self.run_check(
-            self.stated_views(view(brief=1), view(brief=1), view(messages=[approval()]),
-                              view(messages=[approval("picked_up", later(35))])),
+            self.stated_views(view(brief=1), view(brief=1), view(approved=approval()),
+                              view(approved=approval("picked_up", later(35)))),
             statuses={"/api/approve": ["drop"]})
         self.assertEqual([post["version"] for post in self.posts("/api/approve")], [1, 1])
         self.assertEqual((code, out["read_seconds"]), (0, 35))
@@ -278,7 +301,7 @@ class MessageCheckTest(unittest.TestCase):
         self.assertEqual(code, 75)
         self.assertEqual(json.loads(self.state_file.read_text())["approved_versions"], [])
         code, out = self.run_check(
-            [view(brief=1), view(messages=[approval("picked_up", later(40))])])
+            [view(brief=1), view(approved=approval("picked_up", later(40)))])
         self.assertEqual((code, out["read_seconds"]), (0, 40))
         self.assertEqual([post["version"] for post in self.posts("/api/approve")], [1])
 
@@ -297,14 +320,14 @@ class MessageCheckTest(unittest.TestCase):
         self.assertEqual((out["phase"], out["status"], out["sprint_id"]), ("brief", "waiting", SID))
         self.assertEqual(json.loads(self.state_file.read_text())["approved_versions"], [1])
         code, out = self.run_check(
-            [view(messages=[approval()]), view(messages=[approval("picked_up", later(40))])])
+            [view(approved=approval()), view(approved=approval("picked_up", later(40)))])
         self.assertEqual((code, out["read_seconds"]), (0, 40))
         self.assertEqual(self.posts("/api/goal"), [])
         self.assertEqual(self.posts("/api/approve"), [])
 
     def test_a_read_after_five_minutes_is_met_here_and_slow_in_timing(self):
         code, out = self.run_check(self.stated_views(
-            view(messages=[approval("picked_up", later(400))])))
+            view(approved=approval("picked_up", later(400)))))
         self.assertEqual((code, out), (0, {"read_seconds": 400, "status": "met"}))
         self.assertEqual(self.timing(), (1, {"read_seconds": 400, "reason": "slow",
                                              "status": "not_met"}))
@@ -315,7 +338,7 @@ class MessageCheckTest(unittest.TestCase):
 
     def test_an_unreachable_manager_is_not_met(self):
         code, out = self.run_check(self.stated_views(
-            view(messages=[approval()], reach="manager not reachable")))
+            view(approved=approval(), reach="manager not reachable")))
         self.assertEqual((code, out), (1, {"read_seconds": None, "reason": "manager not reachable",
                                            "status": "not_met"}))
         self.assertIn(("stop", "s-1", "work"), self.events)
@@ -326,7 +349,7 @@ class MessageCheckTest(unittest.TestCase):
         saved = {"project": "owner/p01", "sprint_id": SID, "stated_at": STATED,
                  "approved_versions": [1]}
         old = (datetime.fromisoformat(STATED) - timedelta(seconds=1000)).isoformat()
-        code, out = self.run_check([view(messages=[approval(at=old)])], saved=saved, budget="30")
+        code, out = self.run_check([view(approved=approval(at=old))], saved=saved, budget="30")
         self.assertEqual((code, out), (75, {"phase": "read", "sprint_id": SID,
                                             "status": "waiting"}))
         self.assertEqual([e for e in self.events if e[0] == "stop"], [])
@@ -350,14 +373,14 @@ class MessageCheckTest(unittest.TestCase):
     def test_a_failed_stop_keeps_the_outcome_and_the_next_run_stops_then_withdraws(self):
         self.failing_stops = 1
         code, out = self.run_check(self.stated_views(
-            view(messages=[approval("picked_up", later(40))])))
+            view(approved=approval("picked_up", later(40)))))
         self.assertEqual((code, out), (75, {
             "reason": "the test manager is not stopped yet: the stop failed", "sprint_id": SID,
             "status": "waiting"}))
         self.assertEqual(self.posts("/api/withdraw"), [])
         self.assertEqual([e for e in self.events if e[0] == "remove"], [])
         self.assertTrue(self.state_file.exists())
-        code, out = self.run_check([view(messages=[approval("picked_up", later(40))])])
+        code, out = self.run_check([view(approved=approval("picked_up", later(40)))])
         self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
         self.assertIn(("stop", "s-1", "work"), self.events)
         self.assertIn(("remove", "s-1", "work"), self.events)
@@ -367,7 +390,7 @@ class MessageCheckTest(unittest.TestCase):
 
     def test_a_manager_not_listed_is_neither_stopped_nor_removed(self):
         code, out = self.run_check(
-            self.stated_views(view(messages=[approval("picked_up", later(40))])),
+            self.stated_views(view(approved=approval("picked_up", later(40)))),
             registry=Registry({}))
         self.assertEqual((code, out["read_seconds"]), (0, 40))
         self.assertEqual([e for e in self.events if e[0] == "stop"], [])

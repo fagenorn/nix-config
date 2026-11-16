@@ -3061,6 +3061,7 @@ function closingReport(sprint) {
   const closing = sprint.closing;
   if (closing === null || typeof closing !== "object") {
     box.appendChild(el("p", "closing-none", "No closing report."));
+    if (typeof sprint.status === "string") box.appendChild(sprintDetail(sprint));
     return box;
   }
   if (typeof closing.summary === "string") box.appendChild(el("p", "closing-summary", closing.summary));

@@ -4133,6 +4133,26 @@ class PageSprintEndTest(unittest.TestCase):
         self.assertEqual([full(n) for n in of_class(row, "div", "closing-report")],
                          ["No closing report."])
 
+    def test_a_finished_sprint_with_a_report_and_no_closing_keeps_its_report_and_tracker(
+            self) -> None:
+        for state, text in (("done", "done"), ("stopped", "stopped by you")):
+            with self.subTest(state=state):
+                ended = {**REPORTED, **DONE_SPRINT, "state": state, "state_text": text,
+                         "closing": None}
+                (snap,) = render([
+                    START, {"frame": with_sprints([ended])}, {"open": "finished"},
+                    {"open": "ended:" + "a" * 16}, {"open": "sprint:" + "a" * 16},
+                    {"snapshot": True},
+                ])
+                (row,) = of_class(snap["projects"], "li", "finished-line")
+                shown = visible_text(row)
+                self.assertIn("two slices are building", shown)
+                self.assertEqual(
+                    [full(n) for n in of_class(row, "span", "issue")], ["#12", "#13"])
+                (link,) = of_class(row, "a", "tracker")
+                self.assertEqual(link["href"], "https://github.com/owner/p00/milestone/3")
+                self.assertEqual([full(n) for n in of_class(row, "span", "outcome")], [text])
+
     def test_a_stop_failure_shows_on_the_line(self) -> None:
         text = "could not stop the manager: boom; trying again"
         (snap,) = render([
