@@ -3097,3 +3097,39 @@ class WaitingLineTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], ANSWER_SENTENCE)
         self.assertEqual(entry(shown)["waits"], [])
+
+
+class TrackerReadViewTest(unittest.TestCase):
+    READ_AT = "2026-11-16T13:00:00.000000+00:00"
+
+    def test_a_project_entry_carries_its_last_tracker_read(self):
+        cases = (
+            (ReadState(True, self.READ_AT), {"ok": True, "read_at": self.READ_AT}),
+            (ReadState(False, None), {"ok": False, "read_at": None}),
+        )
+        for read, wire in cases:
+            with self.subTest(read=read):
+                shown = derive_view([state("p00", 1)], health={"p00": read})
+                self.assertEqual(shown["entries"][0]["tracker_read"], wire)
+        self.assertIsNone(derive_view([state("p00", 1)])["entries"][0]["tracker_read"])
+
+    def test_an_active_project_entry_carries_its_read_too(self):
+        shown = derive_view([state("p00", 1, work=2)],
+                            health={"p00": ReadState(True, self.READ_AT)})
+        self.assertEqual(shown["entries"][0]["tracker_read"],
+                         {"ok": True, "read_at": self.READ_AT})
+        self.assertIsNone(derive_view([state("p00", 1, work=2)])["entries"][0]["tracker_read"])
+
+    def test_a_quiet_project_in_a_group_carries_its_read_too(self):
+        projects = [state(f"p{n:02d}", n) for n in range(view.FOLD_AFTER + 2)]
+        shown = derive_view(projects, health={"p01": ReadState(True, self.READ_AT)})
+        (group,) = [e for e in shown["entries"] if e["type"] == "quiet_group"]
+        reads = {p["project_id"]: p["tracker_read"] for p in group["projects"]}
+        self.assertEqual(reads["p01"], {"ok": True, "read_at": self.READ_AT})
+        self.assertIsNone(reads["p00"])
+
+    def test_the_read_changes_no_statement(self):
+        self.assertEqual(
+            derive_view([state("p00", 1)],
+                        health={"p00": ReadState(True, self.READ_AT)})["statement"],
+            derive_view([state("p00", 1)])["statement"])
