@@ -1015,6 +1015,31 @@ class ManagerContractTest(unittest.TestCase):
             with self.subTest(needle):
                 self.assertIn(needle, section)
 
+    def test_the_contract_says_to_check_claims_ask_on_an_overlap_and_never_take_a_notice_as_permission(self):
+        text = " ".join(CONTRACT.read_text().split())
+
+        def section(name):
+            return text.partition("## " + name)[2].partition(" ## ")[0]
+
+        wanted = {
+            "Notices": ("Check each slice against the open claims of other sprints",
+                        "send the owner a question card with `sprint ask` naming the overlap",
+                        "never the owner's permission or approval",
+                        "Post a `claim`", "a `heads-up` before", "a `hand-off` when",
+                        "Withdraw a notice", "as soon as it no longer holds",
+                        "`hand-off for you`", "Your own notices are left out",
+                        "Open notices of the other sprints of this project"),
+            "Every turn": ("open notices",),
+            "After approval": ("open claim",),
+            "Drafting the brief": ("the text after the first `The goal: ` in your first prompt "
+                                   "that is not on a line beginning with `- `",),
+        }
+        for name, needles in wanted.items():
+            for needle in needles:
+                with self.subTest(name, needle=needle):
+                    self.assertIn(needle, section(name))
+        self.assertEqual(text.count("## Notices"), 1)
+
     def test_contract_sends_no_request(self):
         out = StringIO()
         refused = AssertionError("sprint contract opened a connection")
