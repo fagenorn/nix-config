@@ -138,7 +138,14 @@ class HookProcessTest(unittest.TestCase):
 
     def test_a_bad_argument_denies_everything(self):
         read = json.dumps(tool("Read", {"file_path": "/x"}))
-        for args, stdin_text in (([], read), (["not json"], read), (['[["just","build"]]'], "{")):
+        deep = "[" * 100000  # under the 128 KiB limit of one argv word
+        for args, stdin_text in (
+            ([], read),
+            (["not json"], read),
+            (['[["just","build"]]'], "{"),
+            (['[["just","build"]]'], deep),
+            ([deep], read),
+        ):
             with self.subTest(args=args, stdin=stdin_text):
                 done = self.run_hook(args, stdin_text)
                 self.assertEqual(done.returncode, 0)

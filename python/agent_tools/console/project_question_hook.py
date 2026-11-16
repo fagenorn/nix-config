@@ -29,7 +29,8 @@ this order:
    shell, and a bare `just` runs the project's default recipe.
 
 Output. Stdout is exactly one line, `json.dumps(output(decision, reason))`, the client's PreToolUse
-wire format. A missing or unparseable argument, or unreadable stdin, prints the `MALFORMED` deny.
+wire format. A missing or unparseable argument, or unreadable stdin (JSON nested deeper than the recursion limit included), prints the `MALFORMED`
+deny.
 The exit status is 0 in every case. A hook process that gives no decision (a timeout, an
 interpreter that fails to start) is turned into a deny by `"onFailure": "block"` in the session's
 settings, not by this module.
@@ -150,7 +151,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         allowed = parse_allowed(arguments[0])
         document = json.loads(sys.stdin.read())
-    except (IndexError, ValueError):
+    except (IndexError, ValueError, RecursionError):
         decision, reason = "deny", MALFORMED
     else:
         decision, reason = decide(document, allowed)
