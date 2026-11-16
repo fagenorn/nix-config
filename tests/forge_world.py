@@ -59,7 +59,8 @@ from shared state (issue 629, see REF_HANDLER): the single-ref read, the prefix 
 (`git/matching-refs`, never scheduled), the ref create (HTTP 422
 when it exists), the repository node id and the `updateRefs` compare-and-swap, which applies
 only from the observed oid. `cas_lies=n` makes the next n applied swaps answer failure, the
-spike's observed lie. Schedule entries are the bare op names `get`, `create` and `cas`, with
+spike's observed lie. `refuse_to=[oid, ...]` makes every swap that would move a ref to one of
+those oids answer failure with a reason (`REFUSED`), changing nothing (issue 1132). Schedule entries are the bare op names `get`, `create` and `cas`, with
 the comment store's semantics. `refs()` reads the store, `set_ref(ref, sha)` moves a ref.
 `prefix=...` leaves the read of a ref outside that prefix to the registered responses, which is
 how `land_lock_ready` serves the land lock beside a release's own branch and tag reads (issue 875).
@@ -122,6 +123,8 @@ if tool == "gh" and (state / "refs.json").exists():
     ZERO = "0" * 40
     LIE = ("Something went wrong while executing your query. "
            "This may be the result of a timeout, or it could be a GitHub bug.")
+
+    REFUSED = "Could not resolve to a Ref: the update to that object is not allowed"
 
     def ref_op(store):
         slug = store["slug"]
@@ -211,6 +214,14 @@ if tool == "gh" and (state / "refs.json").exists():
                     sys.stdout.write(json.dumps({"ref": name, "object": {"sha": sha, "type": "commit"}}))
                     sys.exit(0)
                 repo_id, name, before, after = arg
+                if after in store.get("refuse_to", []):  # a forge that refuses the write, changing nothing
+                    if lose:
+                        lost_reply()
+                    save_refs(store)
+                    sys.stdout.write(json.dumps({"data": {"updateRefs": None}, "errors": [
+                        {"type": "UNPROCESSABLE", "path": ["updateRefs"], "message": REFUSED}]}))
+                    sys.stderr.write("gh: " + REFUSED + "\\n")
+                    sys.exit(1)
                 applied = repo_id == store["node_id"] and before == refs.get(name, ZERO)
                 if applied:
                     if after == ZERO:
@@ -535,12 +546,13 @@ class ForgeWorld:
         return {key: store[key] for key in ("state", "state_reason", "labels", "created")}
 
     def ref_store(self, slug: str, refs: dict[str, str] | None = None, *, node_id: str = "R_kgDOtest",
-                  schedule=(), cas_lies: int = 0, lose_reply=(), prefix: str = "") -> None:
+                  schedule=(), cas_lies: int = 0, lose_reply=(), prefix: str = "", refuse_to=()) -> None:
         """Serve one repository's git refs from shared state (see REF_HANDLER); with `prefix`,
         a read of a ref outside it is left to the registered responses."""
         (self.state / "refs.json").write_text(json.dumps({
             "slug": slug, "refs": dict(refs or {}), "node_id": node_id, "prefix": prefix,
             "schedule": list(schedule), "cursor": 0, "cas_lies": cas_lies,
+            "refuse_to": list(refuse_to),
             "lose_reply": list(lose_reply)}), encoding="utf-8")
 
     def refs(self) -> dict[str, str]:

@@ -126,7 +126,7 @@ and a write of the same oid changes nothing. The holder therefore changes a seco
 `refs/agent-locks/land-beat/<branch>`: `refresh --sha <sha>` answers `not_held` (exit 3, with
 `lock_sha`, `pr` and `by`) and writes nothing unless the lock is at `--sha`, and otherwise moves
 the beat one step: created at `--sha` when absent, else swapped to the first parent of its value
-(deleted when that is a root commit). The beat therefore repeats a value only after it has walked
+(deleted when that is a root commit); a swap the forge refuses, as it did on a merge commit (issue 1132), is retried at `--sha` and then as a deletion, and a refresh all three fail names the forge's reason and the next step. The beat therefore repeats a value only after it has walked
 the whole first-parent history down to the root and begun again, so refreshes that fall between
 two polls of a waiter do not cancel out; a repeat would cost one refresh a waiter did not see,
 nothing more. The lock is read before the beat is written and the two are not one swap: a refresh
@@ -722,6 +722,17 @@ def _release(args: Any) -> tuple[int, dict[str, Any]]:
     return 3, result(args, "not_held", lock_sha=after, pr=pr, by=holder(args.repo, pr))
 
 
+def _readback(slug: str, ref: str, before: str | None, failure: forge_api.ForgeError | None) -> str | None:
+    """The ref after a write; an applied write whose read-back still shows `before` is waited out (issue 816)."""
+    after = fm.read_ref(slug, ref)
+    for _ in range(READBACK_RETRIES):
+        if failure or after != before:
+            break
+        sleep(READBACK_DELAY)
+        after = fm.read_ref(slug, ref)
+    return after
+
+
 def _refresh(args: Any) -> tuple[int, dict[str, Any]]:
     """D11: move the beat one step, only while the lock is at the caller's sha."""
     lock = fm.read_ref(args.repo, lock_ref(args.branch))
@@ -733,18 +744,23 @@ def _refresh(args: Any) -> tuple[int, dict[str, Any]]:
     failure = None
     if beat is None:
         fm.create_ref(args.repo, ref, args.sha)
+        after = _readback(args.repo, ref, beat, None)
     else:
-        step = fm.commit_parent(args.repo, beat) or fm.ZERO_OID
-        failure = fm.cas_ref(args.repo, fm.repo_node_id(args.repo), ref, beat, step)
-    after = fm.read_ref(args.repo, ref)
-    for _ in range(READBACK_RETRIES):
-        if failure or after != beat:
-            break
-        sleep(READBACK_DELAY)  # an applied write whose read-back still shows the old beat (issue 816)
-        after = fm.read_ref(args.repo, ref)
+        # The first parent is the step (D11). A forge that refuses it, whatever shape the commit has
+        # (issue 1132), is asked for the caller's sha, then for the ref's deletion: the beat's value
+        # means nothing, only its change counts.
+        steps = [fm.commit_parent(args.repo, beat) or fm.ZERO_OID, args.sha, fm.ZERO_OID]
+        for step in dict.fromkeys(s for s in steps if s != beat):
+            failure = fm.cas_ref(args.repo, fm.repo_node_id(args.repo), ref, beat, step)
+            after = _readback(args.repo, ref, beat, failure)
+            if after != beat:
+                break
     if after == beat:
+        reason = f"the forge refused it: {failure.detail}" if failure else "the forge did not apply it"
         raise forge_api.ForgeError(failure.code if failure else "gh_failed",
-                                   "the beat write was not applied and the beat is unchanged",
+                                   f"the beat write was not applied and the beat is unchanged; {reason}. "
+                                   "Run the refresh again; if it keeps failing, `forge-claim land release` the "
+                                   "lock and acquire it again before a waiter takes it over after 45 minutes",
                                    transient=failure is not None and failure.transient)
     return 0, result(args, "refreshed", lock_sha=lock, beat=after)
 

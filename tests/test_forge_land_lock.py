@@ -1662,6 +1662,40 @@ class RefreshTest(Base):
         self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
         self.assertEqual(self.world.refs(), {REF: B, BEAT: B})
 
+    def refuse_from(self, *refused):
+        """Re-serve the lock at B with a forge that refuses every swap onto one of `refused`."""
+        self.world.reset()
+        self.lock(B, refuse_to=refused)
+
+    def test_a_refresh_succeeds_whatever_commit_shape_the_beat_has(self):
+        """Issue 1132: the beat at a merge commit whose first parent the forge refuses, at a root
+        commit and at an ordinary commit; the lock's holder is told `refreshed` each time."""
+        shapes = {
+            "merge": ((C, D, E), [(C, D), (C, E)], (D,)),
+            "root": ((C,), [(C, None)], ()),
+            "ordinary": ((C, D), [(C, D), (D, None)], ()),
+        }
+        for name, (_, edges, refused) in shapes.items():
+            with self.subTest(shape=name):
+                self.refuse_from(*refused)
+                for sha, parents in {sha: [p for s, p in edges if s == sha and p] for sha, _ in edges}.items():
+                    self.world.respond_json("gh", ["api", f"repos/{SLUG}/git/commits/{sha}"],
+                                            {"sha": sha, "parents": [{"sha": p} for p in parents]})
+                self.world.set_ref(BEAT, C)
+                code, out = run(*land("refresh", B))
+                self.assertEqual((code, out["verdict"]), (0, "refreshed"))
+                self.assertNotEqual(self.world.refs().get(BEAT), C)
+
+    def test_a_refused_refresh_reports_the_forges_reason_and_a_next_step(self):
+        self.refuse_from(D, B, fm.ZERO_OID)
+        self.parents(C, D)
+        self.world.set_ref(BEAT, C)
+        code, out = run(*land("refresh", B))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+        self.assertIn("Could not resolve to a Ref", out["detail"])
+        self.assertIn("forge-claim land release", out["detail"])
+        self.assertEqual(self.world.refs(), {REF: B, BEAT: C})
+
     def test_a_lock_refreshed_at_the_largest_gap_of_a_train_wait_is_never_taken_over_as_idle(self):
         """The train's checks wait refreshes at gaps of 22 minutes at most (a refresh due after 7,
         behind a 15-minute watch), here for a whole wait of the waiter, 50 minutes, which is longer
