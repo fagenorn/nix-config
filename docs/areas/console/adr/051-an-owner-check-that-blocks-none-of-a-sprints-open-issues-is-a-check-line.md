@@ -9,7 +9,7 @@ A sprint's ball and its now-sentence read "waiting on you" for any open inbox it
 
 ## Decision
 
-**D1. What an owner check is.** An owner check is a tracker item whose reason is one of the verification owner prompts (`verify_owner.REASONS`) or the held-issue review card of ADR-console-053 (`inbox.REVIEW_REASON`). Only an owner check can become a check line; every other tracker item still counts as waiting on the owner.
+**D1. What an owner check is.** An owner check is a tracker item whose reason is one of the verification owner prompts (`verify_owner.REASONS`) or the held-issue review card of ADR-console-054 (`inbox.REVIEW_REASON`). Only an owner check can become a check line; every other tracker item still counts as waiting on the owner.
 
 **D2. Blocking is the tracker's edge.** `blocking` is the list of open issues of the same repository that the check's issue blocks on the tracker, read by the inbox reader. The sprint reads it as it finds it and never asks the tracker again (D-plan-1).
 
