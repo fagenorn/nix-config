@@ -440,11 +440,11 @@ class DocsTreeTest(unittest.TestCase):
             "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
 
     def test_the_console_merge_refusal_decision_is_recorded(self):
-        path = "docs/areas/console/adr/045-a-merge-refused-by-the-guard-shows-once-in-the-sprints-line.md"
+        path = "docs/areas/console/adr/048-a-merge-refused-by-the-guard-shows-once-in-the-sprints-line.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
         self.assertEqual(
             first,
-            "# ADR-console-045 — A merge refused by the guard shows once in the sprint's line, "
+            "# ADR-console-048 — A merge refused by the guard shows once in the sprint's line, "
             "never as a question")
         adr = self.doc(path)
         for needle in ("#1115", "merge refused: <reason>", "status line", "`sprint ask`", "inbox",
@@ -456,7 +456,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertNotIn("stalled", adr)
         raw = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text()
         entry = raw[raw.index("**Report**:"):].split("\n\n")[0]
-        for needle in ("ADR-console-045", "merge refused"):
+        for needle in ("ADR-console-048", "merge refused"):
             with self.subTest(needle):
                 self.assertIn(needle, entry)
 
