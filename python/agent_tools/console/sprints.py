@@ -402,7 +402,7 @@ entry is `{"id", "kind": "answer", "version": null, "text": <the answer>, "at", 
 <question text>, "round": <int>, "chosen": <option text> | null}`; every other entry keeps its five
 keys.
 
-Notices (#1117, ADR-console-043) are what a sprint's manager tells the other managers of its
+Notices (#1117, ADR-console-044) are what a sprint's manager tells the other managers of its
 project: a `claim` ("I am working in this area until ..."), a `heads-up` or a `hand-off` (to the
 owner or to another open sprint of the project). They are information, never approval. Two rows
 carry them, both kept (`event_log.NOTICE_POSTED`, `NOTICE_WITHDRAWN`; each with the project in its

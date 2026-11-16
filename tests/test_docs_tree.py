@@ -1213,9 +1213,9 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_the_notice_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
-                "043-a-manager-posts-lists-and-withdraws-short-notices-for-its-project.md")
+                "044-a-manager-posts-lists-and-withdraws-short-notices-for-its-project.md")
         first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(first, "# ADR-console-043 \u2014 A manager posts, lists and withdraws "
+        self.assertEqual(first, "# ADR-console-044 \u2014 A manager posts, lists and withdraws "
                                 "short notices for its project")
         adr = self.doc(path)
         for needle in ("notice.posted", "notice.withdrawn", "schema 10", "POST /api/notice",
@@ -1227,12 +1227,13 @@ class DocsTreeTest(unittest.TestCase):
         base = "docs/areas/console/adr/"
         self.assertIn("POST /api/withdraw-notice", self.doc(
             base + "008-only-the-page-writes-with-a-token-and-its-origin.md"))
-        self.assertIn("ADR-console-043", self.doc(
+        self.assertIn("ADR-console-044", self.doc(
             base + "008-only-the-page-writes-with-a-token-and-its-origin.md"))
         self.assertIn("schema 10", self.doc(base + "009-events-are-kept-for-90-days.md"))
         context = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("**Notice**:", context)
-        self.assertIn("ADR-console-043", context)
+        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn("ADR-console-044", notice)
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")

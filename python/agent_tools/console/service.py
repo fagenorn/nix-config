@@ -599,7 +599,7 @@ question the manager took back (withdrawn or replaced) with `Refused(TAKEN_BACK)
 owner is still told why), appending no row and storing no message; a question not taken back in an
 ended sprint is still `ENDED`.
 
-Notices (#1117, ADR-console-043): `POST /api/notice`, `POST /api/notices` and `POST
+Notices (#1117, ADR-console-044): `POST /api/notice`, `POST /api/notices` and `POST
 /api/withdraw-notice` are manager writes dispatched like `/api/withdraw-question`, before
 `PAGE_WRITES`, each through `_checked_length` with its own limit (`MAX_NOTICE_BYTES` 16384,
 `MAX_NOTICES_BYTES` 4096, `MAX_WITHDRAW_NOTICE_BYTES` 4096: any `Origin` 403 `origin refused`, 415,
