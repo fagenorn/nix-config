@@ -3,10 +3,13 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the ten screens the sprint block, the finished list and the message life
-  must read well on (`tell-box-open` is the sprint block with its Tell box opened);
+- `STATES` names the twelve screens the sprint block, the finished list, the message life and
+  the notices fold must read well on (`tell-box-open` is the sprint block with its Tell box
+  opened; `notices-fold` is `owner/web`'s open Notices fold; `notice-post-open` is that fold with
+  the owner's post control opened, and shot against a page that has no such control it is the
+  same fold, which is how the before pictures are made);
   `WIDTHS` are the two viewport widths each is shot at. `capture` writes
-  `<state>-<width>.png` for every pair, so a full run writes 20 files.
+  `<state>-<width>.png` for every pair, so a full run writes 24 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -51,7 +54,7 @@ from .console_test_support import write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running")
+          "nothing-running", "notices-fold", "notice-post-open")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -209,6 +212,15 @@ def _seed_state(seed: _Seed, state: str) -> None:
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
+    elif state in ("notices-fold", "notice-post-open"):
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
+        sid, goal = seed.sprint(web, "Fix the settings page", started=20 * MINUTE,
+                                report=2 * MINUTE)
+        seed.put(90, "notice.posted", web, {"sprint_id": sid, "goal": goal, "notice": {
+            "kind": "claim", "text": "reworking the settings form",
+            "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
+        seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
+            "kind": "heads-up", "text": "routes are frozen until Friday"}})
     elif state != "nothing-running":
         raise ValueError(f"unknown state {state!r}")
 
@@ -330,7 +342,9 @@ JARGON_COUNT = r"""(() => {
   }).length;
   const phrases = document.body.innerText.match(
     /\bon track\b|\bstated (just now|\d)|\bwithdraw|\bnudge|\bstop or\b|would do differently/gi);
-  return folds + rows + (phrases ? phrases.length : 0);
+  const owners = Array.from(document.querySelectorAll('#projects button.notice-withdraw')).filter(
+    (button) => button.innerText.trim() === 'Withdraw').length;
+  return folds + rows + Math.max(0, (phrases ? phrases.length : 0) - owners);
 })()"""
 
 
@@ -346,6 +360,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
         if state == "finished-list":
             page.click('details[data-key="finished"] > summary')
             page.click('details[data-key^="ended:"] > summary')
+        if state in ("notices-fold", "notice-post-open"):
+            page.click('details[data-key^="notices:"] > summary')
+            if state == "notice-post-open" and page.query_selector("button.notice-open"):
+                page.click("button.notice-open")
         tell = None
         if state == "tell-box-open":
             page.click("button.tell-open")
