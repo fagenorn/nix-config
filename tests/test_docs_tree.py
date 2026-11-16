@@ -572,7 +572,7 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-037"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
-                 "ADR-console-035"),
+                 "ADR-console-035, ADR-console-038"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -605,7 +605,8 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
-                                          "ADR-console-032, ADR-console-033, ADR-console-035")):
+                                          "ADR-console-032, ADR-console-033, ADR-console-035, "
+                                          "ADR-console-038")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -681,7 +682,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                  "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
-                 "ADR-console-033, ADR-console-035"),
+                 "ADR-console-033, ADR-console-035, ADR-console-038"),
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
                  "- **Status:** accepted; amended by ADR-console-033")):

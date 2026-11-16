@@ -1,6 +1,6 @@
 # ADR-console-036 — The console keeps a manager's pictures and serves them only to the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-038
 - **Decided in:** #1089
 
 ## Context
@@ -25,7 +25,7 @@ A manager that builds or checks a page has a screenshot of its work, and the own
 
 ## Consequences
 
-- A manager can hand the console a screenshot and name it by the id the answer returns; the page can read it with its token, but the page and its content security policy (`img-src data:`) are unchanged until a later slice draws a picture.
+- A manager can hand the console a screenshot and name it by the id the answer returns; the page can read it with its token, the question card draws pictures from object URLs, and the content security policy's `img-src` is `data: blob:` (ADR-console-038).
 - A picture no row names disappears a day after it was last sent; a row that names it keeps it as long as the row is kept.
 - The store is bounded by what managers send in a day plus what rows reference, each at most 2 MiB.
 - ADR-console-008 lists the route among the manager's writes and ADR-console-009 is amended by the sweep.

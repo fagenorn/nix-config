@@ -36,8 +36,10 @@ from agent_tools.console.sprints import (
     Observed,
     PendingStop,
     Question,
+    QuestionPicture,
     Report,
     SprintState,
+    cut,
     first_line,
     sprint_states,
     sprint_title,
@@ -1008,6 +1010,16 @@ class FirstScreenViewTest(unittest.TestCase):
         self.assertEqual(shown["recommended"], shown["options"][0])
         self.assertEqual(shown["recommended_index"], 0)
 
+    def test_a_questions_pictures_reach_its_entry_cut(self):
+        found = self.asking(Question(7, 0, "t9", False, "Which?", "the slice", ("a", "b"), "a",
+                                     pictures=(QuestionPicture("a" * 64, "l" * 200, "before"),
+                                               QuestionPicture("b" * 64, "x"))))
+        self.assertEqual(found["pictures"],
+                         [{"id": "a" * 64, "line": cut("l" * 200, 140), "pair": "before"},
+                          {"id": "b" * 64, "line": "x", "pair": None}])
+        plain = self.asking(Question(7, 0, "t9", False, "Which?", "the slice", ("a", "b"), "a"))
+        self.assertEqual(plain["pictures"], [])
+
     def test_a_recommendation_keeps_its_index_when_cut_options_collide(self):
         options = ("o" * 85 + "a", "o" * 85 + "b")
         found = self.asking(Question(7, 0, "t9", False, "Which?", "the slice", options,
@@ -1426,6 +1438,7 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
                            "recommended_index": options.index(recommended)}],
+            "pictures": [],
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
 
