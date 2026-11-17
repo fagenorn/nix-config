@@ -1250,6 +1250,38 @@ function stallCard(item) {
   card.appendChild(act);
   return card;
 }
+function isFailedStart(item) {
+  return item.reason === "failed_start";
+}
+function failedStartCard(item) {
+  const card = el("article", "card failed-start");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", item.last_reason));
+  const again = stallPosts.get("start-retry\n" + item.sprint_id);
+  const away = stallPosts.get("start-withdraw\n" + item.sprint_id);
+  const retry = actionButton("start-retry btn-primary", "Retry",
+    () => stallPost(item, "start-retry", "Could not retry: ", () => fetch("/api/retry-manager", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
+  markBusy(retry, again !== undefined && again.phase === "sending");
+  const act = el("div", "act");
+  act.appendChild(retry);
+  const withdrawn = actionButton("start-withdraw btn-danger", "Drop the sprint",
+    () => stallPost(item, "start-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  markBusy(withdrawn, away !== undefined && away.phase === "sending");
+  act.appendChild(withdrawn);
+  for (const state of [again, away]) {
+    if (state !== undefined && state.phase === "failed") {
+      act.appendChild(el("span", "fail", state.failure + state.reason));
+    }
+  }
+  card.appendChild(act);
+  return card;
+}
 function isProgress(item) {
   return item.reason === "progress";
 }
@@ -4053,6 +4085,7 @@ function drawInbox(view) {
   const open = view.inbox.open;
   const briefs = open.filter(isBrief);
   const stalls = open.filter(isStall);
+  const starts = open.filter(isFailedStart);
   const progress = open.filter(isProgress);
   const signins = open.filter(isSignin);
   const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
@@ -4063,10 +4096,11 @@ function drawInbox(view) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
-    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
+    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
+      : key.startsWith("start-retry\n") || key.startsWith("start-withdraw\n") ? starts : stalls;
     if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
@@ -4147,6 +4181,7 @@ function drawInbox(view) {
   placeBriefCards(section, briefs);
   for (const item of briefs) cardOf.set(stateId(item), briefRecord(item.sprint_id));
   for (const item of stalls) section.appendChild(stallCard(item));
+  for (const item of starts) section.appendChild(failedStartCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));

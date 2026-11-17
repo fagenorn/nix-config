@@ -82,6 +82,9 @@ Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret
 not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
+The view never shows a reason as given: `plain_reason` maps it to one of `PLAIN_TEXTS` (a table of
+substrings, in order, first hit wins), while the `manager.failed` row and the `console:
+manager_failed` stderr line keep it as given.
 
 Stopping. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
 session (ADR-console-018), so a check that states a real goal still stops its test manager first and
@@ -171,7 +174,45 @@ FAILED_TEXT = "could not start a manager"
 WAITING_TEXT = "waiting on quota until"
 MISSING_TEXT = "the manager is not running"
 
+# The plain words a failed launch is shown with (ADR-console-042 D1: never "stalled", which
+# "installed" holds, so the missing-program text avoids that word).
+UNTRUSTED_TEXT = "this account does not trust the project's folder"
+NOT_INSTALLED_TEXT = "a program the manager needs is missing on this host"
+SLOW_TEXT = "the launch did not answer in time"
+NO_FOLDER_TEXT = "the project's folder is missing"
+SETTINGS_TEXT = "the console could not write the manager's settings"
+SECRET_TEXT = "the sprint's secret is missing"
+REFUSED_TEXT = "the client refused to start the manager"
+PLAIN_TEXTS: tuple[str, ...] = (
+    UNTRUSTED_TEXT, NOT_INSTALLED_TEXT, SLOW_TEXT, NO_FOLDER_TEXT, SETTINGS_TEXT, SECRET_TEXT,
+    REFUSED_TEXT, UNAVAILABLE_TEXT)
+
+_PLAIN_TABLE = (
+    ("not trusted", UNTRUSTED_TEXT),
+    ("is not installed", NOT_INSTALLED_TEXT),
+    ("did not return within", SLOW_TEXT),
+    ("is not a directory", NO_FOLDER_TEXT),
+    ("write the manager's settings", SETTINGS_TEXT),
+    ("secret is missing", SECRET_TEXT),
+)
+
 _DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV)
+
+
+def plain_reason(reason: str | None) -> str:
+    """The plain words for a failed launch's reason: always a member of `PLAIN_TEXTS`.
+
+    A case-insensitive substring test over `_PLAIN_TABLE` in order, first hit wins; then
+    `UNAVAILABLE_TEXT` by equality; anything else, `None` included, is `REFUSED_TEXT`. The reason
+    itself is never returned, so a path or a client's words cannot reach the view.
+    """
+    if reason is None:
+        return REFUSED_TEXT
+    lowered = reason.lower()
+    for needle, text in _PLAIN_TABLE:
+        if needle in lowered:
+            return text
+    return UNAVAILABLE_TEXT if reason == UNAVAILABLE_TEXT else REFUSED_TEXT
 
 
 class LaunchFailed(Exception):
