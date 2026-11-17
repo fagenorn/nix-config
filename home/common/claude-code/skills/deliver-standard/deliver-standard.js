@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message?} records the approval for that head when the pull request head and the verified head are still it, then lands; {answer: fix, head, words, message?} (#1211) records the approval of that head with the owner's words when the pull request head is still it, runs one fix round on the words, verifies again and lands the fixed head when look-approval status keeps the approval for it; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message?} records the approval for that head when the pull request head is still it, first verifying it in a look-verify step when it is not the verified head (recorded only when it gained nothing but clean merges of the integration branch and its verification passes), then lands; an approval it cannot record stops with a reason naming the approved head and the head found; {answer: fix, head, words, message?} (#1211) records the approval of that head with the owner's words when the pull request head is still it, runs one fix round on the words, verifies again and lands the fixed head when look-approval status keeps the approval for it; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -759,9 +759,11 @@ let blocked = RERUN ? null : BLOCKED
 let decisionPending = newDecision !== null
 const keptDecisions = () => decisions.filter(d => !(decisionPending && d === newDecision) && !(oscPending && d === oscDecision))
 const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog.some(d => d.n === blocked.task)
+// #1246: why an owner's approval was not recorded, naming the approved head and the head found; once set, every later stop's reason starts with it.
+let lookWhy = null
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -1982,9 +1984,11 @@ const lookStop = (pr, sha) => {
   // A fix answer stops here before its verify has run: the cont's own verified record stays and speaks for the stop.
   if (verify) verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(picturesOf(verify).length ? { pictures: picturesOf(verify) } : {}) }
   const shown = picturesOf(verify || verified)
-  return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(shown.length ? { pictures: shown } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: LOOK_REASON }
+  return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(shown.length ? { pictures: shown } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: lookWhy ? `${lookWhy}; ${LOOK_REASON}` : LOOK_REASON }
 }
 const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
+// #1246: the verification of an approved head the verified record does not name: what the worktree reached, whether it is only clean merges of the integration branch past the verified head, and the verification.
+const LOOK_VERIFY = { ...VERIFY, properties: { ...VERIFY.properties, merge_only: { type: 'boolean' }, ahead: { type: 'boolean' } }, required: [...VERIFY.required, 'merge_only', 'ahead'] }
 const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1211: the owner's fix answer approves the head it was given for with one fix. The approval is recorded before the fix, only while the pull request is open and its head is
 // both the head the owner saw and the head the awaiting-look stop left; anything else posts nothing and stops at awaiting-look with the head just read.
@@ -2242,32 +2246,64 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
   const review = await readReview(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }
 }
-// #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call.
-const PR_OPEN = `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
+// #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call. #1246: a function, so its Evidence names the results of verify as it is when the call is made (an approved head's verification replaces them).
+const prOpen = () => `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
 const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is posted
-// only for the head the owner saw, when that is also the verified head. Anything else posts nothing and merges nothing.
+// only for the head the owner saw, when that is the pull request head. #1246: a head that is not the verified head is verified first (a look-verify step), and recorded only when it
+// gained nothing but clean merges of the integration branch and its verification passes. Anything else posts nothing, merges nothing and stops naming the approved head and the head found.
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
+  const A = LOOK_ANSWER.head
+  const V0 = verify.head
+  const P = lookAt.pr
+  const NOT_RECORDED = `the approval of ${A} was not recorded`
   approvedHead = null
-  lookAt = { pr: lookAt.pr, head: lookAt.head }
+  lookAt = { pr: P, head: lookAt.head }
   const hd = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
-Then read the head of PR #${lookAt.pr}, changing nothing: run ${UNSET}gh pr view ${lookAt.pr} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
+Then read the head of PR #${P}, changing nothing: run ${UNSET}gh pr view ${P} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
 ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(LOOK_HEAD_SCHEMA) }), r => r.renew)
-  if (!hd) return stop('look-approve', { result: null })
+  const UNREAD = { details: `${NOT_RECORDED}: PR #${P}'s head could not be read; the verified head is ${V0}`, result: hd }
+  if (!hd) return stop('look-approve', UNREAD)
   const lostLook = renewed(hd.renew, 'look-approve')
   if (lostLook) return lostLook
-  if (!complete(hd, LOOK_HEAD_SCHEMA) || !SHA_RE.test(hd.head)) return stop('look-approve', { result: hd })
-  if (hd.state !== 'OPEN') return stop('look-approve', { details: `PR #${lookAt.pr} is ${hd.state}, not open, so the approval of ${LOOK_ANSWER.head} was not recorded` })
-  if (!sameSha(hd.head, LOOK_ANSWER.head)) return lookStop(lookAt.pr, hd.head)
-  if (sameSha(LOOK_ANSWER.head, verify.head)) {
+  if (!complete(hd, LOOK_HEAD_SCHEMA) || !SHA_RE.test(hd.head)) return stop('look-approve', UNREAD)
+  if (hd.state !== 'OPEN') return stop('look-approve', { details: `${NOT_RECORDED}: PR #${P} is ${hd.state}, not open, at head ${hd.head}` })
+  if (!sameSha(hd.head, A)) {
+    lookWhy = `${NOT_RECORDED}: PR #${P}'s head is now ${hd.head}`
+    return lookStop(P, hd.head)
+  }
+  let recordable = sameSha(A, V0)
+  if (!recordable) {
+    const lv = await call(`${CTX}
+The owner approved head ${A} of PR #${P}, which is the pull request's head; the last verified head is ${V0}. Run only git commands and the declared verification, in this order:
+1. git -C ${W} fetch origin. When git -C ${W} rev-parse HEAD is not ${A} and git -C ${W} merge-base --is-ancestor HEAD ${A} succeeds, run git -C ${W} merge --ff-only ${A}; never any other merge, reset, checkout or push. When HEAD is then not ${A}, run nothing more and return head (git -C ${W} rev-parse HEAD), clean, results [], merge_only false, and ahead true only when git -C ${W} merge-base --is-ancestor ${A} HEAD succeeds (the worktree contains ${A}), else false.
+2. Otherwise (HEAD is ${A}) return ahead false, and merge_only true only when git -C ${W} merge-base --is-ancestor ${V0} ${A} succeeds, git -C ${W} rev-list --no-merges ${V0}..${A} ^origin/${INT} prints nothing (the head only gained integration-branch merges), and every merge in git -C ${W} rev-list --merges ${V0}..${A} is a clean two-parent merge, meaning git -C ${W} merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C ${W} rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged); else false, and then run no verification and return results [].
+3. Otherwise: ${verifyBody}`, { label: 'look-verify', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_VERIFY })
+    if (!lv || !complete(lv, LOOK_VERIFY) || !SHA_RE.test(lv.head)) return stop('look-approve', { details: `${NOT_RECORDED}: its verification returned no usable reply; the verified head is ${V0}`, result: lv })
+    if (!sameSha(lv.head, A)) {
+      // The worktree could not be brought to the approved head. One that contains it pushes as an ordinary fast-forward over it; any other cannot be pushed.
+      if (lv.ahead !== true) return stop('look-approve', { details: `${NOT_RECORDED}: the worktree head ${lv.head} neither fast-forwards to it nor contains it, so it cannot be pushed over it` })
+      lookWhy = `${NOT_RECORDED}: the worktree head ${lv.head} is ahead of it`
+    } else if (lv.merge_only !== true) {
+      return stop('look-approve', { details: `${NOT_RECORDED}: it adds commits after the verified head ${V0} that are not clean merges of ${INT}, so it needs a review first` })
+    } else if (verifyProblems(lv).length) {
+      return stop('look-approve', { details: `${NOT_RECORDED}: its verification failed, so the verified head stays ${V0}`, problems: verifyProblems(lv) })
+    } else {
+      verify = { head: fuller(A, lv.head), clean: true, results: lv.results, ...(picturesOf(lv).length ? { pictures: picturesOf(lv) } : {}) }
+      expected = verify.head
+      head = expected
+      recordable = true
+    }
+  }
+  if (recordable) {
     const posted = await call(`${CTX}
-Record the owner's look approval of issue #${ISSUE} of ${SLUG}. Run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer approved --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()}
+Record the owner's look approval of issue #${ISSUE} of ${SLUG}. Run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${P} --head ${A} --answer approved --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()}
 It prints one JSON line. Return its verdict, comment_id and any detail. Run nothing else.
 ${RULES}`, { label: 'look-post', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_POST_SCHEMA })
-    if (!posted || posted.verdict !== 'posted') return stop('look-approve', { result: posted })
-    approvedHead = LOOK_ANSWER.head
-    lookAt = { pr: lookAt.pr, head: approvedHead, approved: approvedHead }
+    if (!posted || posted.verdict !== 'posted') return stop('look-approve', { details: `${NOT_RECORDED}: the verified head was ${V0} and look-approval post answered ${posted ? posted.verdict : 'nothing'}${posted && present(posted.detail) ? `: ${posted.detail}` : ''}`, result: posted })
+    approvedHead = A
+    lookAt = { pr: P, head: approvedHead, approved: approvedHead }
   }
   LOOK_STOP = MARKED && approvedHead === null
 }
@@ -2280,12 +2316,12 @@ const landBody = async () => {
   }
   const prR = await recall(() => LOOK_STOP ? call(`${CTX}
 ${RENEW_FIRST}
-${PR_OPEN}
+${prOpen()}
 Then, ${PROBE(W, INT)}
 Then return behind: true when git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails (the head is behind ${INT}), else false. Issue #${ISSUE} waits for the owner's look before it merges: run no lock command, wait for no check and merge nothing.
 ${RULES}`, { label: 'look-pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), behind: { type: 'boolean' } }) }) : call(`${CTX}
 ${RENEW_FIRST}
-${PR_OPEN}
+${prOpen()}
 Then, ${PROBE(W, INT)}
 ${OWN_RED(W, '<the PR number>', expected)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}

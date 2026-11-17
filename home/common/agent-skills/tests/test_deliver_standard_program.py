@@ -7807,6 +7807,12 @@ D = "d" * 40
 AWAIT_REASON = "issue 9 needs the owner's look before merge"
 F, B = "f" * 40, "b" * 40
 RESUME = {"setup": {"look": MARKED, "head": SHA}}
+# #1246: the pull request head D is an integration merge on top of the verified head (verify is cached at SHA under RESUME).
+LOOK_MERGED = dict(RESUME, **{"look-head": {"head": D}, "pr": {"head": D, "lock": {"verdict": "already_held", "lock_sha": D},
+                                                              "checks": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]}}})
+# A passing look-verify reply at D whose summary differs from the cached verify's.
+LOOK_OK = {"head": D, "clean": True, "merge_only": True, "ahead": False,
+           "results": [{"id": "build", "status": "pass", "summary": "verified at the approved head"}]}
 # The cont of the awaiting-look stop of a marked delivery (LookResumeTest pins it against the program), so SCENARIOS can resume it.
 LOOK_CONT = {
     "setup": {"ok": True, "host": "h1", "slug": "owner/repo", "integration_branch": "dev", "default_branch": "main", "branch": "issue-9-x",
@@ -7833,7 +7839,7 @@ EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-status")),
+             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-status", "look-verify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-", "look-fix")),
@@ -7892,6 +7898,8 @@ SCENARIOS = (
      "patch": dict(RESUME, **{"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
                               "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]},
                               "look-status": {"verdict": "approved", "kept_from": SHA}})},
+    # #1246: an approve answer for a PR head that merged the integration branch on the verified head verifies it first.
+    {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": D}), "patch": LOOK_MERGED},
     WS_SCENARIO,
 )
 
@@ -10378,6 +10386,7 @@ class LookResumeTest(unittest.TestCase):
         got = labels(calls)
         self.assertEqual(result["stage"], "done")
         self.assertEqual([l for l in got if l in ("look-head", "look-post", "pr", "merge")], ["look-head", "look-post", "pr", "merge"])
+        self.assertNotIn("look-verify", got)
         self.assertIn("gh pr view 42 --repo owner/repo --json state,headRefOid", prompt(calls, "look-head"))
         self.assertIn("look-approval post --repo owner/repo --issue 9 --pr 42 --head " + SHA + " --answer approved --message session-s1",
                       prompt(calls, "look-post"))
@@ -10390,19 +10399,25 @@ class LookResumeTest(unittest.TestCase):
         got = labels(calls)
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], SHA)
-        self.assertEqual(result["reason"], AWAIT_REASON)
+        self.assertEqual(result["reason"], "the approval of " + B + " was not recorded: PR #42's head is now " + SHA + "; " + AWAIT_REASON)
         self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
         self.assertIn("look-head", got)
+        self.assertNotIn("look-verify", got)
         for label in ("look-post", "look-pr", "pr", "merge"):
             self.assertNotIn(label, got)
 
     def test_approve_when_the_local_head_moved_records_nothing(self):
-        result, calls = self.approve(patch={"setup": {"look": MARKED, "head": F}, "verify": {"head": F}, "look-pr": {"head": F}})
+        result, calls = self.approve(patch={"setup": {"look": MARKED, "head": F}, "verify": {"head": F}, "look-pr": {"head": F}},
+                                     replies={"look-verify": {"head": F, "clean": True, "merge_only": False, "ahead": True, "results": []}})
         got = labels(calls)
+        self.assertIn("look-verify", got)
         self.assertNotIn("look-post", got)
         self.assertIn("look-pr", got)
+        self.assertLess(got.index("look-verify"), got.index("look-pr"))
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], F)
+        self.assertEqual(result["reason"], "the approval of " + SHA + " was not recorded: the worktree head " + F + " is ahead of it; " + AWAIT_REASON)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": F})
 
     MOVED = dict(RESUME, **{
         "pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
@@ -10670,9 +10685,98 @@ class LookResumeTest(unittest.TestCase):
                 result, calls = self.approve(replies={"look-head": reply}, cont=self.approved_cont() if approved else None)
                 got = labels(calls)
                 self.assertEqual(result["stage"], "look-approve")
+                self.assertEqual(result["details"], self.UNREAD)
                 self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
                 for label in ("look-post", "look-pr", "pr", "merge"):
                     self.assertNotIn(label, got)
+        with self.subTest(reply=None):
+            result, calls = self.approve(replies={"look-head": None})
+            got = labels(calls)
+            self.assertEqual(result["stage"], "look-approve")
+            self.assertEqual(result["details"], self.UNREAD)
+            for label in ("look-post", "look-pr", "pr", "merge"):
+                self.assertNotIn(label, got)
+
+    UNREAD = "the approval of " + SHA + " was not recorded: PR #42's head could not be read; the verified head is " + SHA
+
+    # #1246: an approve answer is verified and recorded for the pull request head, else the stop names both heads.
+    NOT_RECORDED = " was not recorded: "
+
+    def stops_at_approve(self, result, calls, details, absent=("look-post", "look-pr", "pr", "merge")):
+        self.assertEqual(result["stage"], "look-approve")
+        self.assertEqual(result["details"], details)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        got = labels(calls)
+        for label in absent:
+            self.assertNotIn(label, got)
+
+    def test_approve_for_the_pr_head_after_a_merge_on_the_verified_head_verifies_records_and_lands(self):
+        result, calls = self.approve(head=D, patch=LOOK_MERGED, replies={"look-verify": LOOK_OK})
+        got = labels(calls)
+        w = "git -C /r/.wt/w-issue-9-x "
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([l for l in got if l in ("look-head", "look-verify", "look-post", "pr", "merge")],
+                         ["look-head", "look-verify", "look-post", "pr", "merge"])
+        for part in (w + "merge --ff-only " + D, w + "merge-base --is-ancestor HEAD " + D, w + "merge-base --is-ancestor " + D + " HEAD",
+                     "rev-list --no-merges " + SHA + ".." + D + " ^origin/dev", '"argv":["make","build"]'):
+            self.assertIn(part, prompt(calls, "look-verify"))
+        self.assertIn("--head " + D + " --answer approved", prompt(calls, "look-post"))
+        self.assertIn("--sha " + D, prompt(calls, "pr"))
+        self.assertIn('"summary":"verified at the approved head"', prompt(calls, "pr"))
+        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
+        self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
+
+    def test_an_approve_whose_head_fails_verification_stops_with_both_heads(self):
+        for reply in (dict(LOOK_OK, results=[{"id": "build", "status": "fail", "summary": "boom"}]), dict(LOOK_OK, clean=False)):
+            with self.subTest(reply=reply):
+                result, calls = self.approve(head=D, patch=LOOK_MERGED, replies={"look-verify": reply})
+                self.stops_at_approve(result, calls, "the approval of " + D + " was not recorded: its verification failed, so the verified head stays " + SHA)
+                self.assertIn(D, result["reason"])
+                self.assertIn(SHA, result["reason"])
+
+    def test_an_approve_whose_head_adds_its_own_commits_stops_with_both_heads(self):
+        result, calls = self.approve(head=D, patch=LOOK_MERGED, replies={"look-verify": dict(LOOK_OK, merge_only=False, results=[])})
+        self.stops_at_approve(result, calls, "the approval of " + D + " was not recorded: it adds commits after the verified head " + SHA
+                              + " that are not clean merges of dev, so it needs a review first")
+
+    def test_an_unusable_look_verify_reply_stops_with_both_heads(self):
+        replies = (None, {"head": D, "clean": True, "ahead": False, "results": []}, {"head": D, "clean": True, "merge_only": True, "results": []},
+                   dict(LOOK_OK, head="abc"))
+        for reply in replies:
+            with self.subTest(reply=reply):
+                result, calls = self.approve(head=D, patch=LOOK_MERGED, replies={"look-verify": reply})
+                self.stops_at_approve(result, calls, "the approval of " + D + " was not recorded: its verification returned no usable reply; the verified head is " + SHA)
+
+    def test_an_approve_whose_worktree_head_diverged_stops_before_any_push(self):
+        result, calls = self.approve(patch={"setup": {"look": MARKED, "head": F}, "verify": {"head": F}},
+                                     replies={"look-verify": {"head": F, "clean": True, "merge_only": False, "ahead": False, "results": []}})
+        self.stops_at_approve(result, calls, "the approval of " + SHA + " was not recorded: the worktree head " + F
+                              + " neither fast-forwards to it nor contains it, so it cannot be pushed over it",
+                              absent=("look-post", "look-pr", "look-push", "pr", "merge"))
+
+    def test_an_approve_whose_post_fails_stops_with_both_heads(self):
+        cases = (
+            ({}, {"look-post": {"verdict": "error", "detail": "x"}}, SHA, "answered error: x"),
+            ({}, {"look-post": None}, SHA, "answered nothing"),
+            (dict(head=D, patch=LOOK_MERGED), {"look-verify": LOOK_OK, "look-post": {"verdict": "refused"}}, D, "answered refused"),
+        )
+        for kwargs, replies, answered, tail in cases:
+            with self.subTest(tail=tail):
+                result, calls = self.approve(replies=replies, **kwargs)
+                self.stops_at_approve(result, calls, "the approval of " + answered + " was not recorded: the verified head was " + SHA
+                                      + " and look-approval post " + tail, absent=("look-pr", "pr", "merge"))
+
+    def test_an_approve_on_a_pr_that_is_not_open_stops_with_both_heads(self):
+        result, calls = self.approve(replies={"look-head": {"state": "CLOSED", "head": D, "renew": {"verdict": "renewed"}}})
+        self.stops_at_approve(result, calls, "the approval of " + SHA + " was not recorded: PR #42 is CLOSED, not open, at head " + D,
+                              absent=("look-post", "look-verify", "pr", "merge"))
+
+    def test_a_landing_stop_after_an_unrecorded_approval_names_both_heads(self):
+        result, _ = self.approve(patch={"setup": {"look": MARKED, "head": F}, "verify": {"head": F}},
+                                 replies={"look-verify": {"head": F, "clean": True, "merge_only": False, "ahead": True, "results": []}, "look-pr": None})
+        self.assertEqual(result["stage"], "pr")
+        self.assertTrue(result["reason"].startswith("the approval of " + SHA + " was not recorded: the worktree head " + F + " is ahead of it; "),
+                        result["reason"])
 
     def test_the_scenario_look_cont_is_a_real_stop_cont(self):
         self.assertEqual(LOOK_CONT, self.look_cont())
