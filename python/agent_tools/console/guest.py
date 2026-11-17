@@ -49,6 +49,11 @@ finds in that guest's scoped view.
 --json` ServeConfig, `{"Web": {"<tailnet>:443": {"Handlers": {"/": {"Proxy":
 "http://127.0.0.1:<guest port>"}}}}}`, and treats any other shape as not proxying.
 
+`serve_reader(path)` is the reader of that status: a callable that runs the Windows Tailscale client
+at `path` as `serve status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns
+the parsed JSON, or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it
+never raises.
+
 `parse_tailnet`, `parse_colleague` and `parse_removal` read the owner's write bodies as strict
 JSON (a duplicate key, a non-object or an extra or missing key is refused) and raise
 `ValueError` on a malformed body. Whether each project of a colleague is registered is checked by
@@ -57,7 +62,8 @@ the service, which raises `Refused` for a write refused on its merits.
 
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import subprocess
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -76,6 +82,7 @@ OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
 PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
 FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
                              "pending", "movement", "owner_notices"})
+SERVE_TIMEOUT_SECONDS = 15.0
 SERVE_STATES = ("off", "unchecked", "not_proxying", "serving")
 
 LOGIN_HEADER = "Tailscale-User-Login"
@@ -300,6 +307,21 @@ def serve_state(status: object, tailnet: str | None, guest_port: int | None) -> 
             and node in (f"http://127.0.0.1:{guest_port}", f"http://localhost:{guest_port}")):
         return "serving"
     return "not_proxying"
+
+
+def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
+                 ) -> Callable[[], object | None]:
+    def read() -> object | None:
+        try:
+            done = run([path, "serve", "status", "--json"], capture_output=True, text=True,
+                       timeout=SERVE_TIMEOUT_SECONDS, check=False)
+            if done.returncode != 0:
+                return None
+            return json.loads(done.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError, RecursionError):
+            return None
+
+    return read
 
 
 def sharing_entry(access: Access, state: str) -> dict:

@@ -83,6 +83,13 @@ its connection, so a body or a second request sent on it is never parsed. `ROUTE
 route: a handler compares `route` only with registered names, and a method other than GET on a guest
 read is `405` `Allow: GET`. The owner's port refuses, on every route, a request carrying a
 `Tailscale-*` header or `X-Forwarded-For` with `403` `guest.OWNER_PORT_TEXT`, after the `Host` check.
+With `serve_reader` (`console --tailscale PATH`, `guest.serve_reader`) a daemon thread `SERVE_THREAD`
+calls `poll_serve` at once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads the Windows
+Tailscale client's `serve status --json` outside the ingest lock, keeps the reading in memory only (never
+in the log) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve proxies
+the tailnet name to the bound guest port. A reader that raises is one stderr line `console:
+serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); without a reader no
+thread starts and the state stays `unchecked`.
 The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
 a different token, refused on every owner route, as the page token is on the guest picture read.
 
@@ -1615,6 +1622,8 @@ DIGEST_SECONDS = 60.0
 DIGEST_THREAD = "console-digest"
 SPEND_SECONDS = 60.0
 SPEND_THREAD = "console-spend"
+SERVE_SECONDS = 60.0
+SERVE_THREAD = "console-serve-poll"
 MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
@@ -3226,7 +3235,9 @@ class ConsoleService:
                  choice_file: Path | None = None,
                  screenshot_dirs: Iterable[Path] = (),
                  guest_port: int | None = None,
-                 guest_token_path: Path | None = None):
+                 guest_token_path: Path | None = None,
+                 serve_reader: Callable[[], object | None] | None = None,
+                 serve_seconds: float = SERVE_SECONDS):
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
@@ -3362,6 +3373,10 @@ class ConsoleService:
         self._retention_seconds = retention_seconds
         self._digest_seconds = digest_seconds
         self._spend_seconds = spend_seconds
+        self._serve_reader = serve_reader
+        self._serve_seconds = serve_seconds
+        self._serve_status: object | None = None
+        self._serve_thread: threading.Thread | None = None
         self._ping_log = ping_log
         self._retention_thread: threading.Thread | None = None
         self._digest_thread: threading.Thread | None = None
@@ -3607,7 +3622,7 @@ class ConsoleService:
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
         access = self._access
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
-            access, guest.serve_state(None, access.tailnet, self._guest_port_number))))
+            access, guest.serve_state(self._serve_status, access.tailnet, self._guest_port_number))))
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.tailnet is not None:
@@ -6906,6 +6921,19 @@ class ConsoleService:
                 self._activation = found
                 self._publish()
 
+    def poll_serve(self) -> None:
+        """One reading of Tailscale Serve's status; see the module docstring (guest door)."""
+        if self._serve_reader is None:
+            return
+        try:
+            found = self._serve_reader()
+        except Exception as error:
+            print(f"console: serve_status_failed {type(error).__name__}: {error}", file=sys.stderr)
+            found = None
+        with self._ingest:
+            self._serve_status = found
+            self._publish()
+
     def activate(self, commit: str) -> None:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
         with self._ingest:
@@ -7296,6 +7324,12 @@ class ConsoleService:
             if self._stop.wait(self._tracker_seconds):
                 return
 
+    def _serve_loop(self) -> None:
+        while True:
+            self.poll_serve()
+            if self._stop.wait(self._serve_seconds):
+                return
+
     def _activate(self) -> None:
         while True:
             try:
@@ -7369,6 +7403,10 @@ class ConsoleService:
             self._guest_thread = threading.Thread(
                 target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
             self._guest_thread.start()
+        if self._serve_reader is not None:
+            self._serve_thread = threading.Thread(
+                target=self._serve_loop, name=SERVE_THREAD, daemon=True)
+            self._serve_thread.start()
 
     def close(self) -> None:
         if self._closed:
@@ -7398,6 +7436,8 @@ class ConsoleService:
             self._digest_thread.join()
         if self._spend_thread is not None:
             self._spend_thread.join()
+        if self._serve_thread is not None:
+            self._serve_thread.join()
         if self._probe_thread is not None:
             self._probe_thread.join()
         if self._signin_thread is not None:

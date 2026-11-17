@@ -8,7 +8,10 @@ import http.client
 import inspect
 import io
 import json
+import os
+import signal
 import socket
+import subprocess
 import tempfile
 import unittest
 from collections.abc import Mapping
@@ -630,6 +633,103 @@ class ConnectionTest(GuestCase):
                 self.assertEqual(response_head.count(b"Connection: close"), 1)
                 if name != "b":
                     self.assertNotIn(b"owner/p01", received)
+
+
+class ServeStatusTest(GuestCase):
+    def test_the_sharing_state_follows_the_serve_status(self):
+        self.seed()
+        self.reading = None
+        svc = self.start(serve_reader=lambda: self.reading, serve_seconds=3600)
+
+        def proxy(port):
+            return {"Web": {f"{TAILNET}:443": {"Handlers": {
+                "/": {"Proxy": f"http://127.0.0.1:{port}"}}}}}
+
+        rows = ((None, "unchecked"), ({}, "not_proxying"),
+                (proxy(svc.guest_address[1]), "serving"),
+                (proxy(svc.address[1]), "not_proxying"))
+        for reading, state in rows:
+            with self.subTest(state=state, reading=reading):
+                self.reading = reading
+                svc.poll_serve()
+                self.assertEqual(
+                    json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["state"], state)
+                self.assertNotIn(
+                    "sharing", json.loads(self.guest(svc, "GET", "/api/state")[2]))
+        self.reading = proxy(svc.guest_address[1])
+        svc.poll_serve()
+        svc.set_tailnet(None)
+        self.assertEqual(
+            json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["state"], "off")
+
+    def test_a_failing_reader_reads_unchecked(self):
+        self.seed()
+
+        def reader():
+            raise RuntimeError("boom")
+
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc = self.start(serve_reader=reader, serve_seconds=3600)
+            svc.poll_serve()
+        lines = captured.getvalue().splitlines()
+        self.assertTrue(lines)
+        self.assertEqual(set(lines), {"console: serve_status_failed RuntimeError: boom"})
+        self.assertEqual(
+            json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["state"], "unchecked")
+
+    def test_the_serve_reader_runs_the_status_command(self):
+        calls = []
+
+        def run(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 0, stdout='{"Web": {}}', stderr="")
+
+        self.assertEqual(guest.serve_reader("/x/tailscale.exe", run=run)(), {"Web": {}})
+        args, kwargs = calls[0]
+        self.assertEqual(args, ["/x/tailscale.exe", "serve", "status", "--json"])
+        self.assertEqual(kwargs["timeout"], 15.0)
+        self.assertEqual(guest.SERVE_TIMEOUT_SECONDS, 15.0)
+        self.assertNotIn("shell", kwargs)
+
+        def failing(error):
+            def run(args, **kwargs):
+                raise error
+            return run
+
+        rows = (
+            ("a nonzero exit", lambda args, **kw: subprocess.CompletedProcess(
+                args, 1, stdout='{"Web": {}}', stderr="")),
+            ("unparsable output", lambda args, **kw: subprocess.CompletedProcess(
+                args, 0, stdout="not json", stderr="")),
+            ("an OSError", failing(OSError("no such file"))),
+            ("a timeout", failing(subprocess.TimeoutExpired("x", 15))),
+        )
+        for name, row in rows:
+            with self.subTest(row=name):
+                self.assertIsNone(guest.serve_reader("/x/tailscale.exe", run=row)())
+
+    def test_the_console_takes_a_tailscale_path(self):
+        parser = console.build_parser()
+        self.assertIsNone(parser.parse_args([]).tailscale)
+        self.assertEqual(
+            parser.parse_args(["--tailscale", "/x/tailscale.exe"]).tailscale, "/x/tailscale.exe")
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+        self.addCleanup(signal.signal, signal.SIGINT, signal.getsignal(signal.SIGINT))
+        for argv, wanted in ((["--tailscale", "/x/tailscale.exe"], True), ([], False)):
+            with self.subTest(argv=argv), \
+                    mock.patch.object(service, "default_store", return_value=self.store), \
+                    mock.patch.object(service, "default_registry", return_value=self.registry), \
+                    mock.patch.object(service, "ConsoleService") as made, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                made.return_value.start.side_effect = lambda: os.kill(os.getpid(), signal.SIGTERM)
+                self.assertEqual(console.main(argv), 0)
+                kwargs = made.call_args.kwargs
+                self.assertEqual(kwargs["guest_port"], 27185)
+                if wanted:
+                    self.assertTrue(callable(kwargs["serve_reader"]))
+                else:
+                    self.assertIsNone(kwargs["serve_reader"])
 
 
 if __name__ == "__main__":
