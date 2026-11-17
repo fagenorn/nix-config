@@ -1667,6 +1667,26 @@ class WaitClockTest(Case):
         svc.close()
 
 
+class TrackerReadStampTest(Case):
+    def test_a_read_carries_the_time_it_began_before_it_fetched_and_the_time_it_ended(self):
+        inside = []
+
+        def tracker(project_id, slug, *, cancelled):
+            inside.append(datetime.now(timezone.utc))
+            return []
+
+        svc = self.start(support.entries(1), tracker=tracker, slug_of=lambda root: "octo/p00",
+                         activity=lambda root: time.time(), tracker_seconds=3600)
+        self.assertTrue(wait_until(lambda: json.loads(svc.view_bytes)["entries"][0]["tracker_read"]))
+        read = json.loads(svc.view_bytes)["entries"][0]["tracker_read"]
+        svc.close()
+        self.assertEqual(1, len(inside))
+        began, ended = (datetime.fromisoformat(read[k]) for k in ("began_at", "read_at"))
+        self.assertEqual(True, read["ok"])
+        self.assertLessEqual(began, inside[0])
+        self.assertLessEqual(inside[0], ended)
+
+
 class BindTest(Case):
     def test_a_taken_port_raises_before_the_log_opens(self):
         with socket.socket() as held:

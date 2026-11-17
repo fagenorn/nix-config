@@ -15,6 +15,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools import canonical
 from agent_tools.console import inbox, pictures
+from agent_tools.delivery import look_marker
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer, verify_issues
@@ -860,6 +861,118 @@ def block_of(*checks):
 
 def future(when_ask=None):
     return human({"not_before": "2026-11-18T10:00:00+00:00"}, *([when_ask] if when_ask else []))
+
+
+LOOK_LINE = "- [ ] [human] before merge: the settings page at 390 px \u2014 measured: the owner, on the console"
+LOOK_HEAD = "1a2b3c4" + "d" * 33
+
+
+def look(cid, answer="approved", head=LOOK_HEAD, pr=42, assoc="OWNER", issue=7):
+    return comment_node(cid, look_marker.approval_body(issue, pr, head, answer, f"m{cid}"), assoc)
+
+
+class Pulls:
+    """A fake `gh` JSON call that answers the pull request 42 read and records every argv."""
+
+    def __init__(self, merged=True, head=LOOK_HEAD):
+        self.merged, self.head, self.argvs = merged, head, []
+
+    def __call__(self, argv):
+        self.argvs.append(argv)
+        if argv != ["api", f"repos/{SLUG}/pulls/42"]:
+            raise AssertionError(f"unexpected read {argv}")
+        return {"number": 42, "merged": self.merged, "head": {"sha": self.head}}
+
+
+def NEVER(argv):
+    raise AssertionError("no pull request read")
+
+
+def keys(node, call, **kwargs):
+    return [i["key"] for i in inbox.items_from_node(PROJECT, SLUG, node, call=call, **kwargs)]
+
+
+class LookAnsweredReviewTest(unittest.TestCase):
+    """An approved look of the merged head answers its look marker criterion (#1186, ADR-console-054 D8)."""
+
+    CARD = [f"{SLUG}#7/ac2"]
+
+    def node(self, comments=(), body=None):
+        return held_issue(7, body or ac_body("- [x] [code] A", LOOK_LINE), comments=list(comments))
+
+    def test_an_approved_look_of_the_merged_head_raises_no_card(self):
+        pulls = Pulls()
+        self.assertEqual(keys(self.node([look(C1)]), pulls), [])
+        self.assertEqual(pulls.argvs, [["api", f"repos/{SLUG}/pulls/42"]])
+        self.assertEqual(keys(self.node(), NEVER), self.CARD)
+
+    def test_an_approval_of_another_head_or_an_unmerged_pull_request_still_raises_the_card(self):
+        cases = {"other head approved": ([look(C1, head="e" * 40)], Pulls()),
+                 "unmerged": ([look(C1)], Pulls(merged=False)),
+                 "merged other head": ([look(C1)], Pulls(head="e" * 40))}
+        for name, (comments, pulls) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(keys(self.node(comments), pulls), self.CARD)
+
+    def test_a_changes_answer_still_raises_the_card_and_the_latest_answer_decides(self):
+        self.assertEqual(keys(self.node([look(C1), look(C2, "changes")]), Pulls()), self.CARD)
+        self.assertEqual(keys(self.node([look(C1, "changes"), look(C2)]), Pulls()), [])
+
+    def test_an_untrusted_or_ended_approval_still_raises_the_card(self):
+        for assoc in ("COLLABORATOR", "CONTRIBUTOR", "NONE"):
+            with self.subTest(assoc=assoc):
+                self.assertEqual(keys(self.node([look(C1, assoc=assoc)]), NEVER), self.CARD)
+        ended = [look(C1), comment_node(C2, fm.end_body(C1, "done"))]
+        self.assertEqual(keys(self.node(ended), NEVER), self.CARD)
+
+    def test_an_ordinary_human_criterion_keeps_its_card_beside_an_answered_look(self):
+        body = ac_body(LOOK_LINE, "- [ ] [human] The footer reads well")
+        self.assertEqual(keys(self.node([look(C1)], body), Pulls()), self.CARD)
+
+    def test_no_pull_request_is_read_unless_a_look_card_would_be_raised(self):
+        bodies = {"ordinary": (ac_body("- [ ] [human] The footer reads well"), [f"{SLUG}#7/ac1"]),
+                  "ticked": (ac_body(LOOK_LINE.replace("[ ]", "[x]", 1)), []),
+                  "evidence": (ac_body("- [ ] [evidence] E", LOOK_LINE), [])}
+        for name, (body, expected) in bodies.items():
+            with self.subTest(name=name):
+                self.assertEqual(keys(self.node([look(C1)], body), NEVER), expected)
+
+    def test_a_failed_read_raises_the_card_and_a_stop_ends_the_read(self):
+        def failed(argv):
+            raise ForgeError("gh_failed", "x")
+
+        def stopped(argv):
+            raise ForgeError("cancelled")
+
+        self.assertEqual(keys(self.node([look(C1)]), failed), self.CARD)
+        for call in (stopped,):
+            with self.assertRaises(ForgeError) as caught:
+                keys(self.node([look(C1)]), call)
+            self.assertEqual(caught.exception.code, "cancelled")
+        asked = []
+
+        def cancelled():
+            asked.append(1)
+            return len(asked) > 1
+
+        with self.assertRaises(ForgeError) as caught:
+            keys(self.node([look(C1)]), NEVER, cancelled=cancelled)
+        self.assertEqual(caught.exception.code, "cancelled")
+
+    def test_read_items_hands_its_call_to_the_pull_request_read(self):
+        for name, order in (("held search", (False, True)), ("owner search", (True, False))):
+            with self.subTest(name=name):
+                node, pulls, argvs = self.node([look(C1)]), Pulls(), []
+
+                def fake(argv):
+                    argvs.append(argv)
+                    if argv[:2] == ["api", "graphql"]:
+                        index = len([a for a in argvs if a[:2] == ["api", "graphql"]]) - 1
+                        return page([node] if order[index] else [])
+                    return pulls(argv)
+
+                self.assertEqual(inbox.read_items(PROJECT, SLUG, call=fake), [])
+                self.assertEqual(pulls.argvs, [["api", f"repos/{SLUG}/pulls/42"]])
 
 
 class WaitingCheckTest(unittest.TestCase):

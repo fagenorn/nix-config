@@ -16,3 +16,5 @@ A session told the owner's answer resumes at step 6 after step 1's `forge-claim 
 ## Land a marked issue
 
 On `error`, merge nothing: run `forge-claim release` and report it. On `approved`, land as step 6 does, plus two things. After every resync under the lock, run `look-approval status --repo <slug> --issue <n> --pr <pr> --head <head>` again for the new head; when it is not `approved`, run `forge-claim land release --repo <slug> --branch <int> --sha <lock sha>` and stop at awaiting look. The merge is `gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`, plus `--delete-branch` when `vcs.merge.delete_branch`, because the guard admits a marked merge only on the approved head.
+
+After the merge, before the close-out holds the issue, run `look-approval tick --repo <slug> --issue <n> --pr <pr> --head <head>` once: it ticks the look marker's box under the owner's approval of the merged head. `ticked`, `already` and `unmarked` are fine; report any other verdict in the close-out and tick nothing by hand.
