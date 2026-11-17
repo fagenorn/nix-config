@@ -257,6 +257,7 @@ agent-workflow-tests *args:
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_movement.py \
+    tests/test_console_movement_check.py \
     tests/test_console_spend.py \
     tests/test_console_spend_page.py \
     tests/test_console_units.py \
