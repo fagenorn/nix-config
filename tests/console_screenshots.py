@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the nineteen screens the sprint block, the finished list, the message life, the
+- `STATES` names the twenty screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -20,9 +20,12 @@ Contract:
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
   lines) and one question still working, and shot against a page with no Ask box it is the desk
-  without it, which is the before picture);
+  without it, which is the before picture; `ask-goal` is the `ask-box` fixture with `owner/web`'s
+  answered question's Make it a goal clicked, so the goal box shows filled from it with
+  `owner/web` chosen, and shot against a page without that control it is unclicked, which is the
+  before picture);
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 38 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 40 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -44,7 +47,8 @@ Contract:
   pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
   the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the Ask
   box does not show `owner/web`'s open field, its working question and its answered question's
-  Read line (`OPEN_ASK`); or when any shot is not taken from the top of the
+  Read line (`OPEN_ASK`); or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
+  closed, the wrong text or project, or the field clipping the filled text); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
   tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
@@ -73,7 +77,7 @@ from .console_test_support import write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "owner-check", "spend-page", "notices-fold", "notice-post-open",
-          "desk-spend", "goal-open", "inbox-card", "accounts-panel", "ask-box")
+          "desk-spend", "goal-open", "inbox-card", "accounts-panel", "ask-box", "ask-goal")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -90,8 +94,13 @@ OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
 ASK_ANSWERED_QUESTION = "What does the build check?"
 ASK_WORKING_QUESTION = "Is the importer deployed on this host?"
 ASK_READ_LINE = "Read: flake.nix, lib/helpers.nix"
+# Short on purpose: the open goal field shows three 22 px lines, so the filled question, a blank
+# line and this summary must each fit one line of its ~380 px width.
+ASK_ANSWER_SUMMARY = "It builds the three hosts and their checks."
 ASK_OPEN = 'li.asks[data-project="owner/web"] button.ask-open'
 OPEN_ASK = (True, "Working on it", ASK_READ_LINE)
+ASK_GOAL = 'li.asks[data-project="owner/web"] button.ask-goal'
+FILLED_GOAL = (True, ASK_ANSWERED_QUESTION + "\n\n" + ASK_ANSWER_SUMMARY, "owner/web", True)
 DESK_OUTSIDE = "outside-1136"
 
 
@@ -125,6 +134,7 @@ class Shot:
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
     ask: tuple[bool, str | None, str | None] | None = None
+    goal: tuple[bool, str | None, str | None, bool | None] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -285,15 +295,14 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
             "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
-    elif state == "ask-box":
+    elif state in ("ask-box", "ask-goal"):
         seed.put(3 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a1", "question": ASK_ANSWERED_QUESTION,
             "profile": "work-main", "session_id": "5b1f0c2e-7a4d-4e8b-9c3a-1d2e3f4a5b6c"})
         seed.put(2 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
             "question_id": "1177a1", "outcome": "answered",
-            "answer": "Answer: It evaluates the three hosts and builds the console's checks.\n"
-                      f"{ASK_READ_LINE}\nRan: just build\nCould not find out: none\n"
-                      "Question for you: none"})
+            "answer": f"Answer: {ASK_ANSWER_SUMMARY}\n{ASK_READ_LINE}\nRan: just build\n"
+                      "Could not find out: none\nQuestion for you: none"})
         seed.put(20, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a2", "question": ASK_WORKING_QUESTION,
             "profile": "work-main", "session_id": "8d3e9a40-2c6b-4f17-a5d8-0e9f8a7b6c5d"})
@@ -524,6 +533,17 @@ ASK_READING = f"""(() => {{
           read({json.dumps(ASK_ANSWERED_QUESTION)}, 'p.ask-read')];
 }})()"""
 
+GOAL_READING = """(() => {
+  const box = document.querySelector('#goal .goal-box');
+  const field = document.querySelector('#goal textarea.goal-text');
+  const pressed = document.querySelector('#goal .goal-project[aria-pressed="true"]');
+  const shown = field ? field.getClientRects().length > 0 : false;
+  return [Boolean(box && box.getClientRects().length > 0),
+          field ? field.value : null,
+          pressed ? pressed.textContent.trim() : null,
+          field ? shown && field.scrollHeight <= field.clientHeight + 1 : null];
+})()"""
+
 SQUEEZED_COUNT = """Array.from(document.querySelectorAll('li.sprint')).filter((sprint) => {
   const now = sprint.querySelector('.sp-now');
   if (!now) return false;
@@ -594,6 +614,11 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.click(ASK_OPEN)
             page.wait_for_selector('li.asks[data-project="owner/web"] textarea.ask-text')
             ask = tuple(page.evaluate(ASK_READING))
+        goal = None
+        if state == "ask-goal" and page.query_selector(ASK_GOAL):
+            page.click(ASK_GOAL)
+            page.wait_for_selector("#goal .goal-box")
+            goal = tuple(page.evaluate(GOAL_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
@@ -605,7 +630,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
-                short=short, ask=ask)
+                short=short, ask=ask, goal=goal)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -648,6 +673,11 @@ def main(argv: list[str] | None = None) -> int:
                if shot.state == "ask-box" and shot.ask not in (None, OPEN_ASK)]
     for shot in unasked:
         print(f"console-screenshots: {shot.path.name} does not show the open Ask box")
+    unfilled = [shot for shot in taken
+                if shot.state == "ask-goal" and shot.goal not in (None, FILLED_GOAL)]
+    for shot in unfilled:
+        print(f"console-screenshots: {shot.path.name} does not show the goal box filled from "
+              "the answer")
     scrolled = [shot for shot in taken if shot.scroll_y != 0]
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
@@ -656,7 +686,7 @@ def main(argv: list[str] | None = None) -> int:
     for shot in short:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
-    return 1 if wide or squeezed or jargon or closed or unasked or scrolled or short else 0
+    return 1 if wide or squeezed or jargon or closed or unasked or unfilled or scrolled or short else 0
 
 
 if __name__ == "__main__":

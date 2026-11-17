@@ -41,11 +41,12 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_nineteen_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 19)
-        self.assertEqual(shots.STATES[-9:], ("owner-check", "spend-page", "notices-fold",
-                                             "notice-post-open", "desk-spend", "goal-open",
-                                             "inbox-card", "accounts-panel", "ask-box"))
+    def test_the_set_is_twenty_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 20)
+        self.assertEqual(shots.STATES[-10:], ("owner-check", "spend-page", "notices-fold",
+                                              "notice-post-open", "desk-spend", "goal-open",
+                                              "inbox-card", "accounts-panel", "ask-box",
+                                              "ask-goal"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -156,6 +157,94 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(shot.ask, ask)
                 self.assertEqual(page.reads, 1 if ask else 0)
                 self.assertEqual(field in page.waits, bool(clicks))
+
+    def test_an_ask_goal_shot_without_the_filled_box_fails_the_command(self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        self.assertIs(shots.FILLED_GOAL[3], True)
+        self.assertEqual(shots.FILLED_GOAL[1],
+                         shots.ASK_ANSWERED_QUESTION + "\n\n" + shots.ASK_ANSWER_SUMMARY)
+        phrase = "does not show the goal box filled from the answer"
+        text_ = shots.FILLED_GOAL[1]
+        for goal in ((False, None, None, None), (True, "", "owner/web", True),
+                     (True, text_, "owner/api", True),
+                     (True, text_ + "\nRan: just build", "owner/web", True),
+                     (True, text_, "owner/web", False)):
+            with self.subTest(goal=goal):
+                code, text = run(lambda path: shots.Shot("ask-goal", 480, path, 480, goal=goal))
+                self.assertEqual(code, 1)
+                self.assertIn(phrase, text)
+        for goal in (shots.FILLED_GOAL, None):
+            code, text = run(lambda path: shots.Shot("ask-goal", 480, path, 480, goal=goal))
+            self.assertEqual(code, 0)
+            self.assertNotIn(phrase, text)
+        code, text = run(lambda path: shots.Shot("live-several", 480, path, 480,
+                                                 goal=(False, None, None, None)))
+        self.assertEqual(code, 0)
+
+    def test_the_ask_goal_shot_clicks_make_it_a_goal_only_on_a_page_that_has_it(self) -> None:
+        def fake(has_control):
+            class Page:
+                def __init__(self):
+                    self.clicks = []
+                    self.waits = []
+                    self.reads = 0
+
+                def goto(self, url):
+                    pass
+
+                def wait_for_selector(self, selector):
+                    self.waits.append(selector)
+
+                def query_selector(self, selector):
+                    return object() if has_control and selector == shots.ASK_GOAL else None
+
+                def click(self, selector):
+                    self.clicks.append(selector)
+
+                def evaluate(self, expression):
+                    if expression == shots.GOAL_READING:
+                        self.reads += 1
+                        return list(shots.FILLED_GOAL)
+                    if expression == shots.SCROLL_Y:
+                        return 0.0
+                    if expression == "document.documentElement.scrollWidth":
+                        return 480
+                    if expression == shots.SHORT_CONTROLS:
+                        return []
+                    return 0
+
+                def screenshot(self, path, full_page):
+                    pass
+
+                def close(self):
+                    pass
+
+            page = Page()
+
+            class Browser:
+                def new_page(self, viewport):
+                    return page
+
+            return Browser(), page
+
+        cases = (("head", "ask-goal", True, [shots.ASK_GOAL], shots.FILLED_GOAL),
+                 ("base", "ask-goal", False, [], None),
+                 ("other state", "live-several", True, [], None))
+        for name, state, has_control, clicks, goal in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake(has_control)
+                shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                self.assertEqual(page.clicks, clicks)
+                self.assertEqual(shot.goal, goal)
+                self.assertEqual(page.reads, 1 if goal else 0)
+                self.assertEqual("#goal .goal-box" in page.waits, bool(clicks))
 
     def test_a_shot_with_a_short_control_fails_the_command(self) -> None:
         out = StringIO()
@@ -379,7 +468,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         [("You", "heads-up", "routes are frozen until Friday", True),
                          ("Fix the settings page", "claim", "reworking the settings form",
                           False)])
-                elif state == "ask-box":
+                elif state in ("ask-box", "ask-goal"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     self.assertEqual([q["state"] for q in web["questions"]],
                                      ["working", "answered"])
@@ -387,6 +476,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                      [shots.ASK_WORKING_QUESTION, shots.ASK_ANSWERED_QUESTION])
                     self.assertEqual(web["questions"][1]["read_text"], shots.ASK_READ_LINE)
                     self.assertEqual(web["questions"][1]["ran_text"], "Ran: just build")
+                    self.assertEqual(web["questions"][1]["answer"], shots.ASK_ANSWER_SUMMARY)
+                    self.assertLessEqual(len(shots.ASK_ANSWER_SUMMARY), 45)
                     self.assertEqual(view["statement"]["inbox_items"], 0)
                 days = (view["spend"] or {"days": []})["days"]
                 self.assertIsNotNone(view["spend"])
@@ -442,6 +533,11 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 [s.width for s in taken if s.state == "ask-box" and s.ask == shots.OPEN_ASK],
                 list(shots.WIDTHS))
             self.assertEqual([s for s in taken if s.state != "ask-box" and s.ask is not None], [])
+            self.assertEqual(
+                [s.width for s in taken if s.state == "ask-goal" and s.goal == shots.FILLED_GOAL],
+                list(shots.WIDTHS))
+            self.assertEqual([s for s in taken if s.state != "ask-goal" and s.goal is not None],
+                             [])
             self.assertEqual(shots.main(["--out", str(out)]), 0)
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
@@ -562,6 +658,27 @@ class ScreenshotReadingTest(unittest.TestCase):
             [False, "Working on it", "Read: flake.nix, lib/helpers.nix"],
             [True, None, "Read: flake.nix, lib/helpers.nix"],
             None])
+
+    def test_the_goal_reading_reads_the_filled_box(self) -> None:
+        filled = shots.FILLED_GOAL[1]
+
+        def goal(*, box_style="", area_style="height:200px;width:400px"):
+            return ('<div id="goal"><div class="goal-in">'
+                    f'<textarea class="goal-text" style="{area_style}">{filled}</textarea>'
+                    f'<div class="goal-box" style="{box_style}">'
+                    '<button class="goal-project" aria-pressed="false">owner/api</button>'
+                    '<button class="goal-project" aria-pressed="true"> owner/web </button>'
+                    '</div></div></div>')
+
+        found = self.read_pages(
+            [goal(), goal(box_style="display:none"),
+             goal(area_style="height:22px;width:400px;overflow:auto"),
+             "<ul><li>nothing</li></ul>"], shots.GOAL_READING)
+        self.assertEqual(found, [
+            list(shots.FILLED_GOAL),
+            [False, filled, "owner/web", True],
+            [True, filled, "owner/web", False],
+            [False, None, None, None]])
 
 
 if __name__ == "__main__":
