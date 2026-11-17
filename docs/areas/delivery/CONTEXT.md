@@ -28,7 +28,7 @@ _Avoid_: track, tier
 The project-declared reduced route for changes that a project's contract names as light. A project that declares none, or `null`, does not support it, and the verdict falls back to the standard route.
 
 **Look approval**:
-The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved` or `changes`, and the console message it came from (issue 1138). It covers exactly that head; the latest one for a head decides.
+The owner's answer to a look, an `agent:look` marker by an OWNER or MEMBER naming the issue, the pull request, the head commit, `approved` or `changes`, and the console message it came from (issue 1138). It covers exactly that head; the latest one for a head decides. A delivery that lands under it ticks the look marker's box (`look-approval tick`, issue 1186).
 
 **Look marker**:
 An acceptance criterion of kind human written exactly `- [ ] [human] before merge: <what the owner looks at> — measured: <who judges, where>`; it makes the issue need the owner's look at its pull request head before merge (issue 1138). Read only by `agent_tools.delivery.look_marker`. `look-lint` refuses a body with a criterion line that is a near miss of it (issue 1141). An ordinary `[human]` criterion or a hold in prose is not one.
