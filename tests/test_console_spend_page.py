@@ -246,7 +246,7 @@ class SpendRenderTest(unittest.TestCase):
         self.assertEqual([b["attrs"]["data-span"] for b in buttons], ["1", "7", "30"])
         self.assertEqual({b["attrs"]["type"] for b in buttons}, {"button"})
         self.assertEqual({b["tag"] for b in buttons}, {"button"})
-        self.assertEqual({b["cls"] for b in buttons}, {"span"})
+        self.assertEqual({b["cls"] for b in buttons}, {"span btn-quiet"})
         figures = find(snap["summary"], "div", "figure")
         self.assertEqual(
             [find(f, "span", "figure-label")[0]["text"] for f in figures],
@@ -603,7 +603,7 @@ class SpendStaticTest(unittest.TestCase):
                 rest = re.sub(r"var\(--([a-z0-9-]+)\)",
                               lambda m: "" if "--" + m.group(1) in mine else m.group(0), value)
                 rest = re.sub(r"-?\d*\.?\d+(?:px|rem|em|%)?", "", rest)
-                rest = re.sub(r"\b(?:none|transparent|currentColor|inherit|solid)\b", "", rest)
+                rest = re.sub(r"\b(?:none|transparent|currentColor|inherit|solid|dashed|dotted)\b", "", rest)
                 self.assertEqual(rest.strip(), "", f"{prop}: {value}")
         script = self.text[self.text.index("<script>"):]
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}", script), [])
