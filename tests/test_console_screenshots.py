@@ -107,24 +107,29 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_seven_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 27)
+    def test_the_set_is_twenty_nine_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 29)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
                          ("inbox-card", "question-words", "question-refused"))
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-5:], ("ask-box", "questions-closed", "questions-open",
-                                             "ask-goal", "question-read"))
+        self.assertEqual(shots.STATES[-12:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+                                              "question-words", "question-refused",
+                                              "accounts-panel", "ask-box", "questions-closed",
+                                              "questions-open", "ask-goal", "question-read"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
-    def test_the_module_contract_counts_the_screens_the_set_names(self) -> None:
-        doc = shots.__doc__.replace("\n", " ")
-        self.assertIn("`STATES` names the twenty-seven screens", doc)
-        self.assertIn("a full run writes 54 files", doc)
-        self.assertEqual(len(shots.STATES) * len(shots.WIDTHS), 54)
+    def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
+        words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
+                 24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
+                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine"}
+        files = len(shots.STATES) * len(shots.WIDTHS)
+        doc = " ".join(shots.__doc__.split())
+        self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
+        self.assertIn(f"a full run writes {files} files", doc)
 
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
@@ -554,6 +559,66 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(shot.scroll_y, reset_to)
                 self.assertEqual(shot.scroll_y, page.captured[0][0])
 
+    def test_the_goal_states_type_into_the_box_before_the_capture(self) -> None:
+        calls: list[tuple[str, tuple]] = []
+
+        class Page:
+            def goto(self, url):
+                calls.append(("goto", (url,)))
+
+            def wait_for_selector(self, selector):
+                calls.append(("wait_for_selector", (selector,)))
+
+            def focus(self, selector):
+                calls.append(("focus", (selector,)))
+
+            def fill(self, selector, text):
+                calls.append(("fill", (selector, text)))
+
+            def click(self, selector):
+                calls.append(("click", (selector,)))
+
+            def evaluate(self, expression):
+                if expression == shots.SCROLL_Y:
+                    return 0.0
+                if expression == "document.documentElement.scrollWidth":
+                    return 480
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                    return []
+                return 0
+
+            def screenshot(self, path, full_page):
+                calls.append(("screenshot", (path, full_page)))
+
+            def close(self):
+                pass
+
+        class Browser:
+            def new_page(self, viewport):
+                return Page()
+
+        self.assertEqual(shots.GOAL_NEAR_CHARS, 1900)
+        self.assertEqual(shots.GOAL_OVER_CHARS, 2100)
+        for state, typed, over in (("goal-near", "x" * 1900, False),
+                                   ("goal-over", "x" * 2100, True)):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                calls.clear()
+                shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
+                shot_at = next(i for i, c in enumerate(calls) if c[0] == "screenshot")
+                before = calls[:shot_at]
+                focus = ("focus", ("textarea.goal-text",))
+                fill = ("fill", ("textarea.goal-text", typed))
+                self.assertIn(focus, before)
+                self.assertIn(fill, before)
+                self.assertLess(before.index(focus), before.index(fill))
+                self.assertNotIn(("click", ("button.goal-send",)), calls)
+                hint = ("wait_for_selector", (".goal-hint:not(:empty)",))
+                if over:
+                    self.assertIn(hint, before)
+                    self.assertLess(before.index(fill), before.index(hint))
+                else:
+                    self.assertNotIn(hint, calls)
+
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         real_registry = real_home / ".agents" / "state" / "fleet" / "registry.json"
@@ -685,7 +750,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(
                         [(s["state"], s["ball"], s["now_text"]) for s in running],
                         [("on_track", "manager", "waiting its turn to merge")])
-                elif state == "goal-open":
+                elif state in ("goal-open", "goal-near", "goal-over"):
                     other = shots.build_fixture(Path(tmp) / "other", "tell-box-open", now_s)
                     again = shots.start_service(other, now_s)
                     try:

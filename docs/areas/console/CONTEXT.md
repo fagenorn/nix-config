@@ -54,7 +54,7 @@ What the owner says to one sprint: an approval, a change request, free text or t
 _Avoid_: chat, comment
 
 **Question round**:
-The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option, their own words, or both in one send, and the answer reaches the manager as a message (ADR-console-068). A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040).
+The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option, their own words, or both in one send, and the answer reaches the manager as a message (ADR-console-069). A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040).
 _Avoid_: poll, survey
 
 **Notice**:
@@ -74,7 +74,7 @@ One PNG a manager sent to the console, kept by the console under its SHA-256 has
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
-The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020).
+The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020). A relay comes from a sender in the manager's own permission mode that can only message (ADR-console-068).
 _Avoid_: ping, notification
 
 **Bring-back**:

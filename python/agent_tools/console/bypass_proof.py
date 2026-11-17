@@ -89,9 +89,57 @@ The record is `run`'s report, when a session ran, plus `schema_version`, `mode` 
 `refused`), `reason` and `teardown` (`step`, `ok`, `detail`). It is printed on stdout and written
 atomically, mode 0600, to `$HOME/.agents/state/console/bypass-proof.json`. Exit 0 when `passed` with
 every teardown step ok, 2 when `refused`, else 1.
-Verify checks (scripts `bypass-proof-record` and `bypass-proof-managers` under
-`home/common/verify-pending/checks/`). Both print one sorted-keys JSON line and exit 0 met, 1 not
-met, 75 not yet, 2 bad argument; both only read.
+`bypass-proof wakes [--profile NAME] [--ready-wait S] [--idle-wait S] [--wake-wait S]
+[--time-limit S] [--teardown-reserve S]` proves that the console's two relays reach a manager that
+runs in bypass mode, with nobody approving them (#1230). It uses no GitHub and never writes
+`crossSessionInbound`: the manager runs on a local throwaway repository under the settings a real
+manager gets (`manager.settings_document` in bypass), and each wake is the console's own relay
+(`nudge.relay_arguments(name, nudge.NUDGE_TEXT, True)`, a sender that bypasses and can only
+message), so the client delivers it instead of holding it. It refuses, exit 75 with one stderr line
+`bypass-proof: <reason>`, before anything starts (no workdir, `teardown` empty, the record is still
+written) when `CLAUDECODE` is set, the host is not Linux, no profile is given or chosen
+(`chosen-profile`) or it is `default` (that account's sessions and trust live under `~/.claude`,
+not the accounts directory), or `claude-account` or `systemd-run` is not on `PATH`.
+
+Setup, in order: the name `wakes-<UTC YYYYmmddHHMMSS>` (project id `bypass-proof/<name>`); a workdir
+holding `repo/` (`git init -b main`, one empty commit), a stub `bin/sprint` that appends a line to
+`marks/sprint-<verb>` (the contract it prints tells the manager to end its turn and to run exactly
+what each console message names), `marks/` and `settings/`; the checkout trusted in the profile's
+`.claude.json` (`folder_trust.grant`); then the manager is launched in bypass, its `PATH` and
+`BYPASS_PROOF_MARKS` set. The manager is ready when it has called `sprint contract` and its session
+is named by the listing (`claude-account run agents --json --all`) or by the registry directory of
+the profile, which are united because a launch hands back no session id.
+
+Each of the two wakes: wait until the registry reads the manager `idle` with an `updatedAt` at or
+after the newest `sprint` call (a turn the previous wake started has ended, so a late `sprint inbox`
+of that turn is not counted for this wake; after `--idle-wait` the wake is `not_idle` and nothing is
+sent); send the relay; then count `sprint inbox` calls: `delivered` when one more was made within
+`--wake-wait`, else `not_delivered`; a relay that is not confirmed is `not_sent`. `outcome` is
+`passed` iff the manager is ready, both wakes are `delivered` and the step stopped for no reason
+(a second wake delivered as the time ran out is `failed`, reason `OUT_OF_TIME`).
+
+Time. `--time-limit` (default `WAKE_LIMIT`, 540 s, under the verify runner's 600 s) bounds the whole
+step; `--teardown-reserve` (default `TEARDOWN_RESERVE` = the worst case of teardown's client calls,
+150 s) of it is kept for teardown, so setup, launch, polls and relays stop at `time-limit - reserve`
+(reason `OUT_OF_TIME`, outcome `failed`). The parser refuses (exit 2) a wait that is not positive and
+anything but `0 < reserve < time-limit <= WAKE_LIMIT`.
+
+Teardown runs after every outcome but a refusal, an interrupt included, in `WAKE_TEARDOWN_STEPS`
+order, each step attempted whatever the previous one did: `stop_manager` and `remove_manager` (the
+session ids are the one found at ready, else the listing and registry read again; none found fails
+both with the commands that find and finish it), `untrust` (only when the grant changed the file)
+and `remove_checkout` (the whole workdir). The record is `schema_version`, `mode` (`wakes`),
+`profile`, `session_name`, `started_at`, `finished_at`, `outcome`, `reason`, `manager`
+(`permission_mode`, `ready`), `wakes` (`wake`, `sender_bypass`, `sent`, `detail`, `inbox_calls`,
+`verdict`) and `teardown`; it is printed with sorted keys and written atomically, mode 0600, to
+`$HOME/.agents/state/console/bypass-proof-wakes.json`. Exit 0 when `passed` with every teardown step
+ok, 75 when `refused`, else 1.
+
+Verify checks (three scripts, `bypass-proof-record`, `bypass-proof-managers` and
+`bypass-proof-wakes`, under `home/common/verify-pending/checks/`). The first two print one
+sorted-keys JSON line and exit 0 met, 1 not met, 75 not yet, 2 bad argument; both only read.
+`bypass-proof-wakes` runs `wakes` itself (it starts sessions on the owner's account, so its verify
+check is `effects: paid` and runs only after the owner ticks it) and exits as `wakes` does.
 
 `record-check [--record PATH]` reads the record (default `record_path()`). It trusts none of the
 record's summary fields: `record_problems` recomputes the verdict from the attempts (every name of
@@ -115,16 +163,18 @@ import json
 import os
 import shlex
 import shutil
+import secrets
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools.console import manager
+from agent_tools.console import folder_trust, manager, nudge, sessions
 from agent_tools.console.bypass_proof_mcp import split_tool
 from agent_tools.console import permission as permissions
 from agent_tools.console.permission import BYPASS, Permission
@@ -155,6 +205,22 @@ PR_BRANCH = "bypass-proof-pr"
 PROJECT_PREFIX = "bypass-proof/"
 TEARDOWN_STEPS = ("unregister", "recompile", "delete_repository", "remove_checkout")
 COMPILE_ARGV = ["claude-guard-policy"]
+WAKE_COUNT = 2
+READY_WAIT = 60
+IDLE_WAIT = 60
+WAKE_WAIT = 60
+POLL_SECONDS = 1.0
+WAKE_LIMIT = 540
+TEARDOWN_RESERVE = nudge.LISTING_TIMEOUT + manager.STOP_TIMEOUT + manager.REMOVE_TIMEOUT
+WAKE_RECORD = "bypass-proof-wakes.json"
+CONTRACT_MARK = "sprint-contract"
+INBOX_MARK = "sprint-inbox"
+WAKE_TEARDOWN_STEPS = ("stop_manager", "remove_manager", "untrust", "remove_checkout")
+OUT_OF_TIME = "the step ran out of time"
+NOT_FOUND = "the manager's session was not found"
+WAKE_GOAL = "Show that the console's messages reach you: run only what each message tells you to run."
+WAKE_CONTRACT = ("This is a bypass proof. End your turn now. Each time a message from the console "
+                 "arrives, run exactly the command it names, then end your turn again.")
 
 
 class ProofRefused(Exception):
@@ -256,21 +322,21 @@ def _scrubbed_env():
             if name not in ("GITHUB_TOKEN", "GH_TOKEN")}
 
 
-def _run(argv, *, cwd=None):
+def _run(argv, *, cwd=None, timeout=COMMAND_TIMEOUT):
     try:
         return subprocess.run(argv, cwd=cwd, env=_scrubbed_env(), stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=COMMAND_TIMEOUT,
+                              capture_output=True, text=True, timeout=timeout,
                               check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise ProofRefused(f"cannot run {argv[0]}: {error}") from error
 
 
-def _git(checkout, *args):
-    return _run(["git", "-C", str(checkout), *args])
+def _git(checkout, *args, timeout=COMMAND_TIMEOUT):
+    return _run(["git", "-C", str(checkout), *args], timeout=timeout)
 
 
-def _git_checked(checkout, *args):
-    done = _git(checkout, *args)
+def _git_checked(checkout, *args, timeout=COMMAND_TIMEOUT):
+    done = _git(checkout, *args, timeout=timeout)
     if done.returncode != 0:
         raise ProofRefused(f"git {args[0]} failed: {done.stderr.strip() or done.stdout.strip()}")
     return done.stdout
@@ -695,8 +761,8 @@ def _remove_checkout(checkout):
     return None
 
 
-def _write_record(record):
-    path = record_path()
+def _write_record(record, path=None):
+    path = path or record_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".tmp")
     try:
@@ -792,6 +858,364 @@ def _github_main(args):
         return 2
     return 0 if record["outcome"] == "passed" and all(
         entry["ok"] for entry in record["teardown"]) else 1
+
+# --------------------------------------------------------------------------
+# `wakes`: the console's relays reach a bypass manager
+# --------------------------------------------------------------------------
+
+
+class OutOfTime(Exception):
+    """The step's setup and proof have no time left."""
+
+
+class _Stop(Exception):
+    """The step stops with this reason; the teardown still runs."""
+
+
+class Deadline:
+    def __init__(self, seconds, clock=time.monotonic):
+        self._clock = clock
+        self._end = clock() + seconds
+
+    def left(self):
+        """Seconds until the deadline, negative once past."""
+        return self._end - self._clock()
+
+
+def _in_own_session(argv, **kwargs):
+    """`manager.run_in_own_group` for a stop or removal call of the client.
+
+    The account wrapper waits for its Claude child, so a timeout must end the whole group: killing
+    the wrapper alone leaves the child running after teardown has returned.
+    """
+    return manager.run_in_own_group(argv, start_new_session=True, **kwargs)
+
+
+def _bounded(run, deadline):
+    """`run` with each call's timeout capped at what `deadline` has left; `OutOfTime` once none is."""
+    def bounded(argv, **kwargs):
+        left = deadline.left()
+        if left <= 0:
+            raise OutOfTime()
+        return run(argv, **{**kwargs, "timeout": min(kwargs["timeout"], left)})
+    return bounded
+
+
+def wake_record_path():
+    return agent_platform.state_root() / "console" / WAKE_RECORD
+
+
+def _find_sessions(profile, checkout, name, sessions_dir, deadline):
+    """Every id of a session named `name`: the listing united with the registry.
+
+    The value is the registry observation, None when only the listing names the id."""
+    found = {}
+    try:
+        entries = nudge.read_full_entries(
+            profile, str(checkout), run=_bounded(manager.run_in_own_group, deadline))
+    except (nudge.ListingUnreadable, OutOfTime):
+        entries = []
+    for entry in entries:
+        identifier = entry.get("sessionId")
+        if entry.get("name") == name and isinstance(identifier, str) and identifier:
+            found[identifier] = None
+    for identifier, observation in sessions.read_session_registry([sessions_dir]).items():
+        if observation.name == name:
+            found[identifier] = observation
+    return dict(sorted(found.items()))
+
+
+def _poll(check, wait, phase):
+    """The first truthy `check()`, polled every `POLL_SECONDS`; None once `wait` or `phase` passes."""
+    limit = Deadline(wait)
+    while True:
+        value = check()
+        if value:
+            return value
+        left = min(limit.left(), phase.left())
+        if left <= 0:
+            return None
+        time.sleep(min(POLL_SECONDS, left))
+
+
+def _count(path):
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return 0
+
+
+def _stub_sprint(path):
+    script = ("#!/bin/sh\n"
+              f'printf \'%s\\n\' "$*" >> "${MARKS_ENV}/sprint-$1"\n'
+              'case "$1" in\n'
+              f"contract) printf '%s\\n' {shlex.quote(WAKE_CONTRACT)} ;;\n"
+              "inbox) printf '%s\\n' 'The inbox is empty.' ;;\n"
+              "esac\n")
+    path.write_text(script, encoding="utf-8")
+    path.chmod(0o755)
+
+
+class _WakeRun:
+    """One run of the step: its setup, its wakes and the state its teardown needs."""
+
+    def __init__(self, profile, session_name, project_id, sprint_id, *, phase, hard, ready_wait,
+                 idle_wait, wake_wait):
+        self.profile, self.session_name = profile, session_name
+        self.project_id, self.sprint_id = project_id, sprint_id
+        self.phase, self.hard = phase, hard
+        self.ready_wait, self.idle_wait, self.wake_wait = ready_wait, idle_wait, wake_wait
+        self.workdir = None
+        self.launched = False
+        self.granted = False
+        self.trust_key = self.trust_file = None
+        self.session_id = None
+        self.ready = False
+        self.rows = []
+        self.reason = None
+        from agent_tools.console.service import default_choice_file
+        self.accounts = default_choice_file().parent
+        self.sessions_dir = self.accounts / "profiles" / profile / "sessions"
+
+    def _git(self, *args):
+        left = self.phase.left()
+        if left <= 0:
+            raise OutOfTime()
+        return _git_checked(self.checkout, *args, timeout=min(COMMAND_TIMEOUT, left))
+
+    def _find(self, deadline):
+        return _find_sessions(self.profile, self.checkout, self.session_name, self.sessions_dir,
+                              deadline)
+
+    def prove(self):
+        try:
+            self._setup()
+            self._launch()
+            self._wait_ready()
+            self._wake()
+        except _Stop as stop:
+            self.reason = str(stop)
+        except OutOfTime:
+            self.reason = OUT_OF_TIME
+
+    def _setup(self):
+        self.workdir = Path(tempfile.mkdtemp(prefix="bypass-proof-wakes-"))
+        self.checkout = self.workdir / "repo"
+        self.bin, self.marks = self.workdir / "bin", self.workdir / "marks"
+        for directory in (self.checkout, self.bin, self.marks):
+            directory.mkdir()
+        try:
+            self._git("init", "-q", "-b", "main")
+            for key, value in (("user.name", "bypass proof"),
+                               ("user.email", "bypass-proof@localhost"),
+                               ("commit.gpgsign", "false")):
+                self._git("config", key, value)
+            self._git("commit", "-q", "--allow-empty", "-m", "bypass proof wakes")
+        except ProofRefused as error:
+            if self.phase.left() <= 0:
+                raise OutOfTime() from error
+            raise _Stop(f"the checkout could not be made: {' '.join(str(error).split())}") from error
+        _stub_sprint(self.bin / "sprint")
+        self.trust_key = folder_trust.trust_key(str(self.checkout))
+        self.trust_file = self.accounts / "profiles" / self.profile / ".claude.json"
+        result = (folder_trust.grant(self.trust_file, self.trust_key)
+                  if self.trust_key else folder_trust.FAILED)
+        if result not in (folder_trust.GRANTED, folder_trust.ALREADY):
+            raise _Stop("the checkout could not be trusted")
+        self.granted = result == folder_trust.GRANTED
+
+    def _launch(self):
+        launch = manager.new_launch(
+            self.sprint_id, self.project_id, WAKE_GOAL, str(self.checkout), self.profile,
+            secrets.token_hex(16), self.workdir / "settings", permission=PERMISSION)
+        launch = dataclasses.replace(launch, env={
+            **launch.env, "PATH": f"{self.bin}:{os.environ.get('PATH', '')}",
+            MARKS_ENV: str(self.marks)})
+        if self.phase.left() <= 0:
+            raise OutOfTime()
+        # The launch discards the client's stdout: a launch that raised may still have started a
+        # session, which only the listing and the registry can name.
+        self.launched = True
+        try:
+            manager.run_launch(launch, run=_bounded(manager.run_in_own_group, self.phase))
+        except manager.LaunchFailed as error:
+            if self.phase.left() <= 0:
+                raise OutOfTime() from error
+            raise _Stop(f"the manager could not start: {error}") from error
+
+    def _wait_ready(self):
+        def named():
+            if _count(self.marks / CONTRACT_MARK) < 1:
+                return None
+            ids = self._find(self.phase)
+            return next(iter(ids), None)
+
+        self.session_id = _poll(named, self.ready_wait, self.phase)
+        self.ready = self.session_id is not None
+        if not self.ready:
+            if self.phase.left() <= 0:
+                raise OutOfTime()
+            raise _Stop("the manager did not start")
+
+    def _idle(self):
+        newest = max((entry.stat().st_mtime_ns // 1_000_000 for entry in self.marks.iterdir()),
+                     default=0)
+        observation = sessions.read_session_registry([self.sessions_dir]).get(self.session_id)
+        return (observation is not None and observation.status == "idle"
+                and observation.updated_ms is not None and observation.updated_ms >= newest)
+
+    def _wake(self):
+        inbox = self.marks / INBOX_MARK
+        for number in range(1, WAKE_COUNT + 1):
+            row = {"wake": number, "sender_bypass": True, "sent": False, "detail": None,
+                   "inbox_calls": _count(inbox), "verdict": None}
+            if not _poll(self._idle, self.idle_wait, self.phase):
+                row["detail"] = f"the manager was not idle within {self.idle_wait:g} s"
+                row["verdict"] = "not_idle"
+            else:
+                self._send(row, inbox)
+            self.rows.append(row)
+            if self.phase.left() <= 0:
+                raise OutOfTime()
+
+    def _send(self, row, inbox):
+        before = _count(inbox)
+        relay = nudge.Nudge(self.sprint_id, nudge.RELAY, self.session_name, self.session_id,
+                            self.profile, str(self.checkout), sender_bypass=True)
+        try:
+            nudge.run_nudge(relay, run=_bounded(manager.run_in_own_group, self.phase))
+        except nudge.NudgeFailed as error:
+            row.update(detail=str(error), inbox_calls=before, verdict="not_sent")
+            return
+        _poll(lambda: _count(inbox) > before, self.wake_wait, self.phase)
+        calls = _count(inbox)
+        row.update(sent=True, inbox_calls=calls,
+                   verdict="delivered" if calls > before else "not_delivered")
+
+    def _session_ids(self):
+        if self.session_id is not None:
+            return [self.session_id]
+        try:
+            return list(self._find(self.hard))
+        except Exception:  # a lookup that fails names nothing; the step then fails by hand
+            return []
+
+    def _manager_step(self, name, verb, act, ids, run):
+        if not self.launched:
+            return {"step": name, "ok": True, "detail": "nothing to do"}
+        if not ids:
+            return _teardown_step(
+                name, lambda: NOT_FOUND,
+                f"CLAUDE_ACCOUNT={self.profile} claude-account run agents --json --all, then "
+                f"claude-account run stop and claude-account run rm the session named "
+                f'"{self.session_name}"')
+
+        def action():
+            problems = []
+            for identifier in ids:
+                try:
+                    act(identifier, self.profile, run=run)
+                except Exception as error:  # every id is attempted
+                    problems.append(" ".join(str(error).split()) or type(error).__name__)
+            return "; ".join(problems) or None
+
+        by_hand = "; ".join(f"CLAUDE_ACCOUNT={self.profile} claude-account run {verb} "
+                            f"{manager.short_id(identifier)}" for identifier in ids)
+        return _teardown_step(name, action, by_hand)
+
+    def teardown(self):
+        """The entries of `WAKE_TEARDOWN_STEPS`, each attempted whatever the previous one did."""
+        run = _bounded(_in_own_session, self.hard)
+        ids = self._session_ids() if self.launched else []
+        entries = [self._manager_step("stop_manager", "stop", manager.stop_session, ids, run),
+                   self._manager_step("remove_manager", "rm", manager.remove_session, ids, run)]
+
+        def untrust():
+            if folder_trust.remove_entry(self.trust_file, self.trust_key) == folder_trust.FAILED:
+                return "the trust entry could not be removed"
+            return None
+
+        if self.granted:
+            entries.append(_teardown_step(
+                "untrust", untrust, f"remove projects[{self.trust_key}] from {self.trust_file}"))
+        else:
+            entries.append({"step": "untrust", "ok": True, "detail": "nothing to do"})
+        if self.workdir is None:
+            entries.append({"step": "remove_checkout", "ok": True, "detail": "nothing to do"})
+        else:
+            entries.append(_teardown_step("remove_checkout",
+                                          lambda: _remove_checkout(self.workdir),
+                                          f"rm -rf {self.workdir}"))
+        return entries
+
+
+def _wake_refusal(profile):
+    """The profile the step uses, or `ProofRefused` when it must not start."""
+    from agent_tools.console.service import default_choice_file
+    if os.environ.get("CLAUDECODE"):
+        raise ProofRefused("CLAUDECODE is set: run the proof outside a Claude Code session")
+    if not manager.supported(sys.platform):
+        raise ProofRefused(manager.UNAVAILABLE_TEXT)
+    profile = profile or manager.read_choice(default_choice_file())
+    if not profile:
+        raise ProofRefused("no profile: pass --profile or choose one in the console")
+    if profile == "default":
+        raise ProofRefused("the default account keeps its sessions and trust under ~/.claude, not "
+                           "under the accounts directory: pass a named profile")
+    for program in ("claude-account", "systemd-run"):
+        if shutil.which(program) is None:
+            raise ProofRefused(f"{program} is not on PATH")
+    return profile
+
+
+def _wake_record(profile, session_name, started, outcome, reason, ready, rows, teardown):
+    return {"schema_version": 1, "mode": "wakes", "profile": profile,
+            "session_name": session_name, "started_at": started.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(), "outcome": outcome,
+            "reason": reason,
+            "manager": {"permission_mode": PERMISSION.mode, "ready": ready},
+            "wakes": rows, "teardown": teardown}
+
+
+def wake_proof(profile, *, ready_wait=READY_WAIT, idle_wait=IDLE_WAIT, wake_wait=WAKE_WAIT,
+               time_limit=WAKE_LIMIT, teardown_reserve=TEARDOWN_RESERVE):
+    """Run the step, tear down, write the record and return it."""
+    hard = Deadline(time_limit)
+    phase = Deadline(time_limit - teardown_reserve)
+    started = datetime.now(timezone.utc)
+    name = f"wakes-{started.strftime('%Y%m%d%H%M%S')}"
+    project_id, sprint_id = PROJECT_PREFIX + name, secrets.token_hex(8)
+    session_name = manager.session_name(project_id, sprint_id)
+    try:
+        profile = _wake_refusal(profile)
+    except ProofRefused as refusal:
+        record = _wake_record(profile, session_name, started, "refused",
+                              " ".join(str(refusal).split()), False, [], [])
+        _write_record(record, wake_record_path())
+        return record
+    attempt = _WakeRun(profile, session_name, project_id, sprint_id, phase=phase, hard=hard,
+                       ready_wait=ready_wait, idle_wait=idle_wait, wake_wait=wake_wait)
+    interrupt = None
+    try:
+        attempt.prove()
+    except Exception as failure:  # teardown must run after any failure
+        attempt.reason = " ".join(str(failure).split()) or type(failure).__name__
+    except BaseException as stop:  # an interrupt leaves nothing behind either
+        interrupt, attempt.reason = stop, "interrupted"
+    teardown = attempt.teardown()
+    delivered = [row["verdict"] == "delivered" for row in attempt.rows]
+    passed = (attempt.reason is None and attempt.ready and len(delivered) == WAKE_COUNT
+              and all(delivered))
+    reason = None if passed else attempt.reason
+    if reason is None and not passed:
+        reason = f"{delivered.count(False)} of {WAKE_COUNT} wakes were not delivered"
+    record = _wake_record(profile, session_name, started, "passed" if passed else "failed",
+                          reason, attempt.ready, attempt.rows, teardown)
+    _write_record(record, wake_record_path())
+    if interrupt is not None:
+        raise interrupt
+    return record
+
 
 # --------------------------------------------------------------------------
 # Verify checks: the proof record and the next manager's mode
@@ -962,7 +1386,7 @@ def _check_main(args):
     return code
 
 
-def main(argv=None):
+def _parser():
     parser = argparse.ArgumentParser(prog="bypass-proof")
     modes = parser.add_subparsers(dest="mode", required=True)
     run = modes.add_parser("run", help="attempt each forbidden action in a bypass session")
@@ -974,17 +1398,47 @@ def main(argv=None):
     github.add_argument("--owner", required=True)
     github.add_argument("--template", type=Path, required=True)
     github.add_argument("--claude", default="claude")
+    wakes = modes.add_parser("wakes", help="prove the console's relays reach a bypass manager")
+    wakes.add_argument("--profile")
+    wakes.add_argument("--ready-wait", type=float, default=READY_WAIT)
+    wakes.add_argument("--idle-wait", type=float, default=IDLE_WAIT)
+    wakes.add_argument("--wake-wait", type=float, default=WAKE_WAIT)
+    wakes.add_argument("--time-limit", type=float, default=WAKE_LIMIT)
+    wakes.add_argument("--teardown-reserve", type=float, default=TEARDOWN_RESERVE)
     record_check = modes.add_parser("record-check", help="verify the proof record")
     record_check.add_argument("--record", type=Path)
     managers_check = modes.add_parser("managers-check", help="verify the next manager's mode")
     managers_check.add_argument("--project", required=True)
     managers_check.add_argument("--record", type=Path)
     managers_check.add_argument("--log", type=Path)
+    return parser
+
+
+def _wakes_main(parser, args):
+    if not (args.ready_wait > 0 and args.idle_wait > 0 and args.wake_wait > 0
+            and 0 < args.teardown_reserve < args.time_limit <= WAKE_LIMIT):
+        parser.error(f"every wait must be positive and 0 < --teardown-reserve < --time-limit "
+                     f"<= {WAKE_LIMIT}")
+    record = wake_proof(args.profile, ready_wait=args.ready_wait, idle_wait=args.idle_wait,
+                        wake_wait=args.wake_wait, time_limit=args.time_limit,
+                        teardown_reserve=args.teardown_reserve)
+    print(json.dumps(record, sort_keys=True))
+    if record["outcome"] == "refused":
+        print(f"bypass-proof: {record['reason']}", file=sys.stderr)
+        return NOT_YET
+    return 0 if record["outcome"] == "passed" and all(
+        entry["ok"] for entry in record["teardown"]) else 1
+
+
+def main(argv=None):
+    parser = _parser()
     args = parser.parse_args(argv)
     if args.mode in ("record-check", "managers-check"):
         return _check_main(args)
     if args.mode == "github":
         return _github_main(args)
+    if args.mode == "wakes":
+        return _wakes_main(parser, args)
     workdir = None
     try:
         proof_target = target(args.checkout, args.pr)
