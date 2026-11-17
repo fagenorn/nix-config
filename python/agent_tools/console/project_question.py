@@ -15,10 +15,16 @@ non-empty list of strings, a word is not a `project_question_hook.PLAIN_WORD`, o
 the project's root. The root it compares with is the snapshot's own `project.root`, never the path
 the caller passed: the resolver canonicalises the root and builds every cwd from that canonical
 root, while a registry root may hold a symlink, so comparing with the caller's path would drop every
-route of such a project and wrongly answer with the production line (D9). `routes_of(root)` is
-`read_only_routes(resolve(root))` and lets every exception, a `ContractError` included, propagate:
-`()` means only "resolved, no runnable read-only command" (bootstrap: never guess a value the
-resolver declined). `resolve` is a test seam only.
+route of such a project and wrongly answer with the production line (D9). When the root holds a
+`devenv.nix` that is a regular file (an inference from the root, not a contract field), each kept
+route's argv is `devenv shell -- <declared argv>` unless it already starts with `devenv`, so the
+read runs in the project's environment; its `id` and `cwd` do not change, and the skip rules above
+run on the declared argv first (D7). `repo_slug(snapshot)` is `bindings.tracker.repo_slug` only for a
+`github` tracker whose slug fullmatches `project_question_hook.REPO_SLUG`, else None, and never raises.
+`reach_of(root)` is `Reach(read_only_routes(s), repo_slug(s))` with `s = resolve(root)` and lets every
+exception, a `ContractError` included, propagate: an empty `routes` means only "resolved, no
+runnable read-only command" (bootstrap: never guess a value the resolver declined). `resolve` is a
+test seam only.
 
 Prompt. `LEAD`, then a routes paragraph (the declared commands, each exactly as written and alone;
 or that none is declared so production cannot be read), then `QUESTION_MARK` and the question.
@@ -110,7 +116,7 @@ from agent_tools.console import manager
 from agent_tools.console.event_log import (
     PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, Event)
 from agent_tools.console.project_question_hook import (
-    GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD)
+    GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD, REPO_SLUG)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -198,6 +204,12 @@ class Route:
 
 
 @dataclass(frozen=True)
+class Reach:
+    routes: tuple[Route, ...]
+    repo: str | None
+
+
+@dataclass(frozen=True)
 class Turn:
     question: str
     answer: str
@@ -214,6 +226,7 @@ class Ask:
     settings: Path
     session_id: str
     thread: tuple[Turn, ...] = ()
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -235,6 +248,7 @@ def read_only_routes(snapshot: Mapping) -> tuple[Route, ...]:
     if production["status"] != "declared":
         return ()
     root = os.path.normpath(snapshot["project"]["root"])
+    in_devenv = os.path.isfile(os.path.join(root, "devenv.nix"))
     bindings = snapshot["bindings"]["commands"]
     routes = []
     for id in production["read_only"]["commands"]:
@@ -244,13 +258,26 @@ def read_only_routes(snapshot: Mapping) -> tuple[Route, ...]:
         cwd = binding["cwd"]
         if not isinstance(cwd, str) or os.path.normpath(cwd) != root:
             continue
-        routes.append(Route(id, tuple(binding["argv"]), cwd))
+        argv = tuple(binding["argv"])
+        if in_devenv and argv[0] != "devenv":
+            argv = ("devenv", "shell", "--", *argv)
+        routes.append(Route(id, argv, cwd))
     return tuple(routes)
 
 
-def routes_of(root: str, *,
-              resolve: Callable[[str], Mapping] = resolve_project.resolve) -> tuple[Route, ...]:
-    return read_only_routes(resolve(root))
+def repo_slug(snapshot: Mapping) -> str | None:
+    bindings = snapshot.get("bindings")
+    tracker = bindings.get("tracker") if isinstance(bindings, Mapping) else None
+    if not isinstance(tracker, Mapping) or tracker.get("kind") != "github":
+        return None
+    slug = tracker.get("repo_slug")
+    return slug if isinstance(slug, str) and REPO_SLUG.fullmatch(slug) else None
+
+
+def reach_of(root: str, *,
+             resolve: Callable[[str], Mapping] = resolve_project.resolve) -> Reach:
+    snapshot = resolve(root)
+    return Reach(read_only_routes(snapshot), repo_slug(snapshot))
 
 
 def new_question_id() -> str:
@@ -263,9 +290,9 @@ def new_session_id() -> str:
 
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
-            thread: Sequence[Turn] = ()) -> Ask:
+            thread: Sequence[Turn] = (), repo: str | None = None) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
-               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread))
+               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo)
 
 
 def checked_question(text: str) -> str:
@@ -361,7 +388,7 @@ def _write_settings(ask: Ask) -> None:
     descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(settings_document(ask.routes), handle)
+            json.dump(settings_document(ask.routes, ask.repo), handle)
         os.chmod(temporary, 0o600)
         os.replace(temporary, ask.settings)
     except BaseException:

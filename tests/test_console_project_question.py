@@ -37,6 +37,9 @@ GIT_READ_RULES = [
     "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
     "Bash(git blame:*)", "Bash(git ls-files:*)", "Bash(git tag:*)"]
 ROUTES = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
+GITHUB = {"kind": "github", "cli": "gh", "repo_slug": "owner/p01",
+          "credential_env": {"unset_before_invocation": []}}
+REACH = project_question.Reach(ROUTES, "owner/p01")
 ENVIRON = {"HOME": "/home/u", "PATH": "/bin"}
 SESSION_ID = "0b5c8f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
 SUCCESS = (
@@ -45,7 +48,7 @@ SUCCESS = (
 )
 
 
-def SNAPSHOT(read_only, cwd_of=lambda id: "/srv/p01", root="/srv/p01"):  # noqa: N802 -- a fixture
+def SNAPSHOT(read_only, cwd_of=lambda id: "/srv/p01", root="/srv/p01", tracker=None):  # noqa: N802 -- a fixture
     return {
         "project": {"root": root, "id": "owner/p01", "name": "p01"},
         "production": {
@@ -59,7 +62,9 @@ def SNAPSHOT(read_only, cwd_of=lambda id: "/srv/p01", root="/srv/p01"):  # noqa:
             "nix-activate": {"argv": ["just", "switch"], "cwd": "/srv/p01", "env": []},
             "sub-check": {"argv": ["./check"], "cwd": "/srv/p01/sub", "env": []},
             "piped": {"argv": ["sh", "-c", "a|b"], "cwd": "/srv/p01", "env": []},
-        }},
+            "dev-read": {"argv": ["devenv", "shell", "--", "railway", "status"],
+                         "cwd": cwd_of("dev-read"), "env": []},
+        }, **({"tracker": tracker} if tracker is not None else {})},
     }
 
 
@@ -360,6 +365,18 @@ class LaunchTest(unittest.TestCase):
         return project_question.run_question(
             ask or self.ask, cancel, platform=platform, run=run, environ=ENVIRON)
 
+    def test_a_session_with_a_repository_passes_it_to_its_hook_and_settings(self):
+        ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "what shipped?", "work", self.routes,
+            self.settings_dir, session_id=SESSION_ID, repo="owner/p01")
+        self.ask = ask
+        self.start(self.fake(), ask=ask)
+        document = json.loads(self.settings["text"])
+        self.assertEqual(
+            shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])[-1], "owner/p01")
+        self.assertIn("Bash(gh pr list:*)", document["permissions"]["allow"])
+        self.assertIsNone(self.make_ask(self.routes).repo)
+
     def test_the_launch_runs_sonnet_headless_in_the_root_under_the_chosen_profile(self):
         outcome = self.start(self.fake())
 
@@ -447,6 +464,44 @@ class LaunchTest(unittest.TestCase):
                     self.assertEqual(self.calls, [])
 
 
+class DevenvRouteTest(unittest.TestCase):
+    def roots(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        (base / "with_env").mkdir()
+        (base / "with_env" / "devenv.nix").write_text("{}\n")
+        (base / "plain").mkdir()
+        (base / "dir_env" / "devenv.nix").mkdir(parents=True)
+        return [str(base / name) for name in ("with_env", "plain", "dir_env")]
+
+    def routes_in(self, root):
+        return project_question.read_only_routes(
+            SNAPSHOT(["nix-build", "dev-read"], cwd_of=lambda id: root, root=root))
+
+    def test_a_declared_command_runs_inside_devenv_when_the_root_has_devenv_nix(self):
+        with_env, plain, dir_env = self.roots()
+        wrapped = (
+            project_question.Route("nix-build", ("devenv", "shell", "--", "just", "build"), with_env),
+            project_question.Route("dev-read", ("devenv", "shell", "--", "railway", "status"), with_env))
+        self.assertEqual(self.routes_in(with_env), wrapped)
+        bare = lambda root: (
+            project_question.Route("nix-build", ("just", "build"), root),
+            project_question.Route("dev-read", ("devenv", "shell", "--", "railway", "status"), root))
+        self.assertEqual(self.routes_in(plain), bare(plain))
+        self.assertEqual(self.routes_in(dir_env), bare(dir_env))
+
+    def test_a_devenv_route_is_what_the_hook_and_settings_admit(self):
+        routes = self.routes_in(self.roots()[0])
+        allowed = [list(route.argv) for route in routes]
+        self.assertIn("Bash(devenv shell -- just build)",
+                      project_question.settings_document(routes)["permissions"]["allow"])
+        self.assertEqual(hook.decide(bash("devenv shell -- just build"), allowed),
+                         ("allow", hook.ALLOWED))
+        self.assertEqual(hook.decide(bash("just build"), allowed)[0], "deny")
+        self.assertIn("devenv shell -- just build", project_question.prompt("q", routes))
+
+
 class NoProductionTest(unittest.TestCase):
     def test_read_only_routes_resolve_ids_to_argv(self):
         expected = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
@@ -465,7 +520,7 @@ class NoProductionTest(unittest.TestCase):
     def test_an_unresolvable_contract_raises_instead_of_answering_no_routes(self):
         with tempfile.TemporaryDirectory() as path:
             with self.assertRaises(resolve_project.ContractError):
-                project_question.routes_of(path)
+                project_question.reach_of(path)
 
     def test_a_contract_with_no_read_only_command_gets_the_production_line(self):
         for snapshot in (SNAPSHOT([]), {**SNAPSHOT([]), "production": {"status": "none"}},
@@ -529,6 +584,20 @@ class NoProductionTest(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 parse(body)
 
+    def test_reach_names_the_routes_and_the_github_repository_of_the_contract(self):
+        self.assertEqual(
+            project_question.reach_of("/srv/p01", resolve=lambda p: SNAPSHOT(["nix-build"], tracker=GITHUB)),
+            project_question.Reach(ROUTES, "owner/p01"))
+        for name, snapshot in (
+                ("no tracker", SNAPSHOT([])),
+                ("another kind", SNAPSHOT([], tracker={**GITHUB, "kind": "none"})),
+                ("no owner", SNAPSHOT([], tracker={**GITHUB, "repo_slug": "owner"})),
+                ("not a string", SNAPSHOT([], tracker={**GITHUB, "repo_slug": 3})),
+                ("not a slug", SNAPSHOT([], tracker={**GITHUB, "repo_slug": "a/b;c"})),
+                ("empty", {})):
+            with self.subTest(name):
+                self.assertIsNone(project_question.repo_slug(snapshot))
+
     def test_routes_compare_each_cwd_with_the_resolved_root_not_the_given_path(self):
         with tempfile.TemporaryDirectory() as directory:
             real = Path(directory) / "real"
@@ -541,9 +610,11 @@ class NoProductionTest(unittest.TestCase):
                 seen.append(path)
                 return SNAPSHOT(["nix-build"], cwd_of=lambda id: str(real), root=str(real))
 
-            routes = project_question.routes_of(str(link), resolve=resolve)
+            reach = project_question.reach_of(str(link), resolve=resolve)
         self.assertEqual(seen, [str(link)])
-        self.assertEqual(routes, (project_question.Route("nix-build", ("just", "build"), str(real)),))
+        self.assertEqual(
+            reach.routes, (project_question.Route("nix-build", ("just", "build"), str(real)),))
+        self.assertIsNone(reach.repo)
 
 
 if __name__ == "__main__":
@@ -992,7 +1063,7 @@ class QuestionCase(Case):
         defaults = {
             "profile_dirs": [support.profile_dir(self.store, "work")],
             "session_poll_seconds": 3600, "project_asker": self.asker,
-            "project_routes": lambda root: ROUTES,
+            "project_reach": lambda root: REACH,
             "project_question_dispatch": lambda job: job()}
         for name, value in defaults.items():
             kwargs.setdefault(name, value)
@@ -1045,6 +1116,7 @@ class QuestionServiceTest(QuestionCase):
         (ask, cancel), = self.asked
         self.assertEqual((ask.profile, ask.root, ask.routes, ask.question),
                          ("work", "/srv/p01", ROUTES, "why?"))
+        self.assertEqual(ask.repo, "owner/p01")
         self.assertEqual(ask.settings.parent, self.store.with_name("project-question-settings"))
         self.assertIs(cancel, svc._stop)
         self.assertEqual(ask.session_id, SESSION_ID)
@@ -1137,7 +1209,7 @@ class QuestionServiceTest(QuestionCase):
 
         def routes(root):
             raise error
-        svc = self.start(project_routes=routes)
+        svc = self.start(project_reach=routes)
         qid = svc.ask_project_question(WHY, "why?")
         self.assertEqual(self.asked, [])
         self.assertEqual(self.question_rows()[-1], (ANSWERED_KIND, WHY, {

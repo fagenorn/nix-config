@@ -1348,7 +1348,8 @@ accepted question appends one `project_question.asked` row (`question_id`, `ques
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
 `thread_id` it was given) and counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
-model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's read-only routes (a contract that cannot be resolved is a
+model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
+`project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
@@ -3030,7 +3031,7 @@ class ConsoleService:
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  project_asker: Callable[[project_question.Ask, threading.Event | None],
                                          project_question.Outcome] | None = None,
-                 project_routes: Callable[[str], tuple[project_question.Route, ...]] = project_question.routes_of,
+                 project_reach: Callable[[str], project_question.Reach] = project_question.reach_of,
                  project_question_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None,
@@ -3076,7 +3077,7 @@ class ConsoleService:
         self._probe_live: dict[str, str] = {}
         self._probe_workers: list[threading.Thread] = []
         self._project_asker = project_asker
-        self._project_routes = project_routes
+        self._project_reach = project_reach
         self._project_question_dispatch = (
             self._on_project_question_thread if project_question_dispatch is None
             else project_question_dispatch)
@@ -3615,7 +3616,7 @@ class ConsoleService:
                     project_question.FAILED, reason=project_question.STOPPED_TEXT)
             else:
                 try:
-                    routes = self._project_routes(root)
+                    reach = self._project_reach(root)
                 except Exception as error:
                     print(f"console: project_question_contract_failed {question_id} "
                           f"{type(error).__name__}: {error}", file=sys.stderr)
@@ -3632,9 +3633,9 @@ class ConsoleService:
                                     reason=project_question.PROFILE_GONE.format(profile=profile))
                             else:
                                 ask = project_question.new_ask(
-                                    question_id, project_id, root, text, profile, routes,
+                                    question_id, project_id, root, text, profile, reach.routes,
                                     Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id, thread=thread)
+                                    session_id=session_id, thread=thread, repo=reach.repo)
                                 try:
                                     outcome = self._project_asker(ask, self._stop)
                                 except Exception as error:
