@@ -550,7 +550,7 @@ reads them from its `pending` argument (default none).
 the rules, so the view and the service's retry agree) over the sprint, whether it has a listed
 session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
 null. `permission_text` (always present) is the mode the manager's settings file was last written
-with and its reason (`SprintState.permission`, ADR-console-059), null when the sprint has none
+with and its reason (`SprintState.permission`, ADR-console-060), null when the sprint has none
 logged. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
 `unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
 (default true).

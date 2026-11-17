@@ -32,7 +32,7 @@ open question.
 Two kinds record a manager's notices (#1117): `NOTICE_POSTED` (`notice.posted`) and
 `NOTICE_WITHDRAWN` (`notice.withdrawn`), both in `KEPT_KINDS`, so the retention pass never drops
 an open notice and a withdrawal is never lost (ADR-console-044). `NOTICE_NUDGED` (`notice.nudged`,
-#1120) records the one nudge an owner's notice cost a manager; it is not kept; the sprint fold reads only its `permission` member (ADR-console-059).
+#1120) records the one nudge an owner's notice cost a manager; it is not kept; the sprint fold reads only its `permission` member (ADR-console-060).
 
 Three more kinds are kept (#892): `SPRINT_CLOSED` (`sprint.closed`), `SPRINT_STOP_REQUESTED`
 (`sprint.stop_requested`) and `MANAGER_STOPPED` (`manager.stopped`). `manager.stopped` is kept

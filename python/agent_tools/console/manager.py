@@ -63,7 +63,7 @@ three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}
 writes no code and every delivery makes its own worktree, and one `PermissionRequest` command hook
 that prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody watches
 a manager's session (a plain `printf`, no interpreter start). The third is `"permissions":
-{"defaultMode": <mode>}`, the mode the launch's `Permission` chose for the project (ADR-console-059,
+{"defaultMode": <mode>}`, the mode the launch's `Permission` chose for the project (ADR-console-060,
 #1151), nothing else under `permissions`; a launch built without one carries `permission.FALLBACK`,
 so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a

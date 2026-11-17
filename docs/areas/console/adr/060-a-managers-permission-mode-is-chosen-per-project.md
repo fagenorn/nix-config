@@ -1,4 +1,4 @@
-# ADR-console-059 — A manager's permission mode is chosen per project
+# ADR-console-060 — A manager's permission mode is chosen per project
 
 - **Status:** accepted
 - **Decided in:** #1151

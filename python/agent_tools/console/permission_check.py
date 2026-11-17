@@ -6,7 +6,7 @@ Defaults: `--log` `<state_root()>/console/events.sqlite3`, `--accounts` `$CLAUDE
 `$HOME/.claude-accounts`, `--home` `$HOME`. It is read only: the event log is opened `mode=ro` and
 nothing is written anywhere.
 
-The judged manager (plan D4, ADR-console-059) is the first (lowest seq) `manager.started` row of
+The judged manager (plan D4, ADR-console-060) is the first (lowest seq) `manager.started` row of
 `--project` whose payload has a string `sprint_id` and `session_name`, an int `seen_after` (not a
 bool, at least 0) and a `permission` that `permission.from_payload` accepts. Only code that carries
 the permission change writes `permission`, so a manager started before the activation never
