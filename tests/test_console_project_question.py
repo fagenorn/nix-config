@@ -393,6 +393,36 @@ class LaunchTest(unittest.TestCase):
         self.assertIs(kwargs["start_new_session"], True)
         self.assertEqual(outcome, project_question.Outcome("answered", answer="Answer: it builds the hosts."))
 
+    def test_the_session_environment_drops_repository_selection_and_the_declared_credentials(self):
+        ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "what shipped?", "work", self.routes,
+            self.settings_dir, session_id=SESSION_ID, repo="owner/p01", unset=("GH_TOKEN", "GITHUB_TOKEN"))
+        environ = {**ENVIRON, "GIT_DIR": "/other/.git", "GIT_WORK_TREE": "/other",
+                   "GIT_INDEX_FILE": "/other/index", "GH_TOKEN": "stale", "GITHUB_TOKEN": "stale",
+                   "KEEP": "1"}
+        self.ask = ask
+        project_question.run_question(ask, platform="linux", run=self.fake(), environ=environ)
+        env = self.calls[0][3]["env"]
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GH_TOKEN", "GITHUB_TOKEN"):
+            with self.subTest(name):
+                self.assertNotIn(name, env)
+        self.assertEqual((env["KEEP"], env["CLAUDE_ACCOUNT"]), ("1", "work"))
+
+    def test_a_credential_declared_for_unsetting_stays_when_the_contract_declares_none(self):
+        environ = {**ENVIRON, "GH_TOKEN": "mine"}
+        project_question.run_question(self.ask, platform="linux", run=self.fake(), environ=environ)
+        self.assertEqual(self.calls[0][3]["env"]["GH_TOKEN"], "mine")
+
+    def test_reach_carries_the_credentials_the_contract_unsets_before_invocation(self):
+        tracker = {**GITHUB, "credential_env": {"unset_before_invocation": ["GH_TOKEN", "GITHUB_TOKEN"]}}
+        reach = project_question.reach_of("/srv/p01", resolve=lambda p: SNAPSHOT([], tracker=tracker))
+        self.assertEqual(reach.unset, ("GH_TOKEN", "GITHUB_TOKEN"))
+        for name, snapshot in (("none", SNAPSHOT([], tracker=GITHUB)), ("no tracker", SNAPSHOT([])),
+                               ("not a list", SNAPSHOT([], tracker={**GITHUB, "credential_env": {
+                                   "unset_before_invocation": "GH_TOKEN"}}))):
+            with self.subTest(name):
+                self.assertEqual(project_question.credential_unset(snapshot), ())
+
     def test_each_question_gets_its_own_uuid_session_id(self):
         a, b = project_question.new_session_id(), project_question.new_session_id()
         self.assertNotEqual(a, b)
@@ -1162,10 +1192,18 @@ class QuestionServiceTest(QuestionCase):
         self.assertEqual((ask.profile, ask.root, ask.routes, ask.question),
                          ("work", "/srv/p01", ROUTES, "why?"))
         self.assertEqual(ask.repo, "owner/p01")
+        self.assertEqual(ask.unset, ())
         self.assertEqual(ask.settings.parent, self.store.with_name("project-question-settings"))
         self.assertIs(cancel, svc._stop)
         self.assertEqual(ask.session_id, SESSION_ID)
         self.assertEqual(self.question_rows()[0][2]["session_id"], ask.session_id)
+
+    def test_the_sessions_ask_carries_the_credentials_the_reach_unsets(self):
+        reach = project_question.Reach(ROUTES, "owner/p01", ("GH_TOKEN",))
+        svc = self.start(project_reach=lambda root: reach)
+        svc.ask_project_question(WHY, "why?")
+        (ask, _cancel), = self.asked
+        self.assertEqual(ask.unset, ("GH_TOKEN",))
 
     def test_a_questions_transcript_is_spent_under_its_project_and_the_questions_aspect(self):
         now = 1_800_000_000.0

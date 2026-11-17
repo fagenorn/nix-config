@@ -3635,7 +3635,8 @@ class ConsoleService:
                                 ask = project_question.new_ask(
                                     question_id, project_id, root, text, profile, reach.routes,
                                     Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id, thread=thread, repo=reach.repo)
+                                    session_id=session_id, thread=thread, repo=reach.repo,
+                                    unset=reach.unset)
                                 try:
                                     outcome = self._project_asker(ask, self._stop)
                                 except Exception as error:

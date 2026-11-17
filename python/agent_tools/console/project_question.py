@@ -21,7 +21,12 @@ route's argv is `devenv shell -- <declared argv>` unless it already starts with 
 read runs in the project's environment; its `id` and `cwd` do not change, and the skip rules above
 run on the declared argv first (D7). `repo_slug(snapshot)` is `bindings.tracker.repo_slug` only for a
 `github` tracker whose slug fullmatches `project_question_hook.REPO_SLUG`, else None, and never raises.
-`reach_of(root)` is `Reach(read_only_routes(s), repo_slug(s))` with `s = resolve(root)` and lets every
+`credential_unset(snapshot)` is `bindings.tracker.credential_env.unset_before_invocation` (the
+non-empty strings of it, else ()). `session_environment(ask, environ)` is `manager.client_environment`
+minus the `GIT_REPOSITORY_ENV` variables (an inherited `GIT_DIR` would point the admitted git reads at
+another repository) and minus the names in `ask.unset` (a stale `GH_TOKEN` would override the working
+`gh` credential); the run uses it, and the hook rejects `env` and `unset` so the session cannot repair it.
+`reach_of(root)` is `Reach(read_only_routes(s), repo_slug(s), credential_unset(s))` with `s = resolve(root)` and lets every
 exception, a `ContractError` included, propagate: an empty `routes` means only "resolved, no
 runnable read-only command" (bootstrap: never guess a value the resolver declined). `resolve` is a
 test seam only.
@@ -132,6 +137,9 @@ MAX_QUESTION_CHARS = 2000
 SETTINGS_DIR = "project-question-settings"
 SETTINGS_SUFFIX = ".settings.json"
 HOOK_MODULE = "console.project_question_hook"
+GIT_REPOSITORY_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
 HOOK_TIMEOUT = 10
 QUESTION_MARK = "The question: "
 EARLIER_QUESTION = "Earlier question: "
@@ -225,6 +233,7 @@ class Route:
 class Reach:
     routes: tuple[Route, ...]
     repo: str | None
+    unset: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -245,6 +254,7 @@ class Ask:
     session_id: str
     thread: tuple[Turn, ...] = ()
     repo: str | None = None
+    unset: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -292,10 +302,21 @@ def repo_slug(snapshot: Mapping) -> str | None:
     return slug if isinstance(slug, str) and REPO_SLUG.fullmatch(slug) else None
 
 
+def credential_unset(snapshot: Mapping) -> tuple[str, ...]:
+    """`bindings.tracker.credential_env.unset_before_invocation`; () when absent or not strings."""
+    bindings = snapshot.get("bindings")
+    tracker = bindings.get("tracker") if isinstance(bindings, Mapping) else None
+    policy = tracker.get("credential_env") if isinstance(tracker, Mapping) else None
+    names = policy.get("unset_before_invocation") if isinstance(policy, Mapping) else None
+    if not isinstance(names, list):
+        return ()
+    return tuple(name for name in names if isinstance(name, str) and name)
+
+
 def reach_of(root: str, *,
              resolve: Callable[[str], Mapping] = resolve_project.resolve) -> Reach:
     snapshot = resolve(root)
-    return Reach(read_only_routes(snapshot), repo_slug(snapshot))
+    return Reach(read_only_routes(snapshot), repo_slug(snapshot), credential_unset(snapshot))
 
 
 def new_question_id() -> str:
@@ -308,9 +329,11 @@ def new_session_id() -> str:
 
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
-            thread: Sequence[Turn] = (), repo: str | None = None) -> Ask:
+            thread: Sequence[Turn] = (), repo: str | None = None,
+            unset: Sequence[str] = ()) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
-               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo)
+               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo,
+               tuple(unset))
 
 
 def checked_question(text: str) -> str:
@@ -415,6 +438,14 @@ def answer_text(result: str, routes: Sequence[Route]) -> str:
     return text if routes else text + "\n" + NO_PRODUCTION_LINE
 
 
+def session_environment(ask: Ask, environ: Mapping[str, str]) -> dict[str, str]:
+    """The client's environment without the repository selection or the contract's credentials."""
+    env = manager.client_environment(ask.profile, environ)
+    for name in (*GIT_REPOSITORY_ENV, *ask.unset):
+        env.pop(name, None)
+    return env
+
+
 def _write_settings(ask: Ask) -> None:
     directory = ask.settings.parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -453,7 +484,7 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
         with tempfile.TemporaryFile() as stderr:
             try:
                 done = run(argv, timeout=TIMEOUT_SECONDS, cancel=cancel, cwd=ask.root,
-                           env=manager.client_environment(ask.profile, environ),
+                           env=session_environment(ask, environ),
                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr,
                            start_new_session=True)
             except subprocess.TimeoutExpired:
