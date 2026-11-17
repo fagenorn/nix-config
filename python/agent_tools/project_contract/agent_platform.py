@@ -520,8 +520,9 @@ def ensure_directory(path: Path) -> Path:
 # --------------------------------------------------------------------------
 # The fleet registry
 #
-# Read by both binaries; written only from `adopt-project verify --register`,
-# through the locked transaction below. The registry is platform-written
+# Read by both binaries; written from `adopt-project verify --register` and,
+# for its own `bypass-proof/` entry only, by `bypass-proof github`
+# (ADR-console-063), through the locked transaction below. The registry is platform-written
 # state, so every failure to read one that exists is an installation defect
 # published as `resolver_failure` — an absent file is the one benign case,
 # because nothing has been registered yet.

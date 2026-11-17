@@ -11,12 +11,12 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASK_ANSWERED, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
-    SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, cards,
-    check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
-    style_rules, view, with_check, with_notices, with_run, with_sprints)
+    SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
+    asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
+    style_rules, thread, view, with_check, with_notices, with_run, with_sprints)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -53,13 +53,15 @@ DESK_CONTROLS: dict = {
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
-        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "reply-send", "undo", *ANS_PLAIN, "goal-project",
+        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
+        "follow-cancel", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate"),
-    **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "ask-text"),
+    **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "ask-text",
+             "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
              "notice-text", "register-path", "goal-filter", "goal-text"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
@@ -176,8 +178,12 @@ def desk_scenarios() -> list:
         begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"},
         {"click": "notice-open"}, snapshot]
     return [
-        [begin, {"frame": view([project(0, [])])}, {"click": "ask-open"},
+        [begin, {"frame": view([asking(project(0, []), ASK_ANSWERED)])}, {"click": "ask-open"},
          {"type": {"class": "ask-text", "text": "what runs?"}}, snapshot],
+        # a thread's follow-up box under its last answer (#1178)
+        [begin, {"frame": view([asking(project(0, []), thread(ASK_ANSWERED))])},
+         {"open": "questions:owner/p00"}, {"open": "thread:owner/p00:q4"}, snapshot, {"click": "follow-open"},
+         {"type": {"class": "follow-text", "text": "and then?"}}, snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
          {"open": MORE_KEY}, snapshot],

@@ -1265,7 +1265,7 @@ lock held, and no row or stderr line carries the owner's text or the sprint's se
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
-re-folds the sessions and the inbox records and re-derives the last look and the moments from the
+re-folds the sessions, the inbox records and the project questions and re-derives the last look and the moments from the
 log under the ingest lock, with the construction code, and publishes, so the running digest equals
 the one a restart would publish, and a later change is judged against what the log still holds. A failing pass
 is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on. Each pass, the
@@ -1313,7 +1313,8 @@ A question session's spend is the `questions` aspect, its sessions folded from t
 `project_question.asked` rows' `session_id` and `profile` (`spend.question_sessions`), on
 construction and on each append. The asked and answered rows are folded by
 `project_question.asked_questions` into each project entry's `questions`, at construction and on
-each append; retention does not re-fold them.
+each append; a retention pass that removed rows re-folds them from the retained log, as a restart
+would, so a follow-up is admitted and grouped against what the log still holds (#1178).
 A failed iteration is one stderr line `console: spend_poll_failed <Type>: <message>` and the loop
 goes on.
 
@@ -1329,19 +1330,25 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question` (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062)
+(`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None)` admits a question under the ingest
 lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
-question's own checks, and no account the console would start a session under
-(`_session_choice`); a refusal appends nothing and counts nothing. An accepted question appends one
-`project_question.asked` row (`question_id`, `question`, `profile`, `session_id`, the last also
-passed as the session's `--session-id`) and counts itself open in that same section. Its job reads the project's read-only routes (a contract that cannot be resolved is a
+question's own checks, with a `thread_id` only the follow-up checks of
+`project_question.follow_up` against the project's folded questions (an unknown thread, a thread
+whose last question is not answered, a thread too long to carry), and no account the console would
+start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
+accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
+`session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
+`thread_id` it was given) and counts itself open in that same section. A follow-up's session gets
+the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
+model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's read-only routes (a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
@@ -1822,12 +1829,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question = project_question.parse_request(body)
+            project_id, question, thread_id = project_question.parse_request(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question)
+            console.ask_project_question(project_id, question, thread_id)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -3554,12 +3561,15 @@ class ConsoleService:
             worker.start()
             self._project_question_workers.append(worker)
 
-    def ask_project_question(self, project_id: str, text: str) -> str:
+    def ask_project_question(self, project_id: str, text: str,
+                             thread_id: str | None = None) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
-        session runs on a job handed to `project_question_dispatch` outside it. Refusals are
-        `project_question.Refused` and append and count nothing.
+        session runs on a job handed to `project_question_dispatch` outside it. A `thread_id`
+        makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
+        questions after the question's own checks and before the profile choice, and its thread's
+        turns go to the job. Refusals are `project_question.Refused` and append and count nothing.
         """
         with self._ingest:
             if self._project_asker is None:
@@ -3569,21 +3579,25 @@ class ConsoleService:
             if project_id not in self._states:
                 raise project_question.Refused(project_question.UNREGISTERED)
             text = project_question.checked_question(text)
+            thread = () if thread_id is None else project_question.follow_up(
+                self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
             if profile is None:
                 raise project_question.Refused(project_question.NO_PROFILE)
             root = self._states[project_id].root
             question_id = project_question.new_question_id()
             session_id = project_question.new_session_id()
-            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, {
-                "question_id": question_id, "question": text, "profile": profile,
-                "session_id": session_id})])
+            payload = {"question_id": question_id, "question": text, "profile": profile,
+                       "session_id": session_id}
+            if thread_id is not None:
+                payload["thread_id"] = thread_id
+            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, payload)])
             self._apply(appended)
             self._project_questions_open += 1
         try:
             self._project_question_dispatch(
                 lambda: self._run_project_question(
-                    question_id, project_id, root, text, profile, session_id))
+                    question_id, project_id, root, text, profile, session_id, thread))
         except BaseException as error:
             self._record_project_answer(question_id, project_id, project_question.Outcome(
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
@@ -3591,7 +3605,8 @@ class ConsoleService:
         return question_id
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
-                              profile: str, session_id: str) -> None:
+                              profile: str, session_id: str,
+                              thread: "tuple[project_question.Turn, ...]" = ()) -> None:
         """The job of one accepted question: stop check, routes, the session, then the one answer."""
         outcome = None
         try:
@@ -3619,7 +3634,7 @@ class ConsoleService:
                                 ask = project_question.new_ask(
                                     question_id, project_id, root, text, profile, routes,
                                     Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id)
+                                    session_id=session_id, thread=thread)
                                 try:
                                     outcome = self._project_asker(ask, self._stop)
                                 except Exception as error:
@@ -6461,8 +6476,8 @@ class ConsoleService:
     def retain(self) -> int:
         """One retention pass; when it removed rows, re-fold the digest's baselines and publish.
 
-        The folded sessions and inbox records are rebuilt from the retained log, as a
-        restart would, so a later change is judged against what the log still holds.
+        The folded sessions, inbox records and project questions are rebuilt from the retained
+        log, as a restart would, so a later change is judged against what the log still holds.
         """
         with self._ingest:
             removed = self.log.retain()
@@ -6483,6 +6498,7 @@ class ConsoleService:
                 self._adoptions = approve.adoptions(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
+                self._project_questions = project_question.asked_questions(events)
                 self._derive_digest(events)
                 self._publish()
             self._sweep_pictures(events)

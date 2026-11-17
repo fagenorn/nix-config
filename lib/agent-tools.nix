@@ -42,6 +42,7 @@ let
     "adopt-project" = "project_contract.adopt_project";
     "agent-model-matrix" = "agent_model_matrix";
     "artifact-budget" = "delivery.artifact_budget";
+    "bypass-proof" = "console.bypass_proof";
     "cache-proxy" = "hosts.cache_proxy";
     "conformance" = "project_contract.conformance";
     "console" = "console.console";

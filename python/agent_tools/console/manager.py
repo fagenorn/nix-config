@@ -115,7 +115,8 @@ record of each test manager they stopped. The console's own withdrawal removes n
 
 `run_in_own_group(argv, *, timeout, check=False, **kwargs)` is the one runner nudges and probes
 share for a command started in its own session: a timeout kills the whole process group, not only
-the immediate child, because the account wrapper waits for its Claude child.
+the immediate child, because the account wrapper waits for its Claude child. Any exception that
+leaves the call (an interrupt included) also ends the group first.
 """
 
 from __future__ import annotations
@@ -434,19 +435,25 @@ def run_in_own_group(argv: list[str], *, timeout: float, check: bool = False,
     with subprocess.Popen(argv, **kwargs) as process:
         deadline = time.monotonic() + timeout
         out = err = None
-        while True:
-            if cancel is not None and cancel.is_set():
-                _kill_group(process)
-                break
-            remaining = deadline - time.monotonic()
-            try:
-                out, err = process.communicate(
-                    timeout=remaining if cancel is None else min(remaining, CANCEL_POLL_SECONDS))
-                break
-            except subprocess.TimeoutExpired:
-                if deadline - time.monotonic() <= 0:
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
                     _kill_group(process)
-                    raise
+                    break
+                remaining = deadline - time.monotonic()
+                try:
+                    out, err = process.communicate(
+                        timeout=remaining if cancel is None else min(remaining, CANCEL_POLL_SECONDS))
+                    break
+                except subprocess.TimeoutExpired:
+                    if deadline - time.monotonic() <= 0:
+                        _kill_group(process)
+                        raise
+        except BaseException:
+            # An interrupt never reaches a child in its own session, and `Popen` assumes it did.
+            if process.returncode is None:
+                _kill_group(process)
+            raise
         return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 

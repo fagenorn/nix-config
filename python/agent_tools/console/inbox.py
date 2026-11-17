@@ -62,14 +62,16 @@ and `1440/480` stay; `heading_text`), and without a connecting word (`in`, `unde
 dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
 from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`; the whole text, tail included, stays in `criterion_text`.
 
-An approved look answers a look marker (#1186, ADR-console-054 D8). A review criterion whose body line is a look
-marker (`look_marker.marker_line`, issue 1138) raises no card when a trusted (OWNER or MEMBER) live `agent:look`
-marker of the issue, the latest for its pull request and head, answers `approved` (`look_marker.approved_heads`)
-and that pull request reads merged with that head as its head commit (`look_marker.merged_head`). That read is one
-REST `repos/<slug>/pulls/<n>` call through `items_from_node`'s `call` (`read_items` hands its own), made per distinct
-approved pair in ascending order and stopping at the first match, only for an issue that would otherwise raise a
-look-marker card; it lies outside `MAX_CALLS`, `cancelled` is asked before each, a `cancelled` `ForgeError`
-propagates and any other failed read keeps the card. An ordinary `[human]` criterion of the same issue keeps its card.
+An approved look answers a look marker (#1186 and #1211, ADR-console-054 D8). A review criterion whose body line is a
+look marker (`look_marker.marker_line`, issue 1138) raises no card when a pull request that a trusted (OWNER or MEMBER)
+live `agent:look` approval of the issue names (`look_marker.look_prs`) reads merged with a head that the latest trusted
+answer naming it approved, or that keeps an earlier approval (issue 1211), judged at the merge commit's first parent
+(`look_marker.merged_under_look`). The check is one REST `repos/<slug>/pulls/<n>` read through `items_from_node`'s `call`
+(`read_items` hands its own) per pull request a trusted approval names, ascending and stopping at the first match, then
+at most one commit read and `look_marker.READ_LIMIT` carry reads, only for an issue that would otherwise raise a
+look-marker card; it lies outside `MAX_CALLS`, `cancelled` is asked before each read, a `cancelled` `ForgeError`
+propagates and any other failed or unreadable read keeps the card. An ordinary `[human]` criterion of the same issue
+keeps its card.
 
 A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
 its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
@@ -444,24 +446,32 @@ def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: C
 
 def _look_answered(slug: str, issue: int, comments: Sequence[dict], call: Callable[[list[str]], Any] | None,
                    cancelled: Callable[[], bool]) -> bool:
-    """Whether a trusted approval of a head names a pull request that merged with that head (ADR-console-054 D8).
+    """Whether a pull request a trusted approval names merged under a look approval (ADR-console-054 D8).
 
-    Each distinct approved pair is read once, ascending, stopping at the first match; the stop is asked before
-    each read, a stopped read propagates and any other failed read counts as not merged."""
+    A merged head counts when the latest trusted answer naming it approves it, or when it keeps an earlier
+    approval (issue 1211), judged at the merge commit's first parent. One pull is read per pull request a trusted
+    approval names, ascending, stopping at the first match, then at most one commit read and
+    `look_marker.READ_LIMIT` carry reads; the stop is asked before each read, a stopped read propagates and any
+    other failed or unreadable read keeps the card."""
     rest = [{"id": _comment_id(c.get("fullDatabaseId")), "body": c.get("body"), "updated_at": c.get("updatedAt"),
              "author_association": c.get("authorAssociation")}
             for c in comments if c.get("authorAssociation") in look_marker.TRUSTED]
-    for pr, head in look_marker.approved_heads(rest, issue):
+
+    def get(path: str) -> Any:
         if cancelled():
             raise forge_api.ForgeError("cancelled")
+        return (call or forge_api.gh_json)(["api", f"repos/{slug}/{path}"])
+
+    for pr in look_marker.look_prs(rest, issue):
         try:
-            pull = (call or forge_api.gh_json)(["api", f"repos/{slug}/pulls/{pr}"])
+            pull = get(f"pulls/{pr}")
+            if look_marker.merged_under_look(rest, issue, pr, pull, get):
+                return True
         except forge_api.ForgeError as error:
             if error.code == "cancelled":
                 raise
+        except look_marker.Unreadable:
             continue
-        if look_marker.merged_head(pull) == head:
-            return True
     return False
 
 
