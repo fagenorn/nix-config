@@ -77,6 +77,9 @@
 // object_urls: {made, revoked}. A click, focus_on or key step's "on" takes an optional
 // nth (0-based, default 0) choosing among the matches in document order; fewer matches
 // throw.
+// Elem.removeAttribute(name) deletes the attribute and, for disabled, sets .disabled to false.
+// A snapshot node adds busy (its aria-busy attribute, null when unset) and aria_disabled (its
+// aria-disabled attribute, null when unset); disabled stays the native flag only.
 // A key step also takes shiftKey (default false) and passes it on the event. document.body is
 // root, whose direct children are the page's id'd elements (#viewer among them). A snapshot
 // node adds inert (true only when the element's inert property is true), and Elem.focus() does
@@ -141,6 +144,10 @@ class Elem {
   setAttribute(name, value) {
     this.attributes[name] = String(value);
     if (name === "disabled") this.disabled = true;
+  }
+  removeAttribute(name) {
+    delete this.attributes[name];
+    if (name === "disabled") this.disabled = false;
   }
   focus() {
     if (this.disabled === true) return; // a browser does not focus a disabled control
@@ -442,6 +449,8 @@ function node(n) {
     inert: n.inert === true,
     expanded: n.attributes["aria-expanded"] === undefined ? null : n.attributes["aria-expanded"],
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
+    busy: n.attributes["aria-busy"] === undefined ? null : n.attributes["aria-busy"],
+    aria_disabled: n.attributes["aria-disabled"] === undefined ? null : n.attributes["aria-disabled"],
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),

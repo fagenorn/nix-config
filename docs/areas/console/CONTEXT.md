@@ -58,8 +58,12 @@ A short bounded message a manager posts for its project with `sprint notice`, of
 _Avoid_: lock, reservation, announcement
 
 **Project question**:
-What the owner asks about one registered project, from the page. A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker (ADR-console-058).
+What the owner asks about one registered project, from the page. A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker (ADR-console-058). Its session's spend shows on the Spend page under its project and the questions aspect (ADR-console-059).
 _Avoid_: query, ask
+
+**Question thread**:
+A project question and its follow-ups, in order: a follow-up's session gets the thread's earlier questions and answers under the same read-only rules. A thread is kept only in the console's log, and a project's past threads are listed newest first in its closed "Questions (n)" fold, which counts in nothing (ADR-console-059).
+_Avoid_: conversation, chat
 
 **Picture**:
 One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041); an owner check card shows the PNGs its prompt names under the project's root or a configured screenshot location the same way (ADR-console-045).

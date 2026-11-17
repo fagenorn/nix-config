@@ -53,7 +53,7 @@ The phase table: `phase_of(label)` reads a label (without a trailing `RERUN_SUFF
 wins; a label no row matches is `OTHER`. The rows follow the cost measurement's role mapping, so
 they are deliberately not `deliveries.OWNER_LABELS`.
 
-The view: `spend_view(snapshot, today, project_of, profiles)` is the wire object
+The view: `spend_view(snapshot, today, project_of, profiles, questions)` is the wire object
 `{"approximate": <bool>, "days": [<day>, ...]}`, `WINDOW_DAYS` days, `today` and the days before it
 (UTC), oldest first. A day is `{"day", "total", <dimension>: {<key>: <tokens>}}` for each of
 `DIMENSIONS`, every `<tokens>` a `Tokens.wire()`, plus `"sprint_phase": {<sprint id>: {<phase>:
@@ -66,14 +66,21 @@ per message key:
 - `session`: the key's session, else `UNATTRIBUTED`.
 - `project`: `project_of(repo)` of the session's repository (`Snapshot.repos`), `UNATTRIBUTED` when
   the session, its repository or its project is unknown.
-- `account`: `profiles[session]` (the profile the session was seen under), else `UNATTRIBUTED`.
+- `account`: `profiles[session]` (the profile the session was seen under), else `questions[session]`
+  (the profile of its question row), else `UNATTRIBUTED`.
 - `sprint`: the sprint id when the session's name fully matches `MANAGER_SESSION_NAME`, `UNATTRIBUTED`
   when the session is unknown, and not counted for any other session.
 - `run` and `phase` (source `AGENT` only): the run id when the run has a journal, and the phase of
   the agent's journal label; `UNATTRIBUTED` when the run or the agent has no journal record.
 - `aspect`: `KEEPALIVE` for a ping; `DELIVERIES` for a workflow agent; for a session's own and
-  subagent transcripts `MANAGERS` when the session is a sprint's, `OUTSIDE` otherwise, and
+  subagent transcripts `QUESTIONS` when the session is in `questions` (the sessions
+  `question_sessions` folds from the log's `project_question.asked` rows, ADR-console-059),
+  checked before `MANAGERS`, which is for a session that is a sprint's, `OUTSIDE` otherwise, and
   `UNATTRIBUTED` when the session is unknown.
+
+`question_sessions(events, known)` maps a session id to the profile of the latest
+`project_question.asked` row naming it; a row without a non-empty `session_id` and a `profile`
+(one written before the row carried them) is ignored, `known` is copied, never mutated.
 
 The two item breakdowns cover attributed items only: a key whose `sprint` is a sprint id (not
 `UNATTRIBUTED`) is counted in `sprint_phase[sprint][p]`, and a key whose `run` is a run id in
@@ -123,7 +130,7 @@ from agent_tools.console.deliveries import (
     Chunk,
     Unreadable,
 )
-from agent_tools.console.event_log import Event
+from agent_tools.console.event_log import PROJECT_QUESTION_ASKED, Event
 from agent_tools.console.sprints import MANAGER_SESSION_NAME
 from agent_tools.hosts import model_pricing
 
@@ -143,6 +150,7 @@ MANAGERS = "managers"
 DELIVERIES = "deliveries"
 OUTSIDE = "outside_sprint"
 KEEPALIVE = "keepalive"
+QUESTIONS = "questions"
 DIMENSIONS = ("session", "project", "sprint", "run", "phase", "account", "aspect")
 
 BATCH = "deliver-batch"
@@ -513,8 +521,10 @@ def spend_view(
     today: str,
     project_of: Callable[[str], str | None],
     profiles: Mapping[str, str],
+    questions: Mapping[str, str] | None = None,
 ) -> dict:
     """The wire object of the last `WINDOW_DAYS` days of `snapshot`, attributed (see the docstring)."""
+    questions = {} if questions is None else questions
     last = date.fromisoformat(today)
     days = [(last - timedelta(days=n)).isoformat() for n in range(WINDOW_DAYS - 1, -1, -1)]
     totals: dict[str, Tokens] = {day: Tokens() for day in days}
@@ -526,7 +536,7 @@ def spend_view(
         if key.day not in totals:
             continue
         totals[key.day] += tokens
-        named = dict(_attribute(snapshot, key, project_of, profiles))
+        named = dict(_attribute(snapshot, key, project_of, profiles, questions))
         for dimension, name in named.items():
             bucket = groups[key.day][dimension]
             bucket[name] = bucket.get(name, Tokens()) + tokens
@@ -554,14 +564,20 @@ def spend_view(
 
 
 def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | None],
-               profiles: Mapping[str, str]) -> Iterator[tuple[str, str]]:
+               profiles: Mapping[str, str], questions: Mapping[str, str]
+               ) -> Iterator[tuple[str, str]]:
     """The (dimension, name) pairs one key is counted under."""
     session = key.session
     repo = snapshot.repos.get(session) if session is not None else None
     project = project_of(repo) if repo is not None else None
     yield "session", session if session is not None else UNATTRIBUTED
     yield "project", project if project is not None else UNATTRIBUTED
-    yield "account", profiles.get(session, UNATTRIBUTED) if session is not None else UNATTRIBUTED
+    if session is None:
+        yield "account", UNATTRIBUTED
+    elif session in profiles:
+        yield "account", profiles[session]
+    else:
+        yield "account", questions.get(session, UNATTRIBUTED)
     sprint = None
     if session is None:
         yield "sprint", UNATTRIBUTED
@@ -580,6 +596,8 @@ def _attribute(snapshot: Snapshot, key: Key, project_of: Callable[[str], str | N
         yield "aspect", KEEPALIVE
     elif session is None:
         yield "aspect", UNATTRIBUTED
+    elif session in questions:
+        yield "aspect", QUESTIONS
     else:
         yield "aspect", MANAGERS if sprint is not None else OUTSIDE
 
@@ -600,6 +618,19 @@ def session_profiles(events: Iterable[Event],
             continue
         session_id, profile = event.payload.get("session_id"), event.payload.get("profile")
         if isinstance(session_id, str) and isinstance(profile, str):
+            found[session_id] = profile
+    return found
+
+
+def question_sessions(events: Iterable[Event],
+                      known: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Session id -> the profile of its latest `project_question.asked` row; other rows are ignored."""
+    found = dict(known) if known else {}
+    for event in events:
+        if event.kind != PROJECT_QUESTION_ASKED:
+            continue
+        session_id, profile = event.payload.get("session_id"), event.payload.get("profile")
+        if isinstance(session_id, str) and session_id and isinstance(profile, str):
             found[session_id] = profile
     return found
 
