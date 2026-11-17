@@ -1424,6 +1424,21 @@ class HeadingCountsOwnerBallTest(unittest.TestCase):
         self.assertEqual(view.TERMINAL_SENTENCE, "Answer it in the manager's terminal.")
         self.assertEqual(shown["inbox"]["open"], [])
 
+    def test_the_terminal_sentence_is_only_for_a_heading_that_counts_nothing_else(self):
+        waiting = with_manager(reported(started(A), R))
+        answer = [session("s1", "waiting_answer", name=NAME)]
+        decision = {**item("p00", "kd"), "issue": 99, "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None}]}
+        table = [
+            ("an unrelated decision", [InboxRecord(decision, "t1", "u1")], CHOOSE_SENTENCE),
+            ("an unrelated question", [InboxRecord({**item("p00", "kq"), "issue": 99}, "t1", "u1")], NEEDS_SENTENCE),
+        ]
+        for label, records, expected in table:
+            with self.subTest(label):
+                shown = self.shown(waiting, answer, {("p00", r.item["key"]): r for r in records})
+                self.assertEqual(shown["statement"]["inbox_items"], 2)
+                self.assertEqual(shown["statement"]["sentence"], expected)
+
     def test_a_sprint_the_manager_holds_is_not_counted(self):
         shown = self.shown(with_manager(reported(started(A), R)),
                            [session("s1", "working", name=NAME)])

@@ -2108,7 +2108,7 @@ def derive_view(
         sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
-    elif at_terminal:
+    elif at_terminal and open_count == len(at_terminal):
         sentence = TERMINAL_SENTENCE
     elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
