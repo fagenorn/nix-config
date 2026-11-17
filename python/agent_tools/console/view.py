@@ -361,10 +361,18 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
-"notices": [<notice entry>, ...], "notice_post": <bool>, "waits": [<wait entry>, ...]}`; a group entry is
+"notices": [<notice entry>, ...], "notice_post": <bool>, "waits": [<wait entry>, ...],
+"tracker_read": {"ok": <bool>, "read_at": "<ISO time>" | null,
+"began_at": "<ISO time>" | null} | null}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
+
+    `tracker_read` is the project's last tracker read, copied from its `ReadState` and
+    changing no statement, inbox count, headline or sentence. The service sets `read_at` to the
+    time each successful read finished and `began_at` to the time it began, before it fetched anything (a
+    read that began at or after a moment has seen the tracker as it was then); after a restart `read_at` is the
+    time of the last logged change between good and failed reads and `began_at` is null. It is null before any read, never a guessed time.
 
     <wait entry> = {"key", "issue": <int>, "url", "until": "<ISO time>" | null, "text": "<text>"}
     <notice entry> = {"id": <int>, "sprint_id", "poster": "<sprint title>",
@@ -859,6 +867,7 @@ def _wait_entry(record: InboxRecord) -> dict:
 class ReadState:
     ok: bool
     read_at: str | None
+    began_at: str | None = None
 
 
 def inbox_records(
@@ -1559,7 +1568,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    movement: ProjectMovement | None = None,
                    notices: Sequence[Mapping] = (), notice_post: bool = False,
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
-                   waits: Sequence[Mapping] = ()) -> dict:
+                   waits: Sequence[Mapping] = (),
+                   read: ReadState | None = None) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
@@ -1581,6 +1591,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
         "waits": [dict(w) for w in waits],
+        "tracker_read": None if read is None else {"ok": read.ok, "read_at": read.read_at, "began_at": read.began_at},
     }
 
 
@@ -1943,13 +1954,15 @@ def derive_view(
                               (movement or {}).get(s.project_id),
                               notices=notices[s.project_id],
                               notice_post=notice_post[s.project_id],
-                              sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()))
+                              sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
+                              read=health.get(s.project_id))
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
                                     nudges=nudges, looked=looked,
                                     notices=notices[s.project_id],
-                                    notice_post=notice_post[s.project_id])
+                                    notice_post=notice_post[s.project_id],
+                                    read=health.get(s.project_id))
                      for s in quiet]
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],

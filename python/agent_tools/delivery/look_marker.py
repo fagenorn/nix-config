@@ -41,6 +41,13 @@ immediately followed by `before[\\s_-]*merg`. Prose, a bullet that only talks ab
 marker and text inside inline code are never near misses. `near_misses` returns them in body order with their 1-based
 line numbers; `look-lint` prints them, and a body with any is refused even beside a valid marker.
 
+The console reads a look-marker line with `marker_line`, the approved `(pr, head)` pairs of an issue
+with `approved_heads` (trust and latest-wins as `look_answer`), and the head commit of a merged REST
+pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
+look-marker line outside fences changed from `- [ ]` to `- [x]` and the number it changed; every
+other byte of the body, the rest of a changed line (trailing spaces, `\\r`) included, is kept, and
+lines are split and joined on `\\n` alone.
+
 This module reads no network, runs no subprocess and reads no clock.
 """
 import re
@@ -184,6 +191,50 @@ def look_answer(comments: Iterable[Mapping[str, Any]], issue: int, pr: int,
                 if m.kind == KIND and forge_markers.is_live(m, markers)
                 and all(m.fields.get(key) == value for key, value in wanted.items())]
     return max(matching, key=lambda m: m.comment_id, default=None)
+
+
+def marker_line(line: str) -> bool:
+    """Whether one body line, end-stripped as `body_lines` strips it, is a look marker."""
+    return LINE.fullmatch(line.rstrip()) is not None
+
+
+def approved_heads(comments: Iterable[Mapping[str, Any]], issue: int) -> tuple[tuple[int, str], ...]:
+    """The `(pr, head)` pairs, ascending, a trusted live look marker of this issue names and `look_answer` approves."""
+    comments = list(comments)
+    parsed = [forge_markers.parse(c) for c in comments if c.get("author_association") in TRUSTED]
+    pairs = set()
+    for marker in parsed:
+        if marker is None or marker.kind != KIND or marker.fields.get("issue") != str(issue):
+            continue
+        pr, head = marker.fields.get("pr"), marker.fields.get("head")
+        if not isinstance(pr, str) or not isinstance(head, str):
+            continue
+        if re.fullmatch(r"[1-9][0-9]*", pr) is None or HEAD_PATTERN.fullmatch(head) is None:
+            continue
+        answer = look_answer(comments, issue, int(pr), head)
+        if answer is not None and answer.fields.get("answer") == "approved":
+            pairs.add((int(pr), head))
+    return tuple(sorted(pairs))
+
+
+def merged_head(pull: Any) -> str | None:
+    """The head commit of a REST pull request read that is merged, else None."""
+    if not isinstance(pull, dict) or pull.get("merged") is not True:
+        return None
+    head = pull.get("head")
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) and HEAD_PATTERN.fullmatch(sha) else None
+
+
+def tick_markers(body: str | None) -> tuple[str, int]:
+    """The body with every unticked look-marker line outside fences ticked, and how many changed."""
+    lines = (body or "").split("\n")
+    changed = 0
+    for n, line in body_lines(body):
+        if LINE.fullmatch(line) and line.startswith("- [ ] "):
+            lines[n - 1] = "- [x] " + lines[n - 1][6:]
+            changed += 1
+    return "\n".join(lines), changed
 
 
 def judge(pr: int, head: str | None, issues: Iterable[IssueFacts]) -> Verdict:

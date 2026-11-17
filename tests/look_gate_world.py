@@ -27,6 +27,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent_tools.delivery import look_marker
+
 from .forge_world import FLOOR_PROTECTION, ForgeWorld
 from .pre_push_world import FAKE_DERIVE
 from .program_bridge import NODE, run_program
@@ -185,6 +187,7 @@ class LookGateWorld:
 
     def merge_pr(self, number: int) -> str:
         pr = self.prs[number]
+        premerge_head = pr["head"]
         self._scratch += 1
         scratch = self.tmp / f"scratch-{self._scratch}"
         self.git("clone", str(self.bare), str(scratch))
@@ -196,6 +199,13 @@ class LookGateWorld:
         self.register_pr(number)
         merge_commit = self.origin_tip("main")
         self.merge_commits[pr["issue"]] = merge_commit
+        # #1186: the reads and the write of `look-approval tick` against the merged pull request.
+        self.forge.respond_json("gh", ["api", f"repos/{SLUG}/pulls/{number}"],
+                                {"number": number, "merged": True, "head": {"sha": premerge_head}})
+        body = {MARKED: MARKED_BODY, UNMARKED: UNMARKED_BODY}[pr["issue"]]
+        self.forge.respond_json(
+            "gh", ["api", "-X", "PATCH", f"repos/{SLUG}/issues/{pr['issue']}",
+                   "-f", "body=" + look_marker.tick_markers(body)[0]], {"number": pr["issue"]})
         return merge_commit
 
     def look_comments(self) -> list[dict]:
@@ -378,6 +388,15 @@ class LookGateWorld:
         proc = self.look_approval(*line.split()[1:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
+    def _close_out(self, message, match):
+        out = {"issue_state": "CLOSED", "branch_deleted": True, "released": True, "decision_ended": True,
+               "notes": "ok", "release": {"verdict": "released"}}
+        found = re.search(r"Run alone and exactly: (look-approval tick[^\n]*)", message["prompt"])
+        if found:
+            proc = self.look_approval(*found.group(1).split()[1:])
+            out["look_tick"] = json.loads(proc.stdout.strip().splitlines()[-1])
+        return out
+
     def _merge(self, message, match):
         command = MERGE_COMMAND.search(message["prompt"]).group(0)
         number = int(re.search(r"gh pr merge (\d+) ", command).group(1))
@@ -443,9 +462,7 @@ class LookGateWorld:
                                        "decisions": "", "renew": {"verdict": "renewed"}})),
             (r"review|^final-", const(PASS)),
             (r"^hold$", self._hold),
-            (r"^close-out", const({"issue_state": "CLOSED", "branch_deleted": True, "released": True,
-                                   "decision_ended": True, "notes": "ok",
-                                   "release": {"verdict": "released"}})),
+            (r"^close-out", self._close_out),
             (r"^settle-", const({"state": "OPEN", "release": None})),
             (r"^release-", const({"verdict": "released"})),
         ]
@@ -590,4 +607,6 @@ def play_scenario(test_case: unittest.TestCase, guard_source: Path = GUARD_SOURC
            f"the last guard decision is not the admitted merge at {h2}: {command} (exit {code})")
     expect(6, world.contains(h2), "the approved head is not in main")
     expect(6, world.pr_of(MARKED)["state"] == "MERGED", "pull request 111 is not merged")
+    expect(6, final.get("look_tick", {}).get("verdict") == "ticked",
+           f"the close-out did not tick the look marker: {final.get('look_tick')}")
     return out
