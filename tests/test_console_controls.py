@@ -53,13 +53,13 @@ DESK_CONTROLS: dict = {
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
-        "notice-cancel", "notice-withdraw", "reply-send", "undo", *ANS_PLAIN, "goal-project",
+        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick"),
-    **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text"),
+    **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "ask-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
              "notice-text", "register-path", "goal-filter", "goal-text"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
@@ -176,6 +176,8 @@ def desk_scenarios() -> list:
         begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"},
         {"click": "notice-open"}, snapshot]
     return [
+        [begin, {"frame": view([project(0, [])])}, {"click": "ask-open"},
+         {"type": {"class": "ask-text", "text": "what runs?"}}, snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
          {"open": MORE_KEY}, snapshot],

@@ -332,6 +332,18 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .line.notices summary { display: revert; list-style: revert; }
 .line.notices summary::-webkit-details-marker { display: revert; }
 .notice .notice-long, .notice code { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.asks .asks-project { display: block; min-width: 0; margin-bottom: 4px; font-weight: 600; color: var(--sub0); overflow-wrap: anywhere; }
+.ask-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
+.ask-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
+.ask-list { margin-top: 8px; }
+.ask + .ask { margin-top: 12px; }
+.ask > p { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.ask > p + p { margin-top: 2px; }
+.ask-question { color: var(--lav); white-space: pre-line; overflow-wrap: anywhere; }
+.ask-age { margin-left: 8px; color: var(--ov2); white-space: nowrap; }
+.ask-answer { color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
+.ask-back, .ask-state, .ask-reason { color: var(--sub0); }
+.ask-read, .ask-ran, .ask-unknown, .ask-production { color: var(--ov2); }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
@@ -730,6 +742,10 @@ const noticeDrafts = new Map();
 const noticeOpen = new Set();
 const noticePosts = new Map();
 const noticeWithdrawals = new Map();
+const askDrafts = new Map();
+const askOpen = new Set();
+const askPosts = new Map();
+const askLatest = new Map();
 let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
@@ -1925,6 +1941,132 @@ function noticeFold(entry, afterLine) {
   }
   if (post) fold.appendChild(noticePostControl(entry.project_id));
   item.appendChild(fold);
+  return item;
+}
+// A project's Ask box (#1177, ADR-console-002): a quiet button that opens a field in place, and under it the project's questions as its view carries them.
+function askField(projectId) {
+  return Array.from(document.querySelectorAll("textarea.ask-text")).find((area) => area.dataset.askDraft === projectId);
+}
+function openAsk(projectId) {
+  askOpen.add(projectId);
+  redrawNotices();
+  const field = askField(projectId);
+  if (field !== undefined) field.focus();
+}
+function cancelAsk(projectId) {
+  askOpen.delete(projectId);
+  askDrafts.delete(projectId);
+  askPosts.delete(projectId);
+  redrawNotices();
+}
+function askIds(entry) {
+  return (entry !== undefined && Array.isArray(entry.questions) ? entry.questions : []).map((question) => question.id);
+}
+// True when the entry already holds a question the sent one did not have to begin with: the view represents the sent question, so the pending row is not drawn beside it.
+function askShown(projectId, entry) {
+  const post = askPosts.get(projectId);
+  return post !== undefined && askIds(entry).some((id) => !post.before.has(id));
+}
+async function postAsk(projectId, entry) {
+  const current = askPosts.get(projectId);
+  if (current !== undefined && current.phase === "sending") return;
+  const draft = askDrafts.get(projectId);
+  const text = draft === undefined ? "" : draft.value;
+  if (text.trim() === "") return;
+  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString(), before: new Set(askIds(entry)) };
+  askPosts.set(projectId, state);
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/project-question", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ project_id: projectId, question: text }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (askPosts.get(projectId) !== state) return;
+  if (reason === null) {
+    const typed = askDrafts.get(projectId);
+    if (typed !== undefined && typed.value === text) askDrafts.delete(projectId);
+    if (askShown(projectId, askLatest.get(projectId))) askPosts.delete(projectId);
+    else state.phase = "sent";
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawNotices();
+}
+function askBox(projectId, entry) {
+  const state = askPosts.get(projectId);
+  const sending = state !== undefined && state.phase === "sending";
+  const box = el("div", "ask-box");
+  const field = el("textarea", "ask-text field-area");
+  field.setAttribute("aria-label", "Question about " + projectId);
+  field.setAttribute("placeholder", "What do you want to know about this project?");
+  field.dataset.askDraft = projectId;
+  const draft = askDrafts.get(projectId);
+  if (draft !== undefined) field.value = draft.value;
+  const send = actionButton("ask-send btn-quiet", "Send", () => postAsk(projectId, entry));
+  const reason = el("span", "ask-reason", state !== undefined && state.phase === "failed" ? state.reason : "");
+  send.disabled = sending || field.value.trim() === "";
+  markBusy(send, sending);
+  field.addEventListener("input", () => {
+    askDrafts.set(projectId, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
+    const shown = askPosts.get(projectId);
+    if (shown !== undefined && shown.phase === "failed") {
+      askPosts.delete(projectId);
+      reason.textContent = "";
+    }
+    const busy = shown !== undefined && shown.phase === "sending";
+    send.disabled = busy || field.value.trim() === "";
+    markBusy(send, busy);
+  });
+  field.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    if (field.value === "") cancelAsk(projectId);
+  });
+  box.appendChild(field);
+  box.appendChild(send);
+  box.appendChild(actionButton("ask-cancel btn-quiet", "Cancel", () => cancelAsk(projectId)));
+  box.appendChild(reason);
+  return box;
+}
+function askRow(question) {
+  const row = el("li", "ask");
+  row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
+  if (question.state !== "answered") {
+    row.appendChild(el("p", "ask-state", question.state_text));
+    return row;
+  }
+  if (typeof question.back_text === "string") row.appendChild(el("p", "ask-back", question.back_text));
+  if (typeof question.answer === "string" && question.answer !== "") row.appendChild(el("p", "ask-answer", question.answer));
+  for (const [key, cls] of [["read_text", "ask-read"], ["ran_text", "ask-ran"], ["unknown_text", "ask-unknown"], ["production_text", "ask-production"]]) {
+    if (typeof question[key] === "string") row.appendChild(el("p", cls, question[key]));
+  }
+  return row;
+}
+// One block per registered project: the Ask control, then its questions, newest first as the view orders them, with the question being sent drawn first until the view carries it.
+function askBlock(entry, afterLine) {
+  const id = entry.project_id;
+  const item = el("li", afterLine ? "line asks after-line" : "line asks");
+  item.dataset.project = id;
+  if (!afterLine) item.appendChild(el("span", "asks-project", id));
+  item.appendChild(askOpen.has(id) ? askBox(id, entry) : actionButton("ask-open btn-quiet", "Ask a question", () => openAsk(id)));
+  const rows = [];
+  const post = askPosts.get(id);
+  if (post !== undefined && (post.phase === "sending" || post.phase === "sent") && !askShown(id, entry)) {
+    const pending = el("li", "ask");
+    pending.appendChild(phrase("p", "ask-question", post.text, timeEl("ago", post.at, "ask-age")));
+    pending.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending…" : "Working on it"));
+    rows.push(pending);
+  }
+  for (const question of Array.isArray(entry.questions) ? entry.questions : []) rows.push(askRow(question));
+  if (rows.length > 0) {
+    const list = el("ul", "ask-list");
+    for (const row of rows) list.appendChild(row);
+    item.appendChild(list);
+  }
   return item;
 }
 function renderStatement(view) {
@@ -3920,14 +4062,21 @@ function drawProjects(view) {
     && active.dataset.noticeDraft !== undefined
     ? { id: active.dataset.noticeDraft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  const heldAsk = active && active.tagName === "TEXTAREA" && active.dataset
+    && active.dataset.askDraft !== undefined
+    ? { id: active.dataset.askDraft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
   section.replaceChildren(heading);
   const activation = activationLine(view);
   if (activation !== null) section.appendChild(activation);
   const offering = new Set();
   const listed = new Set();
+  const asked = new Set();
   for (const entry of view.entries) {
     for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
       if (project.notice_post === true) offering.add(project.project_id);
+      asked.add(project.project_id);
+      askLatest.set(project.project_id, project);
       for (const notice of Array.isArray(project.notices) ? project.notices : []) {
         listed.add(noticeKey(project.project_id, notice.id));
       }
@@ -3944,6 +4093,19 @@ function drawProjects(view) {
   }
   for (const key of [...noticeWithdrawals.keys()]) {
     if (!listed.has(key)) noticeWithdrawals.delete(key);
+  }
+  for (const id of [...askDrafts.keys()]) {
+    if (!asked.has(id)) askDrafts.delete(id);
+  }
+  for (const id of [...askOpen]) {
+    if (!asked.has(id)) askOpen.delete(id);
+  }
+  for (const id of [...askPosts.keys()]) {
+    const post = askPosts.get(id);
+    if (!asked.has(id) || (post.phase === "sent" && askShown(id, askLatest.get(id)))) askPosts.delete(id);
+  }
+  for (const id of [...askLatest.keys()]) {
+    if (!asked.has(id)) askLatest.delete(id);
   }
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
@@ -3995,7 +4157,7 @@ function drawProjects(view) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
       fold.dataset.key = "quiet";
-      if (entry.projects.some((project) => project.notice_post === true && noticeOpen.has(project.project_id))) fold.open = true;
+      if (entry.projects.some((project) => (project.notice_post === true && noticeOpen.has(project.project_id)) || askOpen.has(project.project_id))) fold.open = true;
       const summary = el("summary");
       summary.appendChild(quietIcon());
       summary.appendChild(el("b", "", entry.label));
@@ -4005,6 +4167,7 @@ function drawProjects(view) {
         inner.appendChild(projectLine(project));
         const notices = noticeFold(project, true);
         if (notices !== null) inner.appendChild(notices);
+        inner.appendChild(askBlock(project, true));
       }
       fold.appendChild(inner);
       const item = el("li");
@@ -4017,6 +4180,7 @@ function drawProjects(view) {
       for (const wait of waits) list.appendChild(waitLine(wait, "li"));
       const notices = noticeFold(entry, drawn);
       if (notices !== null) list.appendChild(notices);
+      list.appendChild(askBlock(entry, drawn || notices !== null));
     }
   }
   section.appendChild(list);
@@ -4034,6 +4198,13 @@ function drawProjects(view) {
     if (again !== undefined) {
       again.focus();
       again.setSelectionRange(heldNotice.start, heldNotice.end);
+    }
+  }
+  if (heldAsk !== null) {
+    const again = askField(heldAsk.id);
+    if (again !== undefined) {
+      again.focus();
+      again.setSelectionRange(heldAsk.start, heldAsk.end);
     }
   }
 }
