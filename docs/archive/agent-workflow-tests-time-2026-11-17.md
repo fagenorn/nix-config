@@ -341,6 +341,33 @@ Three speed-ups keep every member of the suite and change no branch protection, 
 
 On 17 Nov the owner chose to trial 6 members at once and to adopt it only if the saving holds without new flakiness (issue 1215). The runs are `workflow_dispatch` runs of `ci.yaml` made in rounds: each round is one run on the issue branch, whose `ci.yaml` sets `SUITE_RUNNER_JOBS` to 6, and one run on `main`, which sets 4, and the next round starts after both have completed. The window starts at the earliest creation of a run on the issue branch and ends at the latest completion of a job on it; a run on `main` counts only when it was created inside that window, so the runs of `main` outside it stay out of the comparison. A job counts only when it is named `Agent Workflow Tests`, completed with success or failure and has a step `Run agent workflow tests`; a cancelled job is not a row. Each row is one job: Jobs is the job count its branch runs, Created is its run's creation time, Test step is the step's `completed_at` minus its `started_at` in whole seconds from the API, Suite wall is the summary's `wall=` in minutes (`-` when the log has no summary), Members is the summary's `members=` and Failed members are the members the timing rows mark `failed` (`no summary` when the log has none). The saving is the median Test step at 4 jobs minus the median at 6, compared in unrounded seconds, never through the printed minutes. The rule: adopt 6 jobs when the saving is at least 90 seconds (1.5 minutes) and `Failed only at 6` is `none`, else keep 4. `Failed only at 6` lists the members that failed in some 6-job row and in no 4-job row, and every 6-job job whose log has no summary, since it cannot be attributed. The program under Trial reproduce prints the tables and the decision while GitHub keeps the job logs.
 
+| Job | Run/attempt | Jobs | Created (UTC) | Conclusion | Test step (s) | Test step (min) | Suite wall (min) | Members | Failed members |
+|---:|---|---:|---|---|---:|---:|---:|---:|---|
+| 133816634016 | 44016821091/1 | 6 | 2026-11-17 04:23:16 | failure | 479 | 8.0 | 7.8 | 175 | tests/test_console_approve_service.py |
+| 133816688882 | 44016838007/1 | 4 | 2026-11-17 04:23:24 | success | 519 | 8.7 | 8.6 | 175 | - |
+| 133820186676 | 44017913558/1 | 6 | 2026-11-17 04:32:43 | success | 618 | 10.3 | 10.1 | 175 | - |
+| 133820196641 | 44017917344/1 | 4 | 2026-11-17 04:32:45 | success | 576 | 9.6 | 9.4 | 177 | - |
+| 133824368061 | 44019201494/1 | 6 | 2026-11-17 04:44:04 | success | 409 | 6.8 | 6.7 | 175 | - |
+| 133824379800 | 44019205302/1 | 4 | 2026-11-17 04:44:06 | success | 516 | 8.6 | 8.5 | 177 | - |
+| 133827736726 | 44020237822/1 | 6 | 2026-11-17 04:53:19 | success | 562 | 9.4 | 9.2 | 175 | - |
+| 133827745026 | 44020241465/1 | 4 | 2026-11-17 04:53:21 | success | 629 | 10.5 | 10.3 | 177 | - |
+| 133831884418 | 44021522445/1 | 6 | 2026-11-17 05:04:43 | success | 431 | 7.2 | 7.1 | 175 | - |
+| 133831895424 | 44021526408/1 | 4 | 2026-11-17 05:04:45 | success | 615 | 10.2 | 10.1 | 177 | - |
+| 133836033793 | 44022829521/1 | 6 | 2026-11-17 05:15:32 | success | 558 | 9.3 | 9.1 | 175 | - |
+| 133836046115 | 44022833440/1 | 4 | 2026-11-17 05:15:33 | success | 518 | 8.6 | 8.5 | 178 | - |
+
+| Jobs | Runs | Failed runs | Median test step (s) | Median test step (min) | Median suite wall (min) |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 6 | 0 | 547.5 | 9.1 | 9.0 |
+| 6 | 6 | 1 | 518.5 | 8.6 | 8.5 |
+
+Saving: 29.0 s (0.5 min), the median test step at 4 jobs minus the median at 6.
+Failed only at 6: tests/test_console_approve_service.py.
+Decision: 4 jobs.
+Runs: 6 at 6 jobs and 6 at 4 jobs, created 2026-11-17 04:23:16 to 2026-11-17 05:15:33 (UTC).
+
+The saving is 29.0 seconds (0.5 minutes): the median test step is 547.5 seconds at 4 jobs and 518.5 at 6, over six runs at each count, far under the 90 seconds the rule asks for, and the single steps overlap widely (409 to 618 seconds at 6 jobs, 516 to 629 at 4). The runs of `main` carry 177 or 178 members against the branch's 175 because `main` moved on while the trial ran, which does not favour 6. One of the six 6-job runs failed: `tests/test_console_approve_service.py` failed in job 133816634016 with `test_a_waiting_registration_survives_a_restart_and_registers_on_the_first_look` (`self.assertTrue(self.listed("o/r"))` was false) after running 83 seconds; no 4-job run failed. `Failed only at 6` therefore names that member, and the rule gives `Decision: 4 jobs.` on both counts: the saving is under 90 seconds and a member failed only at 6, so the job keeps 4.
+
 ## Trial reproduce
 
 This needs an authenticated `gh` and `python3`; it reads only `gh api`, prints the trial's tables and its decision, and prints nothing to stdout when it refuses.

@@ -81,6 +81,32 @@ def awt_tables(text: str) -> tuple[list[list[str]], dict[str, list[str]], list[l
     return rows_after(AWT_TIME_HEADER), summary, rows_after(AWT_MEMBERS_HEADER)
 
 
+TRIAL_HEADER = (
+    "| Job | Run/attempt | Jobs | Created (UTC) | Conclusion | Test step (s) | Test step (min) |"
+    " Suite wall (min) | Members | Failed members |"
+)
+TRIAL_SUMMARY_HEADER = (
+    "| Jobs | Runs | Failed runs | Median test step (s) | Median test step (min) |"
+    " Median suite wall (min) |"
+)
+
+
+def trial_tables(text: str) -> tuple[list[list[str]], list[list[str]]]:
+    """The trial's job rows' cells and its per-count summary rows' cells."""
+    lines = land_queue_section(text, "Trial at 6 jobs").splitlines()
+
+    def rows_after(header):
+        at = lines.index(header)
+        rows = []
+        for line in lines[at + 2 :]:
+            if not line.startswith("|"):
+                break
+            rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+        return rows
+
+    return rows_after(TRIAL_HEADER), rows_after(TRIAL_SUMMARY_HEADER)
+
+
 ADR_PATH_RE = re.compile(r"docs/areas/[a-z0-9-]+/adr/\d{3}-[a-z0-9-]+\.md")
 # The [E] and [l] classes match the same text as the letters; they keep this
 # line from matching its own pattern, so a grep for the phrases skips this file.
@@ -2623,6 +2649,61 @@ class DocsTreeTest(unittest.TestCase):
         out = result.stdout.splitlines()
         self.assertFalse(any(line.startswith("| 9150 ") for line in out))
         self.assertTrue(any(line.startswith("| 6 | 5 | 0 | 360.0 | 6.0 |") for line in out), out)
+
+
+    def test_the_trial_holds_five_runs_at_each_job_count(self):
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        rows, summary = trial_tables(text)
+        section = land_queue_section(text, "Trial at 6 jobs")
+        lines = section.splitlines()
+        self.assertEqual(
+            "|---:|---|---:|---|---|---:|---:|---:|---:|---|", lines[lines.index(TRIAL_HEADER) + 1]
+        )
+        for cells in rows:
+            self.assertEqual(10, len(cells), cells)
+            self.assertRegex(cells[5], r"^\d+$")
+        by_count = {n: [r for r in rows if r[2] == str(n)] for n in (4, 6)}
+        self.assertGreaterEqual(len(by_count[6]), 5)
+        self.assertGreaterEqual(len(by_count[4]), 5)
+        self.assertEqual(len(rows), len({r[0] for r in rows}))
+        self.assertEqual([r[3] for r in rows], sorted(r[3] for r in rows))
+        median = {}
+        for cells in summary:
+            count = int(cells[0])
+            mine = by_count[count]
+            median[count] = statistics.median(int(r[5]) for r in mine)
+            self.assertEqual(str(len(mine)), cells[1])
+            self.assertEqual(str(sum(1 for r in mine if r[4] == "failure")), cells[2])
+            self.assertEqual(f"{median[count]:.1f}", cells[3])
+        self.assertEqual({4, 6}, set(median))
+        saving = median[4] - median[6]
+        failed_at = {
+            n: {m for r in by_count[n] if r[9] not in ("-", "no summary") for m in r[9].split(", ")}
+            for n in (4, 6)
+        }
+        only_six = sorted(failed_at[6] - failed_at[4])
+        only_six += [f"no summary in job {r[0]}" for r in by_count[6] if r[9] == "no summary"]
+        self.assertIn(
+            f"Saving: {saving:.1f} s ({saving / 60:.1f} min), the median test step at 4 jobs minus the median at 6.",
+            lines,
+        )
+        self.assertIn(f"Failed only at 6: {', '.join(only_six) or 'none'}.", lines)
+        decision = 6 if saving >= 90 and not only_six else 4
+        self.assertIn(f"Decision: {decision} jobs.", lines)
+        self.assertIn(
+            f"Runs: {len(by_count[6])} at 6 jobs and {len(by_count[4])} at 4 jobs, created"
+            f" {rows[0][3]} to {rows[-1][3]} (UTC).",
+            lines,
+        )
+        fence = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Trial reproduce"))
+        self.assertEqual(1, len(fence))
+        for needle in (
+            "python3 -I - <<'PY'",
+            "MIN_RUNS = 5",
+            "THRESHOLD = 90",
+            'TRIAL = {"main": 4, "issue-1215-trial-running-test-suites-6-at": 6}',
+        ):
+            self.assertIn(needle, fence[0])
 
 
 if __name__ == "__main__":
