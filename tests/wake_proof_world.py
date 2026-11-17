@@ -16,7 +16,11 @@ only when sender and receiver are both bypassing or both are not, runs `sprint i
 receiver and goes idle. The `FAKE_CLIENT_*` variables of a run's environment make it fail:
 `LAUNCH_FAILS`, `NOT_READY`, `NO_REGISTRY`, `STAYS_BUSY`, `LISTING_FAILS`, `RELAY_FAILS`,
 `RELAY_DELAY=S`, `FORCE_DEFAULT_SENDER`, `HOLD_AFTER=N`, `LATE_INBOX=S` (the same turn calls
-`sprint inbox` again after `S` seconds) and `STOP_FAILS`.
+`sprint inbox` again after `S` seconds), `LATE_REGISTER=S` (the launch hangs like an account wrapper
+waiting for its client, which registers its session only after `S` seconds, in the wrapper's
+process group) and `STOP_FAILS`.
+
+`LINUX_ONLY` marks a test that needs a launch to succeed: the step refuses other hosts.
 """
 import json
 import os
@@ -29,9 +33,12 @@ import time
 import unittest
 from pathlib import Path
 
+from agent_tools.console import manager
+
 from .guard_policy_world import MANIFEST, REPO_ROOT
 
 PROFILE = "work"
+LINUX_ONLY = unittest.skipUnless(manager.supported(sys.platform), manager.UNAVAILABLE_TEXT)
 SESSION_ID = "m1aaaaaaaaaaaaaa"
 
 FAKE_SYSTEMD_RUN = """#!{python}
@@ -123,8 +130,23 @@ if argv[:1] == ["__late"]:
     set_status("idle")
     sys.exit(0)
 
-with open(LOG / "argv.log", "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(sys.argv) + "\\n")
+late_registration = argv[:1] == ["__bg"]
+if late_registration:
+    state = load()
+    state["daemons"].append(os.getpid())
+    save(state)
+    time.sleep(float(argv[1]))
+    argv = argv[2:]
+else:
+    with open(LOG / "argv.log", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(sys.argv) + "\\n")
+
+if argv[:2] == ["run", "--bg"] and os.environ.get("FAKE_CLIENT_LATE_REGISTER") and not late_registration:
+    subprocess.Popen([sys.argv[0], "__bg", os.environ["FAKE_CLIENT_LATE_REGISTER"], *argv],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+    time.sleep(60)
+    sys.exit(1)
 
 if argv[:2] == ["run", "--bg"]:
     name = argv[argv.index("--name") + 1]

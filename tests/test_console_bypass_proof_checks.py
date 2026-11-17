@@ -16,7 +16,7 @@ from agent_tools.console.bypass_proof import (
     expected_fragments)
 from agent_tools.console.event_log import EventLog
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .wake_proof_world import WakeProofWorld
+from .wake_proof_world import LINUX_ONLY, WakeProofWorld
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_SCRIPT = "home/common/verify-pending/checks/bypass-proof-record"
@@ -267,11 +267,13 @@ class WakeCheckTest(unittest.TestCase):
                               timeout=120)
         return done.returncode, done.stdout
 
+    @LINUX_ONLY
     def test_the_wake_check_is_met_when_both_wakes_reach_the_manager(self):
         code, out = self.run_check()
         self.assertEqual(0, code)
         self.assertEqual("passed", json.loads(out)["outcome"])
 
+    @LINUX_ONLY
     def test_the_wake_check_is_not_met_when_a_wake_is_held(self):
         code, out = self.run_check("--wake-wait", "2", FAKE_CLIENT_HOLD_AFTER="1")
         self.assertEqual(1, code)

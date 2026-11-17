@@ -98,7 +98,8 @@ manager gets (`manager.settings_document` in bypass), and each wake is the conso
 message), so the client delivers it instead of holding it. It refuses, exit 75 with one stderr line
 `bypass-proof: <reason>`, before anything starts (no workdir, `teardown` empty, the record is still
 written) when `CLAUDECODE` is set, the host is not Linux, no profile is given or chosen
-(`chosen-profile`), or `claude-account` or `systemd-run` is not on `PATH`.
+(`chosen-profile`) or it is `default` (that account's sessions and trust live under `~/.claude`,
+not the accounts directory), or `claude-account` or `systemd-run` is not on `PATH`.
 
 Setup, in order: the name `wakes-<UTC YYYYmmddHHMMSS>` (project id `bypass-proof/<name>`); a workdir
 holding `repo/` (`git init -b main`, one empty commit), a stub `bin/sprint` that appends a line to
@@ -114,7 +115,8 @@ after the newest `sprint` call (a turn the previous wake started has ended, so a
 of that turn is not counted for this wake; after `--idle-wait` the wake is `not_idle` and nothing is
 sent); send the relay; then count `sprint inbox` calls: `delivered` when one more was made within
 `--wake-wait`, else `not_delivered`; a relay that is not confirmed is `not_sent`. `outcome` is
-`passed` iff the manager is ready and both wakes are `delivered`.
+`passed` iff the manager is ready, both wakes are `delivered` and the step stopped for no reason
+(a second wake delivered as the time ran out is `failed`, reason `OUT_OF_TIME`).
 
 Time. `--time-limit` (default `WAKE_LIMIT`, 540 s, under the verify runner's 600 s) bounds the whole
 step; `--teardown-reserve` (default `TEARDOWN_RESERVE` = the worst case of teardown's client calls,
@@ -1026,7 +1028,7 @@ class _WakeRun:
         # session, which only the listing and the registry can name.
         self.launched = True
         try:
-            manager.run_launch(launch, run=_bounded(subprocess.run, self.phase))
+            manager.run_launch(launch, run=_bounded(manager.run_in_own_group, self.phase))
         except manager.LaunchFailed as error:
             if self.phase.left() <= 0:
                 raise OutOfTime() from error
@@ -1148,6 +1150,9 @@ def _wake_refusal(profile):
     profile = profile or manager.read_choice(default_choice_file())
     if not profile:
         raise ProofRefused("no profile: pass --profile or choose one in the console")
+    if profile == "default":
+        raise ProofRefused("the default account keeps its sessions and trust under ~/.claude, not "
+                           "under the accounts directory: pass a named profile")
     for program in ("claude-account", "systemd-run"):
         if shutil.which(program) is None:
             raise ProofRefused(f"{program} is not on PATH")
@@ -1190,7 +1195,8 @@ def wake_proof(profile, *, ready_wait=READY_WAIT, idle_wait=IDLE_WAIT, wake_wait
         interrupt, attempt.reason = stop, "interrupted"
     teardown = attempt.teardown()
     delivered = [row["verdict"] == "delivered" for row in attempt.rows]
-    passed = attempt.ready and len(delivered) == WAKE_COUNT and all(delivered)
+    passed = (attempt.reason is None and attempt.ready and len(delivered) == WAKE_COUNT
+              and all(delivered))
     reason = None if passed else attempt.reason
     if reason is None and not passed:
         reason = f"{delivered.count(False)} of {WAKE_COUNT} wakes were not delivered"

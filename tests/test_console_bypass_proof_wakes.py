@@ -4,13 +4,15 @@ Run: just agent-workflow-tests
 """
 import json
 import os
+import sys
 import unittest
+from unittest import mock
 
 from agent_tools.console import bypass_proof, manager, nudge
 from agent_tools.verification import verify_exec
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .wake_proof_world import WakeProofWorld
+from .wake_proof_world import LINUX_ONLY, WakeProofWorld
 
 STEPS = list(bypass_proof.WAKE_TEARDOWN_STEPS)
 
@@ -27,6 +29,7 @@ def stops_and_removals(world):
     return [argv[1:] for argv in world.argv_log() if argv[1:3] in (["run", "stop"], ["run", "rm"])]
 
 
+@LINUX_ONLY
 class BypassProofWakesTest(unittest.TestCase):
     def test_two_wakes_reach_the_bypass_manager_and_each_reads_its_inbox(self):
         world = WakeProofWorld(self)
@@ -140,44 +143,6 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertEqual([entry["trusted"] for entry in world.launch_log()], [True])
         self.assertEqual(json.loads(world.trust_file().read_text())["projects"], {})
 
-    def test_setup_refusals_exit_not_yet_and_start_nothing(self):
-        for label in ("CLAUDECODE", "no profile"):
-            with self.subTest(label):
-                world = WakeProofWorld(self)
-                env = {}
-                if label == "CLAUDECODE":
-                    env["CLAUDECODE"] = "1"
-                else:
-                    (world.accounts / "chosen-profile").unlink()
-
-                code, report, stderr, _ = world.run(env=env)
-
-                self.assertEqual(code, 75, stderr)
-                self.assertEqual(report["outcome"], "refused")
-                self.assertEqual(report["teardown"], [])
-                self.assertTrue(stderr.startswith("bypass-proof: "), stderr)
-                self.assertEqual(world.argv_log(), [])
-                self.assertEqual(world.scratch_entries(), [])
-
-    def test_the_wake_steps_time_limit_fits_the_verify_runner_and_keeps_teardown_time(self):
-        self.assertLess(bypass_proof.WAKE_LIMIT, verify_exec.TIMEOUT)
-        self.assertGreaterEqual(bypass_proof.TEARDOWN_RESERVE,
-                                nudge.LISTING_TIMEOUT + manager.STOP_TIMEOUT
-                                + manager.REMOVE_TIMEOUT)
-        args = bypass_proof._parser().parse_args(["wakes"])
-        self.assertEqual((args.ready_wait, args.idle_wait, args.wake_wait, args.time_limit,
-                          args.teardown_reserve),
-                         (bypass_proof.READY_WAIT, bypass_proof.IDLE_WAIT,
-                          bypass_proof.WAKE_WAIT, bypass_proof.WAKE_LIMIT,
-                          bypass_proof.TEARDOWN_RESERVE))
-        for bad in (["--time-limit", "541"], ["--time-limit", "10", "--teardown-reserve", "10"],
-                    ["--wake-wait", "0"]):
-            with self.subTest(bad):
-                world = WakeProofWorld(self)
-                code, _, _, _ = world.run(*bad)
-                self.assertEqual(code, 2)
-                self.assertEqual(world.argv_log(), [])
-
     def test_an_inbox_call_late_in_the_previous_turn_is_not_counted_for_the_next_wake(self):
         world = WakeProofWorld(self)
 
@@ -285,6 +250,104 @@ class BypassProofWakesTest(unittest.TestCase):
             self.assertIn(report["session_name"], steps[step]["detail"])
         self.assertTrue(steps["untrust"]["ok"] and steps["remove_checkout"]["ok"])
         self.assertEqual(code, 1)
+
+    def test_a_launch_cut_at_the_time_limit_takes_its_unregistered_client_child_with_it(self):
+        world = WakeProofWorld(self)
+
+        code, report, _, seconds = world.run("--time-limit", "8", "--teardown-reserve", "4",
+                                             env={"FAKE_CLIENT_LATE_REGISTER": "30"})
+
+        self.assertEqual(report["reason"], bypass_proof.OUT_OF_TIME)
+        self.assertEqual(report["wakes"], [])
+        self.assertEqual(world.live_daemons(), [])
+        self.assertEqual(code, 1)
+        self.assertLess(seconds, 8)
+
+    def test_a_profile_named_default_is_refused_before_anything_starts(self):
+        world = WakeProofWorld(self)
+
+        code, report, stderr, _ = world.run("--profile", "default")
+
+        self.assertEqual(code, 75, stderr)
+        self.assertEqual(report["outcome"], "refused")
+        self.assertIn("default", report["reason"])
+        self.assertEqual(world.argv_log(), [])
+        self.assertEqual(world.scratch_entries(), [])
+
+
+class BypassProofWakesPortableTest(unittest.TestCase):
+    """What holds on every host: the refusals that come first, the arguments and the verdict rule."""
+
+    def test_a_host_that_is_not_linux_is_refused(self):
+        with mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.dict(os.environ, {}, clear=False) as environ:
+            environ.pop("CLAUDECODE", None)
+            with self.assertRaises(bypass_proof.ProofRefused) as refused:
+                bypass_proof._wake_refusal("work")
+
+        self.assertEqual(str(refused.exception), manager.UNAVAILABLE_TEXT)
+
+    def test_a_profile_named_default_is_refused(self):
+        with mock.patch.object(manager, "supported", return_value=True), \
+                mock.patch.object(bypass_proof.shutil, "which", return_value="/bin/true"), \
+                mock.patch.dict(os.environ, {}, clear=False) as environ:
+            environ.pop("CLAUDECODE", None)
+            with self.assertRaises(bypass_proof.ProofRefused) as refused:
+                bypass_proof._wake_refusal("default")
+
+        self.assertIn("default", str(refused.exception))
+
+    def test_two_delivered_wakes_do_not_pass_a_step_that_ran_out_of_time(self):
+        def prove(attempt):
+            attempt.ready = True
+            attempt.rows = [{"wake": number, "verdict": "delivered"} for number in (1, 2)]
+            attempt.reason = bypass_proof.OUT_OF_TIME
+
+        with mock.patch.object(bypass_proof, "_wake_refusal", return_value="work"), \
+                mock.patch.object(bypass_proof, "_write_record"), \
+                mock.patch.object(bypass_proof._WakeRun, "prove", prove):
+            record = bypass_proof.wake_proof("work")
+
+        self.assertEqual(record["outcome"], "failed")
+        self.assertEqual(record["reason"], bypass_proof.OUT_OF_TIME)
+
+    def test_setup_refusals_exit_not_yet_and_start_nothing(self):
+        for label in ("CLAUDECODE", "no profile"):
+            with self.subTest(label):
+                world = WakeProofWorld(self)
+                env = {}
+                if label == "CLAUDECODE":
+                    env["CLAUDECODE"] = "1"
+                else:
+                    (world.accounts / "chosen-profile").unlink()
+
+                code, report, stderr, _ = world.run(env=env)
+
+                self.assertEqual(code, 75, stderr)
+                self.assertEqual(report["outcome"], "refused")
+                self.assertEqual(report["teardown"], [])
+                self.assertTrue(stderr.startswith("bypass-proof: "), stderr)
+                self.assertEqual(world.argv_log(), [])
+                self.assertEqual(world.scratch_entries(), [])
+
+    def test_the_wake_steps_time_limit_fits_the_verify_runner_and_keeps_teardown_time(self):
+        self.assertLess(bypass_proof.WAKE_LIMIT, verify_exec.TIMEOUT)
+        self.assertGreaterEqual(bypass_proof.TEARDOWN_RESERVE,
+                                nudge.LISTING_TIMEOUT + manager.STOP_TIMEOUT
+                                + manager.REMOVE_TIMEOUT)
+        args = bypass_proof._parser().parse_args(["wakes"])
+        self.assertEqual((args.ready_wait, args.idle_wait, args.wake_wait, args.time_limit,
+                          args.teardown_reserve),
+                         (bypass_proof.READY_WAIT, bypass_proof.IDLE_WAIT,
+                          bypass_proof.WAKE_WAIT, bypass_proof.WAKE_LIMIT,
+                          bypass_proof.TEARDOWN_RESERVE))
+        for bad in (["--time-limit", "541"], ["--time-limit", "10", "--teardown-reserve", "10"],
+                    ["--wake-wait", "0"]):
+            with self.subTest(bad):
+                world = WakeProofWorld(self)
+                code, _, _, _ = world.run(*bad)
+                self.assertEqual(code, 2)
+                self.assertEqual(world.argv_log(), [])
 
 
 if __name__ == "__main__":
