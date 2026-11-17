@@ -643,6 +643,44 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertNotIn("permission", last)
         self.assertEqual(self.sprint_state(svc, sid).permission, AUTO_MODE)
 
+    def test_a_relay_to_a_manager_last_logged_in_bypass_comes_from_a_bypass_sender(self):
+        svc = self.begin(permission_reader=lambda project_id, root: BYPASS_MODE)
+        sid = self.running(svc)
+        self.assertEqual(self.sprint_state(svc, sid).permission, BYPASS_MODE)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "relay", self.name(sid), "s-1", "work", "/srv/p01", sender_bypass=True)])
+        self.assertNotIn("permission", self.nudged()[-1][1])
+
+    def test_a_relay_to_a_manager_last_logged_in_auto_comes_from_a_prompting_sender(self):
+        svc = self.begin(permission_reader=lambda project_id, root: AUTO_MODE)
+        sid = self.running(svc)
+        self.assertEqual(self.sprint_state(svc, sid).permission, AUTO_MODE)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "relay", self.name(sid), "s-1", "work", "/srv/p01", sender_bypass=False)])
+
+    def test_a_relay_to_a_manager_with_no_logged_mode_comes_from_a_prompting_sender(self):
+        svc = self.begin(permission_reader=lambda project_id, root: BYPASS_MODE)
+        sid = self.running(svc)
+        with svc._ingest:
+            svc._sprints[sid] = dataclasses.replace(svc._sprints[sid], permission=None)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertIs(self.nudges[-1].sender_bypass, False)
+
+    def test_a_notice_relay_to_a_bypass_manager_comes_from_a_bypass_sender(self):
+        svc = self.begin(permission_reader=lambda project_id, root: BYPASS_MODE)
+        sid = self.running(svc)
+        self.assertEqual(self.sprint_state(svc, sid).permission, BYPASS_MODE)
+        svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.drain()
+        (sent,) = self.nudges
+        self.assertEqual(sent.route, "relay")
+        self.assertIs(sent.sender_bypass, True)
+
     def test_a_relay_logs_no_mode(self):
         svc = self.begin()
         sid = self.running(svc)
