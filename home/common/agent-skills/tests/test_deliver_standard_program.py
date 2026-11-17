@@ -10560,5 +10560,65 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(LOOK_CONT, self.look_cont())
 
 
+class LookTickTest(unittest.TestCase):
+    """#1186: the close-out of an approved look ticks its look marker, as step 0 of the close-out call."""
+
+    TICK = "Run alone and exactly: look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + SHA
+    CLOSE_OUT = {"issue_state": "CLOSED", "branch_deleted": True, "released": True, "decision_ended": True, "notes": "ok"}
+
+    def look_cont(self):
+        result, _ = run(patch={"setup": {"look": MARKED}})
+        self.assertEqual(result["stage"], "awaiting-look")
+        return result["cont"]
+
+    def approve_args(self):
+        return dict(ARGS, cont=self.look_cont(), look={"answer": "approve", "head": SHA})
+
+    def approve(self, **kw):
+        return run(args=self.approve_args(), patch=RESUME, **kw)
+
+    def test_an_approved_landing_ticks_the_look_marker_after_the_hold(self):
+        result, calls = self.approve()
+        got = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertLess(got.index("hold"), got.index("close-out"))
+        self.assertNotIn("look-tick", got)
+        text = prompt(calls, "close-out")
+        self.assertIn(self.TICK, text)
+        self.assertLess(text.index(self.TICK), text.index("forge-claim release"))
+        self.assertEqual(result["look_tick"], {"verdict": "ticked", "ticked": 1})
+
+    def test_no_look_tick_without_an_approved_marked_landing(self):
+        deliveries = {
+            "unmarked": run(),
+            "awaiting": run(patch={"setup": {"look": MARKED}}),
+            "approve on unmarked": run(args=dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA})),
+        }
+        for name, (result, calls) in deliveries.items():
+            with self.subTest(delivery=name):
+                self.assertFalse([c for c in calls if "look-approval tick" in c["prompt"]])
+                self.assertNotIn("look_tick", result)
+
+    def test_a_merged_pr_resume_of_an_approved_cont_ticks_the_look(self):
+        stopped, _ = self.approve(replies={"merge": None})
+        self.assertEqual(stopped["stage"], "merge")
+        cont = stopped["cont"]
+        self.assertEqual(cont["look"], {"pr": 42, "head": SHA, "approved": SHA})
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"look": MARKED, "head": SHA, **merged(42, "c0ffee")}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls).count("close-out"), 1)
+        self.assertIn(self.TICK, prompt(calls, "close-out"))
+
+    def test_a_look_tick_that_did_not_tick_is_logged_and_the_close_out_still_runs(self):
+        out = run_out(args=self.approve_args(), replies={"close-out": dict(self.CLOSE_OUT, look_tick={"verdict": "needed"})}, patch=RESUME)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(out["result"]["look_tick"]["verdict"], "needed")
+        self.assertEqual(len([l for l in out["logs"] if "close-out: the look marker of issue 9 was not ticked: needed" in l]), 1)
+        silent = run_out(args=self.approve_args(), replies={"close-out": self.CLOSE_OUT}, patch=RESUME)
+        self.assertEqual(silent["result"]["stage"], "done")
+        self.assertIsNone(silent["result"]["look_tick"])
+        self.assertTrue([l for l in silent["logs"] if "was not ticked: no reply" in l])
+
+
 if __name__ == "__main__":
     unittest.main()

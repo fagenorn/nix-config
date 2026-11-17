@@ -6427,6 +6427,7 @@ class ConsoleService:
             if slug is None:
                 continue
             generation = self._answer_generation
+            began = utc_now()
             try:
                 items = self._tracker(project_id, slug, cancelled=self._stop.is_set)
             except ForgeError as error:
@@ -6441,7 +6442,7 @@ class ConsoleService:
                 items = self._with_pictures(project_id, state.root, items)
                 if self._stop.is_set():
                     return
-                self._read_succeeded(project_id, items, generation)
+                self._read_succeeded(project_id, items, generation, began)
 
     def _with_pictures(self, project_id: str, root: str, items: list[dict]) -> list[dict]:
         """Each verification item with its pictures attached; one that fails is kept without them."""
@@ -6485,7 +6486,8 @@ class ConsoleService:
             self._fold(appended)
             self._publish()
 
-    def _read_succeeded(self, project_id: str, items: list[dict], generation: int) -> None:
+    def _read_succeeded(self, project_id: str, items: list[dict], generation: int,
+                        began: str | None = None) -> None:
         with self._ingest:
             if project_id not in self._states:
                 return
@@ -6495,7 +6497,7 @@ class ConsoleService:
             appended = self.log.append([*inbox_changes(self._inbox, project_id, items),
                                         *health_change(self._health, project_id, True)])
             self._fold(appended)
-            self._health[project_id] = ReadState(True, utc_now())
+            self._health[project_id] = ReadState(True, utc_now(), began)
             self._publish()
 
     def _kept_answered(self, project_id: str, item: dict, generation: int) -> dict:
