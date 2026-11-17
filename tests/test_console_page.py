@@ -2203,6 +2203,13 @@ class PageReadingFormatTest(unittest.TestCase):
         self.assertEqual((para["tag"], full(para)), ("p", "first line\nsecond line"))
         self.assertTrue([d for d in css_decls(".ask-answer p") if d.get("white-space") == "pre-line"])
 
+    def test_the_answer_reads_at_the_size_of_a_cards_option_text(self) -> None:
+        (option,) = [d for d in css_decls(".opt .ot") if "font-size" in d]
+        (answer,) = [d for d in css_decls(".ask-answer") if "font-size" in d]
+        self.assertEqual(answer["font-size"], option["font-size"])
+        for selector in (".ask-answer p", ".ask-answer li", ".ask-answer .md-list", ".ask-answer ul.md-list", ".ask-answer ol.md-list"):
+            self.assertEqual([d for d in css_decls(selector) if "font-size" in d or "font" in d], [], selector)
+
     def test_the_call_out_question_takes_the_inline_subset(self) -> None:
         answer_snap = render([*PageReadingTest.opened(thread(ask(
             state="answered", state_text="Answered", answered_at=utc(30000), answer="ok",
