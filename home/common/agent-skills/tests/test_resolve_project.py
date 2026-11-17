@@ -1039,12 +1039,16 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(orchestration["attempt_budget_minutes"], 240)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
-    def test_the_repositorys_own_contract_declares_no_production_rules(self):
+    def test_the_repositorys_own_contract_declares_host_activation_as_production(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
-        # Issue 1193 AC3: the production declaration is issue 1206's, not this change's.
+        # Issue 1206: nix-activate is production, approved only through the console's Activate.
         code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
         self.assertEqual(code, 0, err or out)
-        self.assertEqual(json.loads(out)["production"], {"status": "not_declared"})
+        self.assertEqual(json.loads(out)["production"], {"status": "declared",
+            "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+            "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+            "release_profile": "github-release",
+            "console_activation": "nix-activate"})
 
     def test_nix_activate_is_exact_and_the_snapshot_has_no_deploy(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.

@@ -507,7 +507,7 @@ class DocsTreeTest(unittest.TestCase):
             line for line in (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
             if line.startswith("One goal, later its issues"))
         self.assertTrue(sprint_entry.endswith(
-            "ADR-console-042, ADR-console-050, ADR-console-051, ADR-console-057)."))
+            "ADR-console-042, ADR-console-050, ADR-console-051, ADR-console-057, ADR-console-061)."))
         self.assertNotIn("ADR-console-046", sprint_entry)
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("050-*.md"))), 1)
 
@@ -529,6 +529,28 @@ class DocsTreeTest(unittest.TestCase):
             if line.startswith("One goal, later its issues"))
         for needle in ("session output", "a running check", "ADR-console-057"):
             self.assertIn(needle, sprint_entry)
+
+    def test_the_land_lock_wait_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/061-a-sprint-queued-for-the-land-lock-reads-"
+                "waiting-its-turn-to-merge.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-061 — A sprint queued for the land lock reads "
+                                "waiting its turn to merge")
+        adr = self.doc(path)
+        for needle in ("#1184", "ADR-console-050", "ADR-console-048", "waiting its turn to merge",
+                       "refs/agent-locks/land/", "git/matching-refs", "land-lock-",
+                       "land-relock-", "land-pr-", "stuck", "release pull request",
+                       "refreshes no lock time"):
+            self.assertIn(needle, adr)
+        status = [line for line in (REPO_ROOT / (
+            "docs/areas/console/adr/050-a-sprint-waiting-on-ci-a-committing-delivery-or-a-"
+            "release-step-reads-what-it-waits-for.md")).read_text().splitlines()
+                  if line.startswith("- **Status:**")]
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-061"])
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("waiting its turn to merge", "ADR-console-061"):
+            self.assertIn(needle, context)
+        self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("061-*.md"))), 1)
 
     def test_the_owner_check_pictures_decision_is_recorded(self):
         adr = self.doc(
@@ -604,7 +626,7 @@ class DocsTreeTest(unittest.TestCase):
         decided = next(
             line for line in (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md")
             .read_text().splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1136, #1137"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177"), decided)
 
     def test_the_desk_spend_figure_decision_is_recorded(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -627,7 +649,7 @@ class DocsTreeTest(unittest.TestCase):
         status = next(line for line in lines if line.startswith("- **Status:**"))
         decided = next(line for line in lines if line.startswith("- **Decided in:**"))
         self.assertTrue(status.endswith("ADR-console-052, ADR-console-056"), status)
-        self.assertTrue(decided.endswith("#1136, #1137"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177"), decided)
         self.assertIn("ADR-console-056", desk)
         spend = self.doc("docs/areas/console/adr/052-the-spend-page-is-a-second-read-only-page-of-the-console.md")
         self.assertIn("- **Status:** accepted; amended by ADR-console-056", spend)
@@ -1685,7 +1707,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1135, #1136, #1137"))
+        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177"))
         self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
         self.assertIn('"Hand-off for you, from <title>"', adr)
         self.assertIn("its paths in the code style", adr)

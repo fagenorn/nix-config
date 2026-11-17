@@ -30,9 +30,9 @@ Exits, one JSON line with sorted keys.
 - 0 met: no sprint is stuck and some running sprint has a seen association inside `FRESH_MS`,
   `state != "quiet"` and `ball == "manager"`, a `status_at` and a `movement.base_at` both older than
   `OLD_MS` (so the goal, approval, report and run movement would not move it), a `movement.waits`
-  object whose `ci_at`, `commit_at` and `release_at` are each null or older than `OLD_MS` (the
-  console's own wait signals, read as published and never inferred from the now-sentence, which a
-  moving session hides), no `sessions[]` entry in state `working`, and no delivery entry with a
+  object whose `ci_at`, `commit_at`, `release_at` and `lock_at` (the land lock wait) are each null
+  or older than `OLD_MS` (the console's own wait signals, read as published and never inferred from
+  the now-sentence, which a moving session hides), no `sessions[]` entry in state `working`, and no delivery entry with a
   `moved_at` younger than `OLD_MS`. That covers every delivery entry of a session entry of the project (the
   sprint's `sessions[]` and `outside_sprints.sessions[]`) whose `session_id` is one of the sprint's
   associations or whose `issues[].issue` meets the sprint's `issues[].issue`. Only the session
@@ -55,7 +55,7 @@ from agent_tools.console.deliveries import QUIET_AFTER_MS
 
 FRESH_MS = QUIET_AFTER_MS - 3 * 60_000
 OLD_MS = QUIET_AFTER_MS
-WAITS = ("ci_at", "commit_at", "release_at")
+WAITS = ("ci_at", "commit_at", "release_at", "lock_at")
 NOT_YET = manager_check.NOT_YET
 
 
