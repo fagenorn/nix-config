@@ -62,6 +62,15 @@ and `1440/480` stay; `heading_text`), and without a connecting word (`in`, `unde
 dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
 from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`; the whole text, tail included, stays in `criterion_text`.
 
+An approved look answers a look marker (#1186, ADR-console-054 D8). A review criterion whose body line is a look
+marker (`look_marker.marker_line`, issue 1138) raises no card when a trusted (OWNER or MEMBER) live `agent:look`
+marker of the issue, the latest for its pull request and head, answers `approved` (`look_marker.approved_heads`)
+and that pull request reads merged with that head as its head commit (`look_marker.merged_head`). That read is one
+REST `repos/<slug>/pulls/<n>` call through `items_from_node`'s `call` (`read_items` hands its own), made per distinct
+approved pair in ascending order and stopping at the first match, only for an issue that would otherwise raise a
+look-marker card; it lies outside `MAX_CALLS`, `cancelled` is asked before each, a `cancelled` `ForgeError`
+propagates and any other failed read keeps the card. An ordinary `[human]` criterion of the same issue keeps its card.
+
 A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
 its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
 (case-sensitive). It is the rest of that line, stripped and whitespace-collapsed, and it leaves the
@@ -180,6 +189,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
 from agent_tools.canonical import telemetry_digest
+from agent_tools.delivery import look_marker
 from agent_tools.console import pictures
 from agent_tools.console.sprints import MAX_ASK_CHARS, MAX_PICTURE_LINE_CHARS, MAX_PICTURES, cut
 from agent_tools.system import forge_api
@@ -432,6 +442,29 @@ def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: C
     }
 
 
+def _look_answered(slug: str, issue: int, comments: Sequence[dict], call: Callable[[list[str]], Any] | None,
+                   cancelled: Callable[[], bool]) -> bool:
+    """Whether a trusted approval of a head names a pull request that merged with that head (ADR-console-054 D8).
+
+    Each distinct approved pair is read once, ascending, stopping at the first match; the stop is asked before
+    each read, a stopped read propagates and any other failed read counts as not merged."""
+    rest = [{"id": _comment_id(c.get("fullDatabaseId")), "body": c.get("body"), "updated_at": c.get("updatedAt"),
+             "author_association": c.get("authorAssociation")}
+            for c in comments if c.get("authorAssociation") in look_marker.TRUSTED]
+    for pr, head in look_marker.approved_heads(rest, issue):
+        if cancelled():
+            raise forge_api.ForgeError("cancelled")
+        try:
+            pull = (call or forge_api.gh_json)(["api", f"repos/{slug}/pulls/{pr}"])
+        except forge_api.ForgeError as error:
+            if error.code == "cancelled":
+                raise
+            continue
+        if look_marker.merged_head(pull) == head:
+            return True
+    return False
+
+
 def _labels(node: dict) -> list[str]:
     connection = node.get("labels")
     if connection is None:
@@ -598,7 +631,8 @@ def _waiting_item(project_id: str, slug: str, issue: int, held_work: int, held, 
 
 
 def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], datetime] | None = None,
-                    cancelled: Callable[[], bool] = lambda: False) -> list[dict]:
+                    cancelled: Callable[[], bool] = lambda: False,
+                    call: Callable[[list[str]], Any] | None = None) -> list[dict]:
     """The inbox items of one search node: one per live owner-action marker of a trusted comment, and
     for an issue holding a verify block one more per owner check that waits with no prompt (`wait`)."""
     if cancelled():
@@ -637,8 +671,12 @@ def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], 
     items += [item for _, item in prompts]
     if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
             and node.get("authorAssociation") in verify_answer.TRUSTED and not live):
-        items += [_review_item(project_id, slug, number, held_work, c, blocks)
-                  for c in review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))]
+        reviews = review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))
+        lines = _body(node).split("\n")
+        looks = [c for c in reviews if look_marker.marker_line(lines[c.line])]
+        if looks and _look_answered(slug, number, comments, call, cancelled):
+            reviews = [c for c in reviews if c not in looks]
+        items += [_review_item(project_id, slug, number, held_work, c, blocks) for c in reviews]
     if node.get("__typename") == "Issue" and _holds_block(comments):
         held, waits = verify_wait.held_waits(
             comments, slug, _default_branch(node), clock or (lambda: forge_api.server_now()), cancelled)
@@ -707,14 +745,14 @@ def read_items(project_id: str, slug: str, *,
         raise forge_api.ForgeError("payload_incomplete", f"more than {MAX_CALLS} pages")
     if len(nodes) < total:
         raise forge_api.ForgeError("payload_incomplete", f"{len(nodes)} of {total} search results")
-    items = [i for node in nodes for i in items_from_node(project_id, slug, node, clock, cancelled)]
+    items = [i for node in nodes for i in items_from_node(project_id, slug, node, clock, cancelled, call)]
     seen = {node.get("number") for node in nodes if isinstance(node, dict)}
     held, _, _ = _read_pages(lambda after: held_argv(slug, after), call, cancelled)
     for node in held:
         if isinstance(node, dict) and node.get("number") in seen:
             continue
         try:
-            items += items_from_node(project_id, slug, node, clock, cancelled)
+            items += items_from_node(project_id, slug, node, clock, cancelled, call)
         except forge_api.ForgeError as error:
             if error.code != "payload_incomplete":
                 raise

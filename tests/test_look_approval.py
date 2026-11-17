@@ -157,6 +157,87 @@ class MarkedTest(unittest.TestCase):
         self.assertEqual(self.world.calls(), [])
 
 
+class TickTest(unittest.TestCase):
+    PULL_ARGV = ["api", f"repos/{SLUG}/pulls/{PR}"]
+    TICK = ["tick", *POST]
+    MERGED = {"number": 12, "merged": True, "head": {"sha": HEAD}}
+    TICK_BODY = ("## Acceptance criteria\n\n- [ ] [code] the label — measured: a test\n"
+                 "- [ ] [human] before merge: " + WHAT + " — measured: the owner, on the console\n"
+                 "- [ ] [human] the footer — measured: the owner\n\n```\n"
+                 "- [ ] [human] before merge: an example — measured: nobody\n```\n")
+    TICKED_BODY = TICK_BODY.replace("- [ ] [human] before merge: " + WHAT, "- [x] [human] before merge: " + WHAT)
+    PATCH = ["api", "-X", "PATCH", f"repos/{SLUG}/issues/{ISSUE}", "-f", "body=" + TICKED_BODY]
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def seed(self, comments, body, pull):
+        self.world.comment_store(SLUG, ISSUE, comments)
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+        self.world.respond_json("gh", self.PULL_ARGV, pull)
+        self.world.respond_json("gh", self.PATCH, {"number": 7})
+
+    def approval(self, cid=5, head=HEAD, answer="approved", association="OWNER"):
+        return comment(cid, lm.approval_body(7, 12, head, answer, f"m{cid}"), association)
+
+    def patches(self):
+        return [argv for argv in self.world.argvs("gh") if argv[:3] == ["api", "-X", "PATCH"]]
+
+    def test_tick_ticks_only_the_look_marker_box_of_an_approved_merged_head(self):
+        self.seed([self.approval()], self.TICK_BODY, self.MERGED)
+        code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["covers"]), (0, "ticked", 1, [WHAT]))
+        self.assertEqual({k: out[k] for k in ("command", "action", "repo", "issue", "pr", "head")},
+                         {"command": "look-approval", "action": "tick", "repo": SLUG, "issue": 7, "pr": 12,
+                          "head": HEAD})
+        self.assertEqual(self.world.argvs("gh").count(self.PATCH), 1)
+
+    def test_tick_writes_nothing_without_a_trusted_approval_of_that_head(self):
+        cases = {
+            "untrusted": [self.approval(5, association="CONTRIBUTOR")],
+            "other head": [self.approval(5, head=OTHER)],
+            "changes after": [self.approval(5), self.approval(6, answer="changes")],
+        }
+        for name, comments in cases.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed(comments, self.TICK_BODY, self.MERGED)
+                code, out = run(*self.TICK)
+                self.assertEqual((code, out["verdict"]), (1, "needed"))
+                self.assertEqual(self.patches(), [])
+
+    def test_tick_writes_nothing_unless_the_pull_request_merged_at_that_head(self):
+        cases = {
+            "not merged": {**self.MERGED, "merged": False},
+            "other head": {**self.MERGED, "head": {"sha": OTHER}},
+        }
+        for name, pull in cases.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed([self.approval()], self.TICK_BODY, pull)
+                code, out = run(*self.TICK)
+                self.assertEqual((code, out["verdict"]), (1, "not_merged"))
+                self.assertEqual(self.patches(), [])
+
+    def test_an_already_ticked_or_unmarked_issue_writes_nothing(self):
+        cases = {
+            "already": (self.TICKED_BODY, "already"),
+            "unmarked": ("## Acceptance criteria\n\n- [ ] [code] x\n", "unmarked"),
+        }
+        for name, (body, verdict) in cases.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed([self.approval()], body, self.MERGED)
+                code, out = run(*self.TICK)
+                self.assertEqual((code, out["verdict"], out["ticked"]), (0, verdict, 0))
+                self.assertEqual(self.patches(), [])
+
+    def test_tick_usage_errors_come_before_any_gh_call(self):
+        code, out = run("tick", "--repo", SLUG, "--issue", "7", "--pr", "12", "--head", "abc")
+        self.assertEqual((code, out["error"]), (2, "usage"))
+        self.assertEqual(self.world.argvs("gh"), [])
+
+
 class UsageTest(unittest.TestCase):
     def test_bad_arguments_are_usage_errors_before_any_gh_call(self):
         world = ForgeWorld(self)

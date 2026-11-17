@@ -7,6 +7,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
 
     look-approval post --repo <owner/name> --issue <n> --pr <n> --head <sha> --answer <approved|changes> --message <id>
     look-approval status --repo <owner/name> --issue <n> --pr <n> --head <sha>
+    look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha>
     look-approval marked --repo <owner/name> --issue <n>
     look-approval judge            (no options; reads stdin; no network)
 
@@ -38,9 +39,19 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    read, in `post` and `status` as in `judge`.
 6. Usage errors are found before any `gh` call: `repo` is `<owner>/<name>` of `[A-Za-z0-9_.-]`,
    numbers are positive decimals, `head`, `answer` and `message` are those of
-   `look_marker.approval_fields` (`status` checks `head` only; `marked` takes `repo` and `issue` alone); output `verdict` `error`, `error`
+   `look_marker.approval_fields` (`status` and `tick` check `head` only; `marked` takes `repo` and `issue` alone); output `verdict` `error`, `error`
    `usage`, `detail`, exit 2. A forge error in `post`, `status` or `marked` prints `verdict` `error`, `error`
    (the `ForgeError` code), `detail` and `repo`, `issue`, exit 1; nothing is retried.
+7. `tick` ticks the box of the look marker once the owner's approved head has merged (issue 1186).
+   It reads the issue body, and decides `verdict` in this order, each after the reads it needs:
+   `unmarked` (exit 0: the body has no look marker; nothing else is read), `needed` (exit 1: the
+   latest trusted live `look` marker naming this issue, pull request and head is not `approved`),
+   `not_merged` (exit 1: `look_marker.merged_head` of `repos/<repo>/pulls/<pr>` is not `head`),
+   `already` (exit 0: no unticked look-marker line remains) or `ticked` (exit 0: one PATCH of the
+   issue body, `look_marker.tick_markers` of it, is written). A look-marker line inside a fence and
+   every other criterion keep their boxes. That PATCH is the only write, made only for `ticked`.
+   Output keys: `repo`, `issue`, `pr`, `head`, `verdict`, `covers` (the criteria text) and `ticked`
+   (the boxes this call ticked, 0 unless `ticked`). `head` is checked as in `status` before any `gh` call.
 """
 import argparse
 import json
@@ -53,7 +64,7 @@ from agent_tools.delivery import look_marker as lm
 from agent_tools.system import forge_api
 
 COMMAND = "look-approval"
-VERBS = ("post", "status", "marked", "judge")
+VERBS = ("post", "status", "tick", "marked", "judge")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NUMBER = re.compile(r"[0-9]+")
 USAGE = 2
@@ -83,7 +94,7 @@ def _number(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = Parser(prog=COMMAND, description=__doc__)
     verbs = parser.add_subparsers(dest="action", required=True)
-    for name in ("post", "status"):
+    for name in ("post", "status", "tick"):
         sub = verbs.add_parser(name)
         sub.add_argument("--repo", required=True, type=_repo)
         sub.add_argument("--issue", required=True, type=_number)
@@ -153,6 +164,32 @@ def status(args: argparse.Namespace) -> int:
     return 0
 
 
+def tick(args: argparse.Namespace) -> int:
+    body = _issue_body(args)
+    look = lm.read_look(body)
+    base = {"command": COMMAND, "action": "tick", "repo": args.repo, "issue": args.issue, "pr": args.pr,
+            "head": args.head}
+    covers = list(look.covers)
+
+    def finish(verdict: str, code: int, ticked: int = 0) -> int:
+        emit({**base, "verdict": verdict, "covers": covers, "ticked": ticked})
+        return code
+
+    if not look.marked:
+        return finish("unmarked", 0)
+    marker = lm.look_answer(forge_markers.list_comments(args.repo, args.issue), args.issue, args.pr, args.head)
+    if marker is None or marker.fields.get("answer") != "approved":
+        return finish("needed", 1)
+    pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
+    if lm.merged_head(pull) != args.head:
+        return finish("not_merged", 1)
+    new_body, changed = lm.tick_markers(body)
+    if not changed:
+        return finish("already", 0)
+    forge_api.run_gh(["api", "-X", "PATCH", f"repos/{args.repo}/issues/{args.issue}", "-f", "body=" + new_body])
+    return finish("ticked", 0, changed)
+
+
 def _int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
@@ -210,12 +247,12 @@ def main(argv: list[str] | None = None) -> int:
             return judge(sys.stdin.read())
         if args.action == "post":
             lm.approval_fields(args.issue, args.pr, args.head, args.answer, args.message)
-        elif args.action == "status" and not (isinstance(args.head, str) and lm.HEAD_PATTERN.fullmatch(args.head)):
+        elif args.action in ("status", "tick") and not (isinstance(args.head, str) and lm.HEAD_PATTERN.fullmatch(args.head)):
             raise UsageError(f"head {args.head!r} is not 40 lowercase hex")
     except (UsageError, ValueError) as error:
         return usage_out(argv[0] if argv and argv[0] in VERBS else None, str(error))
     try:
-        return {"post": post, "status": status, "marked": marked}[args.action](args)
+        return {"post": post, "status": status, "tick": tick, "marked": marked}[args.action](args)
     except forge_api.ForgeError as error:
         return forge_out(args, error)
 
