@@ -444,6 +444,11 @@ class AnswerPartsTest(unittest.TestCase):
         self.assertIsNone(parts.back)
         self.assertEqual(project_question.answer_parts("None.").answer, "None.")
 
+    def test_a_heading_only_unicode_case_folding_matches_is_not_a_heading(self):
+        parts = project_question.answer_parts("An\u017fwer: ok\nRead: flake.nix")
+        self.assertEqual(parts.answer, "An\u017fwer: ok")
+        self.assertEqual(parts.read, "flake.nix")
+
     def test_a_part_runs_on_until_the_next_heading(self):
         parts = project_question.answer_parts("Answer: first\nsecond line\nread: none")
         self.assertEqual(parts.answer, "first\nsecond line")

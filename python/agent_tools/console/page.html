@@ -1980,8 +1980,9 @@ function openAsk(projectId) {
 function cancelAsk(projectId) {
   askOpen.delete(projectId);
   askDrafts.delete(projectId);
-  askPosts.delete(projectId);
-  askSent.delete(projectId);
+  // A question already sent stays outstanding, in flight or accepted, until the view carries its row; only a refusal is dropped.
+  const post = askPosts.get(projectId);
+  if (post !== undefined && post.phase !== "sending") askPosts.delete(projectId);
   redrawNotices();
 }
 function askIds(entry) {

@@ -1729,6 +1729,27 @@ class PageAskTest(unittest.TestCase):
         self.assertEqual(self.found(d, "ask-state"), [])
         self.assertEqual(self.found(gone, "ask"), [])
 
+    def test_closing_the_box_keeps_an_accepted_question_working_until_the_view_carries_it(self) -> None:
+        working = view([asking(project(0, []), ASK_WORKING)])
+        accepted, closed, after_frame = render([
+            *self.sent({"click": "ask-send"}, {"snapshot": True},
+                       {"click": "ask-cancel"}, {"snapshot": True},
+                       {"frame": working}, {"snapshot": True})])
+        self.assertEqual(len(self.found(accepted, "ask")), 1)
+        self.assertEqual(self.found(closed, "ask-text"), [])
+        (row,) = self.found(closed, "ask")
+        self.assertEqual(full(self.found(closed, "ask-state")[0]), "Working on it")
+        (row,) = self.found(after_frame, "ask")
+        self.assertEqual(full(self.found(after_frame, "ask-state")[0]), "Working on it")
+
+    def test_closing_the_box_before_the_console_answers_still_shows_the_question_working(self) -> None:
+        snap, = render([
+            *self.sent({"hold": True}, {"click": "ask-send"}, {"click": "ask-cancel"},
+                       {"release": {"status": 204, "text": ""}}, {"snapshot": True})])
+        self.assertEqual(self.found(snap, "ask-text"), [])
+        (row,) = self.found(snap, "ask")
+        self.assertEqual(full(self.found(snap, "ask-state")[0]), "Working on it")
+
     def test_each_state_reads_as_one_plain_line_and_a_question_back_reads_as_a_question(self) -> None:
         (snap,) = render([self.begin, {"frame": view([asking(
             project(0, []), ASK_BACK, ASK_FAILED, ASK_TIMED, ASK_WORKING)])}, {"snapshot": True}])

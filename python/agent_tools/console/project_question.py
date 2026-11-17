@@ -148,7 +148,7 @@ HEADINGS: tuple[tuple[str, str], ...] = (
 )
 _HEADING = re.compile(
     r"^\s*(" + "|".join(re.escape(label) for _, label in HEADINGS) + r")\s*:\s?(.*)$",
-    re.IGNORECASE)
+    re.IGNORECASE | re.ASCII)
 _KEY_OF = {label.lower(): key for key, label in HEADINGS}
 
 
