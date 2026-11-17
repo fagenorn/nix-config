@@ -731,6 +731,23 @@ class WorkflowSkillContractsTest(unittest.TestCase):
             "  --cwd <absolute-worktree> --json\n",
         ])
 
+    def test_codex_collaboration_validation_pins_the_runtime_model(self):
+        text = normalized(self.collaboration)
+        self.assertIn(
+            "`runtime.model` `gpt-6.2-astra`, `runtime.reasoningEffort` `xhigh`", text,
+        )
+        evals = json.loads((
+            REPO_ROOT / "home/common/claude-code/skills/codex-collaboration/evals/evals.json"
+        ).read_text(encoding="utf-8"))["evals"]
+        reviewing = [item for item in evals if "--model" in item["expected_output"]]
+        self.assertTrue(reviewing)
+        for item in reviewing:
+            with self.subTest(eval=item["name"]):
+                self.assertIn(
+                    "runtime.model gpt-6.2-astra, runtime.reasoningEffort xhigh",
+                    item["expected_output"],
+                )
+
     def test_codex_collaboration_documents_carry_their_machine_text(self):
         for path, items in CODEX_COLLABORATION_MACHINE_TEXT.items():
             text = normalized(path.read_text(encoding="utf-8").replace("\n> ", "\n"))
