@@ -41,6 +41,7 @@ class Node {
   }
   addEventListener() {}
   setAttribute() {}
+  removeAttribute() {}
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren(...nodes) { this.children = nodes; }
   set textContent(text) { this.children = [{text: String(text)}]; }
@@ -309,7 +310,7 @@ class PageTest(unittest.TestCase):
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
-             "/api/owner-notice", "/api/owner-notice-withdraw"},
+             "/api/owner-notice", "/api/owner-notice-withdraw", "/api/activate"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -318,7 +319,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 37)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 38)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -344,7 +345,7 @@ class PageTest(unittest.TestCase):
             for selector, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
                 if "var(--peach)" in rule:
                     found += 1
-                    self.assertIn(".needs", selector)
+                    self.assertTrue(".needs" in selector or ".btn-primary" in selector, selector)
         self.assertGreater(found, 0)
 
     def test_session_states_use_the_state_colours(self) -> None:
@@ -796,14 +797,16 @@ class PageRenderTest(unittest.TestCase):
 
 
 ACTIVATION = {
-    "text": "A console change merged and is not active on this host: run just switch in /home/owner/nix-config.",
-    "command": "just switch",
+    "text": "A console change merged at 0123456789ab is not active on this host.",
+    "state": "pending",
+    "commit": "0123456789ab" + "c" * 28,
     "root": "/home/owner/nix-config",
+    "activate": True,
 }
 
 
 class ActivationPageTest(unittest.TestCase):
-    def test_the_activation_line_heads_the_work_column_with_the_command_in_a_code_span(self) -> None:
+    def test_the_activation_line_heads_the_work_column_with_its_activate_button(self) -> None:
         frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         work = snap["projects"]
@@ -812,10 +815,42 @@ class ActivationPageTest(unittest.TestCase):
         self.assertEqual(line["tag"], "p")
         self.assertIn("activation", line["cls"].split())
         # a snapshot node carries its own text only, so the line reads back as its nodes in document order
-        self.assertEqual("".join(n["text"] for n in nodes(line)), ACTIVATION["text"])
-        codes = [n for n in nodes(line) if n["tag"] == "code"]
-        self.assertEqual(len(codes), 1)
-        self.assertEqual(codes[0]["text"], "just switch")
+        self.assertEqual("".join(n["text"] for n in nodes(line)), ACTIVATION["text"] + "Activate")
+        buttons = [n for n in nodes(line) if n["tag"] == "button"]
+        self.assertEqual(len(buttons), 1)
+        self.assertIn("activate", buttons[0]["cls"].split())
+
+    def test_activate_posts_the_shown_commit(self) -> None:
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([{"frame": frame}, {"click": "activate"}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/activate")
+        self.assertEqual(posted(post), {"commit": ACTIVATION["commit"]})
+        self.assertIn("X-Console-Token", post["headers"])
+
+    def test_a_refused_activation_shows_the_consoles_reason(self) -> None:
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([
+            {"frame": frame}, {"respond": {"status": 409, "text": "an activation is already running\n"}},
+            {"click": "activate"}, {"snapshot": True}])
+        (refusal,) = [n for n in nodes(snap["projects"]) if has_class(n, "activation-refused")]
+        self.assertEqual(full(refusal), "The console refused: an activation is already running.")
+
+    def test_an_accepted_click_can_be_pressed_again_when_the_line_comes_back_unchanged(self) -> None:
+        # a retry that fails the same way appends a finished row with the same line, so no frame changes the key
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([
+            {"frame": frame}, {"click": "activate"}, {"click": "activate"}, {"snapshot": True}])
+        self.assertEqual(len(snap["posts"]), 2)
+        (button,) = [n for n in nodes(snap["projects"]) if n["tag"] == "button" and has_class(n, "activate")]
+        self.assertIs(button["disabled"], False)
+
+    def test_a_running_line_has_no_activate(self) -> None:
+        running = dict(ACTIVATION, state="running", activate=False,
+                       text="Activating this host at 0123456789ab. The console may restart before it reports.")
+        frame = dict(view([project(0, [], quiet=True)]), activation=running)
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        self.assertFalse([n for n in nodes(snap["projects"]) if has_class(n, "activate")])
 
     def test_no_activation_draws_no_line(self) -> None:
         plain = view([project(0, [], quiet=True)])
@@ -823,7 +858,6 @@ class ActivationPageTest(unittest.TestCase):
             (snap,) = render([{"frame": frame}, {"snapshot": True}])
             flat = nodes(snap["projects"])
             self.assertFalse([n for n in flat if "activation" in n["cls"].split()])
-            self.assertFalse([n for n in flat if n["tag"] == "code"])
 
     def test_the_line_shows_with_no_project_registered(self) -> None:
         frame = dict(view([], count=0), activation=ACTIVATION)
@@ -831,13 +865,6 @@ class ActivationPageTest(unittest.TestCase):
         work = snap["projects"]
         self.assertIn("activation", work["children"][1]["cls"].split())
         self.assertEqual(work["children"][2]["text"], "No project is registered yet.")
-
-    def test_the_activation_code_span_uses_no_web_font(self) -> None:
-        page = PAGE.read_text()
-        rule = re.search(r"\.activation code\s*\{([^}]*)\}", page)
-        self.assertIsNotNone(rule)
-        self.assertIn("monospace", rule.group(1))
-        self.assertNotIn("@font-face", page)
 
 
 def profile(name: str, state: str, **fields) -> dict:
@@ -1393,7 +1420,7 @@ class PageNoticeTest(unittest.TestCase):
         self.assertTrue([s for s, _ in rules if re.search(r"\.notice(?![\w-])", s)])
         (root,) = [body for s, body in rules if s.strip() == ":root"]
         self.assertEqual(sorted(re.findall(r"(--[\w-]+):", root)), [
-            "--base", "--crust", "--display", "--green", "--hair", "--lav", "--mantle", "--ov2",
+            "--base", "--crust", "--display", "--green", "--hair", "--hover", "--lav", "--mantle", "--ov2",
             "--peach", "--red", "--s0", "--s1", "--s2", "--sub0", "--sub1", "--text", "--ui",
             "--yellow"])
 
@@ -1510,7 +1537,7 @@ class PageOwnerNoticeTest(unittest.TestCase):
         (field,) = self.found(opened, "notice-text")
         self.assertEqual((field["tag"], field["label"]), ("input", "Notice"))
         self.assertEqual(field["placeholder"], "One line for every manager of this project")
-        self.assertEqual(opened["active"], "notice-text")
+        self.assertEqual(role(opened["active"]), "notice-text")
         (send,) = self.found(opened, "notice-send")
         self.assertEqual(full(send), "Send")
         self.assertIs(send["disabled"], True)
@@ -1553,7 +1580,7 @@ class PageOwnerNoticeTest(unittest.TestCase):
             {"select": {"cls": "notice-text", "start": 2, "end": 6}},
             {"frame": view([again])}, {"snapshot": True}])
         self.assertEqual(snap["field"],
-                         {"cls": "notice-text", "value": "routes are frozen", "start": 2, "end": 6})
+                         {"cls": "notice-text field-line", "value": "routes are frozen", "start": 2, "end": 6})
         (fold,) = folds(snap["projects"])
         self.assertTrue(fold["open"])
         self.assertEqual(snap["hidden_focus"], 0)
@@ -1591,7 +1618,7 @@ class PageOwnerNoticeTest(unittest.TestCase):
         (manager,) = [b for b in blocks if "take the reader" in full(b)]
         head = owner["children"][0]
         self.assertEqual([(c["tag"], c["cls"]) for c in head["children"]],
-                         [("span", "notice-who"), ("button", "notice-withdraw"),
+                         [("span", "notice-who"), ("button", "notice-withdraw btn-quiet"),
                           ("time", "notice-age")])
         self.assertEqual(full(head["children"][0]), "Heads-up, from You")
         self.assertEqual(full(head["children"][1]), "Withdraw")
@@ -1738,7 +1765,7 @@ class PageTimeTest(unittest.TestCase):
         self.assertTrue(fold["open"])
         (note,) = [n for n in nodes(after["inbox"]) if has_class(n, "note-text")]
         self.assertEqual(note["value"], "half a note")
-        self.assertEqual(after["active"], "note-text")
+        self.assertEqual(role(after["active"]), "note-text")
         self.assertEqual(after["posts"], before["posts"])
 
 
@@ -1811,11 +1838,17 @@ def has_class(n: dict, name: str) -> bool:
     return name in n["cls"].split()
 
 
+def role(cls: str | None) -> str | None:
+    """The role of a control's class string: its first token, the kind classes following it (#1137)."""
+    return None if cls is None else cls.split()[0]
+
+
 def picked(snap: dict) -> list:
-    """The option words of every `.picked` node: its `span.ot` child when it has one, else the node."""
+    """The option words of every chosen node: a pressed button (the chosen `opt`) or an `li` of a rest or done card
+    with class `picked` (D14); its `span.ot` child when it has one, else the node."""
     found = []
     for n in nodes(snap["inbox"]):
-        if has_class(n, "picked"):
+        if (n["tag"] == "button" and n["pressed"] == "true") or has_class(n, "picked"):
             words = [c for c in n["children"] if has_class(c, "ot")]
             found.append(full(words[0]) if words else full(n))
     return found
@@ -1908,7 +1941,7 @@ class PageAnswerTest(unittest.TestCase):
         self.assertEqual(fail["text"], "Could not send: " + console_answer.NETWORK_DOWN)
         (again,) = [n for n in nodes(failed["inbox"]) if has_class(n, "answer-again")]
         self.assertEqual(again["text"], "Try again")
-        self.assertFalse(has_class(again, "primary"))
+        self.assertFalse(has_class(again, "btn-primary"))
         self.assertTrue(picked(failed)[0].endswith("two"))
         posts = answers(sending)
         self.assertEqual(len(posts), 2)
@@ -2185,7 +2218,7 @@ class PageQuestionTest(unittest.TestCase):
         self.assertEqual(len(buttons), 2)
         recs = [n for n in nodes(before["inbox"]) if has_class(n, "rec")]
         self.assertEqual(len(recs), 1)
-        self.assertEqual([has_class(b, "picked") for b in buttons], [False, True])
+        self.assertEqual([b["pressed"] == "true" for b in buttons], [False, True])
         self.assertEqual([bool([n for n in nodes(b) if has_class(n, "rec")]) for b in buttons],
                          [False, True])
         (sent,) = round_posts(after)
@@ -2282,16 +2315,16 @@ class PageQuestionTest(unittest.TestCase):
             {"frame": frame([BRIEF_B, Q0, Q1])}, {"snapshot": True},
         ])
         for snap in (before, after):
-            self.assertEqual(snap["active"], "words-text")
+            self.assertEqual(role(snap["active"]), "words-text")
             self.assertEqual(snap["field"], {
-                "cls": "words-text", "value": "use the reader", "start": 14, "end": 14,
+                "cls": "words-text field-area", "value": "use the reader", "start": 14, "end": 14,
             })
         self.assertEqual(len(brief_cards(after)), 1)
         (focused,) = render([
             START, {"frame": frame([Q0, Q1])}, {"focus_on": "words-text"},
             {"frame": frame([BRIEF_B, Q0, Q1])}, {"snapshot": True},
         ])
-        self.assertEqual(focused["active"], "words-text")
+        self.assertEqual(role(focused["active"]), "words-text")
         (typed,) = render([
             START, {"frame": frame([Q0, Q1])},
             {"type": {"class": "words-text", "text": "use the reader"}},
@@ -2552,7 +2585,7 @@ class PageViewerTest(unittest.TestCase):
     def test_a_focused_thumbnail_keeps_focus_through_an_unrelated_frame(self) -> None:
         (snap,) = render(self.opened + [
             {"focus_on": "pic-thumb", "nth": 1}, {"frame": frame([PICTURED])}, {"snapshot": True}])
-        self.assertEqual(snap["active"], "pic-thumb")
+        self.assertEqual(role(snap["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertTrue(focused["key"].endswith("/1"), focused["key"])
 
@@ -2591,7 +2624,7 @@ class PageViewerTest(unittest.TestCase):
             {"key": "Escape", "follow": True}, {"snapshot": True}])
         self.assertTrue(snap["viewer"]["hidden"])
         self.assertEqual([c for c in snap["viewer"]["children"]], [])
-        self.assertEqual(snap["active"], "pic-thumb")
+        self.assertEqual(role(snap["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertTrue(focused["key"].endswith("/2"), focused["key"])
         self.assertTrue(snap["key_prevented"])
@@ -2658,16 +2691,16 @@ class PageViewerTest(unittest.TestCase):
         start, one, two, back = render(self.opened + [
             {"click": "pic-thumb"}, {"snapshot": True}, tab, {"snapshot": True}, tab,
             {"snapshot": True}, {"key": "Tab", "shiftKey": True, "follow": True}, {"snapshot": True}])
-        self.assertEqual([s["active"] for s in (start, one, two, back)],
+        self.assertEqual([role(s["active"]) for s in (start, one, two, back)],
                          ["viewer", "viewer-next", "viewer-close", "viewer-next"])
         for snap in (one, two, back):
             self.assertTrue(snap["key_prevented"])
         first, second = render(self.opened + [
             {"click": "pic-thumb", "nth": 1}, tab, {"snapshot": True}, tab, {"snapshot": True}])
-        self.assertEqual([first["active"], second["active"]], ["viewer-prev", "viewer-next"])
+        self.assertEqual([role(first["active"]), role(second["active"])], ["viewer-prev", "viewer-next"])
         (last,) = render(self.opened + [
             {"click": "pic-thumb"}, {"key": "Tab", "shiftKey": True, "follow": True}, {"snapshot": True}])
-        self.assertEqual(last["active"], "viewer-close")
+        self.assertEqual(role(last["active"]), "viewer-close")
 
     def test_arrows_move_the_picture_and_leave_focus_where_it_is(self) -> None:
         right = {"key": "ArrowRight", "follow": True}
@@ -2679,7 +2712,7 @@ class PageViewerTest(unittest.TestCase):
         held, kept, ended = render(self.opened + [
             {"click": "pic-thumb", "nth": 1}, {"focus_on": "viewer-next"}, {"snapshot": True},
             {"key": "ArrowLeft", "follow": True}, {"snapshot": True}, right, right, {"snapshot": True}])
-        self.assertEqual([held["active"], kept["active"]], ["viewer-next", "viewer-next"])
+        self.assertEqual([role(held["active"]), role(kept["active"])], ["viewer-next", "viewer-next"])
         self.assertEqual(kept["focus_count"], held["focus_count"])
         self.assertEqual(self.count(kept), "1 of 3")
         self.assertEqual(self.count(ended), "3 of 3")
@@ -2691,7 +2724,8 @@ class PageViewerTest(unittest.TestCase):
         (snap,) = render(self.opened + [{"click": "pic-thumb", "nth": 1}, {"snapshot": True}])
         (bar,) = with_class(snap["viewer"], "viewer-bar")
         self.assertEqual([c["cls"] for c in bar["children"]],
-                         ["viewer-prev", "viewer-count", "viewer-next", "viewer-close"])
+                         ["viewer-prev btn-quiet", "viewer-count", "viewer-next btn-quiet",
+                          "viewer-close btn-quiet"])
         self.assertEqual([full(c) for c in bar["children"]], ["Previous", "2 of 3", "Next", "Close"])
         self.assertEqual(len(with_class(snap["viewer"], "viewer-stage")), 1)
         style, top = page_css()
@@ -3225,7 +3259,7 @@ class PageCardTest(unittest.TestCase):
                 self.assertIn("svg", [c["tag"] for c in kind["children"]])
                 self.assertIn(project, full(top))
                 self.assertIn("waiting ", full(top))
-                primaries = [n for n in nodes(card) if has_class(n, "primary")]
+                primaries = [n for n in nodes(card) if has_class(n, "btn-primary")]
                 self.assertEqual(len(primaries), 1)
                 self.assertEqual(primaries[0]["tag"], "button")
                 self.assertEqual(full(primaries[0]), label)
@@ -3238,7 +3272,7 @@ class PageCardTest(unittest.TestCase):
         flat = nodes(card)
         opts = next(i for i, n in enumerate(flat) if has_class(n, "opts"))
         held = next(i for i, n in enumerate(flat) if has_class(n, "held"))
-        primary = next(i for i, n in enumerate(flat) if has_class(n, "primary"))
+        primary = next(i for i, n in enumerate(flat) if has_class(n, "btn-primary"))
         self.assertLess(opts, held)
         self.assertLess(held, primary)
         self.assertEqual(full(flat[held]), "holds 3 issues")
@@ -3258,7 +3292,7 @@ class PageCardTest(unittest.TestCase):
         card = snap["inbox"]["children"][0]
         (kind,) = [n for n in nodes(card) if has_class(n, "kind")]
         self.assertEqual(full(kind), "Conflict")
-        (primary,) = [n for n in nodes(card) if has_class(n, "primary")]
+        (primary,) = [n for n in nodes(card) if has_class(n, "btn-primary")]
         self.assertEqual(primary["tag"], "a")
         self.assertTrue(has_class(primary, "answer"))
         self.assertEqual(primary["text"], "Answer on the tracker")
@@ -3278,13 +3312,15 @@ class PageCardTest(unittest.TestCase):
 
     def test_the_primary_style_outranks_the_button_base_rules(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
-        rules = []
-        for body in re.findall(r"(?s)<style>(.*?)</style>", text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            for selectors, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-                names = [d.partition(":")[0].strip() for d in rule.split(";") if d.strip()]
-                for selector in selectors.split(","):
-                    rules.append((" ".join(selector.split()), names))
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        lines = style.splitlines()
+        shared = lines.index("/* controls */")
+        end = lines.index("/* end controls */")
+        desk, desk_end = lines.index("/* controls: desk */"), lines.index("/* end controls: desk */")
+        self.assertEqual(desk, end + 1)
+
+        def rules_in(block: list) -> list:
+            return [(s, d) for s, d in style_rules("\n".join(block))]
 
         def spec(selector: str) -> tuple:
             selector = re.sub(r"::[\w-]+", "", selector)
@@ -3296,20 +3332,24 @@ class PageCardTest(unittest.TestCase):
             c = sum(1 for t in re.split(r"[\s>+~]+", rest) if t[:1].isalpha())
             return (a, b, c)
 
-        self.assertEqual(spec('.abox button[class^="ans-"]'), (0, 2, 1))
-        self.assertEqual(spec(".act .primary.needs:hover:enabled"), (0, 5, 0))
-        for state in ("", ":hover:enabled", ":disabled"):
+        self.assertEqual(spec(".btn-primary"), (0, 1, 0))
+        block, addendum = rules_in(lines[shared + 1:end]), rules_in(lines[desk + 1:desk_end])
+        hover = ':hover:not(:disabled):not([aria-disabled="true"])'
+        wanted = {"": ("background", "color", "border-color"), hover: ("background", "border-color"),
+                  ":disabled": ("background", "color", "border-color")}
+        for state, props in wanted.items():
             with self.subTest(state=state):
-                mine = [s for s, names in rules if s.endswith(".primary.needs" + state) and "background" in names]
-                bases = (".send", ".approve", ".answer", 'button[class^="ans-"]')
-                rivals = [s for s, _ in rules if any(s.endswith(base + state) for base in bases)]
+                mine = [s for s, d in addendum if s.endswith(".btn-primary" + state) and "background" in d]
+                rivals = [s for s, _ in block if s.endswith(".btn-primary" + state)]
                 self.assertTrue(mine)
-                self.assertTrue(rivals)
-                self.assertGreater(min(spec(s) for s in mine), max(spec(s) for s in rivals))
-                if state == "":
-                    declared = [names for s, names in rules if s in mine]
-                    for prop in ("background", "color", "border", "padding", "border-radius"):
-                        self.assertTrue(any(prop in names for names in declared), prop)
+                if state != hover:
+                    self.assertTrue(rivals)
+                if rivals:
+                    self.assertGreaterEqual(min(spec(s) for s in mine), max(spec(s) for s in rivals))
+                declared = [d for s, d in addendum if s in mine]
+                for prop in props:
+                    self.assertTrue(any(prop in d for d in declared), prop)
+        self.assertEqual(re.findall(r"[^{}]*\.primary(?![\w-])[^{}]*\{", style), [])
 
 
 class PageRowTest(unittest.TestCase):
@@ -3350,7 +3390,7 @@ class PageRowTest(unittest.TestCase):
         rest, rows = self.rows()
         self.assertTrue(all(has_class(r, "row") for r in rest["children"]))
         for n in nodes(rest):
-            for name in ("card", "lead", "primary"):
+            for name in ("card", "lead", "btn-primary"):
                 self.assertFalse(has_class(n, name), name)
         self.assertTrue([n for n in nodes(rows[2]) if has_class(n, "ans-passed")])
 
@@ -3411,10 +3451,10 @@ class PageOptionTest(unittest.TestCase):
         def declares(selector_test, declaration):
             return any(selector_test(sel) and declaration in rule for sel, rule in rules)
         self.assertTrue(declares(
-            lambda sel: any(t.endswith(".opt") for t in re.split(r"[\s,]+", sel)), "width: 100%"))
-        self.assertTrue(declares(lambda sel: ".opt.picked kbd" in sel, "background:"))
+            lambda sel: any(t.endswith(".btn-option") for t in re.split(r"[\s,]+", sel)), "width: 100%"))
+        self.assertTrue(declares(lambda sel: '.btn-option[aria-pressed="true"] kbd' in sel, "background:"))
         for sel, rule in rules:
-            if ".opt" in sel:
+            if ".opt" in sel or ".btn-option" in sel:
                 self.assertNotIn("var(--peach)", rule, sel)
 
 
@@ -3598,7 +3638,7 @@ def goal_names(snap: dict) -> list:
 
 
 def goal_picked(snap: dict) -> list:
-    return [full(n) for n in goal_named(snap, "goal-project") if has_class(n, "picked")]
+    return [full(n) for n in goal_named(snap, "goal-project") if n["pressed"] == "true"]
 
 
 def box_open(snap: dict) -> bool:
@@ -3664,7 +3704,7 @@ class PageGoalTest(unittest.TestCase):
         self.assertTrue(box_open(opened))
         self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
         self.assertEqual(goal_picked(opened), ["owner/zeta"])
-        self.assertEqual(opened["active"], "goal-text")
+        self.assertEqual(role(opened["active"]), "goal-text")
         self.assertIs(opened["key_prevented"], True)
         (filter_node,) = goal_named(opened, "goal-filter")
         self.assertIn(filter_node["value"], ("", None))
@@ -3679,7 +3719,7 @@ class PageGoalTest(unittest.TestCase):
         ])
         self.assertTrue(box_open(opened))
         self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
-        self.assertEqual(opened["active"], "goal-text")
+        self.assertEqual(role(opened["active"]), "goal-text")
         self.assertFalse(box_open(closed))
         self.assertIsNone(closed["active"])
         self.assertEqual(len(goal_named(closed, "goal-text")), 1)
@@ -3796,8 +3836,8 @@ class PageGoalTest(unittest.TestCase):
             {"frame": {**GOAL_FRAME, "recent_projects": ["owner/new", "owner/zeta"]}},
             {"snapshot": True},
         ])
-        self.assertEqual(before["active"], "goal-text")
-        self.assertEqual(after["active"], "goal-text")
+        self.assertEqual(role(before["active"]), "goal-text")
+        self.assertEqual(role(after["active"]), "goal-text")
         self.assertEqual(after["focus_count"], before["focus_count"])
         (text_node,) = goal_named(after, "goal-text")
         self.assertEqual(text_node["value"], "half a thought")
@@ -3995,7 +4035,7 @@ class PageMessageTest(unittest.TestCase):
         self.assertEqual(field["value"], TELL_TEXT)
         self.assertTrue(field["focused"])
         self.assertEqual(field["selection"], [6, 9])
-        self.assertEqual(after["active"], "tell")
+        self.assertEqual(role(after["active"]), "tell")
         self.assertTrue(tell_field(more)["value"].endswith("!"))
 
     def test_a_sprint_no_longer_listed_restores_no_focus(self) -> None:
@@ -4151,11 +4191,11 @@ class PageMessageLifeTest(unittest.TestCase):
         ])
         (line,) = sprint_lines(snap)
         (box,) = of_class(line, "div", "sprint-tell")
-        self.assertEqual([c["cls"] for c in box["children"]], ["tell-label", "tell-hint", "tell-send"])
+        self.assertEqual([c["cls"] for c in box["children"]], ["tell-label", "tell-hint", "tell-send btn-quiet"])
         label, hint, _send = box["children"]
         words, area = label["children"]
         self.assertEqual((words["tag"], full(words)), ("span", "Tell the manager"))
-        self.assertEqual((area["tag"], area["cls"]), ("textarea", "tell"))
+        self.assertEqual((area["tag"], area["cls"]), ("textarea", "tell field-area"))
         self.assertEqual(full(hint), HINT_TEXT)
 
     def test_a_new_reply_is_announced_under_the_statement_and_not_counted(self) -> None:
@@ -4301,7 +4341,7 @@ class PageSprintControlsTest(unittest.TestCase):
         self.assertFalse(fold["open"])
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
         self.assertEqual(full(summary), "End the sprint")
-        self.assertEqual(telling["active"], "tell")
+        self.assertEqual(role(telling["active"]), "tell")
         (line,) = sprint_lines(telling)
         (field,) = in_line(line, "textarea", "tell")
         self.assertTrue(field["focused"])
@@ -4377,7 +4417,7 @@ class PageSprintControlsTest(unittest.TestCase):
             (line,) = sprint_lines(snap)
             self.assertEqual(in_line(line, "textarea", "tell"), [])
             self.assertEqual(len(in_line(line, "button", "tell-open")), 1)
-        self.assertEqual(escaped["active"], "tell-open")
+        self.assertEqual(role(escaped["active"]), "tell-open")
         (line,) = sprint_lines(within)
         self.assertEqual(len(in_line(line, "textarea", "tell")), 1)
 
@@ -4391,7 +4431,7 @@ class PageSprintControlsTest(unittest.TestCase):
             {"frame": with_sprints([SPRINT])}, {"snapshot": True},
         ])
         self.assertTrue(tell_field(streamed)["focused"])
-        self.assertEqual(streamed["active"], "tell")
+        self.assertEqual(role(streamed["active"]), "tell")
         for snap in (left, escaped, again):
             self.assertEqual(tell_field(snap)["value"], TELL_TEXT)
 
@@ -4538,19 +4578,18 @@ class PageManagerTest(unittest.TestCase):
                 (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "card")]
                 first, second = [n for n in nodes(card) if n["tag"] == "button"]
                 self.assertTrue(has_class(first, keep))
-                self.assertTrue(has_class(first, "primary") and has_class(first, "needs"))
+                self.assertTrue(has_class(first, "btn-primary"))
                 self.assertTrue(has_class(second, away))
-                self.assertFalse(has_class(second, "primary") or has_class(second, "needs"))
+                self.assertFalse(has_class(second, "btn-primary") or has_class(second, "needs"))
                 (act,) = [n for n in nodes(card) if has_class(n, "act")]
                 self.assertEqual([n for n in nodes(act) if n["tag"] == "button"], [first, second])
 
     def test_the_quiet_withdraw_buttons_share_the_page_button_rules(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
         style = text[text.index("<style>"):text.index("</style>")]
-        for name in ("continue", "progress-withdraw", "try-again", "stall-withdraw"):
-            with self.subTest(name=name):
-                for suffix in ("", ":hover:enabled", ":disabled"):
-                    self.assertRegex(style, r"(?m)^[^{]*\." + re.escape(name) + re.escape(suffix) + r"[,\s{]")
+        for kind in ("btn-primary", "btn-danger"):
+            with self.subTest(kind=kind):
+                self.assertRegex(style, r"(?m)^[^{]*\." + re.escape(kind) + r"[,\s{]")
         self.assertRegex(style, r"\.card \.reason \{[^}]*color: var\(--ov2\)")
 
     def test_a_stall_card_withdraw_posts_the_withdrawal(self) -> None:
@@ -5851,7 +5890,7 @@ class PageSideColumnTest(unittest.TestCase):
                 self.assertEqual([m for m in nodes(n) if has_class(m, "give-goal")], [])
         self.assertTrue(box_open(opened))
         self.assertEqual(goal_picked(opened), ["owner/p01"])
-        self.assertEqual(opened["active"], "goal-text")
+        self.assertEqual(role(opened["active"]), "goal-text")
         (post,) = goals(sent)
         self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p01", "goal": GOAL_TEXT})
         self.assertEqual(post["headers"], GOAL_HEADERS)
@@ -5873,7 +5912,7 @@ class PageSideColumnTest(unittest.TestCase):
         self.assertEqual(f["value"], "")
         (t,) = goal_named(snap, "goal-text")
         self.assertEqual(t["value"], "draft")
-        self.assertEqual(snap["active"], "goal-text")
+        self.assertEqual(role(snap["active"]), "goal-text")
 
     def test_every_quiet_project_offers_a_goal_even_when_folded(self) -> None:
         group = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
@@ -6174,9 +6213,9 @@ class PageBriefTest(unittest.TestCase):
             {"frame": frame([{**BRIEF, "version": 3}])}, {"snapshot": True},
         ])
         for snap in (before, after):
-            self.assertEqual(snap["active"], "reply-text")
+            self.assertEqual(role(snap["active"]), "reply-text")
             self.assertEqual(snap["field"], {
-                "cls": "reply-text", "value": "keep slice 1", "start": 12, "end": 12,
+                "cls": "reply-text field-area", "value": "keep slice 1", "start": 12, "end": 12,
             })
         self.assertEqual(after["focus_count"], before["focus_count"])
 
@@ -6188,9 +6227,9 @@ class PageBriefTest(unittest.TestCase):
             {"select": {"cls": "reply-text", "start": 2, "end": 4}},
             {"frame": frame([BRIEF, moved])}, {"snapshot": True},
         ])
-        self.assertEqual(snap["active"], "reply-text")
+        self.assertEqual(role(snap["active"]), "reply-text")
         self.assertEqual(snap["field"], {
-            "cls": "reply-text", "value": "abcdef", "start": 2, "end": 4,
+            "cls": "reply-text field-area", "value": "abcdef", "start": 2, "end": 4,
         })
         first, second = brief_cards(snap)
         self.assertIn("owner/p01 brief, version 2", full(first))
@@ -6220,7 +6259,7 @@ class PageBriefTest(unittest.TestCase):
         ])
         self.assertEqual([n for n in nodes(plain["inbox"]) if n["tag"] == "textarea"], [])
         (field,) = [n for n in nodes(brief["inbox"]) if n["tag"] == "textarea"]
-        self.assertEqual(field["cls"], "reply-text")
+        self.assertEqual(field["cls"], "reply-text field-area")
 
 
 def brief_row(snap: dict, key: str = KEY_B) -> dict:
@@ -6318,7 +6357,7 @@ class PageBriefRowTest(unittest.TestCase):
         self.assertTrue(row["open"])
         shown = visible(row)
         self.assertEqual(sum(1 for n in shown if has_class(n, "approve")), 1)
-        self.assertEqual(sum(1 for n in shown if has_class(n, "primary")), 0)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "btn-primary")), 0)
         self.assertEqual(sum(1 for n in shown if has_class(n, "reply-text")), 1)
         self.assertEqual(sum(1 for n in shown if has_class(n, "reply-send")), 1)
         text = visible_text(row)
@@ -6343,7 +6382,7 @@ class PageBriefRowTest(unittest.TestCase):
             {"close": KEY_B}, both, {"snapshot": True},
             {"open": KEY_B}, {"snapshot": True},
         ])
-        self.assertEqual(typed["active"], "reply-text")
+        self.assertEqual(role(typed["active"]), "reply-text")
         self.assertEqual(typed["field"]["value"], "smaller slices")
         for snap in (typed, closed, reopened):
             row = brief_row(snap)
@@ -6600,7 +6639,7 @@ class PageStandingRulesTest(unittest.TestCase):
         rules = style_rules(top)
         self.assertTrue([
             d for s, d in rules
-            if s == ".goal-in .goal-text:focus-visible" and d.get("outline") in ("none", "0")])
+            if s == ".field-bare:focus-visible" and d.get("outline") in ("none", "0")])
         self.assertTrue([
             d for s, d in rules
             if s == ".goal-in:focus-within" and d.get("border-color") == "var(--lav)"])
@@ -6753,7 +6792,7 @@ class AccountsPanelPageTest(unittest.TestCase):
         self.assertEqual(names(open_), ["a", "b", "c"])
         self.assertIs(after["accounts"]["hidden"], True)
         self.assertEqual(after["capacity"]["expanded"], "false")
-        self.assertEqual(after["active"], "cap")
+        self.assertEqual(role(after["active"]), "cap")
         self.assertIs(after["key_prevented"], True)
         self.assertEqual(after["accounts_body"]["children"], [])
 
@@ -6844,7 +6883,7 @@ class AccountsPanelPageTest(unittest.TestCase):
             START, {"frame": with_inbox}, {"focus_on": "opt"}, {"click": "cap"},
             {"frame": with_inbox}, {"key": "Escape"}, {"snapshot": True},
         ])
-        self.assertEqual(lost["active"], "cap")
+        self.assertEqual(role(lost["active"]), "cap")
 
     def test_while_the_panel_is_open_only_escape_acts(self) -> None:
         with_inbox = {**F3, **frame([ANSWERABLE])}
@@ -7157,7 +7196,7 @@ class StripPageTest(unittest.TestCase):
         for name, value in {
             "flex-wrap": "nowrap", "white-space": "nowrap", "overflow": "hidden",
             "min-width": "0", "max-width": "100%", "font": "inherit", "background": "none",
-            "border": "0", "padding": "0", "text-align": "left", "cursor": "pointer",
+            "padding": "0", "text-align": "left", "cursor": "pointer",
             "font-size": ".8125rem", "color": "var(--sub0)",
         }.items():
             self.assertEqual(cap.get(name), value, name)
@@ -7326,8 +7365,7 @@ class StripPageTest(unittest.TestCase):
                 "flex": "1 1 12rem", "min-width": "12rem", "max-width": "440px"}),
             "top-in": (rule(".top-in"), {"flex-wrap": "wrap", "gap": "10px 28px"}),
             "placeholder": (rule(".goal-in .goal-text::placeholder"), {
-                "white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
-                "color": "var(--ov2)"}),
+                "white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis"}),
             "placeholder host": (rule(".goal-in .goal-text"), {"text-overflow": "ellipsis"}),
             "narrow goal-bar": (
                 {k: v for s, d in narrow if s == ".goal-bar" for k, v in d.items()},
@@ -8189,13 +8227,13 @@ class AddAccountPageTest(unittest.TestCase):
         (snap,) = render([
             START, {"frame": V}, {"click": "account-add-open"},
             {"type": {"class": "account-name", "text": "fre"}}, {"frame": V}, {"snapshot": True}])
-        self.assertEqual(snap["field"], {"cls": "account-name", "value": "fre", "start": 3, "end": 3})
+        self.assertEqual(snap["field"], {"cls": "account-name field-line", "value": "fre", "start": 3, "end": 3})
 
     def test_the_typed_code_and_its_focus_survive_a_frame(self) -> None:
         (snap,) = render(NO_ITEM + [
             {"type": {"class": "account-code", "text": "ab"}},
             {"frame": {**V, "signin_runs": RUNNING}}, {"snapshot": True}])
-        self.assertEqual(snap["field"], {"cls": "account-code", "value": "ab", "start": 2, "end": 2})
+        self.assertEqual(snap["field"], {"cls": "account-code field-code", "value": "ab", "start": 2, "end": 2})
 
 
 NO_LINK = "{\"attempt\":9,\"link\":null,\"profile\":\"fresh\"}"
@@ -8257,7 +8295,7 @@ class AddAccountKeepsCodePageTest(unittest.TestCase):
         (snap,) = render(NO_ITEM + [
             {"type": {"class": "account-code", "text": "ab"}},
             {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
-        self.assertEqual(snap["field"], {"cls": "account-code", "value": "ab", "start": 2, "end": 2})
+        self.assertEqual(snap["field"], {"cls": "account-code field-code", "value": "ab", "start": 2, "end": 2})
         self.assertEqual(of_class(sign_in_card(snap), "input", "signin-code"), [])
 
 
@@ -8385,7 +8423,7 @@ class PanelSigninPageTest(unittest.TestCase):
         typing, closed = render([
             *steps, {"type": {"class": "signin-code", "text": "ab#C"}}, {"snapshot": True},
             {"key": "Escape"}, {"snapshot": True}])
-        self.assertEqual(typing["active"], "signin-code")
+        self.assertEqual(role(typing["active"]), "signin-code")
         self.assertIs(closed["accounts"]["hidden"], True)
         self.assertIsNone(closed["active"])
         self.assertIsNone(closed["field"])
@@ -8466,7 +8504,7 @@ class PanelSigninPageTest(unittest.TestCase):
         self.assertIn("acct-signin", start["cls"].split())
         self.assertEqual(len(in_row(a, "button", "signin-cancel")), 1)
         for n in nodes(panel(snap)):
-            self.assertFalse({"primary", "needs"} & set(n["cls"].split()), n["cls"])
+            self.assertFalse({"btn-primary", "needs"} & set(n["cls"].split()), n["cls"])
         (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
         for selector, decls in style_rules(style):
             if ".acct-" in selector or "#accounts" in selector:
@@ -9138,7 +9176,7 @@ class RegisterControlTest(unittest.TestCase):
     def test_a_typed_path_survives_a_frame(self) -> None:
         (snap,) = render(REGISTER_TYPED + [
             {"frame": {**frame([]), "registration": None}}, {"snapshot": True}])
-        self.assertEqual(snap["field"], {"cls": "register-path", "value": "/srv/r", "start": 6, "end": 6})
+        self.assertEqual(snap["field"], {"cls": "register-path field-line", "value": "/srv/r", "start": 6, "end": 6})
 
     def test_a_refused_write_shows_its_reason_and_keeps_the_path(self) -> None:
         (snap,) = render(REGISTER_TYPED + [
@@ -9380,7 +9418,7 @@ class DraftedContractPageTest(unittest.TestCase):
             {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}},
             {"select": {"cls": "draft-text", "start": 2, "end": 5}},
             {"frame": cards([register_item(0, Q_TEXT, text=True)])}, {"snapshot": True}])
-        self.assertEqual(snap["field"], {"cls": "draft-text", "value": "sample-owner/sample-app",
+        self.assertEqual(snap["field"], {"cls": "draft-text field-line", "value": "sample-owner/sample-app",
                                          "start": 2, "end": 5})
 
     def test_each_drafted_value_shows_with_a_change_control(self) -> None:
@@ -9464,7 +9502,7 @@ class DraftedContractPageTest(unittest.TestCase):
             {"type": {"class": "draft-edit", "text": "main"}},
             {"frame": cards([], {**DRAFTED, "at": "2026-11-15T09:00:00+00:00"})}, {"snapshot": True},
             {"click": "draft-cancel"}, {"snapshot": True}])
-        self.assertEqual(kept["field"], {"cls": "draft-text draft-edit", "value": "main",
+        self.assertEqual(kept["field"], {"cls": "draft-text draft-edit field-line", "value": "main",
                                          "start": 4, "end": 4})
         self.assertEqual(registered(closed, "draft-edit"), [])
         self.assertEqual(len(registered(closed, "draft-change")), 1)
@@ -9729,7 +9767,7 @@ class RegisterCardPageTest(unittest.TestCase):
             [ASKING["line"], *ASKING["lines"]])
         self.assertEqual(
             sorted(n["cls"] for n in nodes(snap["register"]) if n["tag"] == "button"),
-            ["register-open"])
+            ["register-open btn-quiet"])
         self.assertEqual([n for n in nodes(snap["register"]) if has_class(n, "opt")], [])
 
     def test_a_single_option_card_offers_the_option_as_its_action(self) -> None:
@@ -9740,7 +9778,7 @@ class RegisterCardPageTest(unittest.TestCase):
         self.assertEqual(count(first, "opt"), 0)
         (send,) = [n for n in nodes(lead) if has_class(n, "send")]
         self.assertEqual(full(send), "Archive it under .agents/knowledge/archive/adopted/")
-        self.assertTrue(has_class(send, "primary"))
+        self.assertTrue(has_class(send, "btn-primary"))
         (strip,) = [n for n in nodes(first["inbox"]) if has_class(n, "keys")]
         self.assertIn("sends this answer", full(strip))
         self.assertEqual([full(n) for n in nodes(strip) if n["tag"] == "kbd"], ["Enter"])
@@ -9825,7 +9863,7 @@ class RegisterCardKeysPageTest(unittest.TestCase):
             {"blur_on": "draft-text"}, {"respond": {"status": 204, "text": ""}}, {"key": "Enter"},
             {"clock": 5000}, {"snapshot": True}])
         self.assertEqual(first["posts"], [])
-        self.assertEqual(first["field"]["cls"], "draft-text")
+        self.assertEqual(first["field"]["cls"], "draft-text field-line")
         (post,) = second["posts"]
         self.assertEqual(post["url"], "/api/plan-answer")
         self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
@@ -10467,7 +10505,7 @@ class PageBriefPictureTest(unittest.TestCase):
         self.assertEqual(img["src"], made[C])
         self.assertEqual(opened["active"], "viewer")
         self.assertTrue(closed["viewer"]["hidden"])
-        self.assertEqual(closed["active"], "pic-thumb")
+        self.assertEqual(role(closed["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(closed["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertTrue(focused["key"].endswith("/2"), focused["key"])
 
@@ -10481,7 +10519,7 @@ class PageBriefPictureTest(unittest.TestCase):
         (snap,) = render([
             START, {"frame": frame([BRIEF_PICTURED])}, {"focus_on": "pic-thumb", "nth": 1},
             {"frame": frame([BRIEF_PICTURED])}, {"snapshot": True}])
-        self.assertEqual(snap["active"], "pic-thumb")
+        self.assertEqual(role(snap["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(snap["inbox"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertTrue(focused["key"].endswith("/1"), focused["key"])
 
@@ -10528,7 +10566,7 @@ class PageReportPictureTest(unittest.TestCase):
         (img,) = with_class(opened["viewer"], "viewer-img")
         self.assertEqual(img["alt"], "the landed header")
         self.assertTrue(closed["viewer"]["hidden"])
-        self.assertEqual(closed["active"], "pic-thumb")
+        self.assertEqual(role(closed["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(closed["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertTrue(focused["key"].endswith("/1"), focused["key"])
 
@@ -10536,7 +10574,7 @@ class PageReportPictureTest(unittest.TestCase):
         (snap,) = render(self.pictured() + [
             {"open": DETAIL_KEY}, {"focus_on": "pic-thumb", "in": DETAIL_KEY, "nth": 1},
             {"frame": with_sprints([REPORT_PICTURED])}, {"snapshot": True}])
-        self.assertEqual(snap["active"], "pic-thumb")
+        self.assertEqual(role(snap["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertEqual(focused["key"], REPORT_KEY + "/1")
 
@@ -10583,7 +10621,7 @@ class PageReportPictureTest(unittest.TestCase):
             {"hold": True}, {"click": "tell-send"},
             {"focus_on": "pic-thumb", "in": DETAIL_KEY, "nth": 1},
             {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
-        self.assertEqual(snap["active"], "pic-thumb")
+        self.assertEqual(role(snap["active"]), "pic-thumb")
         (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertEqual(focused["key"], REPORT_KEY + "/1")
         self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/message"]), 1)
@@ -10744,7 +10782,7 @@ class PageSpendFigureTest(unittest.TestCase):
                      if n["tag"] == "details" and n["open"]}
         self.assertIn("sprint:" + "a" * 16, open_keys)
         self.assertIn("line:owner/p00", open_keys)
-        self.assertEqual(snap["active"], "tell")
+        self.assertEqual(role(snap["active"]), "tell")
         self.assertEqual(snap["field"]["value"], "keep the schema")
         (sprint,) = figures(of_class(snap["projects"], "li", "sprint")[0])
         self.assertEqual(full(sprint), "1.3M tokens, about $5.15")

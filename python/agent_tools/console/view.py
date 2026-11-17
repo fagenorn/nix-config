@@ -63,14 +63,18 @@ Wire format, one object:
      "activation": <activation line> | null,
      "spend": <spend view> | null}
 
-`activation` is the one line the page shows when a console change has merged and this host is not
-yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": "<root>"}`; the text is
-ACTIVATION_BEHIND_TEXT instead when the reading's `local_behind` is set, because that checkout must be
-updated to origin before `just switch` there builds the change. The
-member is on every view and is null when `derive_view` is given no `activation` reading (the
-`activation.py` `Activation`) or one whose `changed` is empty. It is a line beside the statement,
+`activation` is the one line the page shows about activating this host (#1114, #1193,
+ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
+"root", "activate": <bool>}`. `pending` is a reading (the `activation.py` `Activation`) with a non-empty
+`changed`; `activation_run` is the newest run (`activation_run.LastRun`). The first match wins: a
+`running` run is `running` (ACTIVATING_TEXT, its commit, no Activate); a settled run is `activated`
+(ACTIVATED_TEXT) or `failed` (ACTIVATION_FAILED_TEXT with its reason and next step) when a change is
+pending for that very commit, or when nothing is pending and it finished less than OUTCOME_MS before
+`now_ms`, and only a `failed` one for the pending commit has `activate` true; a pending change is
+`pending` (ACTIVATION_TEXT, the reading's commit, `activate` true); otherwise null. Every text shows
+the commit as its first 12 characters. The member is on every view. It is a line beside the statement,
 not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
-or `stale` (#1114, ADR-console-043).
+or `stale`.
 
 `spend` is the `spend.spend_view` the caller passes (members defined in `spend.py`), null when none;
 it is a reading beside the statement, never counted in `inbox_items` (#1134).
@@ -613,6 +617,7 @@ from pathlib import PurePosixPath
 
 from agent_tools.console import contract_draft, inbox
 from agent_tools.console.activation import Activation
+from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import (
     DONE as RUN_DONE,
@@ -806,9 +811,12 @@ STALE_SENTENCE = ("The tracker could not be read for {projects}; "
 UNREAD_DECISION = "A decision waits on the tracker, but its questions could not be read."
 INBOX_HEALTH = "inbox.health"
 ACTIVATE_COMMAND = "just switch"
-ACTIVATION_TEXT = "A console change merged and is not active on this host: run {command} in {root}."
-ACTIVATION_BEHIND_TEXT = ("A console change merged and is not active on this host: run {command} in {root} "
-                          "once it is updated to origin's integration branch.")
+ACTIVATION_TEXT = "A console change merged at {commit} is not active on this host."
+ACTIVATING_TEXT = "Activating this host at {commit}. The console may restart before it reports."
+ACTIVATED_TEXT = "Activated this host at {commit}."
+ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {next_step}"
+ACTIVATE_LABEL = "Activate"
+OUTCOME_MS = 24 * 3600 * 1000
 
 
 @dataclass(frozen=True)
@@ -1809,6 +1817,7 @@ def derive_view(
     looked: str | None = None,
     movement: Mapping[str, ProjectMovement] | None = None,
     activation: Activation | None = None,
+    activation_run: LastRun | None = None,
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
 ) -> dict:
@@ -2030,13 +2039,34 @@ def derive_view(
                 (p for p in (pending or {}).values()
                  if p.reason is not None and p.project_id in registered),
                 key=lambda p: (p.failed_at, p.sprint_id))],
-        "activation": (
-            None if activation is None or not activation.changed else
-            {"text": (ACTIVATION_BEHIND_TEXT if activation.local_behind else ACTIVATION_TEXT).format(
-                command=ACTIVATE_COMMAND, root=activation.root),
-             "command": ACTIVATE_COMMAND, "root": activation.root}),
+        "activation": _activation_line(activation, activation_run, now_ms),
         "spend": dict(spend) if spend is not None else None,
     }
+
+
+def _activation_line(activation: Activation | None, run: LastRun | None, now_ms: int | None) -> dict | None:
+    """The activation line by the precedence in the module docstring; None when there is nothing to say."""
+    pending = activation is not None and bool(activation.changed)
+
+    def line(text: str, state: str, commit: str, root: str, activate: bool) -> dict:
+        return {"text": text, "state": state, "commit": commit, "root": root, "activate": activate}
+
+    if run is not None and run.state == "running":
+        return line(ACTIVATING_TEXT.format(commit=run.commit[:12]), "running", run.commit, run.root, False)
+    if run is not None and run.state in ("activated", "failed"):
+        same = pending and activation.commit == run.commit
+        recent = (not pending and now_ms is not None and run.finished_ms is not None
+                  and now_ms - run.finished_ms < OUTCOME_MS)
+        if same or recent:
+            if run.state == "activated":
+                return line(ACTIVATED_TEXT.format(commit=run.commit[:12]), "activated", run.commit, run.root, False)
+            text = ACTIVATION_FAILED_TEXT.format(
+                commit=run.commit[:12], reason=run.reason or "", next_step=run.next_step or "")
+            return line(text, "failed", run.commit, run.root, same)
+    if pending:
+        return line(ACTIVATION_TEXT.format(commit=activation.commit[:12]), "pending",
+                    activation.commit, activation.root, True)
+    return None
 
 
 def encode_view(view: Mapping) -> bytes:

@@ -157,9 +157,9 @@ when nobody is. A waiter with a pull request ahead of it creates no free lock un
 itself watched the lock free for `FREE_GRACE` seconds (60), and takes no closed one over until
 it has itself seen it closed for `CLOSED_GRACE` seconds (150); its next poll comes when that
 grace ends. A live first waiter takes a free lock within `FAST_POLL` seconds and a closed one
-within one poll of 120 seconds, because a merge leaves the lock's oid unchanged and only a whole
-poll sees it; each grace is longer than that, and bounds what a waiter that died or hangs can
-cost. The queue is asked
+within `FAST_POLL` seconds too (issue 1204: a merge leaves the lock's oid unchanged, so the same
+short read also asks whether the holder's pull request is still open); each grace is longer than
+that, and bounds what a waiter that died or hangs can cost. The queue is asked
 nothing else. `already_held` and `moved` concern only the caller's own lock and are answered
 before the queue is read, and the idle takeover of D4 does not depend on the caller's place: its
 own 45-minute watch is the bound. A following release's second attempt, right after it deleted
@@ -175,7 +175,12 @@ when it is called again within `QUEUE_LIVE` seconds; left alone the registration
 process deletes, while it waits, only registrations it created itself, so two waits of one pull
 request do not undo each other. While nobody is ahead of it the waiter also reads the lock ref
 alone every `FAST_POLL` seconds (20) between two polls and polls at once when it differs from
-what the poll saw, or is free (issue 1018: a poll whose takeover of a closed lock lost to the
+what the poll saw, or is free, or when the pull request that held it, as the poll saw it, is no
+longer open (issue 1204: that is how the first in line notices a merge within `FAST_POLL` seconds
+instead of at its next whole poll; the holder's pull request is read once more in each short
+read, and a closed holder the poll cannot take over is polled for once, so it costs no more than
+the 120-second rate, and a holder whose read fails is not read again by the short reads, which then
+see only the lock ref until the poll that follows; issue 1018: a poll whose takeover of a closed lock lost to the
 holder's release ends having read the lock free, and a read that only compared would see no
 change until a waiter behind had taken the lock at its grace's end). After one failed poll
 (D8) a waiter that was first in line keeps reading the lock ref so until its next poll, and
@@ -535,6 +540,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
     queue = Queue(args.repo, args.branch, node)
     keep = False  # D12: a land-contended answer leaves the registration to the next wait
     poll: list[Any] = [None, "", False, 0.0]  # pull request, sha, queue read, grace left when held back
+    noticed: set[int] = set()  # issue 1204: holders seen closed by a short read, which polled once for each
     closed: list[Any] = [None, 0.0]  # [a lock seen closed with a waiter ahead, first seen so]
 
     def seen(oid: str | None) -> None:
@@ -637,6 +643,16 @@ def wait_acquire(args: Any, node: Callable[[], str],
                     lock = fm.read_ref(args.repo, lock_ref(args.branch))
                     if lock is None or lock != watch[0]:
                         break  # issue 1018: free is reason enough, also when the poll itself left it free
+                    if (last is not None and last.pr is not None and last.lock_sha == lock
+                            and last.pr not in noticed):
+                        try:
+                            held = fm.pull_open(args.repo, last.pr)
+                        except forge_api.ForgeError:
+                            noticed.add(last.pr)  # issue 1204: a failed read is not asked again, and no poll
+                            continue
+                        if not held:
+                            noticed.add(last.pr)  # issue 1204: a merge leaves the lock's oid as it was
+                            break
                 except forge_api.ForgeError:
                     if failures:
                         continue  # after a failed poll the polls keep their 120-second rate (D8)

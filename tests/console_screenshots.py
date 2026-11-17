@@ -3,8 +3,8 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the sixteen screens the sprint block, the finished list, the message life, the
-  Spend page, the notices fold and the desk's spend figures must read well on (`tell-box-open` is
+- `STATES` names the nineteen screens the sprint block, the finished list, the message life, the
+  Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
   running sprint's manager session, an outside-sprint session and one workflow run, with spend on
@@ -17,8 +17,12 @@ Contract:
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
-  so the spend figures show); `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 32 files.
+  so the spend figures show; `goal-open` is the sprint block of `tell-box-open` with the top
+  bar's goal field focused so its box is open; `inbox-card` is `owner/web`'s question card with
+  two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
+  two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading);
+  `WIDTHS` are the two viewport widths each is shot at. `capture`
+  writes `<state>-<width>.png` for every pair, so a full run writes 38 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -39,7 +43,9 @@ Contract:
   `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
   pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
   the sprint block's content, `OPEN_TELL`); or when any shot is not taken from the top of the
-  page (`window.scrollY` is not 0 right before its full-page capture). It returns 2 with a one-line
+  page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
+  rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
+  tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
   reason when Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
 """
@@ -55,7 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import manager, sessions
+from agent_tools.console import capacity, manager, sessions, signin
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
@@ -66,7 +72,7 @@ from .console_test_support import hook_body, write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend")
+          "notice-post-open", "desk-spend", "goal-open", "inbox-card", "accounts-panel")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -112,6 +118,7 @@ class Shot:
     jargon: int = 0
     tell: tuple[bool, str | None, str | None, bool] | None = None
     scroll_y: float = 0.0
+    short: tuple[str, ...] = ()
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -196,6 +203,17 @@ class _Seed:
             "answers": ["passed", "failed", "note"], "paid": False, "confirm": "",
             "answered": False, "held_work": 1, "blocking": [], "version": "v1"})
 
+    def account(self, name: str, week: float) -> None:
+        """A signed-in profile with one capacity reading whose week window is `week` used."""
+        self._at[0] = _iso(self.now_s)
+        reading = capacity.parse_report({
+            "http_status": 200, "status": "allowed", "reset": int(self.now_s) + 86400, "binding": None,
+            "claim": None, "account": None, "session_id": None,
+            "windows": {"7d": {"status": "allowed", "utilization": week,
+                               "reset": int(self.now_s) + 86400}}})
+        self.log.append(capacity.report_entries(reading, name))
+        self.log.append([signin.entry(name, signin.Status("signed_in", None))])
+
     def message(self, project: str, sid: str, goal: str, *, sent: float, read: float | None = None,
                 replied: float | None = None) -> None:
         base = {"sprint_id": sid}
@@ -224,7 +242,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
-    elif state == "tell-box-open":
+    elif state in ("tell-box-open", "goal-open"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
@@ -247,6 +265,13 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
                     held=True)
         seed.check(web, 11, 3 * MINUTE)
+    elif state == "inbox-card":
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
+                    asks=True)
+        seed.check(web, 11, 3 * MINUTE)
+    elif state == "accounts-panel":
+        seed.account("work-main", 0.4)
+        seed.account("work-spare", 0.9)
     elif state in ("notices-fold", "notice-post-open"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
         sid, goal = seed.sprint(web, "Fix the settings page", started=20 * MINUTE,
@@ -377,6 +402,9 @@ def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
         sprint_ids = _seed_state(_Seed(log, at, now_s), state, str(projects[0]))
     finally:
         log.close()
+    if state == "accounts-panel":
+        for name in ("work-main", "work-spare"):
+            (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
     if state == "spend-page":
         _write_spend(fixture, now_s, sprint_ids[0])
     elif state == "desk-spend":
@@ -415,7 +443,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
             "local_reader": lambda root, pattern: LocalReading((), False)}
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
-        profile_dirs=lambda: [], token_path=fixture.token, sprint_secrets=fixture.secrets,
+        profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
         activity=lambda root: None,
         slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
@@ -515,6 +543,12 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
+CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
+SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
+  (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
+  (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
+  ([n, h]) => n.tagName.toLowerCase() + "." + (n.getAttribute("class") || "").split(/\\s+/)[0]
+    + " " + Math.round(h * 100) / 100 + "px")"""
 SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
@@ -533,6 +567,12 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.click('details[data-key^="notices:"] > summary')
             if state == "notice-post-open" and page.query_selector("button.notice-open"):
                 page.click("button.notice-open")
+        if state == "goal-open":
+            page.focus("textarea.goal-text")
+            page.wait_for_selector(".goal-box")
+        if state == "accounts-panel":
+            page.click("#capacity")
+            page.wait_for_selector("#accounts:not([hidden])")
         tell = None
         if state == "tell-box-open":
             page.click("button.tell-open")
@@ -543,11 +583,12 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
         squeezed = page.evaluate(SQUEEZED_COUNT)
         jargon = page.evaluate(JARGON_COUNT)
         scroll_y = page.evaluate(SCROLL_Y)
+        short = tuple(page.evaluate(SHORT_CONTROLS))
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
-    return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y)
+    return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y, short=short)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -590,7 +631,11 @@ def main(argv: list[str] | None = None) -> int:
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
               f"(scrolled {shot.scroll_y:g} px)")
-    return 1 if wide or squeezed or jargon or closed or scrolled else 0
+    short = [shot for shot in taken if shot.short]
+    for shot in short:
+        print(f"console-screenshots: {shot.path.name} has a control under 32 px "
+              f"({', '.join(shot.short)})")
+    return 1 if wide or squeezed or jargon or closed or scrolled or short else 0
 
 
 if __name__ == "__main__":

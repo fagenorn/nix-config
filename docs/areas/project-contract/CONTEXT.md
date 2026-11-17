@@ -28,7 +28,7 @@ _Avoid_: upgrade script
 The versioned JSON file the platform ships, listing its deprecations and migrations. A project's contract schema version is checked against it.
 
 **Production rules**:
-The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production.
+The optional `production` section of a project contract: the commands, key files and MCP tools that change the project's production, the routes that only read it, and the release profile through which a change is allowed, or the declaration that the project has no production. A contract without the section has no production rules, which is not the same as declaring no production. A rules section may name one of its changing commands as its console activation, the command the console's Activate runs (ADR-system-004).
 _Avoid_: deploy rules, production config
 
 **Project contract**:

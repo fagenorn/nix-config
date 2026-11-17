@@ -15,6 +15,7 @@
   --crust: #181926; --peach: #f5a97f; --lav: #b7bdf8;
   --green: #a6da95; --yellow: #eed49f; --red: #ed8796;
   --hair: rgba(202, 211, 245, .09);
+  --hover: rgba(202, 211, 245, .05);
   --ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
   --display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Display", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
   color-scheme: dark;
@@ -32,6 +33,36 @@ ul { list-style: none; }
 kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; font: 600 .71875rem/1 var(--ui); color: var(--sub0); border: 1px solid var(--s2); border-radius: 5px; }
 .ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; align-self: center; }
 .ic .f { fill: currentColor; stroke: none; }
+/* controls */
+.btn-primary, .btn-quiet, .btn-danger, .btn-option { display: inline-flex; align-items: center; gap: 8px; min-height: 32px; padding: 5px 12px; font: 500 .875rem/1.4 var(--ui); text-align: left; text-decoration: none; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 8px; cursor: pointer; transition: background-color .16s, border-color .16s; }
+.btn-primary { min-height: 40px; padding: 0 16px; font-weight: 600; }
+.btn-option { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; column-gap: 14px; width: 100%; min-height: 44px; padding: 9px 14px; color: var(--text); border-color: transparent; }
+.btn-option kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
+.btn-bare { padding: 0; border-color: transparent; background: none; }
+.field-line, .field-area, .field-code { min-height: 32px; padding: 5px 10px; font: 400 .875rem/1.4 var(--ui); color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.field-area { display: block; width: 100%; min-height: 4.5rem; resize: vertical; }
+.field-code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; letter-spacing: .06em; }
+.field-bare { padding-left: 0; padding-right: 0; background: none; border-color: transparent; }
+.field-line::placeholder, .field-area::placeholder, .field-code::placeholder { color: var(--ov2); opacity: 1; }
+.btn-primary:disabled, .btn-primary[aria-disabled="true"], .btn-quiet:disabled, .btn-quiet[aria-disabled="true"], .btn-danger:disabled, .btn-danger[aria-disabled="true"], .btn-option:disabled, .btn-option[aria-disabled="true"], .field-line:disabled, .field-line[aria-disabled="true"], .field-area:disabled, .field-area[aria-disabled="true"], .field-code:disabled, .field-code[aria-disabled="true"] { border-width: 1px; border-style: dashed; border-color: var(--s1); cursor: not-allowed; opacity: .55; }
+.btn-primary[aria-busy="true"], .btn-quiet[aria-busy="true"], .btn-danger[aria-busy="true"], .btn-option[aria-busy="true"], .field-line[aria-busy="true"], .field-area[aria-busy="true"], .field-code[aria-busy="true"] { border-width: 1px; border-style: dotted; cursor: progress; }
+.btn-primary[aria-busy="true"]::after, .btn-quiet[aria-busy="true"]::after, .btn-danger[aria-busy="true"]::after { content: "\2026"; }
+.btn-quiet:hover:not(:disabled):not([aria-disabled="true"]), .btn-danger:hover:not(:disabled):not([aria-disabled="true"]), .btn-option:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--hover); border-color: var(--s2); }
+.btn-quiet.btn-bare:hover:not(:disabled):not([aria-disabled="true"]) { border-color: transparent; }
+.btn-primary:active, .btn-quiet:active, .btn-danger:active, .btn-option:active { transform: translateY(1px); }
+.btn-primary[aria-pressed="true"], .btn-quiet[aria-pressed="true"], .btn-danger[aria-pressed="true"], .btn-option[aria-pressed="true"] { border-color: var(--lav); font-weight: 600; }
+.btn-primary:focus-visible, .btn-quiet:focus-visible, .btn-danger:focus-visible, .btn-option:focus-visible, .field-line:focus-visible, .field-area:focus-visible, .field-code:focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 8px; }
+.field-bare:focus-visible { outline: none; }
+/* end controls */
+/* controls: desk */
+.btn-primary { background: var(--peach); border-color: var(--peach); color: var(--crust); }
+.btn-primary kbd { border-color: rgba(24, 25, 38, .28); color: var(--crust); }
+.btn-danger { color: var(--red); }
+.btn-primary:hover:not(:disabled):not([aria-disabled="true"]) { background: #f8bb98; border-color: #f8bb98; }
+.btn-primary:disabled, .btn-primary[aria-disabled="true"] { background: var(--s1); border-color: var(--s2); color: var(--sub0); }
+.btn-option[aria-pressed="true"] { background: rgba(183, 189, 248, .10); }
+.btn-option[aria-pressed="true"] kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
+/* end controls: desk */
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 56px; }
@@ -39,7 +70,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .conn { color: var(--ov2); font-size: .8125rem; }
 .nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; }
 .nav:hover { color: var(--text); }
-.cap { display: flex; flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
+.cap { display: flex; flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
 .cap > * { flex: none; }
 .cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
 .cap-fine { color: var(--green); }
@@ -53,9 +84,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .cap-pc { color: var(--sub1); }
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 .cap-excluded, .cap-excl, .cap-pin-mark { color: var(--ov2); }
-.acct-toggle, .acct-pin, .acct-signin, .acct-remove, .acct-remove-send, .acct-remove-cancel, .acct-close { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-.acct-toggle:disabled, .acct-pin:disabled, .acct-toggle[aria-disabled="true"], .acct-pin[aria-disabled="true"], .acct-signin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled,
-.acct-signin[aria-disabled="true"], .acct-remove-send[aria-disabled="true"], .acct-remove-cancel[aria-disabled="true"] { cursor: default; opacity: .6; }
 .acct-panel { position: absolute; top: calc(100% + 6px); right: 16px; z-index: 20; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 6rem); overflow-y: auto; padding: 12px 16px; background: var(--base); border: 1px solid var(--s1); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); font-size: .84375rem; color: var(--sub0); }
 .acct-panel[hidden] { display: none; }
 .acct-panel:focus-visible { outline: none; }
@@ -70,7 +98,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-detail { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 2px; font-size: .8125rem; color: var(--sub0); }
 .acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
-.acct-remove-name { font: inherit; color: inherit; background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .acct-pin-note { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); font-size: .8125rem; color: var(--sub1); }
 
@@ -136,35 +163,25 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .continue, .progress-withdraw, .tell-open, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .continue:hover:enabled, .progress-withdraw:hover:enabled, .tell-open:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .continue:disabled, .progress-withdraw:disabled, .tell-open:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
-.abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
-.abox textarea, .abox input { display: block; width: 100%; max-width: 40rem; margin-top: 6px; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
-.abox textarea { min-height: 4.5rem; resize: vertical; }
-.opt { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; column-gap: 14px; width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid transparent; }
+.abox textarea, .abox input { display: block; width: 100%; max-width: 40rem; margin-top: 6px; }
+.abox textarea { resize: vertical; }
 .opt .ot { font-size: 1.0625rem; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
 .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
-.opt kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
 .opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
-.opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
-.opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
-.goal-project.picked { color: var(--lav); border-color: var(--lav); }
 .goal-bar { position: relative; flex: 1 1 12rem; min-width: 12rem; max-width: 440px; }
 .goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
 .goal-in:hover { border-color: var(--s1); }
 .goal-in:focus-within { border-color: var(--lav); }
-.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; text-overflow: ellipsis; }
-.goal-in .goal-text:focus-visible { outline: none; }
-.goal-in .goal-text::placeholder { color: var(--ov2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 7px 0; font: inherit; line-height: 22px; color: var(--text); background: none; resize: none; overflow: hidden; text-overflow: ellipsis; }
+.goal-in .goal-text::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .goal-key { margin-top: 9px; }
 .goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
 .goal-bar.open .goal-text { height: 82px; overflow: auto; }
 .goal-box { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 14rem); overflow-y: auto; padding: 12px; background: var(--base); border: 1px solid var(--lav); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); }
 .goal-filter { min-width: 0; }
-.goal-filter, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
+.goal-filter, .reply-text { width: 100%; }
 .reply-text { min-height: 6em; resize: vertical; }
 .brief .title-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
 .brief .brief-goal { margin-top: 6px; font-size: .84375rem; }
@@ -203,7 +220,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
 .sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
-.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.sprint-check { padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -225,10 +242,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-list > summary .message-new, .sprint-earlier summary .message-new { margin-left: 10px; }
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
 .activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
+.activation .btn-quiet { margin-left: 8px; }
+.activation-refused { margin-left: 8px; color: var(--sub0); }
 .wait { margin-top: 6px; font-size: .84375rem; color: var(--sub0); max-width: 44rem; overflow-wrap: anywhere; }
 .wait a { color: inherit; text-underline-offset: 3px; }
 .sprint-checks .wait { margin: 0; padding: 2px 0; font-size: .8125rem; max-width: none; }
-.activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
@@ -239,19 +257,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-acts { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
 .sprint-acts .sprint-tell { flex: 1 0 100%; }
 .sprint-more { margin-left: auto; font-size: .8125rem; }
-.sprint-more summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
+.sprint-more summary { list-style: none; }
 .sprint-more summary::-webkit-details-marker { display: none; }
-.tell { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
+.tell { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail, .stop-fail, .unstopped { color: var(--red); }
 .stop-ask { color: var(--text); }
 .lead .act { margin-top: 14px; align-items: center; gap: 8px; font-size: .9375rem; }
-.act .primary.needs { display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 10px; font-weight: 600; background: var(--peach); color: var(--crust); text-decoration: none; }
-.act .primary.needs:hover:enabled { background: #f8bb98; }
-.act .primary.needs:disabled { background: var(--s1); color: var(--sub0); cursor: not-allowed; }
-.act .primary.needs kbd { border-color: rgba(24, 25, 38, .28); color: var(--crust); }
 .item-detail { margin-left: auto; }
-.item-detail summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
+.item-detail summary { list-style: none; }
 .item-detail summary::-webkit-details-marker { display: none; }
 .finished-list { margin-top: 16px; font-size: .8125rem; }
 .finished-list > summary { cursor: pointer; color: var(--ov2); }
@@ -278,7 +292,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .earlier summary::-webkit-details-marker { display: none; }
 .earlier summary:hover { background: rgba(202, 211, 245, .05); }
 .earlier summary b { font-weight: 600; color: var(--sub0); }
-.answer { color: var(--lav); text-underline-offset: 3px; }
+.answer:not([class*="btn-"]) { color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
 .side h2 { display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
@@ -294,7 +308,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .line summary > .sess-sum, .line summary > .run-sum { flex-basis: 100%; }
 .line.quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .line.quiet > details { flex: 1 1 auto; min-width: 0; }
-.give-goal { margin-left: auto; font-size: .8125rem; color: var(--sub1); }
+.give-goal { margin-left: auto; }
 .run-sum { font-size: .8125rem; color: var(--sub0); }
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
@@ -308,13 +322,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .notice-head .notice-age { flex: none; margin-left: auto; color: var(--ov2); white-space: nowrap; }
 .notice-words { color: var(--text); }
 .notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
-.notice-open, .notice-send, .notice-cancel, .notice-withdraw { font: inherit; color: inherit; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.notice-open:hover:enabled, .notice-send:hover:enabled, .notice-cancel:hover:enabled, .notice-withdraw:hover:enabled { background: rgba(202, 211, 245, .05); }
-.notice-send:disabled, .notice-withdraw:disabled { cursor: default; color: var(--ov2); }
-.notice-open { margin-top: 8px; font-size: .8125rem; color: var(--sub0); }
-.notice-withdraw { flex: none; padding: 0 8px; font-size: .8125rem; color: var(--ov2); }
+.notice-open { margin-top: 8px; }
+.notice-withdraw { flex: none; }
 .notice-post { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; font-size: .8125rem; color: var(--sub0); }
-.notice-text { flex: 1 1 12rem; min-width: 0; max-width: 100%; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.notice-text { flex: 1 1 12rem; min-width: 0; max-width: 100%; }
 .notice-list + .notice-open, .notice-list + .notice-post { margin-top: 12px; }
 .notice-post-reason, .notice-reason { color: var(--sub0); }
 .notice-reason { margin: 2px 0 0; font-size: .8125rem; }
@@ -345,21 +356,15 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .signin-run { margin: 6px 0 0; color: var(--sub0); }
 .signin-failed { color: var(--red); }
 .signin-link { color: var(--blue); overflow-wrap: anywhere; }
-.signin-code { flex: 1 1 14rem; max-width: 24rem; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.signin-code { flex: 1 1 14rem; max-width: 24rem; }
 .account-add { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: .8125rem; color: var(--sub0); }
-.account-add button { font: inherit; color: inherit; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.account-add button:hover:enabled { background: rgba(202, 211, 245, .05); }
-.account-add button:disabled { cursor: default; color: var(--ov2); }
-.account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; }
 .account-add-note { margin: 0; color: var(--text); }
 .account-add-link { color: var(--blue); }
 .account-add-reason { color: var(--sub0); }
 .register { margin-top: 24px; font-size: .8125rem; color: var(--sub0); }
 .register-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-.register button { font: inherit; color: inherit; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.register button:hover:enabled { background: rgba(202, 211, 245, .05); }
-.register button:disabled { cursor: default; color: var(--ov2); }
-.register-path { flex: 1 1 12rem; min-width: 0; max-width: 100%; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.register-path { flex: 1 1 12rem; min-width: 0; max-width: 100%; }
 .register-result { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
@@ -375,12 +380,11 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .draft-more > summary { cursor: pointer; }
 .draft-more-list { list-style: none; padding-left: 0; margin: 6px 0 0; }
 .draft-more-list li { margin-bottom: 4px; }
-.register .draft-pick { display: block; width: 100%; box-sizing: border-box; text-align: left; border: 0; background: none; padding: 2px 0; overflow-wrap: anywhere; }
+.register .draft-pick { display: block; width: 100%; box-sizing: border-box; text-align: left; padding: 2px 0; overflow-wrap: anywhere; }
 .draft-edit-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
 .draft-options { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px 8px; }
 .register .draft-option { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
-.register .draft-option.picked { color: var(--text); border-color: var(--s1); }
-.draft-edit { flex: 1 1 12rem; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.draft-edit { flex: 1 1 12rem; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .abox .draft-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
 .abox .draft-row input { flex: 1 1 14rem; width: auto; min-width: 0; margin-top: 0; box-sizing: border-box; }
 .card .q.reg, .rest .q.reg { white-space: pre-line; }
@@ -393,7 +397,7 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .pic { margin: 0; flex: 0 1 200px; min-width: 0; max-width: 100%; }
 .pic-pair { display: flex; align-items: flex-start; gap: 12px; flex: 1 1 412px; min-width: 0; max-width: 100%; }
 .pic-pair .pic { flex: 1 1 0; }
-.pic-thumb { display: block; width: 100%; padding: 0; overflow: hidden; cursor: zoom-in; background: rgba(24, 25, 38, .22); border: 1px solid var(--hair); border-radius: 8px; }
+.pic-thumb { display: block; width: 100%; padding: 0; overflow: hidden; cursor: zoom-in; background: rgba(24, 25, 38, .22); }
 .pic-thumb img { display: block; width: 100%; height: auto; min-height: 48px; max-height: 180px; object-fit: contain; }
 .pic-thumb img[hidden] { display: none; }
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
@@ -414,9 +418,8 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 .viewer-pic.current { outline: 2px solid var(--lav); outline-offset: 4px; border-radius: 4px; }
 .viewer img { display: block; max-width: 100%; max-height: calc(100vh - 10rem); object-fit: contain; }
 .viewer img[hidden] { display: none; }
-.viewer-bar button { min-height: 36px; padding: 6px 14px; font: inherit; color: var(--text); background: var(--base); border: 1px solid var(--s1); border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.viewer-bar button { white-space: nowrap; }
 .viewer-bar .viewer-close { margin-left: auto; }
-.viewer-bar button:disabled { color: var(--ov2); border-color: var(--hair); cursor: default; }
 
 @media (max-width: 1180px) {
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
@@ -434,7 +437,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .pic-pair { flex-direction: column; align-items: stretch; }
   .viewer-pair { flex-direction: column; }
   .viewer-bar { padding: 8px 12px; }
-  .viewer-bar button { min-height: 44px; padding: 6px 12px; }
+  .viewer-bar button { min-height: 44px; }
   .pic { flex-basis: 100%; }
   .pic-thumb img { max-height: 240px; }
   .card .q.reg, .rest .q.reg { font-size: 1rem; }
@@ -452,7 +455,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/spend">Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/spend">Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -488,6 +491,11 @@ function el(tag, cls, text) {
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+// Marks a control busy while its own post is held: aria-busy only. The caller keeps its disabling line, so busy never decides disabled or aria-disabled.
+function markBusy(node, busy) {
+  if (busy) node.setAttribute("aria-busy", "true");
+  else node.removeAttribute("aria-busy");
 }
 // Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
 function pathWords(node, text) {
@@ -803,14 +811,14 @@ function tellBox(item, entry, sprint) {
   const state = tells.get(id);
   const draft = tellDrafts.get(id);
   if (!tellOpen.has(id) && (draft === undefined || draft.value === "") && state === undefined) {
-    const opener = actionButton("tell-open", "Tell the manager", () => openTell(id));
+    const opener = actionButton("tell-open btn-quiet", "Tell the manager", () => openTell(id));
     opener.dataset.tellOpen = id;
     return opener;
   }
   const box = el("div", "sprint-tell");
   const label = el("label", "tell-label");
   label.appendChild(el("span", "", "Tell the manager"));
-  const area = el("textarea", "tell");
+  const area = el("textarea", "tell field-area");
   area.dataset.tell = id;
   const hasHint = typeof sprint.tell_text === "string";
   if (hasHint) area.setAttribute("aria-describedby", "tell-hint-" + id);
@@ -836,8 +844,9 @@ function tellBox(item, entry, sprint) {
     hint.setAttribute("id", "tell-hint-" + id);
     box.appendChild(hint);
   }
-  const send = actionButton("tell-send", "Send", () => tell(item, entry, sprint));
+  const send = actionButton("tell-send btn-quiet", "Send", () => tell(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") send.setAttribute("disabled", "");
+  markBusy(send, state !== undefined && state.phase === "sending");
   box.appendChild(send);
   if (state !== undefined && state.phase === "failed") {
     box.appendChild(el("span", "fail", "Could not send: " + state.reason));
@@ -921,7 +930,7 @@ function drawSprint(item, entry, sprint) {
     const list = el("ul", "sprint-checks");
     for (const check of checks) {
       const line = el("li", "");
-      line.appendChild(actionButton("sprint-check", check.text, () => openCheckCard(check)));
+      line.appendChild(actionButton("sprint-check btn-quiet btn-bare", check.text, () => openCheckCard(check)));
       list.appendChild(line);
     }
     for (const wait of waits) list.appendChild(waitLine(wait, "li"));
@@ -935,8 +944,9 @@ function drawSprint(item, entry, sprint) {
   }
   const retrying = retries.get(sprint.sprint_id);
   if (sprint.retry === true) {
-    const again = actionButton("retry", "Retry", () => retry(item, entry, sprint));
+    const again = actionButton("retry btn-quiet", "Retry", () => retry(item, entry, sprint));
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
+    markBusy(again, retrying !== undefined && retrying.phase === "sending");
     item.appendChild(again);
   }
   if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
@@ -961,10 +971,11 @@ function drawSprint(item, entry, sprint) {
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
-  more.appendChild(el("summary", "", "End the sprint"));
+  more.appendChild(el("summary", "more-open btn-quiet", "End the sprint"));
   if (stopButton !== null) more.appendChild(stopButton);
-  const button = actionButton("withdraw", "Drop the sprint", () => withdraw(item, entry, sprint));
+  const button = actionButton("withdraw btn-danger", "Drop the sprint", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
+  markBusy(button, state !== undefined && state.phase === "sending");
   more.appendChild(button);
   controls.appendChild(more);
   item.appendChild(controls);
@@ -976,21 +987,23 @@ function stopControls(item, entry, sprint) {
   // The Stop and report button sits under "End the sprint" beside Drop the sprint; the confirmation it opens stays on the sprint's line.
   let button = null;
   if (!asking) {
-    button = actionButton("stop", "Stop and report", () => {
+    button = actionButton("stop btn-quiet", "Stop and report", () => {
       stops.set(id, { phase: "confirming", reason: "" });
       refillRows(id);
     });
   } else {
     item.appendChild(el("span", "stop-ask",
       "Stop this sprint? The manager finishes what is mid-merge, starts nothing new and reports."));
-    const confirm = actionButton("stop-confirm", "Stop and report", () => stop(item, entry, sprint));
+    const confirm = actionButton("stop-confirm btn-quiet", "Stop and report", () => stop(item, entry, sprint));
     if (state.phase === "sending") confirm.setAttribute("disabled", "");
+    markBusy(confirm, state.phase === "sending");
     item.appendChild(confirm);
-    const cancel = actionButton("stop-cancel", "Cancel", () => {
+    const cancel = actionButton("stop-cancel btn-quiet", "Cancel", () => {
       stops.delete(id);
       refillRows(id);
     });
     if (state.phase === "sending") cancel.setAttribute("disabled", "");
+    markBusy(cancel, state.phase === "sending");
     item.appendChild(cancel);
   }
   if (state !== undefined && state.phase === "failed") {
@@ -1173,18 +1186,20 @@ function stallCard(item) {
   card.appendChild(el("span", "reason", item.last_reason));
   const again = stallPosts.get("again\n" + item.sprint_id);
   const away = stallPosts.get("withdraw\n" + item.sprint_id);
-  const retry = actionButton("try-again primary needs", "Try again",
+  const retry = actionButton("try-again btn-primary", "Try again",
     () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
+  markBusy(retry, again !== undefined && again.phase === "sending");
   const act = el("div", "act");
   act.appendChild(retry);
-  const withdrawn = actionButton("stall-withdraw", "Drop the sprint",
+  const withdrawn = actionButton("stall-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  markBusy(withdrawn, away !== undefined && away.phase === "sending");
   act.appendChild(withdrawn);
   for (const state of [again, away]) {
     if (state !== undefined && state.phase === "failed") {
@@ -1218,18 +1233,20 @@ function progressCard(item) {
   if (typeof item.last_status === "string") card.appendChild(el("span", "reason", item.last_status));
   const going = stallPosts.get("continue\n" + item.sprint_id);
   const away = stallPosts.get("progress-withdraw\n" + item.sprint_id);
-  const onward = actionButton("continue primary needs", "Continue",
+  const onward = actionButton("continue btn-primary", "Continue",
     () => stallPost(item, "continue", "Could not continue: ", () => fetch("/api/continue", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
+  markBusy(onward, going !== undefined && going.phase === "sending");
   const act = el("div", "act");
   act.appendChild(onward);
-  const withdrawn = actionButton("progress-withdraw", "Drop the sprint",
+  const withdrawn = actionButton("progress-withdraw btn-danger", "Drop the sprint",
     () => stallPost(item, "progress-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  markBusy(withdrawn, away !== undefined && away.phase === "sending");
   act.appendChild(withdrawn);
   for (const state of [going, away]) {
     if (state !== undefined && state.phase === "failed") {
@@ -1293,10 +1310,11 @@ function redrawAccounts() {
 function exclusionControls(acct, p) {
   const state = exclusionPosts.get(p.profile);
   const sending = state !== undefined && state.phase === "sending";
-  const toggle = actionButton("acct-toggle", excludedProfile(p) ? "Include" : "Exclude", () => toggleExclusion(p));
+  const toggle = actionButton("acct-toggle btn-quiet", excludedProfile(p) ? "Include" : "Exclude", () => toggleExclusion(p));
   // aria-disabled, not disabled: a disabled button cannot take the focus renderAccounts restores to it,
   // and the action guards itself while a POST is in flight.
   if (sending) toggle.setAttribute("aria-disabled", "true");
+  markBusy(toggle, sending);
   acct.appendChild(toggle);
   if (state !== undefined && state.phase === "failed") {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
@@ -1338,10 +1356,11 @@ async function togglePin(p) {
 function pinControls(acct, p) {
   const state = pinPosts.get(p.profile);
   const sending = state !== undefined && state.phase === "sending";
-  const toggle = actionButton("acct-pin", pinnedProfile(p) ? "Unpin" : "Pin", () => togglePin(p));
+  const toggle = actionButton("acct-pin btn-quiet", pinnedProfile(p) ? "Unpin" : "Pin", () => togglePin(p));
   // aria-disabled, not disabled: a disabled button cannot take the focus renderAccounts restores to it,
   // and the action guards itself while a POST is in flight.
   if (sending) toggle.setAttribute("aria-disabled", "true");
+  markBusy(toggle, sending);
   acct.appendChild(toggle);
   if (state !== undefined && state.phase === "failed") {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
@@ -1402,7 +1421,7 @@ async function removeAccount(p) {
 }
 function removeControls(act, row, p, view) {
   const name = p.profile;
-  act.appendChild(actionButton("acct-remove", "Remove", () => {
+  act.appendChild(actionButton("acct-remove btn-danger", "Remove", () => {
     removeOpen.add(name);
     redrawAccounts();
   }));
@@ -1413,17 +1432,18 @@ function removeControls(act, row, p, view) {
   const words = removeSessionsWords(name, view);
   if (words !== null) box.appendChild(el("span", "acct-remove-sessions", words));
   box.appendChild(el("span", "acct-remove-note", "Type " + name + " to remove it. It is signed out first."));
-  const input = el("input", "acct-remove-name");
+  const input = el("input", "acct-remove-name field-line");
   input.type = "text";
   input.setAttribute("aria-label", "Type " + name + " to remove it");
   input.dataset.removeDraft = name;
-  const send = actionButton("acct-remove-send", "Remove " + name, () => removeAccount(name));
+  const send = actionButton("acct-remove-send btn-danger", "Remove " + name, () => removeAccount(name));
   const draft = removeDrafts.get(name);
   if (draft !== undefined) input.value = draft.value;
   // aria-disabled, not disabled, while a POST is in flight: a disabled button cannot take the focus
   // renderAccounts restores to it, and removeAccount guards itself. A wrong name still disables it.
   send.disabled = input.value !== name;
   if (sending) send.setAttribute("aria-disabled", "true");
+  markBusy(send, sending);
   input.addEventListener("input", () => {
     removeDrafts.set(name, { value: input.value, start: input.selectionStart, end: input.selectionEnd });
     send.disabled = input.value !== name;
@@ -1431,7 +1451,7 @@ function removeControls(act, row, p, view) {
   removeFields.set(name, input);
   box.appendChild(input);
   box.appendChild(send);
-  const cancel = actionButton("acct-remove-cancel", "Cancel", () => {
+  const cancel = actionButton("acct-remove-cancel btn-quiet", "Cancel", () => {
     const now = removePosts.get(name);
     if (now !== undefined && now.phase === "sending") return;
     removeOpen.delete(name);
@@ -1440,6 +1460,7 @@ function removeControls(act, row, p, view) {
     redrawAccounts();
   });
   if (sending) cancel.setAttribute("aria-disabled", "true");
+  markBusy(cancel, sending);
   box.appendChild(cancel);
   if (state !== undefined && state.phase === "failed") {
     box.appendChild(el("span", "fail", "Could not remove: " + state.reason));
@@ -1592,6 +1613,7 @@ function signinStartButton(item, cls) {
     // The panel's button stays focusable (aria-disabled) so renderAccounts can restore the focus to it; signinPost guards itself.
     if (cls.split(" ").includes("acct-signin")) start.setAttribute("aria-disabled", "true");
     else start.setAttribute("disabled", "");
+    markBusy(start, true);
   }
   return start;
 }
@@ -1605,16 +1627,16 @@ function signinAct(item, quiet = false) {
   const cancelling = signinPosts.get("cancel\n" + item.profile);
   const act = el("div", "act");
   if (!linked) {
-    act.appendChild(signinStartButton(item, quiet ? "signin-start acct-signin" : "signin-start primary needs"));
+    act.appendChild(signinStartButton(item, quiet ? "signin-start acct-signin btn-quiet" : "signin-start btn-primary"));
   } else {
     act.appendChild(signinLinkNode("signin-link", held));
     const input = document.createElement("input");
     input.type = "text";
     input.autocomplete = "off";
-    input.className = "signin-code";
+    input.className = "signin-code field-code";
     input.setAttribute("placeholder", "Code from the sign-in page");
     input.setAttribute("aria-label", "Sign-in code");
-    const send = actionButton("signin-send", "Send code",
+    const send = actionButton("signin-send btn-quiet", "Send code",
       () => signinPost(item, "code", "Could not send the code: ", () => fetch("/api/signin-code", {
         method: "POST", headers: stallHeaders(), body: signinBody(item, input.value.trim()),
       })));
@@ -1623,19 +1645,21 @@ function signinAct(item, quiet = false) {
     const lock = (value) => {
       send.disabled = value.trim() === "" || (sending && !quiet);
       if (sending && quiet) send.setAttribute("aria-disabled", "true");
+      markBusy(send, sending);
     };
     act.appendChild(draftField(input, stateId(item) + "\nsignin-code", lock));
     lock(input.value);
     act.appendChild(send);
   }
   if ((run !== null && run.state === "running") || held !== undefined) {
-    const cancel = actionButton("signin-cancel", "Cancel",
+    const cancel = actionButton("signin-cancel btn-quiet", "Cancel",
       () => signinPost(item, "cancel", "Could not cancel: ", () => fetch("/api/signin-cancel", {
         method: "POST", headers: stallHeaders(), body: signinBody(item),
       })));
     if (cancelling !== undefined && cancelling.phase === "sending") {
       // The panel's Cancel stays focusable (aria-disabled) so renderAccounts can restore the focus to it.
       cancel.setAttribute(quiet ? "aria-disabled" : "disabled", quiet ? "true" : "");
+      markBusy(cancel, true);
     }
     act.appendChild(cancel);
   }
@@ -1684,7 +1708,7 @@ function projectLine(entry) {
   line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
   if (entry.quiet) {
-    line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
+    line.appendChild(actionButton("give-goal btn-quiet", "Give it a goal", () => openGoalFor(entry.project_id)));
   }
   return line;
 }
@@ -1778,6 +1802,28 @@ async function postNotice(projectId) {
   }
   redrawNotices();
 }
+// The owner's Activate click (ADR-console-043): posts the commit the line shows and is disabled only while sending. The refusal stays on the line until a frame brings a different line.
+let activationPost = null;
+async function postActivation(commit, key) {
+  if (activationPost !== null && activationPost.key === key && activationPost.refused === null) return;
+  const state = { key, refused: null };
+  activationPost = state;
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/activate", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ commit }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (activationPost !== state) return;
+  // An accepted click ends the sending state: a retry that fails the same way brings a line with the same key, so no frame would clear it.
+  if (reason === null) activationPost = null;
+  else state.refused = reason;
+  redrawNotices();
+}
 async function withdrawNotice(projectId, id) {
   const key = noticeKey(projectId, id);
   const current = noticeWithdrawals.get(key);
@@ -1805,17 +1851,18 @@ async function withdrawNotice(projectId, id) {
 }
 // The owner's post control at the foot of a project's notices fold: one quiet button, or the one-line field with Send and Cancel.
 function noticePostControl(projectId) {
-  if (!noticeOpen.has(projectId)) return actionButton("notice-open", "Post a notice", () => openNotice(projectId));
+  if (!noticeOpen.has(projectId)) return actionButton("notice-open btn-quiet", "Post a notice", () => openNotice(projectId));
   const state = noticePosts.get(projectId);
   const sending = state !== undefined && state.phase === "sending";
   const box = el("div", "notice-post");
-  const field = accountField("notice-text", "Notice", "One line for every manager of this project");
+  const field = accountField("notice-text field-line", "Notice", "One line for every manager of this project");
   field.dataset.noticeDraft = projectId;
   const draft = noticeDrafts.get(projectId);
   if (draft !== undefined) field.value = draft.value;
-  const send = actionButton("notice-send", "Send", () => postNotice(projectId));
+  const send = actionButton("notice-send btn-quiet", "Send", () => postNotice(projectId));
   const reason = el("span", "notice-post-reason", sending ? "Sending\u2026" : state === undefined ? "" : state.reason);
   send.disabled = sending || field.value.trim() === "";
+  markBusy(send, sending);
   field.addEventListener("input", () => {
     noticeDrafts.set(projectId, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
     const shown = noticePosts.get(projectId);
@@ -1824,10 +1871,11 @@ function noticePostControl(projectId) {
       reason.textContent = "";
     }
     send.disabled = field.value.trim() === "" || (shown !== undefined && shown.phase === "sending");
+    markBusy(send, shown !== undefined && shown.phase === "sending");
   });
   box.appendChild(field);
   box.appendChild(send);
-  box.appendChild(actionButton("notice-cancel", "Cancel", () => cancelNotice(projectId)));
+  box.appendChild(actionButton("notice-cancel btn-quiet", "Cancel", () => cancelNotice(projectId)));
   box.appendChild(reason);
   return box;
 }
@@ -1842,8 +1890,9 @@ function noticeLine(notice, projectId) {
   const owned = notice.owner === true;
   const withdrawal = owned ? noticeWithdrawals.get(noticeKey(projectId, notice.id)) : undefined;
   if (owned) {
-    const withdraw = actionButton("notice-withdraw", "Withdraw", () => withdrawNotice(projectId, notice.id));
+    const withdraw = actionButton("notice-withdraw btn-quiet", "Withdraw", () => withdrawNotice(projectId, notice.id));
     withdraw.disabled = withdrawal !== undefined && withdrawal.phase === "sending";
+    markBusy(withdraw, withdrawal !== undefined && withdrawal.phase === "sending");
     head.appendChild(withdraw);
   }
   head.appendChild(timeEl("ago", notice.at, "notice-age"));
@@ -2133,7 +2182,7 @@ function accountRow(shown, view) {
   const elsewhere = accountSignin === name && accountCont !== null;
   const live = signinLive(name);
   if (!elsewhere && !live) {
-    act.appendChild(signinStartButton(item, "acct-signin"));
+    act.appendChild(signinStartButton(item, "acct-signin btn-quiet"));
     const failed = signinPosts.get("start\n" + name);
     if (failed !== undefined && failed.phase === "failed") {
       act.appendChild(el("span", "signin-failed", failed.failure + failed.reason));
@@ -2190,7 +2239,7 @@ function renderAccounts(view) {
   removeFields = new Map();
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Accounts"));
-  head.appendChild(actionButton("acct-close", "Close", closeAccounts));
+  head.appendChild(actionButton("acct-close btn-quiet", "Close", closeAccounts));
   const list = el("ul", "acct-rows");
   for (const p of cap.profiles) list.appendChild(accountRow(p, view));
   const parts = [head, list];
@@ -2364,7 +2413,7 @@ function heldLine(item) {
 function detailFold(item) {
   const fold = el("details", "item-detail");
   fold.dataset.key = "detail:" + itemId(item);
-  fold.appendChild(el("summary", "", "Detail"));
+  fold.appendChild(el("summary", "detail-open btn-quiet", "Detail"));
   fold.appendChild(answerLink(item));
   return fold;
 }
@@ -2505,7 +2554,7 @@ function holdPictures(draw) {
   let heldThumb = null;
   if (pictureHolds === 0) {
     const active = document.activeElement;
-    heldThumb = active && active.dataset && active.tagName === "BUTTON" && active.className === "pic-thumb"
+    heldThumb = active && active.dataset && active.tagName === "BUTTON" && active.className.split(" ")[0] === "pic-thumb"
       ? active.dataset.key : null;
   }
   pictureHolds += 1;
@@ -2532,7 +2581,7 @@ function pictureFigure(key, index, picture, label, sequence, caption) {
   const line = typeof caption === "function" ? caption(picture.line) : picture.line;
   const figure = el("figure", "pic");
   if (label !== null) figure.appendChild(el("span", "pic-label", label));
-  const thumb = el("button", "pic-thumb");
+  const thumb = el("button", "pic-thumb btn-quiet btn-bare");
   thumb.setAttribute("type", "button");
   thumb.dataset.key = key + "/" + index;
   thumb.dataset.picture = picture.id;
@@ -2614,11 +2663,11 @@ function drawViewer() {
     for (const n of [...host.children]) if (n !== bar) n.remove();
     host.appendChild(stage);
   } else {
-    const prev = viewerButton("viewer-prev", "Previous", false);
+    const prev = viewerButton("viewer-prev btn-quiet", "Previous", false);
     prev.addEventListener("click", () => stepViewer(-1));
-    const forward = viewerButton("viewer-next", "Next", false);
+    const forward = viewerButton("viewer-next btn-quiet", "Next", false);
     forward.addEventListener("click", () => stepViewer(1));
-    const close = viewerButton("viewer-close", "Close", false);
+    const close = viewerButton("viewer-close btn-quiet", "Close", false);
     close.addEventListener("click", closeViewer);
     bar = el("div", "viewer-bar");
     for (const n of [prev, el("p", "viewer-count", ""), forward, close]) bar.appendChild(n);
@@ -3083,7 +3132,7 @@ function briefRecord(sprintId) {
     goalFold.appendChild(goalText);
     const parts = el("div", "parts");
     const act = el("div", "act");
-    const field = el("textarea", "reply-text");
+    const field = el("textarea", "reply-text field-area");
     field.setAttribute("placeholder", "Or say what to change\u2026");
     field.setAttribute("aria-label", "Or say what to change");
     const row = el("details", "row brief-row");
@@ -3095,7 +3144,7 @@ function briefRecord(sprintId) {
       card, top, head, title, goalSlot, goalFold, goalText, parts, act, field, status: el("p", "act"), item: null,
       row, rowHead, seen: null,
     };
-    rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
+    rec.send = actionButton("reply-send btn-quiet", "Ask for changes", () => sendReply(rec));
     const box = el("div", "reply");
     for (const part of [field, rec.send, rec.status]) box.appendChild(part);
     for (const part of [top, head, title, goalSlot, parts, act, box]) card.appendChild(part);
@@ -3152,12 +3201,13 @@ function drawBrief(rec, item, lead) {
     : words[reply.phase] === undefined ? [] : [el("span", "", words[reply.phase])];
   rec.status.replaceChildren(...status);
   rec.send.disabled = reply.phase === "sending";
+  markBusy(rec.send, reply.phase === "sending");
 }
 function approveLine(item, state, lead) {
   if (state.phase === "waiting") {
     return [
       el("span", "", "Approving in five seconds."),
-      actionButton("undo", "Undo", () => { undo(state); redraw(); }),
+      actionButton("undo btn-quiet", "Undo", () => { undo(state); redraw(); }),
     ];
   }
   if (state.phase === "sending") return [el("span", "", "Approving\u2026")];
@@ -3168,7 +3218,7 @@ function approveLine(item, state, lead) {
   if (old !== undefined) {
     nodes.push(el("span", "", "A newer brief replaced version " + old + "; nothing was approved."));
   }
-  const approve = actionButton(lead ? "approve primary needs" : "approve", "Approve", () => { if (startApproval(item, state)) redraw(); });
+  const approve = actionButton(lead ? "approve btn-primary" : "approve btn-quiet", "Approve", () => { if (startApproval(item, state)) redraw(); });
   nodes.push(approve);
   return nodes;
 }
@@ -3218,7 +3268,7 @@ function actionButton(cls, label, onClick) {
 function statusLine(act, state, item) {
   if (state.phase === "waiting") {
     act.appendChild(el("span", "", "Sending in five seconds."));
-    act.appendChild(actionButton("undo", "Undo", () => { undo(state); redraw(); }));
+    act.appendChild(actionButton("undo btn-quiet", "Undo", () => { undo(state); redraw(); }));
   } else if (state.phase === "sending") {
     act.appendChild(el("span", "", "Sending\u2026"));
   } else if (state.phase === "sent") {
@@ -3228,7 +3278,7 @@ function statusLine(act, state, item) {
     if (state.phase === "failed") {
       act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
-        act.appendChild(actionButton("try-again answer-again", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
+        act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
       }
     }
     if (state.notice) act.appendChild(el("span", "", state.notice));
@@ -3240,8 +3290,9 @@ function actionLine(item, state, lead) {
   const act = el("div", "act");
   if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
-    const send = actionButton(lead ? "send primary needs" : "send", words, () => { if (start(item, state)) redraw(); });
+    const send = actionButton(lead ? "send btn-primary" : "send btn-quiet", words, () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
+    markBusy(send, planBusy(item, state));
     send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
@@ -3279,8 +3330,8 @@ function typedArea(cls, label, placeholder) {
 }
 function noteBox(item, state, box) {
   const review = item.kind === "owner-review";
-  const area = typedArea("note-text", "Note", review ? "What is not right yet" : "Write a note");
-  const send = actionButton("ans-note", review ? "Not yet" : "Send note", () => {
+  const area = typedArea("note-text field-area", "Note", review ? "What is not right yet" : "Write a note");
+  const send = actionButton("ans-note btn-quiet", review ? "Not yet" : "Send note", () => {
     const text = area.value;
     if (text.trim() === "") return;
     if (startCheck(item, state, "note", { note: text })) redraw();
@@ -3290,8 +3341,8 @@ function noteBox(item, state, box) {
   return send;
 }
 function wordsBox(item, state, box) {
-  const area = typedArea("words-text", "Answer in your own words", "Answer in your own words");
-  const send = actionButton("ans-words", "Send my words", () => {
+  const area = typedArea("words-text field-area", "Answer in your own words", "Answer in your own words");
+  const send = actionButton("ans-words btn-quiet", "Send my words", () => {
     const text = area.value;
     if (text.trim() === "") return;
     if (startWords(item, state, text)) redraw();
@@ -3300,7 +3351,9 @@ function wordsBox(item, state, box) {
   const pending = !choosable(state);
   box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
   area.disabled = pending;
+  markBusy(area, state.phase === "sending");
   send.disabled = pending || area.value.trim() === "";
+  markBusy(send, state.phase === "sending");
   box.appendChild(send);
 }
 function draftInput(cls, placeholder) {
@@ -3313,7 +3366,7 @@ function draftInput(cls, placeholder) {
   return input;
 }
 function draftBox(item, state, box) {
-  const input = draftInput("draft-text", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
+  const input = draftInput("draft-text field-line", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
   const row = el("div", "draft-row");
   // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
   const pending = !choosable(state) || planBusy(item, state);
@@ -3322,7 +3375,7 @@ function draftBox(item, state, box) {
     if (text === "" || pending) return;
     if (startDraft(item, state, text)) redraw();
   };
-  const send = actionButton("ans-draft", "Send", submit);
+  const send = actionButton("ans-draft btn-quiet", "Send", submit);
   input.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -3330,7 +3383,9 @@ function draftBox(item, state, box) {
   });
   row.appendChild(draftField(input, itemId(item) + "\ndraft", (value) => { send.disabled = pending || value.trim() === ""; }));
   input.disabled = !choosable(state);
+  markBusy(input, state.phase === "sending");
   send.disabled = pending || input.value.trim() === "";
+  markBusy(send, state.phase === "sending" || planBusy(item, state));
   row.appendChild(send);
   box.appendChild(row);
 }
@@ -3339,7 +3394,7 @@ function confirmBox(item, box, approve) {
   const input = document.createElement("input");
   input.type = "text";
   input.autocomplete = "off";
-  input.className = "confirm-text";
+  input.className = "confirm-text field-line";
   input.setAttribute("aria-label", "Typed confirmation");
   box.appendChild(draftField(input, itemId(item) + "\nconfirm", (value) => { approve.disabled = value !== item.confirm; }));
   approve.disabled = input.value !== item.confirm;
@@ -3376,7 +3431,7 @@ function checkBox(item, state, lead) {
     const extra = () => (approve ? { confirm: draftOf(itemId(item) + "\nconfirm").value } : {});
     const primary = lead && !marked;
     if (primary) marked = true;
-    const button = actionButton("ans-" + answer + (primary ? " primary needs" : ""), labels[answer] || answer, () => {
+    const button = actionButton("ans-" + answer + (primary ? " btn-primary" : " btn-quiet"), labels[answer] || answer, () => {
       if (button.disabled) return;
       if (startCheck(item, state, answer, extra())) redraw();
     });
@@ -3403,9 +3458,10 @@ function answerBox(item, state, lead) {
     if (soleOption(item)) return;
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
-      const button = el("button", state.picks[qi] === oi ? "opt picked" : "opt");
+      const button = el("button", "opt btn-option");
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
+      markBusy(button, state.phase === "sending");
       button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
       button.appendChild(pathWords(el("span", "ot"), option === q.chosen ? "chosen: " + option : option));
@@ -3456,7 +3512,7 @@ function leadItem(item) {
     if (held !== null) card.appendChild(held);
     if (!isQuestion(item) && !isRegister(item)) {
       const act = el("div", "act");
-      act.appendChild(answerLink(item, "answer primary needs"));
+      act.appendChild(answerLink(item, "answer btn-primary"));
       card.appendChild(act);
     }
   } else card.appendChild(answerBox(item, state, true));
@@ -3859,18 +3915,27 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
-// The activation line (#1114, ADR-console-043): the one sentence at the head of the Work column when a merged console change is not active on this host. The command rides in a code span; the rest of the text is drawn with pathWords so the checkout's path breaks after a slash.
+// The activation line (#1114, #1193, ADR-console-043): the one sentence at the head of the Work column about activating this host, drawn with pathWords so a path breaks after a slash. While Activate is offered the line ends with its button; a refusal of the click shows beside it until a frame brings a different line.
 function activationLine(view) {
   const found = view.activation;
-  if (found === null || typeof found !== "object") return null;
-  const { text, command } = found;
-  if (typeof text !== "string" || typeof command !== "string") return null;
-  const at = text.indexOf(command);
-  if (at < 0) return null;
+  if (found === null || typeof found !== "object") {
+    activationPost = null;
+    return null;
+  }
+  const { text, state, commit, activate } = found;
+  if (typeof text !== "string" || typeof commit !== "string") return null;
+  const key = state + " " + commit + " " + text;
+  if (activationPost !== null && activationPost.key !== key) activationPost = null;
   const line = el("p", "activation");
-  line.appendChild(el("span", "", text.slice(0, at)));
-  line.appendChild(el("code", "", command));
-  pathWords(line.appendChild(el("span")), text.slice(at + command.length));
+  pathWords(line.appendChild(el("span")), text);
+  if (activate === true) {
+    const button = actionButton("activate btn-quiet", "Activate", () => postActivation(commit, key));
+    button.disabled = activationPost !== null && activationPost.refused === null;
+    line.appendChild(button);
+  }
+  if (activationPost !== null && activationPost.refused !== null) {
+    line.appendChild(el("span", "activation-refused", "The console refused: " + activationPost.refused + "."));
+  }
   return line;
 }
 function drawProjects(view) {
@@ -4034,11 +4099,12 @@ function refreshGoalList() {
   if (goalUi === null) return;
   const chosen = chosenProject();
   const items = goalMatches().map((id) => {
-    const button = actionButton(id === chosen ? "goal-project picked" : "goal-project", id, () => {
+    const button = actionButton("goal-project btn-quiet", id, () => {
       draft.project = id;
       goalEdited();
       refreshGoalList();
     });
+    button.setAttribute("aria-pressed", String(id === chosen));
     const row = el("li");
     row.appendChild(button);
     return row;
@@ -4079,6 +4145,7 @@ async function sendGoal() {
   const sentRev = draft.rev;
   showGoalReason();
   if (goalUi !== null) goalUi.send.disabled = true;
+  if (goalUi !== null) markBusy(goalUi.send, true);
   let reason = null;
   try {
     const response = await fetch("/api/goal", {
@@ -4095,6 +4162,7 @@ async function sendGoal() {
   }
   draft.phase = "idle";
   if (goalUi !== null) goalUi.send.disabled = false;
+  if (goalUi !== null) markBusy(goalUi.send, false);
   if (reason === null) {
     draft.reason = "";
     if (draft.rev === sentRev) {
@@ -4109,7 +4177,7 @@ async function sendGoal() {
     showGoalReason();
   }
 }
-const goalText = el("textarea", "goal-text");
+const goalText = el("textarea", "goal-text field-line field-bare");
 goalText.setAttribute("rows", "1");
 goalText.setAttribute("placeholder", "Tell a manager what you want next\u2026");
 goalText.setAttribute("aria-label", "Tell a manager what you want next");
@@ -4157,16 +4225,16 @@ const OUTCOME_WORDS = new Map([
   ["cancelled", (profile) => "The sign-in to " + profile + " was cancelled."],
   ["signed_in", (profile) => profile + " is signed in."],
 ]);
-const accountName = accountField("account-name", "Account name", "Account name");
-const accountOpen = actionButton("account-add-open", "Add account", () => {
+const accountName = accountField("account-name field-line", "Account name", "Account name");
+const accountOpen = actionButton("account-add-open btn-quiet", "Add account", () => {
   accountOutcome = null;
   accountState.phase = "naming";
   accountState.failure = "";
   renderAccountAdd(lastView);
   accountName.focus();
 });
-const accountSend = actionButton("account-add-send", "Add", () => accountAddPost());
-const accountCancel = actionButton("account-add-cancel", "Cancel", () => {
+const accountSend = actionButton("account-add-send btn-quiet", "Add", () => accountAddPost());
+const accountCancel = actionButton("account-add-cancel btn-quiet", "Cancel", () => {
   accountName.value = "";
   accountState.phase = "closed";
   accountState.failure = "";
@@ -4233,21 +4301,21 @@ async function accountSigninPost(flag, prefix, send, onOk, okStatus = 204) {
   renderAccountAdd(lastView);
 }
 function beginAccountSignin() {
-  const code = accountField("account-code", "Sign-in code", "Code from the sign-in page");
+  const code = accountField("account-code field-code", "Sign-in code", "Code from the sign-in page");
   code.addEventListener("input", () => renderAccountAdd(lastView));
-  const send = actionButton("account-code-send", "Send code", () => {
+  const send = actionButton("account-code-send btn-quiet", "Send code", () => {
     const value = code.value.trim();
     if (value === "" || accountState.codeSending) return;
     accountSigninPost("codeSending", "Could not send the code: ", (profile) => fetch("/api/signin-code", {
       method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile, code: value }),
     }), () => { code.value = ""; });
   });
-  const cancel = actionButton("account-signin-cancel", "Cancel", () => {
+  const cancel = actionButton("account-signin-cancel btn-quiet", "Cancel", () => {
     accountSigninPost("cancelling", "Could not cancel: ", (profile) => fetch("/api/signin-cancel", {
       method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
     }), () => {});
   });
-  const fetchLink = actionButton("account-link-get", "Get sign-in link", () => {
+  const fetchLink = actionButton("account-link-get btn-quiet", "Get sign-in link", () => {
     accountSigninPost("fetching", "Could not get the sign-in link: ", (profile) => fetch("/api/signin", {
       method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
     }), async (response, profile) => {
@@ -4308,14 +4376,18 @@ function renderAccountAdd(view) {
     reason = accountState.failure;
     if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
     accountCont.fetchLink.disabled = accountState.fetching;
+    markBusy(accountCont.fetchLink, accountState.fetching);
     accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
+    markBusy(accountCont.send, accountState.codeSending);
     accountCont.cancel.disabled = accountState.cancelling;
+    markBusy(accountCont.cancel, accountState.cancelling);
   } else if (want === "closed" && accountOutcome !== null && OUTCOME_WORDS.has(accountOutcome.state)) {
     want = "outcome";
     accountOutcomeNote.textContent = OUTCOME_WORDS.get(accountOutcome.state)(accountOutcome.profile);
   } else if (want === "naming") {
     const named = accountNameReason(accountName.value.trim(), view);
     accountSend.disabled = accountState.adding || named !== null;
+    markBusy(accountSend, accountState.adding);
     reason = accountState.adding ? "Adding\u2026" : named || accountState.failure;
   }
   if (accountState.shown !== want) {
@@ -4337,15 +4409,15 @@ const registerBox = document.getElementById("register");
 const registerForm = el("div", "register-form");
 const registerResult = el("div", "register-result");
 const registerReason = el("span", "register-reason");
-const registerPath = accountField("register-path", "Repository path", "Path of a repository on this host");
-const registerOpen = actionButton("register-open", "Register project", () => {
+const registerPath = accountField("register-path field-line", "Repository path", "Path of a repository on this host");
+const registerOpen = actionButton("register-open btn-quiet", "Register project", () => {
   registerState.phase = "naming";
   registerState.failure = "";
   renderRegister(lastView);
   registerPath.focus();
 });
-const registerSend = actionButton("register-send", "Register", () => registerPost());
-const registerCancel = actionButton("register-cancel", "Cancel", () => {
+const registerSend = actionButton("register-send btn-quiet", "Register", () => registerPost());
+const registerCancel = actionButton("register-cancel btn-quiet", "Cancel", () => {
   registerPath.value = "";
   registerState.phase = "closed";
   registerState.failure = "";
@@ -4424,25 +4496,25 @@ async function postChange(registration, change, value) {
 function changeBox(registration, entry, change) {
   const box = el("div", "draft-edit-box");
   const key = draftKey(entry.field);
-  const input = entry.text === true ? draftInput("draft-text draft-edit", "Type the new value") : null;
+  const input = entry.text === true ? draftInput("draft-text draft-edit field-line", "Type the new value") : null;
   const submit = () => {
     const value = change.choice !== null ? change.choice : input.value.trim();
     if (!send.disabled) postChange(registration, change, value);
   };
-  const send = actionButton("draft-send", "Send", submit);
+  const send = actionButton("draft-send btn-quiet", "Send", submit);
   const ready = () => !change.posting && (change.choice !== null || (input !== null && input.value.trim() !== ""));
   const picks = [];
   if (Array.isArray(entry.options) && entry.options.length > 0) {
     const list = el("div", "draft-options");
     for (const option of entry.options) {
-      const button = actionButton(change.choice === option.value ? "draft-option picked" : "draft-option", option.label, () => {
+      const button = actionButton("draft-option btn-quiet", option.label, () => {
         change.choice = option.value;
         renderRegister(lastView);
       });
-      button.replaceChildren();
-      pathWords(button, option.label);
+      button.replaceChildren(pathWords(el("span"), option.label));
       button.setAttribute("aria-pressed", String(change.choice === option.value));
       button.disabled = change.posting;
+      markBusy(button, change.posting);
       picks.push(button);
       list.appendChild(button);
     }
@@ -4455,7 +4527,6 @@ function changeBox(registration, entry, change) {
       if (change.choice !== null) {
         change.choice = null;
         for (const button of picks) {
-          button.className = "draft-option";
           button.setAttribute("aria-pressed", "false");
         }
       }
@@ -4463,6 +4534,7 @@ function changeBox(registration, entry, change) {
     });
     registerFields.set(key, input);
     input.disabled = change.posting;
+    markBusy(input, change.posting);
     input.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();
@@ -4471,8 +4543,9 @@ function changeBox(registration, entry, change) {
     box.appendChild(input);
   }
   send.disabled = !ready();
+  markBusy(send, change.posting);
   box.appendChild(send);
-  box.appendChild(actionButton("draft-cancel", "Cancel", () => {
+  box.appendChild(actionButton("draft-cancel btn-quiet", "Cancel", () => {
     closeChange();
     renderRegister(lastView);
   }));
@@ -4494,13 +4567,12 @@ function draftRow(registration, entry, folded) {
     const sent = registerSent.get(entry.field);
     const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
     if (folded) {
-      const pick = actionButton("draft-pick", entry.line, () => openChange(entry, retry));
-      pick.replaceChildren();
-      pathWords(pick, entry.line);
+      const pick = actionButton("draft-pick btn-quiet btn-bare", entry.line, () => openChange(entry, retry));
+      pick.replaceChildren(pathWords(el("span"), entry.line));
       pick.setAttribute("aria-label", "Change: " + entry.line);
       row.appendChild(pick);
     } else {
-      row.appendChild(actionButton("draft-change", "Change", () => openChange(entry, retry)));
+      row.appendChild(actionButton("draft-change btn-quiet", "Change", () => openChange(entry, retry)));
     }
     if (refusedHere) row.appendChild(el("p", "fail draft-refusal", registration.refusal));
   }
@@ -4569,8 +4641,9 @@ function drawRegisterResult(registration) {
   if (drafted.length > 0) parts.push(...drawDraft({ ...registration, draft: drafted }));
   else registerMore = null;
   if (registration.status === "done" && registration.cancel === true) {
-    const withdraw = actionButton("register-withdraw", "Cancel registration", () => withdrawRegistration(registration));
+    const withdraw = actionButton("register-withdraw btn-quiet", "Cancel registration", () => withdrawRegistration(registration));
     withdraw.disabled = registerWithdraw.posting;
+    markBusy(withdraw, registerWithdraw.posting);
     parts.push(withdraw);
     if (registerWithdraw.failure !== "") parts.push(el("span", "register-withdraw-reason", registerWithdraw.failure));
   }
@@ -4582,6 +4655,7 @@ function renderRegister(view) {
   const naming = registerState.phase === "naming";
   if (naming) {
     registerSend.disabled = registerState.posting || registerPath.value.trim() === "";
+    markBusy(registerSend, registerState.posting);
   }
   const reason = naming ? (registerState.posting ? "Registering\u2026" : registerState.failure) : "";
   if (registerState.shown !== registerState.phase) {
@@ -4623,7 +4697,7 @@ renderRegister(null);
 let goalPanel = null;
 function buildGoalBox() {
   const box = el("div", "goal-box");
-  const filter = el("input", "goal-filter");
+  const filter = el("input", "goal-filter field-line");
   filter.setAttribute("type", "text");
   filter.setAttribute("aria-label", "Filter projects");
   filter.setAttribute("placeholder", "Filter projects");
@@ -4635,14 +4709,15 @@ function buildGoalBox() {
   });
   const list = el("ul", "goal-projects");
   const status = el("div", "goal-status");
-  const send = actionButton("goal-send", "Send", sendGoal);
+  const send = actionButton("goal-send btn-quiet", "Send", sendGoal);
   const act = el("div", "goal-act");
   act.appendChild(send);
-  act.appendChild(actionButton("goal-cancel", "Cancel", closeGoal));
+  act.appendChild(actionButton("goal-cancel btn-quiet", "Cancel", closeGoal));
   for (const part of [filter, list, status, act]) box.appendChild(part);
   goalPanel = box;
   goalUi = { filter, list, status, send };
   send.disabled = draft.phase === "sending";
+  markBusy(send, draft.phase === "sending");
   refreshGoalList();
   showGoalReason();
   return box;

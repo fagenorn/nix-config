@@ -92,7 +92,7 @@ class DerivationTest(WorldCase):
         derivation = policy["derivation"]
         self.assertEqual(set(derivation),
                          {"schema_version", "platform_version", "registry_digest"})
-        self.assertEqual(derivation["schema_version"], 5)
+        self.assertEqual(derivation["schema_version"], 6)
         self.assertRegex(derivation["registry_digest"], r"^sha256:[0-9a-f]{64}$")
         # D11: identity evidence only, never the contract or a resolved snapshot.
         text = self.world.output.read_text("utf-8")
@@ -269,6 +269,29 @@ class DeriveTest(WorldCase):
         self.assertEqual([rows[slug]["required_checks"]
                           for slug in ("fagenorn/null", "fagenorn/absent")], [[], []])
         self.assertEqual(self.derived("fagenorn/checks")["row"], rows["fagenorn/checks"])
+
+    def test_console_activation_reaches_the_row(self):
+        """Issue 1193: a declared `console_activation` is copied to the row's production;
+        a declared contract without it yields a row without the key."""
+        def declare(console):
+            def mutate(contract):
+                contract["production"] = {
+                    "none": False,
+                    "changes": {"commands": ["nix-activate"], "key_files": [],
+                                "mcp_tools": []},
+                    "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+                    "release_profile": "github-release"}
+                if console:
+                    contract["production"]["console_activation"] = "nix-activate"
+            return mutate
+
+        self.world.project("fixture/console", "fagenorn/console", mutate=declare(True))
+        self.world.project("fixture/plain", "fagenorn/plain", mutate=declare(False))
+        self.assertEqual(self.world.compile()[0], 0)
+        rows = self.world.policy()["derived_repositories"]
+        self.assertEqual(rows["fagenorn/console"]["production"]["console_activation"],
+                         "nix-activate")
+        self.assertNotIn("console_activation", rows["fagenorn/plain"]["production"])
 
     def test_declared_production_rules_reach_the_row_as_argv(self):
         """Issue 1149 D1: a declared contract's row carries its changing and read-only
