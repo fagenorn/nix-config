@@ -1198,7 +1198,7 @@ class ManagerViewTest(unittest.TestCase):
     def test_a_failed_start_shows_its_reason_and_retry(self):
         entry = self.shown(Manager("failed", T0, reason="the directory is not trusted"))
         self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
-                         ("failed", "could not start a manager: the directory is not trusted",
+                         ("failed", "could not start a manager: this account does not trust the project's folder",
                           True))
 
     def test_waiting_on_quota_reads_until_the_earliest_reset(self):
@@ -1791,20 +1791,20 @@ class SprintMovementViewTest(unittest.TestCase):
                              ("quiet", "quiet for 20 min \u2014 may be stuck"))
             self.assertEqual(shown["ball"], "nobody")
             self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
-        with self.subTest("drafting, nothing but the goal"):
+        with self.subTest("drafting, a failed start is the owner's card"):
             fresh = failed_at(sprint(A), T0_MS)
             at = T0_MS + MIN
-            self.assertEqual(entry(line(fresh, at))["ball"], "nobody")
+            self.assertEqual(entry(line(fresh, at))["ball"], "owner")
             self.assertEqual(entry(line(fresh, at, sessions=[idle_session]))["ball"], "manager")
             self.assertEqual(entry(line(fresh, at, sessions=[working_session]))["ball"],
                              "manager")
 
-    def test_a_freshly_stated_goal_moves_until_its_launch_fails(self):
+    def test_a_freshly_stated_goal_moves_until_its_launch_fails_to_the_owner(self):
         fresh = with_manager(sprint(A))
         self.assertEqual(entry(line(fresh, T0_MS + MIN))["ball"], "manager")
         self.assertEqual(entry(line(fresh, T0_MS + 15 * MIN))["ball"], "nobody")
         failed = with_manager(sprint(A), state="failed")
-        self.assertEqual(entry(line(failed, T0_MS + MIN))["ball"], "nobody")
+        self.assertEqual(entry(line(failed, T0_MS + MIN))["ball"], "owner")
 
 
 def moving(**kw):

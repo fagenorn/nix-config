@@ -100,13 +100,18 @@ def fake_browser(present):
 
 class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_set_is_twenty_four_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 24)
+        self.assertEqual(len(shots.STATES), 25)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
+        self.assertEqual(shots.STATES.index("failed-start"),
+                         shots.STATES.index("desk-spend") + 1)
         self.assertEqual(shots.STATES[-5:], ("ask-box", "questions-closed", "questions-open",
                                              "ask-goal", "question-read"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
+
+    def test_the_module_contract_counts_the_screens_the_set_names(self) -> None:
+        self.assertIn("`STATES` names the twenty-four screens", shots.__doc__.replace("\n", " "))
 
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
@@ -542,6 +547,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 ended = [s for s in sprints if s["ended_at"] is not None]
                 self.assertEqual(launches, [])
                 for sprint in running:
+                    if state == "failed-start":
+                        continue
                     self.assertEqual(sprint["manager_state"], "started", sprint["title"])
                     self.assertIsNone(sprint["manager_text"], sprint["title"])
                     self.assertFalse(sprint["now_text"].startswith("Working on"), sprint["title"])
@@ -594,6 +601,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state == "failed-start":
+                    (sprint,) = running
+                    self.assertEqual(sprint["manager_state"], "failed")
+                    self.assertTrue(sprint["retry"])
+                    self.assertEqual(sprint["now_text"],
+                                     "waiting for you: the manager failed to start")
+                    (item,) = [i for i in view["inbox"]["open"]]
+                    self.assertEqual(item["reason"], "failed_start")
+                    self.assertEqual(item["last_reason"],
+                                     "this account does not trust the project's folder")
+                    self.assertNotIn("/home/", json.dumps(view))
                 elif state == "waiting-its-turn":
                     self.assertEqual(
                         [(s["state"], s["ball"], s["now_text"]) for s in running],

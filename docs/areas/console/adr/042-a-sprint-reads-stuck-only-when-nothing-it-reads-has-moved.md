@@ -1,6 +1,6 @@
 # ADR-console-042 — A sprint reads stuck only when nothing it reads has moved
 
-- **Status:** accepted; amended by ADR-console-050, ADR-console-057
+- **Status:** accepted; amended by ADR-console-050, ADR-console-057, ADR-console-064
 - **Decided in:** #1109
 
 ## Context
@@ -15,7 +15,7 @@ A running sprint's state line and its ball each read whether the sprint had move
 
 **D3. A run is the sprint's.** A run belongs to the sprint when it is its manager session's, or when it carries an issue of the sprint's report or of the report's inbox. It counts whenever it moved, before or after the report, and a new report keeps the movement already seen. Stage observations are unchanged: only reported issues, only runs that moved after the report, cleared by the next report.
 
-**D4. A failed launch.** When the manager failed to start and no session of the sprint is listed, only the goal's stated time leaves the signals, because it stood in for a manager about to be listed and a failed launch says none will be. An approval, a report or a run inside the window keeps the sprint moving whatever its order against the failure. With none of them the sprint is not moving at once, and the ball reads nothing running, as #1086 decided: a failed launch beats the freshness of the goal. The state then reads drafting, since no brief was approved.
+**D4. A failed launch.** When the manager failed to start and no session of the sprint is listed, only the goal's stated time leaves the signals, because it stood in for a manager about to be listed and a failed launch says none will be. An approval, a report or a run inside the window keeps the sprint moving whatever its order against the failure. With none of them the sprint is not moving at once, and the ball reads nothing running, as #1086 decided: a failed launch beats the freshness of the goal. The state then reads drafting, since no brief was approved. A failed first launch with no brief is the owner's card, so its ball reads waiting on you and its line the failed start (ADR-console-064).
 
 ## Consequences
 

@@ -17,7 +17,8 @@ Contract:
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
-  so the spend figures show; `goal-open` is the sprint block of `tell-box-open` with the top
+  so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
+  card carrying the reason and the Retry and Drop the sprint buttons; `goal-open` is the sprint block of `tell-box-open` with the top
   bar's goal field focused so its box is open; `inbox-card` is `owner/web`'s question card with
   two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
@@ -120,7 +121,7 @@ from .console_test_support import hook_body, write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "goal-open", "inbox-card", "accounts-panel",
+          "notice-post-open", "desk-spend", "failed-start", "goal-open", "inbox-card", "accounts-panel",
           "ask-box", "questions-closed", "questions-open", "ask-goal", "question-read")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -346,6 +347,17 @@ class _Seed:
             self.put(stop - 20, "manager.stopped", project, {"sprint_id": sid})
         return sid, goal
 
+    def failed_start(self, project: str, title: str, ago: float) -> tuple[str, str]:
+        """One sprint whose first launch was refused: a stated goal and a `manager.failed`."""
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        self.put(ago, "goal.stated", project, {"sprint_id": sid, "goal": goal})
+        self.put(ago - 10, "manager.failed", project, {"sprint_id": sid, "reason": (
+            "Workspace not trusted. Run `claude` in /home/owner/Projects/web once and accept "
+            "the trust prompt, then retry.")})
+        return sid, goal
+
     def check(self, project: str, issue: int, ago: float) -> None:
         """One open `verify-ask` inbox item on `issue`, which blocks none of the manager's work."""
         self.put(ago, "inbox.seen", project, {
@@ -396,6 +408,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "failed-start":
+        seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open"):

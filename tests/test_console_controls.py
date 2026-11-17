@@ -12,7 +12,7 @@ from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
     ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
-    FAILED_REGISTRATION, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
+    FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
@@ -45,9 +45,9 @@ def _roles(kinds: frozenset, *names: str) -> dict:
 
 DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
-    **_roles(PRIMARY_ONLY, "continue", "answer"),
-    **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "progress-withdraw", "acct-remove",
-             "acct-remove-send"),
+    **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry"),
+    **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
+             "acct-remove", "acct-remove-send"),
     **_roles(OPTION_ONLY, "opt"),
     **_roles(
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
@@ -200,6 +200,7 @@ def desk_scenarios() -> list:
         [START, {"frame": with_check([DECISION_ITEM])}, snapshot],
         # a stall and a progress card
         [START, {"frame": frame([STALL, PROGRESS])}, snapshot],
+        [START, {"frame": frame([FAILED_START])}, snapshot],
         # the raised decision card with its Detail fold, and a brief
         [START, {"frame": frame([DECISION_ITEM])}, snapshot],
         [START, brief_open, {"input": {"cls": "reply-text", "value": "redo"}}, snapshot],
@@ -569,7 +570,8 @@ BUSY_ROLES = frozenset({
     "acct-toggle", "acct-pin", "acct-remove-send", "acct-remove-cancel", "acct-signin",
     "account-link-get", "account-code-send", "account-signin-cancel", "draft-option", "draft-send",
     "register-withdraw", "send", "retry", "withdraw", "stop-confirm", "stop-cancel", "try-again",
-    "stall-withdraw", "continue", "progress-withdraw", "signin-start", "signin-send",
+    "stall-withdraw", "start-retry", "start-withdraw", "continue", "progress-withdraw",
+    "signin-start", "signin-send",
     "signin-cancel", "notice-withdraw", "ans-words", "ans-draft", "opt", "words-text", "draft-text"})
 
 
@@ -681,6 +683,10 @@ BUSY_SCENARIOS = [
              refusal("this sprint has a manager")),
     busy_row("stall-withdraw", [START, {"frame": frame([STALL])}], held("stall-withdraw"),
              refusal("this sprint is not open")),
+    busy_row("start-retry", [START, {"frame": frame([FAILED_START])}], held("start-retry"),
+             refusal("this sprint has a manager")),
+    busy_row("start-withdraw", [START, {"frame": frame([FAILED_START])}],
+             held("start-withdraw"), refusal("this sprint is not open")),
     busy_row("continue", [START, {"frame": frame([PROGRESS])}], held("continue"),
              refusal("this sprint's manager is not waiting for you")),
     busy_row("progress-withdraw", [START, {"frame": frame([PROGRESS])}],
