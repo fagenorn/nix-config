@@ -33,7 +33,10 @@ Exits, one JSON line with sorted keys.
   object whose `ci_at`, `commit_at`, `release_at` and `lock_at` (the land lock wait) are each null
   or older than `OLD_MS` (the console's own wait signals, read as published and never inferred from
   the now-sentence, which a moving session hides), no `sessions[]` entry in state `working`, and no delivery entry with a
-  `moved_at` younger than `OLD_MS`. That covers every delivery entry of a session entry of the project (the
+  `journal_at` (the run journal's own last movement, ADR-console-062) missing or younger than
+  `OLD_MS`; `moved_at` is not read, since its extra parts are the run session's output and running
+  check (the evidence itself) and the run's wait signals, which `movement.waits` already judges.
+  That covers every delivery entry of a session entry of the project (the
   sprint's `sessions[]` and `outside_sprints.sessions[]`) whose `session_id` is one of the sprint's
   associations or whose `issues[].issue` meets the sprint's `issues[].issue`. Only the session
   signals of this change can then be moving it: `{"status": "met", "moving": [<same members>]}`.
@@ -157,8 +160,8 @@ def _reads_moving(project: dict, sprint: dict, found: list[dict], now_ms: int) -
         for delivery in _list(entry.get("deliveries")):
             delivery = _dict(delivery)
             if entry.get("session_id") in ids or issues & _issues(delivery.get("issues")):
-                moved = _ms(delivery.get("moved_at"))
-                if moved is None or now_ms - moved < OLD_MS:
+                journal = _ms(delivery.get("journal_at"))
+                if journal is None or now_ms - journal < OLD_MS:
                     return False
     return True
 
