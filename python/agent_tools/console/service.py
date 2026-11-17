@@ -919,7 +919,7 @@ None, and `movement.merged` keeps the last good reading of the pull requests: th
 its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
 receives the issues whose run is in a session not ended (`live`) and those of them in a lock step (`IssueStage.locking`,
 #1184); a holding pull request's issues count only when live (a run that died holding the lock leaves its pull request
-holding until a waiter takes it over, ADR-console-059 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+holding until a waiter takes it over, ADR-console-060 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
 read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
 of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
