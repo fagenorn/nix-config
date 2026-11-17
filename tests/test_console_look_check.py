@@ -16,6 +16,7 @@ from pathlib import Path
 from agent_tools.console import look_check
 from agent_tools.delivery import look_marker
 from agent_tools.system.forge_api import ForgeError
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from tests.test_verify_checks import committed_mode
 
 ROOT = Path(__file__).resolve().parents[1]
