@@ -99,7 +99,10 @@ skipped. A transcript only grows, so each file is read once from its start and a
 where the last reading stopped (`_HELD_SEEN`, per file identity, through its last complete line): a held
 marker stays in the reading however much follows it, and a poll costs what was appended. A file that
 shrank or was replaced is read again from its start. `SessionReading.held` is that reading and the fold keeps the latest one in
-`SessionMovement.held`, never the largest. The flag moves no sprint and names no wait.
+`SessionMovement.held`, never the largest. The flag moves no sprint and names no wait. A
+`SessionTarget` with `held_only` (a sprint's known manager session that is absent or ended, so a console
+restart finds its transcript still ending in a held message) reads only that flag: no output time, no
+CPU, so it moves nothing.
 """
 
 import json
@@ -215,6 +218,7 @@ class SessionTarget:
     pid: int | None
     sprints: frozenset[str]
     replies: tuple[tuple[str, int], ...] = ()
+    held_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -589,6 +593,10 @@ def read_sessions(projects_dirs: Iterable[Path], targets: Iterable[SessionTarget
     table = process_table(proc, clock_ticks)
     readings = []
     for target in sorted(targets, key=lambda t: t.session_id):
+        if target.held_only:
+            readings.append(SessionReading(target.session_id, target.sprints, None, None,
+                                           target.replies, session_held(projects, target.session_id)))
+            continue
         alive = table is not None and target.pid is not None and target.pid in table
         cpu = descendant_cpu(table, target.pid) if alive else None
         readings.append(SessionReading(target.session_id, target.sprints,

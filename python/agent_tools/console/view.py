@@ -1226,6 +1226,20 @@ def sprint_sessions_of(project_id: str, sprints: Iterable[SprintState],
     return found
 
 
+def sprint_absent_managers(project_id: str, sprints: Iterable[SprintState],
+                           belonging: Mapping[str, frozenset[str]]) -> dict[str, frozenset[str]]:
+    """The running sprints of `project_id` each known `manager_session` that is not a live session of
+    theirs (absent from the registry or ended, so absent from `belonging`) manages (#1229). Its
+    transcript is still read for a held peer message, whatever became of the session."""
+    found: dict[str, set[str]] = {}
+    for sprint in sprints:
+        if (sprint.project_id == project_id and ended_at(sprint) is None
+                and sprint.manager_session is not None
+                and sprint.sprint_id not in belonging.get(sprint.manager_session, ())):
+            found.setdefault(sprint.manager_session, set()).add(sprint.sprint_id)
+    return {sid: frozenset(ids) for sid, ids in found.items()}
+
+
 def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
                          sessions: Iterable[SessionState],
                          states: Mapping[str, ProjectState]) -> dict[str, tuple[tuple[str, int], ...]]:

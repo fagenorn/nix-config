@@ -938,7 +938,9 @@ such session, outside the lock, it reads the session registry once per poll for 
 `movement.read_sessions`: the newest transcript write and the CPU of the session's descendants),
 (each target carries `replies`, the idle nudges of the sprints the session manages, so the fold leaves
 the manager's reply out and keeps earlier movement) and merges the readings with `sessions_ms=at`, so a write after the read began is never counted as
-seen. A project with no such session calls neither the registry nor the reader. A reader that
+seen. A running sprint's known `manager_session` that is not such a session (absent or ended; a console
+restart finds it so) is added as a `held_only` target (`view.sprint_absent_managers`) that reads only
+the transcript's held-peer-message flag (#1229). A project with neither calls neither the registry nor the reader. A reader that
 raises prints `console: movement_sessions_failed <project_id> <Type>: <message>` and the project
 merges with no session reading (the kept associations are not refreshed and age out; the forge
 and local halves are unaffected). The sessions half is memory only. Its cost is one
@@ -1399,8 +1401,8 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, project_for, project_states, read_states, registry_changes, sprint_nudge_replies,
-    sprint_sessions_of, sprint_waiting)
+    is_waiting, project_for, project_states, read_states, registry_changes, sprint_absent_managers,
+    sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -6922,6 +6924,8 @@ class ConsoleService:
             nudged = {project_id: sprint_nudge_replies(
                 project_id, self._sprints.values(), self._sessions.values(), self._states)
                 for project_id in roots}
+            absent = {project_id: sprint_absent_managers(
+                project_id, self._sprints.values(), belonging[project_id]) for project_id in roots}
             dropped = [project_id for project_id in self._movement if project_id not in roots]
             for project_id in dropped:
                 del self._movement[project_id]
@@ -6939,15 +6943,20 @@ class ConsoleService:
                       file=sys.stderr)
                 local = movement.LocalReading((), False)
             belong = belonging[project_id]
-            if belong:
+            if belong or absent[project_id]:
                 try:
-                    if registry is None:
-                        registry = sessions.read_session_registry(self._session_dirs())
-                    targets = tuple(
-                        movement.SessionTarget(
-                            sid, registry[sid].pid if sid in registry else None, belong[sid],
-                            nudged[project_id].get(sid, ()))
-                        for sid in sorted(belong))
+                    targets = ()
+                    if belong:
+                        if registry is None:
+                            registry = sessions.read_session_registry(self._session_dirs())
+                        targets = tuple(
+                            movement.SessionTarget(
+                                sid, registry[sid].pid if sid in registry else None, belong[sid],
+                                nudged[project_id].get(sid, ()))
+                            for sid in sorted(belong))
+                    targets += tuple(
+                        movement.SessionTarget(sid, None, absent[project_id][sid], (), True)
+                        for sid in sorted(absent[project_id]))
                     at = int(self._clock() * 1000)
                     readings = self._session_reader(self._projects_dirs(), targets)
                     local = dataclasses.replace(local, sessions=tuple(readings), sessions_ms=at)

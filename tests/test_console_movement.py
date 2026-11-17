@@ -521,6 +521,14 @@ class SessionHeldTest(unittest.TestCase):
                                   proc=Path(tmp) / "empty")
             self.assertTrue(one.held)
 
+    def test_a_held_only_target_reads_the_flag_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript(Path(tmp) / "projects", OTHER, HELD)
+            [one] = read_sessions([Path(tmp) / "projects"],
+                                  (SessionTarget("s1", 1, frozenset({"a"}), (), True),),
+                                  proc=Path(tmp) / "empty")
+            self.assertEqual((one.held, one.output_ms, one.cpu), (True, None, None))
+
     def test_the_fold_keeps_the_latest_reading_not_the_largest(self):
         held = SessionReading("s1", frozenset({"a"}), 1000, None, (), True)
         fresh = SessionReading("s1", frozenset({"a"}), 2000, None, (), False)
