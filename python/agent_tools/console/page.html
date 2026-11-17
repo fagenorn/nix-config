@@ -194,6 +194,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-projects li { min-width: 0; max-width: 100%; }
 .goal-project { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .goal-status:empty { display: none; }
+.goal-count { font-size: .8125rem; color: var(--ov2); font-variant-numeric: tabular-nums; }
+.goal-count.near { color: var(--text); }
+.goal-count.over { color: var(--red); font-weight: 600; }
 .goal-act { display: flex; flex: none; gap: 8px; }
 .sprint-blocks { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; padding: 12px 16px; border: 1px solid var(--hair); border-radius: 12px; overflow-wrap: anywhere; font-size: .8125rem; color: var(--sub0); }
@@ -4083,8 +4086,28 @@ function renderUnmanaged(view) {
   section.appendChild(list);
 }
 const MAX_GOAL = 2000;
+const GOAL_NEAR = 1800;
+// The service counts code points after str.strip(); trim() strips a different set (U+FEFF, not U+001C-001F or U+0085).
+const GOAL_SPACE = /^[\t\n\v\f\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+function goalChars(text) {
+  return Array.from(text.replace(GOAL_SPACE, "")).length;
+}
 const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "", rev: 0 };
 let goalUi = null;
+function showGoalCount() {
+  if (goalUi === null) return;
+  const n = goalChars(draft.text);
+  if (n <= GOAL_NEAR) {
+    goalUi.count.className = "goal-count";
+    goalUi.count.textContent = `${n} / ${MAX_GOAL}`;
+  } else if (n <= MAX_GOAL) {
+    goalUi.count.className = "goal-count near";
+    goalUi.count.textContent = `${n} / ${MAX_GOAL}, ${MAX_GOAL - n} left`;
+  } else {
+    goalUi.count.className = "goal-count over";
+    goalUi.count.textContent = `${n} / ${MAX_GOAL}, ${n - MAX_GOAL} over the limit`;
+  }
+}
 let recentProjects = [];
 function goalMatches() {
   const needle = draft.filter.toLowerCase();
@@ -4133,7 +4156,7 @@ async function sendGoal() {
   const project = chosenProject();
   draft.reason = "";
   if (project === null) draft.reason = "choose a project";
-  else if (Array.from(draft.text.trim()).length > MAX_GOAL) {
+  else if (goalChars(draft.text) > MAX_GOAL) {
     draft.reason = "a goal is at most " + MAX_GOAL + " characters";
   }
   if (draft.reason !== "") {
@@ -4184,6 +4207,7 @@ goalText.setAttribute("aria-keyshortcuts", "g");
 goalText.addEventListener("input", (event) => {
   draft.text = event.target.value;
   goalEdited();
+  showGoalCount();
 });
 goalText.addEventListener("focus", () => {
   if (!draft.open) {
@@ -4707,18 +4731,20 @@ function buildGoalBox() {
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
+  const count = el("p", "goal-count");
   const status = el("div", "goal-status");
   const send = actionButton("goal-send btn-quiet", "Send", sendGoal);
   const act = el("div", "goal-act");
   act.appendChild(send);
   act.appendChild(actionButton("goal-cancel btn-quiet", "Cancel", closeGoal));
-  for (const part of [status, filter, list, act]) box.appendChild(part);
+  for (const part of [count, status, filter, list, act]) box.appendChild(part);
   goalPanel = box;
-  goalUi = { filter, list, status, send };
+  goalUi = { count, filter, list, status, send };
   send.disabled = draft.phase === "sending";
   markBusy(send, draft.phase === "sending");
   refreshGoalList();
   showGoalReason();
+  showGoalCount();
   return box;
 }
 function openGoal() {
