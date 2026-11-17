@@ -5,6 +5,8 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import socket
+import threading
 import unittest
 from unittest import mock
 
@@ -138,6 +140,29 @@ class LockWaitCheckTest(unittest.TestCase):
         self.assertEqual((75, "forge_unreadable"), (code, printed["status"]))
         code, printed = self.run_check(read_state=silent)
         self.assertEqual((75, "no_console"), (code, printed["status"]))
+
+    def test_a_console_response_cut_short_is_not_yet(self):
+        with socket.socket() as server:
+            server.bind(("127.0.0.1", 0))
+            server.listen(1)
+
+            def answer():
+                connection, _ = server.accept()
+                with connection:
+                    connection.recv(4096)
+                    connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{}")
+
+            thread = threading.Thread(target=answer)
+            thread.start()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = lock_wait_check.main(
+                    ["--project", PROJECT, "--repo", PROJECT, "--pattern", PATTERN,
+                     "--port", str(server.getsockname()[1])],
+                    read_pulls=lambda slug, pattern: (P40, P41),
+                    read_waiters=lambda slug: WAITER_41, forge_now=lambda: NOW)
+            thread.join()
+        self.assertEqual((75, "no_console"), (code, json.loads(out.getvalue())["status"]))
 
     def test_the_defaults_are_this_checkouts_pattern_and_the_console_port(self):
         parsed = lock_wait_check.build_parser().parse_args(["--project", "p", "--repo", "o/r"])

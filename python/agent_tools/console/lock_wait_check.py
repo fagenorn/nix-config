@@ -39,7 +39,7 @@ lock wait: it prints `{"queued", "sprints", "status": "no_wait_shown"}` and exit
 The rules are read in this order: `no_queue`, `no_sprint`, `not_met`, `no_wait_shown`, `met`.
 
 A forge error (`ForgeError`) prints `{"reason", "status": "forge_unreadable"}` and a console that
-does not answer (`OSError`, a non-JSON body) `{"reason", "status": "no_console"}`, both exit 75; a
+does not answer (`OSError`, a non-JSON body, a response cut short: `http.client.HTTPException`) `{"reason", "status": "no_console"}`, both exit 75; a
 usage error exits 2.
 
 `--pattern` defaults to `deliveries.configured_branch_pattern(os.getcwd())`; `--port` defaults to
@@ -49,6 +49,7 @@ listing of the waiters, one forge clock read, one loopback GET) and writes nothi
 """
 
 import argparse
+import http.client
 import json
 import os
 import urllib.request
@@ -135,7 +136,7 @@ def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read
         return NOT_YET
     try:
         state = read_state(args.port)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
         manager_check._print({"reason": str(error), "status": "no_console"})
         return NOT_YET
     running = _running_sprints(state, args.project)

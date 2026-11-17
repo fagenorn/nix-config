@@ -12,7 +12,8 @@ Contract:
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
-  lock, served through a stand-in forge reader;
+  lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
+  step (a run that is not live is no holder of the sprint's);
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
@@ -60,7 +61,7 @@ from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT
 
-from .console_test_support import write_registry
+from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
@@ -383,6 +384,24 @@ def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
     return fixture
 
 
+def _seed_lock_run(service: ConsoleService, fixture: Fixture, now_s: float) -> None:
+    """A live delivery run whose issue 12 sits in the `pr` (lock) step, so the holder's issue is live.
+    The journal last moved with the sprint's report, so only the held lock moves the sprint."""
+    root = str(fixture.projects[0])
+    body = hook_body("session start", cwd=root)
+    service.ingest_hook(body)
+    sid = json.loads(body)["session_id"]
+    run = fixture.config / "projects" / "-web" / sid / "subagents" / "workflows" / "wf_l1"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "journal.jsonl").write_bytes(_transcript([
+        {"type": "started", "agentId": "a1", "label": "setup", "phase": "Setup"},
+        {"type": "result", "agentId": "a1", "result": {"branch": "issue-12-upload-form"}},
+        {"type": "started", "agentId": "a2", "label": "pr", "phase": "Ship"}]))
+    moved = now_s - 45 * MINUTE
+    os.utime(run / "journal.jsonl", (moved, moved))
+    service.poll_deliveries()
+
+
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
@@ -400,11 +419,13 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
         activity=lambda root: None,
         slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
-        branch_pattern_of=lambda repo: None, dispatch=lambda job: job(),
+        branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
+        dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
     service.start()
     service.poll_spend()
     if fixture.holding:
+        _seed_lock_run(service, fixture, now_s)
         service.poll_movement()
     return service
 
