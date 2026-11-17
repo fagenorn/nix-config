@@ -30,7 +30,9 @@
 // own focus listeners with {type: "focus", target}; after its disabled and inert
 // checks Elem.focus() also adds 1 to state.hiddenFocus (the snapshot's
 // hidden_focus, starting at 0) when an ancestor DETAILS is not open and the
-// element is not inside that details' own SUMMARY child, and focuses all the same; Elem.blur() clears
+// element is not inside that details' own SUMMARY child, and focuses all the same; Elem.focus(options) also adds 1 to
+// state.scrollingFocus (the snapshot's scrolling_focus) unless options.preventScroll is true, as a browser scrolls a
+// focused element into view only then; Elem.blur() clears
 // state.active when it is that element and fires nothing; removing a node (replaceChildren dropping it, appendChild
 // moving it, the textContent setter, Elem.remove()) clears state.active when it
 // is that node or inside its subtree, as a browser blurs a removed element, and
@@ -40,8 +42,8 @@
 // had preventDefault called (null before any key step). A click step skips a
 // disabled element. The fake setTimeout/clearTimeout fire when a clock step
 // reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
-// of the inbox, statement, projects, unmanaged, register, digest, goal, capacity and
-// promoted sections; every serialized node carries its title attribute (null
+// of the inbox, statement, projects, unmanaged, register, digest, goal, capacity,
+// promoted and reading sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time, and
 // its placeholder attribute (null when unset) and its inline style.width (null
 // when unset; Elem.style is a plain object) and its aria-label attribute as
@@ -149,7 +151,7 @@ class Elem {
     delete this.attributes[name];
     if (name === "disabled") this.disabled = false;
   }
-  focus() {
+  focus(options) {
     if (this.disabled === true) return; // a browser does not focus a disabled control
     for (let n = this; n; n = n.parentNode) if (n.inert === true) return; // nor inside an inert subtree
     for (let n = this; n.parentNode; n = n.parentNode) {
@@ -162,6 +164,7 @@ class Elem {
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
+    if (!(options && options.preventScroll === true)) state.scrollingFocus += 1; // a browser scrolls the element into view
     if (!was) for (const fn of this.listeners.focus || []) fn({ type: "focus", target: this });
   }
   blur() {
@@ -299,7 +302,7 @@ for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[
 
 const steps = JSON.parse(fs.readFileSync(0, "utf8"));
 const state = {
-  focused: false, visibility: "visible", clock: null, active: null, focusCount: 0, hiddenFocus: 0, keyPrevented: null,
+  focused: false, visibility: "visible", clock: null, active: null, focusCount: 0, scrollingFocus: 0, hiddenFocus: 0, keyPrevented: null,
 };
 if (steps.length > 0 && "start" in steps[0]) {
   state.focused = steps[0].start.focused;
@@ -586,6 +589,7 @@ async function run() {
         accounts: byId("accounts") ? node(byId("accounts")) : null,
         accounts_body: byId("accounts-body") ? node(byId("accounts-body")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
+        reading: byId("reading") ? node(byId("reading")) : null,
         viewer: byId("viewer") ? node(byId("viewer")) : null,
         object_urls: { made: object_urls.made.slice(), revoked: object_urls.revoked.slice() },
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
@@ -594,6 +598,7 @@ async function run() {
           end: field.selectionEnd,
         },
         focus_count: state.focusCount,
+        scrolling_focus: state.scrollingFocus,
         hidden_focus: state.hiddenFocus,
         scroll_y: window.scrollY,
         key_prevented: state.keyPrevented,

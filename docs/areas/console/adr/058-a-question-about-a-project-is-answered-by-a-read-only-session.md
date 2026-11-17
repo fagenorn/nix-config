@@ -1,6 +1,6 @@
 # ADR-console-058 — A question about a project is answered by a read-only session
 
-- **Status:** accepted; amended by ADR-console-059
+- **Status:** accepted; amended by ADR-console-059, ADR-console-065
 - **Decided in:** #1176
 
 ## Context
@@ -15,15 +15,15 @@ The owner can state a goal and read the desk, but cannot ask the console a plain
 
 **D3. The model.** The question session names `sonnet`. The manager keeps its profile's default model and its launches are unchanged, so "smaller than the manager's" is the owner's choice: the comparison is not enforced by any test or check.
 
-**D4. Fail closed.** The settings file's hook entry carries `"onFailure": "block"`, so a hook that errors, fails to start or times out denies the call. The permission layer refuses on its own as well: no user, project or local settings (`--setting-sources ""`), `dontAsk`, an allow list equal to the hook's admissions, a deny list of Edit, Write, NotebookEdit, WebFetch, WebSearch, Agent and the five lifecycle verbs, and `--tools` without Bash when the project has no route. Read-only is enforced by the settings and the hook, never by the prompt.
+**D4. Fail closed.** The settings file's hook entry carries `"onFailure": "block"`, so a hook that errors, fails to start or times out denies the call. The permission layer refuses on its own as well: no user, project or local settings (`--setting-sources ""`), `dontAsk`, an allow list equal to the hook's admissions, a deny list of Edit, Write, NotebookEdit, WebFetch, WebSearch, Agent and the five lifecycle verbs, and `--tools` without Bash when the project has no route. Read-only is enforced by the settings and the hook, never by the prompt. ADR-console-065 changes this: Bash is always a tool, since the git reads need it even with no route, and the allow list adds a prefix rule for each git read and, with a GitHub repository, each gh read.
 
 **D5. The settings file.** It is `project-question-settings/<id>.settings.json` beside the console's store, mode 0600 in a 0700 directory, and is removed after the run. It runs `agent_tools.console.project_question_hook` on every tool, by the console's own interpreter; the hook has no command-table row.
 
-**D6. The hook's admission rule.** The hook admits Read, Grep and Glob, and a Bash command only when it is made of plain words with U+0020 spaces as the only separator and equals one declared read-only argv exactly. Separators are checked before any split, so a bare `just` that would run a project's default recipe, a newline or any metacharacter is refused; a command naming a lifecycle verb is refused whatever the routes hold.
+**D6. The hook's admission rule.** The hook admits Read, Grep and Glob, and a Bash command only when it is made of plain words with U+0020 spaces as the only separator and equals one declared read-only argv exactly. Separators are checked before any split, so a bare `just` that would run a project's default recipe, a newline or any metacharacter is refused; a command naming a lifecycle verb is refused whatever the routes hold. ADR-console-065 changes this: the hook also admits the plain git reads and the gh reads of the project's own GitHub repository, pinned by `--repo`.
 
-**D7. The routes.** Routes come from `production.read_only.commands` (ADR-guard-009, ADR-guard-011), only those whose `cwd` is the resolved snapshot's `project.root`; the cwd is compared there, never with the registry root, which may be a symlink. With none, the console appends `Production cannot be read for this project: its contract declares no read-only command that runs from its root.` to the answer itself. A contract that cannot be resolved is a `failed` answer naming the resolver's error, and no session starts.
+**D7. The routes.** Routes come from `production.read_only.commands` (ADR-guard-009, ADR-guard-011), only those whose `cwd` is the resolved snapshot's `project.root`; the cwd is compared there, never with the registry root, which may be a symlink. With none, the console appends `Production cannot be read for this project: its contract declares no read-only command that runs from its root.` to the answer itself. A contract that cannot be resolved is a `failed` answer naming the resolver's error, and no session starts. ADR-console-065 changes this: a route runs inside `devenv shell --` when the root holds a `devenv.nix` that is a regular file.
 
-**D8. The answer.** The prompt fixes the shape: Answer, Read, Ran, Could not find out, Question for you. A step that needs money or a credential is put in Question for you, never attempted.
+**D8. The answer.** The prompt fixes the shape: Answer, Read, Ran, Could not find out, Question for you. A step that needs money or a credential is put in Question for you, never attempted. ADR-console-065 changes this: the answer leads with the direct answer in plain business terms.
 
 **D9. The log.** Two rows, `project_question.asked` and `project_question.answered`, the second with the outcome `answered`, `failed` or `timed_out` and the answer or the reason. They are not kept kinds, so the schema stays 10 (ADR-console-001) and retention removes them like any other. Nothing reaches a tracker (ADR-console-011).
 

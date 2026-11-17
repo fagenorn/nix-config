@@ -331,7 +331,7 @@ class ManagerServiceTest(Case):
             sid = self.state(svc)
         sprint = self.sprint(svc, sid)
         self.assertEqual((sprint["manager_state"], sprint["manager_text"], sprint["retry"]), (
-            "failed", "could not start a manager: the directory is not trusted", True))
+            "failed", "could not start a manager: this account does not trust the project's folder", True))
         self.assertIn(f"console: manager_failed {sid} the directory is not trusted",
                       stderr.getvalue())
         status, _, body = self.retry(svc, sid)

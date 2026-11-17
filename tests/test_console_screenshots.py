@@ -59,10 +59,14 @@ def fake_browser(present):
         def click(self, selector):
             self.clicks.append(selector)
 
-        def evaluate(self, expression):
+        def evaluate(self, expression, arg=None):
             if expression == shots.ASK_READING:
                 self.reads += 1
-                return list(shots.OPEN_ASK)
+                return list(shots.HEAD_ASK if shots.READING_PANEL in present else shots.OPEN_ASK)
+            if expression == shots.READ_READING:
+                self.reads += 1
+                self.counted = arg
+                return list(shots.READ_SHOWN)
             if expression == shots.THREAD_READING:
                 self.reads += 1
                 return list(shots.OPEN_THREAD if shots.ASK_FOLD in present else shots.BASE_THREAD)
@@ -95,19 +99,22 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_five_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 25)
+    def test_the_set_is_twenty_seven_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 27)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
-        self.assertEqual(shots.STATES[-9:], ("goal-open", "goal-near", "goal-over", "inbox-card",
-                                             "accounts-panel", "ask-box", "questions-closed",
-                                             "questions-open", "ask-goal"))
+        self.assertEqual(shots.STATES.index("failed-start"),
+                         shots.STATES.index("desk-spend") + 1)
+        self.assertEqual(shots.STATES[-10:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+                                              "accounts-panel", "ask-box", "questions-closed",
+                                              "questions-open", "ask-goal", "question-read"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
-                 24: "twenty-four", 25: "twenty-five"}
+                 24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
+                 27: "twenty-seven"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -154,6 +161,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertIn(phrase, text)
         code, text = run(lambda path: shots.Shot("ask-box", 480, path, 480, ask=shots.OPEN_ASK))
         self.assertEqual(code, 0)
+        code, text = run(lambda path: shots.Shot("ask-box", 480, path, 480, ask=shots.HEAD_ASK))
+        self.assertEqual(code, 0)
         code, text = run(lambda path: shots.Shot("ask-box", 480, path, 480, ask=None))
         self.assertEqual(code, 0)
         self.assertNotIn(phrase, text)
@@ -164,9 +173,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_ask_box_shot_opens_owner_webs_box_only_on_a_page_that_has_one(self) -> None:
         field = 'li.asks[data-project="owner/web"] textarea.ask-text'
 
+        panel = {shots.ASK_OPEN, shots.ASK_FOLD, shots.READING_PANEL}
+        through_panel = [shots.ASK_OPEN, shots.ASK_FOLD, shots.thread_line("1177a1")]
         head = {shots.ASK_OPEN, shots.ASK_FOLD}
         opened = [shots.ASK_OPEN, shots.ASK_FOLD, *shots.ASK_THREADS]
-        cases = (("head", "ask-box", head | {"li.asks"}, opened, shots.OPEN_ASK),
+        cases = (("head with the reading panel", "ask-box", panel, through_panel, shots.HEAD_ASK),
+                 ("head", "ask-box", head | {"li.asks"}, opened, shots.OPEN_ASK),
                  # The page of #1178: the line holds the button and no li.asks exists until the box opens.
                  ("head, no Ask block before opening", "ask-box", head, opened, shots.OPEN_ASK),
                  # The page of #1177: li.asks holds the button and there is no fold.
@@ -214,7 +226,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
     def test_the_ask_goal_shot_clicks_make_it_a_goal_only_on_a_page_that_has_it(self) -> None:
         fold = [shots.ASK_FOLD, shots.ASK_THREADS[1]]
-        cases = (("head", "ask-goal", {shots.ASK_FOLD, shots.ASK_GOAL}, [*fold, shots.ASK_GOAL],
+        through_panel = [shots.ASK_FOLD, shots.thread_line("1177a1"), "#reading button.ask-goal"]
+        cases = (("head with the reading panel", "ask-goal",
+                  {shots.READING_PANEL, shots.ASK_FOLD, "#reading button.ask-goal"},
+                  through_panel, shots.FILLED_GOAL),
+                 ("head", "ask-goal", {shots.ASK_FOLD, shots.ASK_GOAL}, [*fold, shots.ASK_GOAL],
                   shots.FILLED_GOAL),
                  ("base", "ask-goal", {shots.ASK_FOLD}, fold, None),
                  ("no fold", "ask-goal", set(), [], None),
@@ -269,7 +285,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
     def test_the_questions_open_shot_opens_the_fold_only_on_a_page_that_has_it(self) -> None:
         newest = 'details[data-key="thread:owner/web:1178a2"] > summary'
-        cases = (("head", {shots.ASK_FOLD}, [shots.ASK_FOLD, newest], shots.OPEN_THREAD),
+        cases = (("head with the reading panel", {shots.ASK_FOLD, shots.READING_PANEL},
+                  [shots.ASK_FOLD, shots.thread_line("1178a2")], shots.OPEN_THREAD),
+                 ("head", {shots.ASK_FOLD}, [shots.ASK_FOLD, newest], shots.OPEN_THREAD),
                  ("base", set(), [], shots.BASE_THREAD))
         for name, present, clicks, thread in cases:
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
@@ -285,6 +303,112 @@ class ScreenshotFixtureTest(unittest.TestCase):
             self.assertEqual(page.clicks, [])
             self.assertIsNone(shot.thread)
             self.assertEqual(shot.acts, ())
+
+    def test_a_question_read_shot_that_does_not_read_the_answer_in_the_main_column_fails_the_command(
+            self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        phrase = "does not show the answer in the main column"
+        for reading in ((False, 1, True, True, 3), (True, 2, True, True, 3),
+                        (True, 1, False, True, 3), (True, 1, True, False, 3),
+                        (True, 1, True, True, 0)):
+            with self.subTest(reading=reading):
+                code, text = run(lambda path: shots.Shot("question-read", 480, path, 480,
+                                                         reading=reading))
+                self.assertEqual(code, 1)
+                self.assertIn(phrase, text)
+        for reading in (shots.READ_SHOWN, None):
+            with self.subTest(reading=reading):
+                code, text = run(lambda path: shots.Shot("question-read", 480, path, 480,
+                                                         reading=reading))
+                self.assertEqual(code, 0)
+                self.assertNotIn(phrase, text)
+
+    def test_the_question_read_shot_opens_the_thread_in_the_panel_only_on_a_page_that_has_it(
+            self) -> None:
+        cases = (("head", {shots.READING_PANEL, shots.ASK_FOLD},
+                  [shots.ASK_FOLD, shots.thread_line("1226a1")], shots.READ_SHOWN),
+                 ("base", {shots.ASK_FOLD},
+                  [shots.ASK_FOLD, 'details[data-key="thread:owner/web:1226a1"] > summary'], None))
+        for name, present, clicks, reading in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                shot = shots._shoot(browser, "http://console.test/", "question-read", 480,
+                                    Path(tmp))
+                self.assertEqual(page.clicks, clicks)
+                self.assertEqual(shot.reading, reading)
+
+    def test_the_question_read_shot_counts_the_question_it_was_given(self) -> None:
+        browser, page = fake_browser({shots.READING_PANEL, shots.ASK_FOLD})
+        with tempfile.TemporaryDirectory() as tmp:
+            shots._shoot(browser, "http://console.test/", "question-read", 480, Path(tmp),
+                         question="What is in production?")
+        self.assertEqual(page.counted, "What is in production?")
+        self.assertNotIn("What was done", shots.READ_READING)
+
+    def test_a_real_answer_run_shoots_only_the_question_read_state_with_that_answer(self) -> None:
+        def run(reading, jargon=0):
+            calls = []
+
+            def capture(out, states=shots.STATES, widths=shots.WIDTHS, **kwargs):
+                calls.append({"states": tuple(states), **kwargs})
+                return [shots.Shot("question-read", width, Path(out) / f"question-read-{width}.png",
+                                   width, jargon=jargon, reading=reading) for width in widths]
+
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", side_effect=capture), \
+                    redirect_stdout(out):
+                answer = Path(tmp) / "answer.txt"
+                answer.write_text("Answer: plain", encoding="utf-8")
+                code = shots.main(["--out", tmp, "--question", "Q?", "--answer-file", str(answer)])
+            return code, out.getvalue(), calls
+
+        phrase = "does not show the answer in the main column"
+        code, text, calls = run((True, 1, False, False, 0), jargon=1)
+        self.assertEqual(code, 0)
+        self.assertNotIn(phrase, text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["states"], ("question-read",))
+        self.assertEqual(calls[0]["read"], ("Q?", "Answer: plain"))
+        code, text, _ = run(None)
+        self.assertEqual(code, 0)
+        code, text, _ = run((True, 2, False, False, 0))
+        self.assertEqual(code, 1)
+        self.assertIn(phrase, text)
+        code, text, _ = run((False, 1, True, True, 3))
+        self.assertEqual(code, 1)
+        self.assertIn(phrase, text)
+        for flags in (["--question", "Q?"], ["--answer-file", "x.txt"]):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp, \
+                    redirect_stdout(StringIO()), mock.patch("sys.stderr", new=StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    shots.main(["--out", tmp, *flags])
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_a_real_answer_seeds_the_question_read_state_with_that_question_and_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(
+                Path(tmp), "question-read", now_s,
+                read=("Q?", "Answer: plain\nQuestion for you: none"))
+            svc = shots.start_service(fixture, now_s)
+            try:
+                view = json.loads(svc.view_bytes)
+            finally:
+                svc.close()
+        web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+        (thread,) = web["questions"]["threads"]
+        (asked,) = thread["questions"]
+        self.assertEqual(asked["question"], "Q?")
+        self.assertEqual(asked["answer"], "plain")
+        self.assertIsNone(asked["back_text"])
 
     def test_a_shot_with_a_short_control_fails_the_command(self) -> None:
         out = StringIO()
@@ -490,6 +614,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 ended = [s for s in sprints if s["ended_at"] is not None]
                 self.assertEqual(launches, [])
                 for sprint in running:
+                    if state == "failed-start":
+                        continue
                     self.assertEqual(sprint["manager_state"], "started", sprint["title"])
                     self.assertIsNone(sprint["manager_text"], sprint["title"])
                     self.assertFalse(sprint["now_text"].startswith("Working on"), sprint["title"])
@@ -542,6 +668,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state == "failed-start":
+                    (sprint,) = running
+                    self.assertEqual(sprint["manager_state"], "failed")
+                    self.assertTrue(sprint["retry"])
+                    self.assertEqual(sprint["now_text"],
+                                     "waiting for you: the manager failed to start")
+                    (item,) = [i for i in view["inbox"]["open"]]
+                    self.assertEqual(item["reason"], "failed_start")
+                    self.assertEqual(item["last_reason"],
+                                     "this account does not trust the project's folder")
+                    self.assertNotIn("/home/", json.dumps(view))
                 elif state == "waiting-its-turn":
                     self.assertEqual(
                         [(s["state"], s["ball"], s["now_text"]) for s in running],
@@ -585,6 +722,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(asked[1]["answer"], shots.ASK_ANSWER_SUMMARY)
                     self.assertLessEqual(len(shots.ASK_ANSWER_SUMMARY), 45)
                     self.assertEqual(view["statement"]["inbox_items"], 0)
+                elif state == "question-read":
+                    web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+                    threads = web["questions"]["threads"]
+                    self.assertEqual([len(t["questions"]) for t in threads], [1])
+                    asked = threads[0]["questions"][0]
+                    self.assertEqual(asked["state"], "answered")
+                    self.assertEqual(asked["question"], shots.READ_QUESTION)
+                    self.assertGreaterEqual(len(asked["answer"]), 1200)
+                    for marker in ("**", "\n- ", "`", "```",
+                                   "\n" + shots.READ_FENCED_LINE + "\n"):
+                        self.assertIn(marker, asked["answer"])
+                    self.assertNotIn("--since=7.days", asked["read_text"])
+                    self.assertEqual(len(shots.READ_CHOICES), 3)
+                    self.assertEqual(asked["back_choices"], list(shots.READ_CHOICES))
+                    self.assertTrue(asked["back_text"].startswith("Question for you: "))
+                    self.assertEqual(running, [])
                 elif state in ("questions-closed", "questions-open"):
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
                     self.assertEqual(web["questions"]["count"], 2)
