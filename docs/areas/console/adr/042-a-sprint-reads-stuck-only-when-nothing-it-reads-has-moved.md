@@ -1,7 +1,7 @@
 # ADR-console-042 — A sprint reads stuck only when nothing it reads has moved
 
 - **Status:** accepted; amended by ADR-console-050, ADR-console-057, ADR-console-064, ADR-console-069
-- **Decided in:** #1109
+- **Decided in:** #1109, #1229
 
 ## Context
 
@@ -16,6 +16,8 @@ A running sprint's state line and its ball each read whether the sprint had move
 **D3. A run is the sprint's.** A run belongs to the sprint when it is its manager session's, or when it carries an issue of the sprint's report or of the report's inbox. It counts whenever it moved, before or after the report, and a new report keeps the movement already seen. Stage observations are unchanged: only reported issues, only runs that moved after the report, cleared by the next report.
 
 **D4. A failed launch.** When the manager failed to start and no session of the sprint is listed, only the goal's stated time leaves the signals, because it stood in for a manager about to be listed and a failed launch says none will be. An approval, a report or a run inside the window keeps the sprint moving whatever its order against the failure. With none of them the sprint is not moving at once, and the ball reads nothing running, as #1086 decided: a failed launch beats the freshness of the goal. The state then reads drafting, since no brief was approved. A failed first launch with no brief is the owner's card, so its ball reads waiting on you and its line the failed start (ADR-console-064).
+
+**D5. A manager that cannot hear the console.** When the manager session's own transcript shows that a message from another session was held and not delivered (the client's `Held peer message ... not delivered` line, which waits for a person to approve it at the terminal) and no peer message was delivered after it, the sprint's now-sentence reads "the manager cannot hear the console", with what the owner can do (bring it back or drop the sprint), and the ball is the owner's. It replaces the terminal-permission sentence, never an answer waiting at the terminal. A real permission prompt, and a held message followed by a delivered one, read as before. The flag moves nothing: it is not a movement signal and adds no state to D1's reading.
 
 ## Consequences
 

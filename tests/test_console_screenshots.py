@@ -21,7 +21,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name != "holding"
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -99,8 +99,10 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_seven_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 27)
+    def test_the_set_is_twenty_eight_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 28)
+        self.assertEqual(shots.STATES.index("manager-cannot-hear"),
+                         shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
@@ -114,11 +116,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven"}
+                 27: "twenty-seven", 28: "twenty-eight"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
         self.assertIn(f"a full run writes {files} files", doc)
+
+    def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
+        justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
+        count = len(shots.STATES) * len(shots.WIDTHS)
+        self.assertIn(f"sprint states against a fixture console, {count} PNGs into out", justfile)
 
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
@@ -640,6 +647,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual([s["ball"] for s in running], ["nobody"])
                     self.assertEqual(running[0]["now_text"],
                                      "last seen building 1 of 2: the upload form")
+                elif state == "manager-cannot-hear":
+                    self.assertEqual([s["ball"] for s in running], ["owner"])
+                    self.assertEqual(
+                        running[0]["now_text"],
+                        "the manager cannot hear the console: bring it back or drop the sprint")
                 elif state == "tell-box-open":
                     self.assertEqual(len(running), 1)
                     self.assertEqual(running[0]["messages"], [])
