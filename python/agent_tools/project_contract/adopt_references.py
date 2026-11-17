@@ -38,7 +38,11 @@ maps to the successors of its wholly moved subtrees, carried only for an empty,
 `/` or `/**` tail.
 
 An occurrence that no answer decides (its own, or its policy's, below) opens a
-`path-reference` question unless its policy's question is open. The question is
+`path-reference` question unless its policy's question is open, or its quoted
+line already holds every form `extend` would add as an element of its own
+(#1234): such an occurrence is `named`, is decided as `retain` with `decided_by`
+`line` after its own answer and its policy's, and opens no question, nor holds
+its policy's question open. The question is
 keyed by its `subject`, `<path>:<line>:<column>`, with an `answers` list and no
 recommended value: `extend`, offered when the token is a quoted element of a
 bracketed, braced or parenthesised sequence (it follows `[`, `{`, `,`, a `(`
@@ -133,7 +137,7 @@ or a subject answered twice refuses `adopt.decisions.invalid_answer`. The
 `reference-format` answers are checked after it.
 
 Each `path_references` row carries `target`, `policy` (null for a file the plan
-does not move) and `decided_by` (`occurrence`, `policy` or null), and the plan
+does not move) and `decided_by` (`occurrence`, `policy`, `line` or null), and the plan
 document and the adoption evidence record carry `reference_policies`, one row
 per policy that has an occurrence, sorted by subject. A row has thirteen
 members: `subject`, `tree`, `class`, `recommended`, `answer` (the policy's
@@ -646,6 +650,7 @@ class Occurrence:
     tree: str | None
     variable: bool = False
     depth: bool = False
+    named: bool = False
 
     @property
     def subject(self) -> str:
@@ -703,6 +708,18 @@ def _shape(text: str, token: Token) -> str | None:
     whole = re.compile(r"[ \t]*(?:- )?([\"']?)" + re.escape(token.text)
                        + r"\1\s*")
     return "line" if whole.fullmatch(line) else None
+
+
+def _line_names(text: str, token: Token, forms: tuple[str, ...]) -> bool:
+    """Whether the token's line already holds every one of `forms` as an
+    element of its own, so `extend` would add nothing (#1234). An element is a
+    quoted token of the `quoted` shape; the same text in a comment or in a
+    longer string is no element."""
+    line_start, line_end = _line_bounds(text, token.start, token.end)
+    held = {other.text for other in tokens(text)
+            if line_start <= other.start and other.end <= line_end
+            and _shape(text, other) == "quoted"}
+    return all(form in held for form in forms)
 
 
 def _follows_a_name(before: str) -> bool:
@@ -772,16 +789,18 @@ def _occurrence(path: str, text: str, token: Token, base: Tree, after: Tree,
     answers = []
     additions: tuple[str, ...] = ()
     replacement = None
+    named = False
     if not variable and shape is not None and forms and None not in forms:
         answers.append("extend")
         additions = tuple(forms)
+        named = shape == "quoted" and _line_names(text, token, additions)
     if single and forms and forms[0] is not None:
         answers.append("rewrite")
         replacement = forms[0]
     answers.append("retain")
     return Occurrence(path, token.line, token.column, token.start, token.end,
                       token.text, tuple(answers), additions, replacement,
-                      shape, target, tree, variable)
+                      shape, target, tree, variable, named=named)
 
 
 # --------------------------------------------------------------------------
@@ -1138,7 +1157,8 @@ def effective_answer(occurrence: Occurrence, answers: Mapping[str, str],
 
     The occurrence's own answer decides first (`occurrence`). Otherwise the
     answer given to its policy decides (`policy`) when the occurrence offers
-    it. Raises `ValueError` for a policy answer outside `POLICY_ANSWERS`.
+    it, and otherwise a `named` occurrence is `retain` (`line`). Raises
+    `ValueError` for a policy answer outside `POLICY_ANSWERS`.
     """
     own = answers.get(occurrence.subject)
     if own is not None:
@@ -1150,6 +1170,8 @@ def effective_answer(occurrence: Occurrence, answers: Mapping[str, str],
             raise ValueError(f"{policy}: {value!r} is not a policy answer")
         if value in occurrence.answers:
             return value, "policy"
+    if occurrence.named:
+        return "retain", "line"
     return None, None
 
 

@@ -485,12 +485,18 @@ class DeliveryViewTest(unittest.TestCase):
         by_id = {s["session_id"]: s for s in session_entries(view)}
         self.assertEqual(by_id["s1"]["deliveries"], [
             {"run_id": "wf_b", "quiet": False, "moved_text": "moved just now",
+             "wait_text": None,
              "summary": "1 issue in delivery: 1 queued, moved just now",
              "moved_at": "1970-01-01T00:00:02+00:00",
+             "journal_at": "1970-01-01T00:00:02+00:00",
+             "reading_at": "1970-01-01T00:00:02+00:00",
              "issues": [{"issue": 860, "stage": "queued", "stage_text": "queued"}]},
             {"run_id": "wf_a", "quiet": False, "moved_text": "moved just now",
+             "wait_text": None,
              "summary": "2 issues in delivery: 1 building, 1 plan review, moved just now",
              "moved_at": "1970-01-01T00:00:01+00:00",
+             "journal_at": "1970-01-01T00:00:01+00:00",
+             "reading_at": "1970-01-01T00:00:01+00:00",
              "issues": [
                  {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
                  {"issue": 857, "stage": "plan review", "stage_text": "plan review"}]},
@@ -2004,6 +2010,200 @@ class SprintWaitViewTest(unittest.TestCase):
                 self.assertEqual((later["state"], later["state_text"]),
                                  ("quiet", "quiet for 20 min \u2014 may be stuck"))
                 self.assertEqual(later["ball"], "nobody")
+
+
+class SprintRunLineViewTest(unittest.TestCase):
+    """A sprint issue's run line reads its sprint's movement, not the journal alone (#1212)."""
+
+    base = reported(with_manager(started(A)), R)
+    now = R + 45 * MIN
+
+    def run_of(self, issue=4, moved=R, sid="d1"):
+        return run(sid, "wf_d", moved, IssueStage(issue, "landing"))
+
+    def shown(self, movement, deliveries=None, sprint_state=None, now=None, sessions=None):
+        return line(sprint_state or self.base, now or self.now,
+                    sessions=sessions or [idle_session, session("d1", "idle")],
+                    deliveries=deliveries or self.run_of(), movement=movement)
+
+    def run_line(self, view, run_id="wf_d"):
+        found = [d for s in session_entries(view) for d in s["deliveries"]]
+        found += [d for e in view["entries"] for sp in e["sprints"]
+                  for s in sp["sessions"] for d in s["deliveries"]]
+        return next(d for d in found if d["run_id"] == run_id)
+
+    def test_a_run_of_a_sprint_issue_whose_only_movement_is_a_fresh_wait_names_that_wait(self):
+        now = self.now
+        pull = PullMovement(40, frozenset({4}), now - MIN, now - MIN)
+        cases = (
+            ("a land lock wait", moving(locks=((4, now - MIN),)), "waiting its turn to merge"),
+            ("CI on its pull request",
+             moving(pulls=(PullMovement(40, frozenset({4}), now - MIN, None),), read_ms=now - MIN),
+             "waiting for CI on its pull request"),
+            ("a commit on its branch", moving(branches=((4, now - 5 * MIN),)),
+             "a delivery is committing"),
+            ("a release step", moving(release_ms=now - MIN), "waiting for a release step"),
+            ("the order, CI first",
+             moving(pulls=(pull,), read_ms=now - MIN, release_ms=now - MIN,
+                    locks=((4, now - MIN),)), "waiting for CI on its pull request"),
+            ("the order, release before the lock",
+             moving(release_ms=now - MIN, locks=((4, now - MIN),)),
+             "waiting for a release step"),
+            ("committing before release and lock",
+             moving(branches=((4, now - MIN),), release_ms=now - MIN, locks=((4, now - MIN),)),
+             "a delivery is committing"))
+        for label, movement, sentence in cases:
+            with self.subTest(label):
+                view = self.shown(movement)
+                r = self.run_line(view)
+                self.assertEqual((r["quiet"], r["moved_text"]), (False, sentence))
+                self.assertEqual(r["wait_text"], sentence)
+                self.assertEqual(r["summary"], "1 issue in delivery: 1 landing, " + sentence)
+                for word in ("quiet", "stuck", "stalled"):
+                    self.assertNotIn(word, r["moved_text"])
+                    self.assertNotIn(word, r["summary"])
+                    self.assertNotIn(word, r["wait_text"] or "")
+                if label == "a land lock wait":
+                    self.assertEqual(entry(view)["now_text"], "waiting its turn to merge")
+        with self.subTest("a journal that moved itself"):
+            r = self.run_line(self.shown(moving(locks=((4, now - MIN),)),
+                                         deliveries=self.run_of(moved=now - 2 * MIN)))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (False, "moved 1 min ago", None))
+            self.assertEqual(r["reading_at"],
+                             datetime.fromtimestamp((now - MIN) / 1000, timezone.utc).isoformat())
+        with self.subTest("session output moves it too"):
+            r = self.run_line(self.shown(moving(
+                locks=((4, now - MIN),),
+                sessions=(SessionMovement("d1", A, now - 3 * MIN, None, None),))))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (False, "moved 1 min ago", None))
+
+    def test_a_run_whose_own_session_wrote_output_reads_its_moved_time_not_quiet(self):
+        now = self.now
+        with self.subTest("output"):
+            r = self.run_line(self.shown(moving(
+                sessions=(SessionMovement("d1", A, now - 3 * MIN, None, None),))))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (False, "moved 3 min ago", None))
+            self.assertEqual(r["reading_at"],
+                             datetime.fromtimestamp((now - 3 * MIN) / 1000, timezone.utc).isoformat())
+            journal = datetime.fromtimestamp(R / 1000, timezone.utc).isoformat()
+            self.assertEqual((r["journal_at"], r["moved_at"]), (journal, journal))
+        with self.subTest("a running check"):
+            r = self.run_line(self.shown(moving(
+                sessions=(SessionMovement("d1", A, None, now - 2 * MIN, None),))))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (False, "moved 2 min ago", None))
+        with self.subTest("a run of the manager's session with no issue yet"):
+            view = self.shown(
+                moving(sessions=(SessionMovement("s1", A, now - 3 * MIN, None, None),)),
+                deliveries=run("s1", "wf_m", R), sessions=[idle_session])
+            r = self.run_line(view, "wf_m")
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (False, "moved 3 min ago", None))
+
+    def test_a_run_of_a_sprint_issue_with_nothing_moved_for_fifteen_minutes_still_reads_quiet(self):
+        now = self.now
+        with self.subTest("nothing moved"):
+            r = self.run_line(self.shown(None))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 45 min", None))
+            self.assertEqual(r["summary"], "1 issue in delivery: 1 landing, quiet for 45 min")
+        with self.subTest("a lock wait last seen 16 minutes ago"):
+            view = self.shown(moving(locks=((4, now - 16 * MIN),)))
+            r = self.run_line(view)
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 16 min", None))
+            self.assertEqual(r["reading_at"],
+                             datetime.fromtimestamp((now - 16 * MIN) / 1000, timezone.utc).isoformat())
+            self.assertEqual(entry(view)["state_text"], "quiet for 16 min \u2014 may be stuck")
+        with self.subTest("another issue's wait"):
+            view = self.shown(moving(locks=((5, now - MIN),)))
+            r = self.run_line(view)
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 45 min", None))
+            self.assertEqual(entry(view)["now_text"], "waiting its turn to merge")
+        with self.subTest("another session's output"):
+            r = self.run_line(self.shown(moving(
+                sessions=(SessionMovement("s9", A, now - MIN, None, None),))))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 45 min", None))
+
+    def test_a_run_outside_any_running_sprint_is_unchanged(self):
+        now = self.now
+        with self.subTest("not a sprint issue"):
+            r = self.run_line(self.shown(moving(locks=((99, now - MIN),)),
+                                         deliveries=self.run_of(issue=99)))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 45 min", None))
+        with self.subTest("an ended sprint"):
+            r = self.run_line(self.shown(
+                moving(locks=((4, now - MIN),)),
+                sprint_state=stopped(self.base, now - 30 * MIN, now - 29 * MIN)))
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 45 min", None))
+        with self.subTest("a project with no sprint"):
+            view = derive_view([state("p00", 1)], sessions=[session("d1", "idle")],
+                               deliveries=self.run_of(), now_ms=now,
+                               movement=moving(locks=((4, now - MIN),)))
+            r = self.run_line(view)
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (True, "quiet for 45 min", None))
+        with self.subTest("no clock"):
+            view = line(self.base, None, sessions=[idle_session, session("d1", "idle")],
+                        deliveries=self.run_of(), movement=moving(locks=((4, R),)))
+            r = self.run_line(view)
+            self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
+                             (False, "moved just now", None))
+
+
+class DeafManagerViewTest(unittest.TestCase):
+    """A manager that holds the console's wake behind a prompt nobody at a terminal will answer (#1229)."""
+
+    base = reported(with_manager(started(A)), R)
+    now = R + 2 * MIN
+    DEAF = "the manager cannot hear the console"
+
+    def shown(self, held, session_state="idle", sid="s1", sessions=None):
+        sessions = [session(sid, session_state, name=NAME)] if sessions is None else sessions
+        return entry(line(self.base, self.now, sessions=sessions, movement=moving(
+            sessions=(SessionMovement(sid, A, None, None, None, self.now - MIN, held),))))
+
+    def test_a_held_undelivered_message_reads_the_manager_cannot_hear_the_console(self):
+        for state in ("idle", "working", "waiting_permission"):
+            with self.subTest(state):
+                shown = self.shown(True, state)
+                self.assertTrue(shown["now_text"].startswith(self.DEAF), shown["now_text"])
+                self.assertIn("drop the sprint", shown["now_text"])
+                self.assertNotIn("permission", shown["now_text"])
+                self.assertEqual((shown["ball"], shown["ball_text"]), ("owner", "waiting on you"))
+
+    def test_a_real_permission_prompt_and_an_idle_manager_read_as_before(self):
+        shown = self.shown(False, "waiting_permission")
+        self.assertEqual(shown["now_text"], "waiting for your permission in the manager's terminal")
+        self.assertEqual(shown["ball"], "owner")
+        shown = self.shown(False, "working")
+        self.assertEqual((shown["now_text"], shown["ball"]),
+                         ("building 1 of 7: Importer resumes", "manager"))
+
+    def test_a_question_at_the_terminal_still_reads_its_own_words(self):
+        shown = self.shown(True, "waiting_answer")
+        self.assertEqual(shown["now_text"], "waiting for your answer in the manager's terminal")
+
+    def test_only_the_managers_held_message_counts(self):
+        delivery = session("d1", "working", name="other-name")
+        shown = entry(line(self.base, self.now, sessions=[working_session, delivery],
+                           movement=moving(sessions=(
+                               SessionMovement("d1", A, None, None, None, self.now - MIN, True),))))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        other = entry(line(self.base, self.now, sessions=[working_session], movement=moving(
+            sessions=(SessionMovement("s1", "b" * 16, None, None, None, self.now - MIN, True),))))
+        self.assertEqual(other["now_text"], "building 1 of 7: Importer resumes")
+
+    def test_no_movement_reading_never_reads_deaf(self):
+        shown = entry(line(self.base, self.now, sessions=[working_session], movement=None))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
 
 
 class SessionSignalViewTest(unittest.TestCase):

@@ -171,13 +171,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 .goal-bar { position: relative; flex: 1 1 12rem; min-width: 12rem; max-width: 440px; }
-.goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
+.goal-in { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
 .goal-in:hover { border-color: var(--s1); }
 .goal-in:focus-within { border-color: var(--lav); }
 .goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 7px 0; font: inherit; line-height: 22px; color: var(--text); background: none; resize: none; overflow: hidden; text-overflow: ellipsis; }
 .goal-in .goal-text::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .goal-key { margin-top: 9px; }
-.goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
+.goal-bar.open .goal-in { padding-bottom: 20px; background: var(--base); border-color: var(--lav); }
 .goal-bar.open .goal-text { height: 82px; overflow: auto; }
 .goal-box { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 14rem); overflow-y: auto; padding: 12px; background: var(--base); border: 1px solid var(--lav); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); }
 .goal-filter { min-width: 0; }
@@ -194,7 +194,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-projects li { min-width: 0; max-width: 100%; }
 .goal-project { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .goal-status:empty { display: none; }
-.goal-act { display: flex; flex: none; gap: 8px; }
+.goal-count { display: none; position: absolute; right: 12px; bottom: 4px; font-size: .75rem; line-height: 14px; color: var(--ov2); font-variant-numeric: tabular-nums; pointer-events: none; }
+.goal-bar.open .goal-count { display: block; }
+.goal-count.over { color: var(--red); font-weight: 600; }
+.goal-act { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
+.goal-hint { font-size: .8125rem; color: var(--sub0); }
 .sprint-blocks { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; padding: 12px 16px; border: 1px solid var(--hair); border-radius: 12px; overflow-wrap: anywhere; font-size: .8125rem; color: var(--sub0); }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
@@ -603,12 +607,14 @@ function quietIcon() {
   return icon("quiet-icon");
 }
 function movedWords(run, cls) {
-  if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
-  return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.moved_at, ""))
-                   : phrase("span", cls, "moved ", timeEl("ago", run.moved_at, ""));
+  if (typeof run.wait_text === "string" && run.wait_text !== "") return el("span", cls, run.wait_text);
+  if (!Number.isFinite(Date.parse(run.reading_at))) return el("span", cls, run.moved_text);
+  return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.reading_at, ""))
+                   : phrase("span", cls, "moved ", timeEl("ago", run.reading_at, ""));
 }
 function runSummary(run) {
-  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current.
+  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current,
+  // or leaves a named wait as the view wrote it.
   const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
   return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
 }
@@ -4833,8 +4839,26 @@ function renderUnmanaged(view) {
   section.appendChild(list);
 }
 const MAX_GOAL = 2000;
+const GOAL_NEAR = 1800;
+// The service counts code points after str.strip(); trim() strips a different set (U+FEFF, not U+001C-001F or U+0085).
+const GOAL_SPACE = /^[\t\n\v\f\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t\n\v\f\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g;
+function goalChars(text) {
+  return Array.from(text.replace(GOAL_SPACE, "")).length;
+}
 const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "", rev: 0 };
 let goalUi = null;
+// #1214, ADR-console-002: the count sits at the field's corner and reads only near the limit; over it, Send is aria-disabled and the hint beside it says how much to cut. Nothing here changes a size.
+const goalCount = el("span", "goal-count");
+function showGoalLimit() {
+  const n = goalChars(draft.text);
+  const cut = n - MAX_GOAL;
+  goalCount.className = cut > 0 ? "goal-count over" : "goal-count";
+  goalCount.textContent = n > GOAL_NEAR ? `${n} / ${MAX_GOAL}` : "";
+  if (goalUi === null) return;
+  goalUi.hint.textContent = cut > 0 ? `Cut ${cut} ${cut === 1 ? "character" : "characters"} to send` : "";
+  if (cut > 0) goalUi.send.setAttribute("aria-disabled", "true");
+  else goalUi.send.removeAttribute("aria-disabled");
+}
 let recentProjects = [];
 function goalMatches() {
   const needle = draft.filter.toLowerCase();
@@ -4874,19 +4898,16 @@ function goalEdited() {
   showGoalReason();
 }
 function closeGoal() {
-  if (draft.phase !== "sending") draft.reason = "";
   draft.open = false;
   renderGoal();
   goalText.blur();
 }
 async function sendGoal() {
   if (draft.phase === "sending") return;
+  if (goalChars(draft.text) > MAX_GOAL) return;
   const project = chosenProject();
   draft.reason = "";
   if (project === null) draft.reason = "choose a project";
-  else if (Array.from(draft.text.trim()).length > MAX_GOAL) {
-    draft.reason = "a goal is at most " + MAX_GOAL + " characters";
-  }
   if (draft.reason !== "") {
     showGoalReason();
     return;
@@ -4919,6 +4940,7 @@ async function sendGoal() {
       draft.filter = "";
       draft.text = "";
       goalText.value = "";
+      showGoalLimit();
       draft.project = null;
       if (draft.open) closeGoal();
     } else showGoalReason();
@@ -4935,6 +4957,7 @@ goalText.setAttribute("aria-keyshortcuts", "g");
 goalText.addEventListener("input", (event) => {
   draft.text = event.target.value;
   goalEdited();
+  showGoalLimit();
 });
 goalText.addEventListener("focus", () => {
   if (!draft.open) {
@@ -4944,6 +4967,7 @@ goalText.addEventListener("focus", () => {
 });
 const goalIn = el("div", "goal-in");
 goalIn.appendChild(goalText);
+goalIn.appendChild(goalCount);
 goalIn.appendChild(el("kbd", "goal-key", "g"));
 document.getElementById("goal").appendChild(goalIn);
 function accountNameReason(name, view) {
@@ -5462,15 +5486,21 @@ function buildGoalBox() {
   const status = el("div", "goal-status");
   const send = actionButton("goal-send btn-quiet", "Send", sendGoal);
   const act = el("div", "goal-act");
+  const hint = el("span", "goal-hint");
+  hint.setAttribute("id", "goal-hint");
+  hint.setAttribute("role", "status");
+  send.setAttribute("aria-describedby", "goal-hint");
   act.appendChild(send);
   act.appendChild(actionButton("goal-cancel btn-quiet", "Cancel", closeGoal));
-  for (const part of [filter, list, status, act]) box.appendChild(part);
+  act.appendChild(hint);
+  for (const part of [status, filter, list, act]) box.appendChild(part);
   goalPanel = box;
-  goalUi = { filter, list, status, send };
+  goalUi = { filter, list, status, send, hint };
   send.disabled = draft.phase === "sending";
   markBusy(send, draft.phase === "sending");
   refreshGoalList();
   showGoalReason();
+  showGoalLimit();
   return box;
 }
 function openGoal() {
@@ -5494,6 +5524,7 @@ function goalFromAnswer(projectId, question) {
   draft.text = text;
   goalText.value = text;
   openGoalFor(projectId);
+  showGoalLimit();
 }
 function renderGoal() {
   const bar = document.getElementById("goal");
