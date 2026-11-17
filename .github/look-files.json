@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "sets": {
+    "console": ["python/agent_tools/console/**"]
+  }
+}
