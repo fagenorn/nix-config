@@ -216,6 +216,7 @@ agent-workflow-tests *args:
     tests/test_console_folder_trust.py \
     tests/test_console_trust_start.py \
     tests/test_console_plan_questions.py \
+    tests/test_console_project_question.py \
     tests/test_console_contract_draft.py \
     tests/test_console_register.py \
     tests/test_console_register_service.py \
@@ -228,6 +229,7 @@ agent-workflow-tests *args:
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
     tests/test_console_lock_wait_check.py \
+    tests/test_console_look_check.py \
     tests/test_console_page.py \
     tests/test_console_service.py \
     tests/test_console_stream.py \
@@ -258,6 +260,7 @@ agent-workflow-tests *args:
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_movement.py \
+    tests/test_console_movement_check.py \
     tests/test_console_spend.py \
     tests/test_console_spend_page.py \
     tests/test_console_units.py \

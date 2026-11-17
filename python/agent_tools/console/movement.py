@@ -47,7 +47,7 @@ The fold. `lock_held` is `any(p.holding for p in pulls)` for a read and the prev
 `pulls` is None. In a good read each issue of a read pull with `holding` that is in `live` (the issues whose delivery run is in a session not ended; None
 gates nothing), and each issue of `locking` (the issues whose journal sits at a lock step) when that read's
 `lock_held` is true, is seen: a run that died holding the lock leaves its pull request holding, so its issues
-are seen no more and the sprint ages out to may be stuck (ADR-console-057 D1); its `locks` time
+are seen no more and the sprint ages out to may be stuck (ADR-console-059 D1); its `locks` time
 becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
 issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
 out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
@@ -61,12 +61,39 @@ out under the quiet window like a run that ended. `branches` is the union of `pr
 `local.branches` by issue, the larger time winning, ascending by issue: a deleted branch keeps its last
 time, never refreshed. `release_ms = now_ms` when `local.release`, else `previous.release_ms`. Nothing
 is pruned: the service drops a project's whole reading once no sprint of it runs.
+
+Sessions. Two more readers say whether a sprint's sessions are working (#1185). `session_output_ms` is
+the newest write among a session's transcript files: `<projects>/<slug>/<session_id>.jsonl` and every
+`.jsonl` anywhere under `<projects>/<slug>/<session_id>/` (its subagents and workflow agents), over every
+slug directory of every projects directory; None when there is none, and an absent or unreadable path is
+skipped, never raised. An id that is empty, `.`, `..` or holds `/` or NUL names no path. `process_table`
+reads `/proc` once (None without procfs): per all-digit entry its parent pid, start time and CPU in
+milliseconds (utime + stime + cutime + cstime), parsed after the LAST `)` of `stat` as `sessions.py` does.
+`descendant_cpu` lists the CPU of every process whose parent chain reaches a session's pid, NEVER the
+session process itself: a background session's own process burns CPU while idle, so only the tool
+shells and the processes they start say it is running something. `read_sessions` reads the table once
+per call and returns one `SessionReading` per target, ascending by session id, with `cpu` None when
+the table, the pid or the pid's entry is missing.
+
+The session fold. `merged` also folds `local.sessions` into one `SessionMovement` per association of
+a session with a sprint, at `sessions_ms` (the time the caller started the read) or else `now_ms`.
+`output_ms` is the larger of the read and the last one, never moving back. A reading of a manager session carries `replies`, the `(sprint, idle-nudge time)` of
+the sprints it manages that were nudged: an output or a CPU reading for such a sprint that falls from the
+nudge to `NUDGE_REPLY_MS` (five minutes) after it is the manager's reply, so it is never folded and the
+last qualifying time stays (a reply never erases earlier movement; ADR-console-057 D6). `check_ms` is that time
+when the CPU used since the last reading, summed per process key `(pid, start)` (a process new since
+then counts all of its CPU), is at least `CHECK_CPU_MS` (one second: a watcher loop idling at a few
+milliseconds per poll must not read as a running check), and with no earlier table to compare (the
+first reading, or after a None) it moves nothing. Times are kept per association, not per session:
+an association the reading does not carry is kept exactly, so a session that moved on to another
+sprint never refreshes the times of the one it left (ADR-console-050 D1). Sessions fold whether
+`pulls` is None or not.
 """
 
 import json
 import os
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -112,6 +139,10 @@ RUNNING_CHECKS = frozenset({"QUEUED", "IN_PROGRESS", "PENDING"})
 RUNNING_STATUSES = frozenset({"PENDING"})
 HELD_FOR_A_PERSON = "attention_required"
 REFLOG_TAIL_BYTES = 4096
+CHECK_CPU_MS = 1000
+# A nudged idle manager answers the nudge; the answer is not the sprint moving. Equal to
+# `idle.IDLE_AFTER_MS`, defined here because `idle` imports `view`, which imports this module (#1185).
+NUDGE_REPLY_MS = 300_000
 
 _BODY_ISSUE = re.compile(r"(?<![\w/])#(\d+)\b")
 _REFLOG_TIME = re.compile(r"(\d+) [+-]\d{4}$")
@@ -131,6 +162,8 @@ class LocalReading:
     branches: tuple[tuple[int, int], ...]
     release: bool
     invalid: tuple[str, ...] = ()
+    sessions: tuple["SessionReading", ...] = ()
+    sessions_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +182,44 @@ class ProjectMovement:
     release_ms: int | None = None
     locks: tuple[tuple[int, int], ...] = ()
     lock_held: bool = False
+    sessions: tuple["SessionMovement", ...] = ()
+
+
+Cpu = tuple[tuple[tuple[int, str], int], ...]
+
+
+@dataclass(frozen=True)
+class ProcessStat:
+    ppid: int
+    start: str
+    cpu_ms: int
+
+
+@dataclass(frozen=True)
+class SessionTarget:
+    session_id: str
+    pid: int | None
+    sprints: frozenset[str]
+    replies: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionReading:
+    session_id: str
+    sprints: frozenset[str]
+    output_ms: int | None
+    cpu: Cpu | None
+    replies: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class SessionMovement:
+    session_id: str
+    sprint_id: str
+    output_ms: int | None
+    check_ms: int | None
+    cpu: Cpu | None
+    read_ms: int | None = None
 
 
 def pulls_argv(slug: str) -> list[str]:
@@ -355,6 +426,118 @@ def read_local(root: str, pattern: str | None) -> LocalReading:
     return LocalReading(branch_updates(root, pattern), *release_reading(root))
 
 
+def session_output_ms(projects_dirs: Iterable[Path], session_id: str) -> int | None:
+    if session_id in ("", ".", "..") or "/" in session_id or "\0" in session_id:
+        return None
+    newest: int | None = None
+
+    def note(path: str) -> None:
+        nonlocal newest
+        try:
+            stamp = os.stat(path).st_mtime_ns // 1_000_000
+        except OSError:
+            return
+        newest = stamp if newest is None else max(newest, stamp)
+
+    for projects in projects_dirs:
+        try:
+            slugs = [entry.path for entry in os.scandir(projects) if entry.is_dir()]
+        except OSError:
+            continue
+        for slug in slugs:
+            own = os.path.join(slug, session_id + ".jsonl")
+            if os.path.isfile(own):
+                note(own)
+            for here, _, names in os.walk(os.path.join(slug, session_id)):
+                for name in names:
+                    path = os.path.join(here, name)
+                    if name.endswith(".jsonl") and os.path.isfile(path):
+                        note(path)
+    return newest
+
+
+def process_table(proc: Path = Path("/proc"), clock_ticks: int | None = None) -> dict[int, ProcessStat] | None:
+    if not (proc / "self" / "stat").exists():
+        return None
+    ticks = clock_ticks or os.sysconf("SC_CLK_TCK")
+    table: dict[int, ProcessStat] = {}
+    try:
+        names = os.listdir(proc)
+    except OSError:
+        return None
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            text = (proc / name / "stat").read_text(encoding="utf-8", errors="replace")
+            fields = text.rsplit(")", 1)[1].split()
+            if len(fields) < 20:
+                continue
+            used = sum(int(fields[i]) for i in (11, 12, 13, 14))
+            table[int(name)] = ProcessStat(int(fields[1]), fields[19], used * 1000 // ticks)
+        except (OSError, IndexError, ValueError):
+            continue
+    return table
+
+
+def descendant_cpu(table: Mapping[int, ProcessStat], pid: int) -> Cpu:
+    if pid not in table:
+        return ()
+    children: dict[int, list[int]] = {}
+    for child, stat in table.items():
+        children.setdefault(stat.ppid, []).append(child)
+    seen = {pid}
+    queue = [pid]
+    found = []
+    while queue:
+        for child in children.get(queue.pop(), ()):
+            if child not in seen:
+                seen.add(child)
+                queue.append(child)
+                found.append(((child, table[child].start), table[child].cpu_ms))
+    return tuple(sorted(found))
+
+
+def read_sessions(projects_dirs: Iterable[Path], targets: Iterable[SessionTarget], *,
+                  proc: Path = Path("/proc"), clock_ticks: int | None = None) -> tuple[SessionReading, ...]:
+    projects = list(projects_dirs)
+    table = process_table(proc, clock_ticks)
+    readings = []
+    for target in sorted(targets, key=lambda t: t.session_id):
+        alive = table is not None and target.pid is not None and target.pid in table
+        cpu = descendant_cpu(table, target.pid) if alive else None
+        readings.append(SessionReading(target.session_id, target.sprints,
+                                       session_output_ms(projects, target.session_id), cpu,
+                                       target.replies))
+    return tuple(readings)
+
+
+def _fold_sessions(previous: tuple[SessionMovement, ...], readings: tuple[SessionReading, ...],
+                   at: int) -> tuple[SessionMovement, ...]:
+    old = {(s.session_id, s.sprint_id): s for s in previous}
+    fresh = {}
+    for reading in readings:
+        for sprint in reading.sprints:
+            seen = old.get((reading.session_id, sprint))
+            nudged = dict(reading.replies).get(sprint)
+
+            def reply(ms: int | None) -> bool:
+                return ms is not None and nudged is not None and nudged <= ms < nudged + NUDGE_REPLY_MS
+
+            outputs = [m for m in (None if reply(reading.output_ms) else reading.output_ms,
+                                   seen and seen.output_ms) if m is not None]
+            check = seen.check_ms if seen else None
+            if reading.cpu is not None and seen is not None and seen.cpu is not None:
+                prev = dict(seen.cpu)
+                used = sum(max(0, ms - prev.get(key, 0)) for key, ms in reading.cpu)
+                if used >= CHECK_CPU_MS and not reply(at):
+                    check = at
+            fresh[(reading.session_id, sprint)] = SessionMovement(
+                reading.session_id, sprint, max(outputs) if outputs else None, check,
+                reading.cpu, at)
+    return tuple(sorted({**old, **fresh}.values(), key=lambda s: (s.session_id, s.sprint_id)))
+
+
 def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | None,
            now_ms: int, local: LocalReading,
            locking: Collection[int] = (), live: Collection[int] | None = None) -> ProjectMovement:
@@ -385,6 +568,8 @@ def merged(previous: ProjectMovement | None, pulls: tuple[PullRequest, ...] | No
     branches = dict(before.branches)
     for issue, moved in local.branches:
         branches[issue] = max(moved, branches.get(issue, moved))
+    at = now_ms if local.sessions_ms is None else local.sessions_ms
     return ProjectMovement(kept, read_ms, tuple(sorted(branches.items())),
                            now_ms if local.release else before.release_ms,
-                           tuple(sorted(locks.items())), lock_held)
+                           tuple(sorted(locks.items())), lock_held,
+                           _fold_sessions(before.sessions, local.sessions, at))

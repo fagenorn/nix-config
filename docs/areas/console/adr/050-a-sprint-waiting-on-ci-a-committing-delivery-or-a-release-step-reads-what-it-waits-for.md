@@ -1,6 +1,6 @@
 # ADR-console-050 — A sprint waiting on CI, a committing delivery or a release step reads what it waits for
 
-- **Status:** accepted; amended by ADR-console-057
+- **Status:** accepted; amended by ADR-console-059
 - **Decided in:** #1110
 
 ## Context
