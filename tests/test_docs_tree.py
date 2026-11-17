@@ -473,7 +473,8 @@ class DocsTreeTest(unittest.TestCase):
         status = [line for line in (REPO_ROOT / "docs/areas/console/adr/042-a-sprint-reads-stuck-"
                                     "only-when-nothing-it-reads-has-moved.md").read_text().splitlines()
                   if line.startswith("- **Status:**")]
-        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-050, ADR-console-057"])
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-050, "
+                                  "ADR-console-057, ADR-console-062"])
         context = self.doc("docs/areas/console/CONTEXT.md")
         for needle in ("a delivery committing or a release step moves it", "ADR-console-050"):
             self.assertIn(needle, context)
@@ -525,6 +526,27 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("waiting its turn to merge", "ADR-console-061"):
             self.assertIn(needle, context)
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("061-*.md"))), 1)
+
+    def test_the_run_line_movement_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/062-a-delivery-run-line-of-a-sprints-issue-reads-"
+                "its-sprints-movement-for-that-issue.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-062 — A delivery run line of a sprint's issue "
+                                "reads its sprint's movement for that issue")
+        adr = self.doc(path)
+        for needle in ("#1212", "ADR-console-042", "ADR-console-050", "ADR-console-061",
+                       "ADR-console-005", "ADR-console-048", "waiting its turn to merge",
+                       "wait_text", "journal_at", "its own session"):
+            self.assertIn(needle, adr)
+        status = [line for line in (REPO_ROOT / (
+            "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
+        )).read_text().splitlines() if line.startswith("- **Status:**")]
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-062"])
+        lines = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
+        entry = lines[lines.index("**Delivery run**:") + 1]
+        for needle in ("ADR-console-062", "quiet for N min"):
+            self.assertIn(needle, entry)
+        self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("062-*.md"))), 1)
 
     def test_the_owner_check_pictures_decision_is_recorded(self):
         adr = self.doc(
