@@ -175,6 +175,44 @@ class ProbeCommandTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(result.returncode, -signal.SIGKILL)
 
+    def test_an_interrupt_kills_and_reaps_the_whole_group_before_it_is_raised_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pids = Path(tmp) / "pids"
+            code = ("import os, subprocess, sys, time\n"
+                    "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+                    f"open({str(pids)!r}, 'w').write(f'{{os.getpid()}} {{g.pid}}')\n"
+                    "time.sleep(300)\n")
+
+            main = threading.get_ident()
+
+            def interrupt_when_started():
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    if pids.exists() and len(pids.read_text().split()) == 2:
+                        break
+                    time.sleep(0.05)
+                signal.pthread_kill(main, signal.SIGINT)
+
+            threading.Thread(target=interrupt_when_started, daemon=True).start()
+            with self.assertRaises(KeyboardInterrupt):
+                manager.run_in_own_group(
+                    [sys.executable, "-c", code], timeout=60, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            found = [int(pid) for pid in pids.read_text().split()]
+            self.assertEqual(len(found), 2)
+
+            def kill_all():
+                for pid in found:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            self.addCleanup(kill_all)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and any(self.alive(pid) for pid in found):
+                time.sleep(0.05)
+            self.assertEqual([pid for pid in found if self.alive(pid)], [])
+
     def test_the_group_runner_returns_what_the_command_printed(self):
         argv = [sys.executable, "-c", "print('ok')"]
         for extra in ({}, {"cancel": threading.Event()}):
