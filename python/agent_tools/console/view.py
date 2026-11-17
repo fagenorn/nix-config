@@ -2116,11 +2116,12 @@ def derive_view(
                            if sprint["ball"] == BALL_OWNER and not sprint["waiting"]
                            and sprint["sprint_id"] not in counted]
     at_terminal = [sprint["sprint_id"] for sprint in at_terminal_sprints]
-    # Only a manager the sprint reads as waiting at its terminal sends the owner there; any other
-    # counted sprint (one that cannot hear the console, ADR-console-042 D5, or one stopping) has
-    # no terminal to go to and reads the recovery sentence.
+    # Only a manager with a session waiting at its terminal sends the owner there, read from the
+    # sessions rather than `now_text` (a stopping sprint's `now_text` is the stop sentence even while
+    # its manager waits); any other counted sprint (one that cannot hear the console,
+    # ADR-console-042 D5) has no terminal to go to and reads the recovery sentence.
     at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints
-                        if sprint["now_text"] in (NOW_ANSWER_TEXT, NOW_PERMISSION_TEXT)]
+                        if any(s["state"] in _WAITING for s in sprint["sessions"])]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items) + len(at_terminal))

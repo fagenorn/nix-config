@@ -1469,6 +1469,17 @@ class HeadingCountsOwnerBallTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], view.DEAF_SENTENCE)
 
+    def test_a_stopping_manager_waiting_at_its_terminal_is_sent_there(self):
+        stopping = dataclasses.replace(reported(with_manager(started(A)), R), stop_at=iso(R + MIN))
+        for waiting in ("waiting_answer", "waiting_permission"):
+            with self.subTest(waiting):
+                shown = derive_view([state("p00", 1)], None, sprints={A: stopping},
+                                    sessions=[session("s1", waiting, name=NAME)],
+                                    now_ms=R + 2 * MIN, managers=True)
+                self.assertEqual(entry(shown)["now_text"], view.NOW_STOPPING_TEXT)
+                self.assertEqual(shown["statement"]["inbox_items"], 1)
+                self.assertEqual(shown["statement"]["sentence"], view.TERMINAL_SENTENCE)
+
     def test_a_deaf_manager_beside_a_terminal_question_reads_both(self):
         B = "b" * 16
         deaf = reported(with_manager(started(A)), R)
