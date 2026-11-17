@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1151: the first manager started under the permission change runs in the
+# permission mode its manager.started row logged. Exit 0 met, 1 not met, 75 not yet.
+# Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.permission_check "$@"

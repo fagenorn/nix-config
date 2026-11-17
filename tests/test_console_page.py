@@ -5159,6 +5159,34 @@ class PageSprintReportTest(unittest.TestCase):
         for cls in ("progress", "status", "report-status"):
             self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
 
+    def test_the_sprint_detail_shows_the_permission_mode(self) -> None:
+        shown = {**SPRINT, "permission_text": "bypass: production rules in place"}
+        closing = {**SPRINT, "closing": CLOSING,
+                   "permission_text": "auto: no production rules declared"}
+        open_sprint, closed_sprint = render([
+            START, {"frame": with_sprints([shown])}, {"snapshot": True},
+            {"frame": with_sprints([closing])}, {"snapshot": True}])
+        (fold,) = detail_nodes(sprint_lines(open_sprint)[0])
+        self.assertEqual([c["cls"] for c in fold["children"]],
+                         ["", "sprint-goal-full", "permission"])
+        self.assertEqual(full(fold["children"][2]),
+                         "Permission mode bypass: production rules in place")
+        (closed_fold,) = detail_nodes(sprint_lines(closed_sprint)[0])
+        (note,) = [c for c in closed_fold["children"] if has_class(c, "permission")]
+        self.assertEqual(full(note), "Permission mode auto: no production rules declared")
+
+    def test_a_finished_sprint_shows_the_permission_mode(self) -> None:
+        text = "bypass: production rules in place"
+        reported = {**ended_sprint("c", 10 * 60000, CLOSING), "permission_text": text}
+        unreported = {**ended_sprint("d", 20 * 60000, None), "permission_text": text}
+        bare = ended_sprint("e", 30 * 60000, CLOSING)
+        (snap,) = render([START, {"frame": with_sprints([reported, unreported, bare])},
+                          {"open": "finished"}, {"open": "ended:" + "c" * 16},
+                          {"open": "ended:" + "d" * 16}, {"open": "ended:" + "e" * 16},
+                          {"snapshot": True}])
+        notes = [full(n) for n in nodes(snap["projects"]) if has_class(n, "permission")]
+        self.assertEqual(notes, ["Permission mode " + text] * 2)
+
 
 CLOSING = {
     "at": "2026-11-12T11:00:00+00:00", "summary": "The importer now resumes after a crash.",

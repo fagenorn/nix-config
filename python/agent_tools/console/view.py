@@ -394,6 +394,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
                                        | "stalled" | "unavailable",
                       "manager_until": "<time>" | null, "retry": <bool>,
+                      "permission_text": "<bypass|auto>: <reason>" | null,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
                       "status": "<status line>" | null, "status_at": "<report time>" | null,
@@ -553,7 +554,9 @@ reads them from its `pending` argument (default none).
 `manager_state`, `manager_text` and `retry` are all `sprints.manager_status` (its docstring holds
 the rules, so the view and the service's retry agree) over the sprint, whether it has a listed
 session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
-null. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
+null. `permission_text` (always present) is the mode the manager's settings file was last written
+with and its reason (`SprintState.permission`, ADR-console-060), null when the sprint has none
+logged. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
 `unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
 (default true).
 A listed session of the sprint's project whose name is `manager.session_name(project_id,
@@ -1537,6 +1540,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
         "manager_state": manager_state,
+        "permission_text": None if state.permission is None else state.permission.text,
         "manager_until": (state.manager.until
                           if manager_state == WAITING and state.manager is not None else None),
         "retry": retry,

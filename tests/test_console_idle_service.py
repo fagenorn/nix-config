@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import nudge, service, sprints
+from agent_tools.console import nudge, permission, service, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -449,7 +449,8 @@ class IdleQuotaTest(IdleCase):
         self.assertEqual(self.revives(), [
             nudge.Nudge(sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
         self.assertEqual(self.rows("manager.woken"), [
-            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True, "resumed": True}])
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True, "resumed": True,
+             "permission": {"mode": "auto", "reason": permission.UNRESOLVED}}])
         said = self.said(svc)
         self.assertEqual(said.count(RESUMED), 1)
         self.assertEqual(said.count("The manager of " + PARTS["title"] + " was restarted"), 0)
