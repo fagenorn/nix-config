@@ -26,10 +26,10 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_inspection",  # plan_questions
         "agent_tools.project_contract.adopt_planning",  # contract_draft
         "agent_tools.project_contract.adopt_apply",  # approve
-        "agent_tools.claims.forge_markers",  # answer, inbox, look_check
+        "agent_tools.claims.forge_markers",  # answer, inbox, look_check, look_kept_check
         "agent_tools.claims.forge_owner_action",  # answer, inbox
         "agent_tools.claims.owner_actions",  # inbox, look_check, movement, service
-        "agent_tools.delivery.look_marker",  # inbox, look_check
+        "agent_tools.delivery.look_marker",  # inbox, look_check, look_kept_check
         "agent_tools.release.transaction_history",  # movement
         "agent_tools.release.transaction_storage",  # movement
         "agent_tools.verification.verify_answer",  # answer, inbox, service
