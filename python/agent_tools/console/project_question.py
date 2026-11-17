@@ -26,8 +26,13 @@ exception, a `ContractError` included, propagate: an empty `routes` means only "
 runnable read-only command" (bootstrap: never guess a value the resolver declined). `resolve` is a
 test seam only.
 
-Prompt. `LEAD`, then a routes paragraph (the declared commands, each exactly as written and alone;
-or that none is declared so production cannot be read), then `QUESTION_MARK` and the question.
+Prompt. `LEAD` (the owner's framing, the `ANSWER_RULES` and the heading shape: a direct answer in two
+or three sentences in plain business terms, what is live first, no decision-record jargon, history
+and tracker before decision records, a failed command named in the answer), then a routes paragraph
+(the declared commands, each exactly as written and alone; or that none is declared so production
+cannot be read), then the reads paragraph (the git reads with their examples, and either the gh
+reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
+thread text, then `QUESTION_MARK` and the question (ADR-console-065).
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`.
 
@@ -162,10 +167,23 @@ UNREADABLE_TEXT = "the session's answer could not be read"
 STOPPING = "the console is stopping"
 PROFILE_GONE = "the account {profile} was removed before the session started"
 
+ANSWER_RULES = (
+    "Lead with the direct answer in two or three sentences, in the owner's plain business terms, "
+    "then at most a short list of five lines. "
+    "When the question asks what is live or in production, say what is live first. "
+    "Use no decision-record jargon: no ADR numbers, decision ids or internal terms unless the "
+    "owner asks for them. "
+    "Answer from the project's history, its pull requests and releases and its declared "
+    "production read, not from its decision records alone. "
+    "If a command you run fails, say plainly in the answer which command failed and what it "
+    "printed. "
+)
+
 LEAD = (
     "You answer one question about this project for its owner, started by the console. You only "
     "read: a step you are refused stays refused. A step that would cost money or needs a "
     "credential you lack is never attempted: put it in your answer as a question for the owner. "
+    + ANSWER_RULES +
     "Reply in exactly this shape, one heading per line:\n"
     "Answer: <the answer in plain words>\n"
     "Read: <the files you read, or none>\n"
@@ -333,14 +351,30 @@ def thread_text(thread: Sequence[Turn]) -> str:
         for turn in thread)
 
 
-def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = ()) -> str:
+def reads_paragraph(repo: str | None) -> str:
+    text = ("You may also run these reads, each alone, in plain words with no quotes: git log, "
+            "git show, git diff, git status, git blame, git ls-files and git tag -l. For recent "
+            "work: git log --since=7.days.ago --oneline. Name revisions by sha, tag or --since, "
+            "since ~ and ^ are refused. ")
+    if repo:
+        return text + (
+            "For this project's GitHub repository: gh pr list, gh pr view, gh release list, "
+            "gh release view, gh issue list, gh issue view, gh run list and gh run view, each "
+            f"with --repo {repo} right after list or view, before any other word, and no --. "
+            f"For merged work: gh pr list --repo {repo} --state merged --limit 30. "
+            f"For what was released: gh release list --repo {repo}.\n\n")
+    return text + "gh cannot be used: this project's contract names no GitHub repository.\n\n"
+
+
+def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), *,
+           repo: str | None = None) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
     else:
         paragraph = ("This project declares no read-only command, so production cannot be read: "
-                     "answer from the code and docs only.\n\n")
-    return LEAD + paragraph + thread_text(thread) + QUESTION_MARK + question
+                     "answer from the code, the docs and the reads below.\n\n")
+    return LEAD + paragraph + reads_paragraph(repo) + thread_text(thread) + QUESTION_MARK + question
 
 
 def tools(routes: Sequence[Route]) -> str:
@@ -373,7 +407,7 @@ def launch_command(ask: Ask, platform: str) -> list[str] | None:
     return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
-            prompt(ask.question, ask.routes, ask.thread)]
+            prompt(ask.question, ask.routes, ask.thread, repo=ask.repo)]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:

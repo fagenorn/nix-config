@@ -854,6 +854,51 @@ class FollowUpTest(unittest.TestCase):
         self.assertEqual(len(project_question.follow_up(short, "q1", "why?")), 1)
 
 
+class AnswerRulesTest(unittest.TestCase):
+    def test_the_prompt_leads_with_the_direct_answer_in_plain_terms(self):
+        text = project_question.prompt(
+            "what was done in the last 7 days and what is in production?", ROUTES, repo="owner/p01")
+        rules = (
+            "Lead with the direct answer in two or three sentences, in the owner's plain business "
+            "terms, then at most a short list of five lines.",
+            "When the question asks what is live or in production, say what is live first.",
+            "Use no decision-record jargon: no ADR numbers, decision ids or internal terms unless "
+            "the owner asks for them.",
+            "Answer from the project's history, its pull requests and releases and its declared "
+            "production read, not from its decision records alone.",
+            "If a command you run fails, say plainly in the answer which command failed and what "
+            "it printed.",
+        )
+        for rule in rules:
+            self.assertIn(rule, project_question.LEAD)
+            self.assertLess(text.index(rule), text.index("Answer: <"))
+        self.assertEqual(project_question.ANSWER_RULES, " ".join(rules) + " ")
+
+    def test_the_prompt_names_reads_the_hook_admits(self):
+        text = project_question.prompt("q", (), repo="owner/p01")
+        examples = ("git log --since=7.days.ago --oneline", "git tag -l",
+                    "gh pr list --repo owner/p01 --state merged --limit 30",
+                    "gh release list --repo owner/p01")
+        for example in examples:
+            self.assertIn(example, text)
+            self.assertEqual(hook.decide(bash(example), (), repo="owner/p01"),
+                             ("allow", hook.ALLOWED))
+        bare = project_question.prompt("q", ())
+        self.assertIn("gh cannot be used: this project's contract names no GitHub repository.", bare)
+        self.assertNotIn("gh pr list", bare)
+        self.assertIn("This project declares no read-only command, so production cannot be read",
+                      text)
+
+    def test_the_launch_passes_the_rules_and_the_repository_to_the_session(self):
+        ask = project_question.new_ask(
+            "a" * 16, "owner/p01", "/srv/p01", "what is live?", "work", ROUTES, Path("/tmp/s"),
+            session_id=SESSION_ID, repo="owner/p01")
+        argv = project_question.launch_command(ask, "linux")
+        self.assertEqual(argv[-1], project_question.prompt("what is live?", ROUTES, repo="owner/p01"))
+        self.assertIn("gh pr list --repo owner/p01", argv[-1])
+        self.assertIn(project_question.ANSWER_RULES, argv[-1])
+
+
 class ThreadPromptTest(unittest.TestCase):
     def test_a_follow_up_prompt_puts_its_thread_before_the_question(self):
         turns = (project_question.Turn("what does the build check?", "Answer: it builds."),)
@@ -1451,7 +1496,7 @@ class QuestionThreadServiceTest(QuestionCase):
                             ("--setting-sources", "")):
             self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
         self.assertEqual(follow_argv[-1], project_question.prompt(
-            "and which host is deployed?", ROUTES, follow_ask.thread))
+            "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01"))
         self.assertIn("Earlier question: what does the build check?\n"
                       "Earlier answer: Answer: it builds.\n", follow_argv[-1])
         self.assertEqual(_thread_ids(svc), [[first, follow]])
