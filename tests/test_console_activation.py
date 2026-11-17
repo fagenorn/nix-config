@@ -7,16 +7,20 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import activation, console, service, view
+from agent_tools.console import activation, activation_run, console, service, view
 from agent_tools.console.activation import (
     Activation, blob_id, console_files, origin_files, reader_for, reading)
+from agent_tools.console.activation_run import NEXT_STEP, Activator, Outcome, Refused, Stopped
 from agent_tools.project_contract import resolve_project
 
 from . import accounts_sandbox
@@ -404,6 +408,269 @@ class ActivationServiceTest(Trees):
         lines = captured.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("console: activation_failed ReadFailed: "), lines[0])
+
+
+class ActivationRunTest(Trees):
+    """The activation runner (#1193): the command, run in its own clone, judged by its recorded exit."""
+
+    def setUp(self):
+        super().setUp()
+        self.advance({f"{CONSOLE}/view.py": "VALUE = 2\n"})
+        self.commit = git(self.checkout, "rev-parse", "origin/main").strip()
+        self.state = self.tmp / "state"
+        self.release = self.tmp / "release"
+        self.addCleanup(self.release.touch)
+
+    def script(self, body):
+        return [sys.executable, "-c", body]
+
+    def activator(self, body, **seams):
+        seams.setdefault("revision", lambda: self.commit)
+        seams.setdefault("scoped", False)
+        argv = seams.pop("argv", None) or self.script(body)
+        seams.setdefault("command_of", lambda root: (argv, "."))
+        return Activator(self.state, **seams)
+
+    def started(self, activator, commit=None):
+        run = activator.start(str(self.checkout), commit or self.commit)
+        self.assertIsInstance(run, activation_run.Run, run)
+        pgid = int(run.tree.removeprefix("group:")) if run.tree.startswith("group:") else None
+        if pgid is not None:
+            self.addCleanup(lambda: activation_run.stop_tree(run.tree, signal.SIGKILL))
+        return run
+
+    def act(self, activator, commit=None):
+        return activator.wait(self.started(activator, commit), threading.Event())
+
+    def snapshot_checkout(self):
+        worktrees = self.checkout / ".git/worktrees"
+        return (git(self.checkout, "for-each-ref"), git(self.checkout, "worktree", "list", "--porcelain"),
+                sorted(path.name for path in worktrees.iterdir()) if worktrees.exists() else [])
+
+    def await_file(self, path, seconds=10):
+        deadline = time.monotonic() + seconds
+        while not path.exists():
+            self.assertLess(time.monotonic(), deadline, f"{path} never appeared")
+            time.sleep(0.05)
+
+    def hold(self, extra=""):
+        return ("import time, pathlib\n"
+                f"r = pathlib.Path({str(self.release)!r})\n"
+                "end = time.time() + 30\n"
+                "while not r.exists() and time.time() < end:\n    time.sleep(0.05)\n" + extra)
+
+    def test_a_run_executes_the_command_in_a_tree_at_the_commit(self):
+        marker = self.tmp / "marker"
+        body = ("import subprocess, pathlib\n"
+                f"pathlib.Path({str(marker)!r}).write_text(subprocess.run(['git', 'rev-parse', 'HEAD'], "
+                "capture_output=True, text=True).stdout.strip())\n")
+        a = self.activator(body)
+        run = self.started(a)
+        outcome = a.wait(run, threading.Event())
+        self.assertEqual(outcome, Outcome(self.commit, True))
+        self.assertEqual(marker.read_text(), self.commit)
+        self.assertNotEqual(self.commit, git(self.checkout, "rev-parse", "HEAD").strip())
+        self.assertTrue(run.tree.startswith("group:"))
+
+    def test_the_run_writes_nothing_to_the_checkout(self):
+        git(self.checkout, "worktree", "add", "-q", "--detach", str(self.tmp / "gone"))
+        shutil.rmtree(self.tmp / "gone")
+        a = self.activator("pass")
+        self.act(a)
+        self.advance({f"{CONSOLE}/view.py": "VALUE = 3\n"})
+        before = self.snapshot_checkout()
+        self.act(a, git(self.checkout, "rev-parse", "origin/main").strip())
+        self.assertEqual(self.snapshot_checkout(), before)
+        self.assertIn("gone", git(self.checkout, "worktree", "list", "--porcelain"))
+
+    def test_a_second_run_moves_the_tree_to_its_commit(self):
+        marker = self.tmp / "marker"
+        body = ("import subprocess, pathlib\n"
+                f"pathlib.Path({str(marker)!r}).write_text(subprocess.run(['git', 'rev-parse', 'HEAD'], "
+                "capture_output=True, text=True).stdout.strip())\n")
+        a = self.activator(body)
+        self.act(a)
+        self.advance({f"{CONSOLE}/view.py": "VALUE = 3\n"})
+        newer = git(self.checkout, "rev-parse", "origin/main").strip()
+        self.assertNotEqual(newer, self.commit)
+        self.act(a, newer)
+        self.assertEqual(marker.read_text(), newer)
+
+    def test_a_failing_command_reports_its_exit_and_last_line(self):
+        a = self.activator("import sys\nprint('first\\nsudo: a password is required', end='')\nsys.exit(3)\n")
+        outcome = self.act(a)
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.reason, "the activation command exited 3 (sudo: a password is required)")
+        self.assertEqual(outcome.next_step, NEXT_STEP.format(log=self.state / "activation.log"))
+        self.assertIn("first", (self.state / "activation.log").read_text())
+
+    def test_a_mismatched_revision_is_a_failure(self):
+        outcome = self.act(self.activator("pass", revision=lambda: "b" * 40))
+        self.assertEqual(
+            outcome.reason, f"the activation command finished but this host runs {'b' * 12}")
+        outcome = self.act(self.activator("pass", revision=lambda: None))
+        self.assertEqual(
+            outcome.reason, "the activation command finished but this host's revision could not be read")
+
+    def test_a_command_that_cannot_start_is_a_failure(self):
+        outcome = self.act(self.activator("", argv=[str(self.tmp / "absent")]))
+        self.assertFalse(outcome.ok)
+        self.assertTrue(
+            outcome.reason.startswith("the activation command could not start (FileNotFoundError"),
+            outcome.reason)
+
+    def test_a_run_past_its_time_ends_its_whole_tree(self):
+        marker = self.tmp / "grandchild"
+        body = ("import subprocess, sys, time, pathlib\n"
+                "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"pathlib.Path({str(marker)!r}).write_text(str(g.pid))\n"
+                "time.sleep(60)\n")
+        a = self.activator(body, seconds=1)
+        run = self.started(a)
+        began = time.monotonic()
+        outcome = a.wait(run, threading.Event())
+        self.assertLess(time.monotonic() - began, 15)
+        self.assertEqual(
+            outcome.reason, "the activation ran longer than 0 minutes and was stopped")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(marker.read_text()), 0)
+
+    def test_the_run_is_not_finished_while_a_descendant_lives(self):
+        grandchild = ("import subprocess, sys\n"
+                      f"subprocess.Popen([sys.executable, '-c', {self.hold()!r}])\n")
+        a = self.activator(grandchild)
+        run = self.started(a)
+        results = []
+        thread = threading.Thread(target=lambda: results.append(a.wait(run, threading.Event())))
+        thread.start()
+        self.addCleanup(thread.join, 20)
+        self.await_file(self.state / "activation.result")
+        time.sleep(1.5)
+        self.assertTrue(thread.is_alive())
+        self.release.touch()
+        thread.join(10)
+        self.assertEqual(results, [Outcome(self.commit, True)])
+
+    def test_a_stop_leaves_the_run_going_and_records_nothing(self):
+        a = self.activator(self.hold())
+        run = self.started(a)
+        stop = threading.Event()
+        threading.Timer(0.5, stop.set).start()
+        began = time.monotonic()
+        with self.assertRaises(Stopped):
+            a.wait(run, stop)
+        self.assertLess(time.monotonic() - began, 5)
+        self.assertTrue(activation_run.tree_alive(run.tree))
+        self.assertFalse((self.state / "activation.result").exists())
+        self.release.touch()
+
+    def test_a_restarted_console_reads_the_runs_recorded_failure(self):
+        a = self.activator(self.hold("print('switch-to-configuration failed')\nraise SystemExit(4)\n"))
+        run = self.started(a)
+        stopped = threading.Event()
+        stopped.set()
+        with self.assertRaises(Stopped):
+            a.wait(run, stopped)
+        self.release.touch()
+        restarted = Activator(self.state, revision=lambda: self.commit, scoped=False)
+        self.assertEqual(
+            restarted.wait(run, threading.Event()),
+            Outcome(self.commit, False, "the activation command exited 4 (switch-to-configuration failed)",
+                    NEXT_STEP.format(log=self.state / "activation.log")))
+
+    def test_a_scoped_launch_runs_in_its_own_user_scope(self):
+        launched = {}
+
+        class Process:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+        def popen(argv, **kwargs):
+            launched.update(argv=argv, kwargs=kwargs)
+            return Process()
+
+        run = self.activator("pass", scoped=True, popen=popen).start(str(self.checkout), self.commit)
+        argv = launched["argv"]
+        self.assertEqual(argv[:5], ["systemd-run", "--user", "--scope", "--quiet", "--collect"])
+        self.assertRegex(argv[5], r"^--unit=agent-console-activation-[0-9a-f]{12}-[0-9a-f]{8}$")
+        self.assertEqual(
+            argv[argv.index("--") + 1:][:4],
+            [sys.executable, "-m", "agent_tools.console.activation_run", "record"])
+        self.assertIs(launched["kwargs"]["start_new_session"], True)
+        self.assertIn("PYTHONPATH", launched["kwargs"]["env"])
+        self.assertEqual(run.tree, "scope:" + argv[5][len("--unit="):] + ".scope")
+
+    def test_a_scope_tree_reads_its_state_from_systemctl(self):
+        calls = []
+
+        def answer(code, out):
+            def fake(argv, **kwargs):
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, code, stdout=out)
+            return fake
+
+        def broken(argv, **kwargs):
+            raise OSError("no systemctl")
+
+        self.assertTrue(activation_run.tree_alive("scope:u.scope", run=answer(0, "active\n")))
+        self.assertFalse(activation_run.tree_alive("scope:u.scope", run=answer(0, "inactive\n")))
+        self.assertTrue(activation_run.tree_alive("scope:u.scope", run=answer(1, "")))
+        self.assertTrue(activation_run.tree_alive("scope:u.scope", run=broken))
+        self.assertEqual(
+            calls[0], ["systemctl", "--user", "show", "--property=ActiveState", "--value", "u.scope"])
+        calls.clear()
+        activation_run.stop_tree("scope:u.scope", signal.SIGTERM, run=answer(0, ""))
+        self.assertEqual(calls, [["systemctl", "--user", "kill", "--signal=SIGTERM", "u.scope"]])
+
+    def manifest_home(self):
+        home = Path(tempfile.mkdtemp(dir=accounts_sandbox.root())).resolve()
+        previous = os.environ["HOME"]
+        os.environ["HOME"] = str(home)
+        self.addCleanup(os.environ.__setitem__, "HOME", previous)
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".agents/share").mkdir(parents=True)
+        shutil.copy(REPO_ROOT / "home/common/agent-skills/platform-manifest.json",
+                    home / ".agents/share/platform-manifest.json")
+
+    def test_the_activation_command_is_the_contracts_console_activation(self):
+        self.manifest_home()
+        self.assertEqual(activation_run.activation_command(str(REPO_ROOT)), (["just", "switch"], "."))
+
+    def test_a_contract_without_console_activation_names_no_command(self):
+        self.manifest_home()
+        with self.assertRaises(Refused):
+            activation_run.activation_command(str(self.checkout))
+
+        def refuse(root):
+            raise Refused("x")
+
+        def popen(*args, **kwargs):
+            raise AssertionError("nothing may be launched")
+
+        a = Activator(self.state, command_of=refuse, popen=popen, scoped=False)
+        self.assertEqual(
+            a.start(str(self.checkout), self.commit),
+            Outcome(self.commit, False, "x", NEXT_STEP.format(log=self.state / "activation.log")))
+
+    def test_host_revision_reads_the_configuration_revision(self):
+        seen = []
+
+        def answer(code, out):
+            def fake(argv, **kwargs):
+                seen.append(argv)
+                return subprocess.CompletedProcess(argv, code, stdout=out)
+            return fake
+
+        def broken(argv, **kwargs):
+            raise OSError("absent")
+
+        self.assertEqual(activation_run.host_revision("linux", run=answer(0, "a" * 40 + "\n")), "a" * 40)
+        self.assertEqual(seen[0][0], "/run/current-system/sw/bin/nixos-version")
+        self.assertIsNone(activation_run.host_revision("linux", run=answer(1, "a" * 40)))
+        self.assertIsNone(activation_run.host_revision("linux", run=answer(0, "x")))
+        self.assertIsNone(activation_run.host_revision("linux", run=broken))
 
 
 if __name__ == "__main__":
