@@ -70,7 +70,7 @@ One PNG a manager sent to the console, kept by the console under its SHA-256 has
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
-The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020).
+The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020). A relay comes from a sender in the manager's own permission mode that can only message (ADR-console-066).
 _Avoid_: ping, notification
 
 **Bring-back**:

@@ -5287,6 +5287,12 @@ class ConsoleService:
                 raise nudge.NudgeFailed(str(error)) from error
         return chosen
 
+    def _relays_in_bypass(self, sprint_id: str) -> bool:
+        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060 D4) is bypass, so its relay must come from a bypassing sender (ADR-console-066)."""
+        sprint = self._sprints.get(sprint_id)
+        return (sprint is not None and sprint.permission is not None
+                and sprint.permission.mode == permission.BYPASS)
+
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
                       reason: str | None, listing_failed: str | None = None,
                       written: permission.Permission | None = None) -> None:
@@ -5334,9 +5340,11 @@ class ConsoleService:
             with self._ingest:
                 if self._held_for_quota(sprint_id):
                     return None
+                bypass = self._relays_in_bypass(sprint_id)
             if listed:
                 route, listing_failed = nudge.RELAY, None
-                self._send_nudge(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
+                self._send_nudge(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd,
+                                             sender_bypass=bypass))
             elif known is not None:
                 route = nudge.WAKE
                 written = self._refresh_settings(sprint_id, cwd)
@@ -5907,7 +5915,9 @@ class ConsoleService:
                         or self._working_now(listed[0])):
                     self._nudging.discard(sprint_id)
                     return
-            self._send_nudge(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd))
+                bypass = self._relays_in_bypass(sprint_id)
+            self._send_nudge(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd,
+                                         sender_bypass=bypass))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")
