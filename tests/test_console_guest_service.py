@@ -253,6 +253,23 @@ class RouteTableTest(GuestCase):
                     self.assertEqual(body, guest.OWNER_ONLY_TEXT.encode() + b"\n")
                     self.assertTrue(headers["Content-Type"].startswith("text/plain"))
 
+    def test_an_unsupported_method_is_refused_like_a_supported_one(self):
+        self.seed()
+        svc = self.start()
+        for route in sorted(service.OWNER_ONLY):
+            for method in ("TRACE", "CONNECT", "PROPFIND"):
+                with self.subTest(route=route, method=method):
+                    status, headers, body = self.unchanged(
+                        svc, lambda: self.guest(svc, method, route, headers=JSON, length=100))
+                    self.assertEqual(status, 403)
+                    self.assertEqual(body, guest.OWNER_ONLY_TEXT.encode() + b"\n")
+                    self.assertTrue(headers["Content-Type"].startswith("text/plain"))
+        status, _, body = self.guest(svc, "TRACE", "/api/state", logins=(STRANGER,))
+        self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
+        status, headers, _ = self.guest(svc, "TRACE", "/api/state")
+        self.assertEqual((status, headers["Allow"]), (405, "GET"))
+        self.assertEqual(self.guest(svc, "TRACE", "/nowhere")[0], 404)
+
     def test_the_guest_reads_answer(self):
         self.seed()
         svc = self.start()
@@ -341,7 +358,7 @@ class OwnerPortTest(GuestCase):
         extra = ({"Tailscale-User-Login": COLLEAGUE}, {"Tailscale-User-Name": "Colleague"},
                  {"X-Forwarded-For": "100.64.0.1"})
         for route in sorted(service.ROUTES):
-            for method in ("GET", "POST"):
+            for method in ("GET", "POST", "TRACE", "CONNECT", "PROPFIND"):
                 for headers in extra:
                     with self.subTest(route=route, method=method, headers=headers):
                         status, _, body = self.unchanged(
@@ -498,8 +515,8 @@ class AccessWriteTest(GuestCase):
             "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
             "state": "unchecked", "last_request": {
                 "admitted": True, "forwarded_for": False, "host": TAILNET,
-                "host_form": "exact", "hosts": 1, "login_headers": 1, "probe": False,
-                "probe_login_arrived": False, "reason": None}})
+                "host_form": "exact", "hosts": 1, "login_headers": 1, "login_valid": True,
+                "probe": False, "probe_login_arrived": False, "reason": None}})
         status, _, body = self.write(
             svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]})
         self.assertEqual((status, body), (204, b""))
@@ -620,8 +637,8 @@ class ReadingServiceTest(GuestCase):
         self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
         self.assertEqual(self.reading(svc), {
             "admitted": False, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
-            "hosts": 1, "login_headers": 1, "probe": False, "probe_login_arrived": False,
-            "reason": "not_shared"})
+            "hosts": 1, "login_headers": 1, "login_valid": True, "probe": False,
+            "probe_login_arrived": False, "reason": "not_shared"})
         self.assertNotIn(STRANGER.encode(), svc.view_bytes.lower())
         status, _, _ = self.guest(svc, "GET", "/api/whoami", headers={"X-Console-Probe": FORGED})
         self.assertEqual(status, 200)
@@ -690,14 +707,14 @@ class ReadingServiceTest(GuestCase):
         svc = self.start()
         rows = support.log_rows(self.store)
         table = [
-            (("TRACE", "/api/state", {"logins": [STRANGER, STRANGER]}), 501, None,
+            (("TRACE", "/api/state", {"logins": [STRANGER, STRANGER]}), 403, guest.NOT_SHARED_TEXT,
              {"login_headers": 2, "reason": "not_shared", "admitted": False}),
             (("POST", "/api/looked", {"host": OTHER_HOST}), 403, guest.HOST_TEXT,
              {"host_form": "other", "host": OTHER_HOST}),
             (("GET", "/api/whoami", {"logins": []}), 200, None,
              {"login_headers": 0, "reason": "not_shared"}),
             (("DELETE", "/api/state", {}), 405, None, {"admitted": True, "reason": None}),
-            (("PROPFIND", "/api/state", {"logins": [STRANGER]}), 501, None,
+            (("PROPFIND", "/api/state", {"logins": [STRANGER]}), 403, guest.NOT_SHARED_TEXT,
              {"login_headers": 1}),
         ]
         for (method, path, kwargs), status, text, expected in table:

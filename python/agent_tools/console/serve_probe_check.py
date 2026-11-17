@@ -26,7 +26,8 @@ The rules, read in this order, each printing one line:
 2. `sharing` is not an object or `sharing.tailnet` is not a string: `sharing_off`, 75;
 3. `sharing.last_request` is absent or null: `no_request`, 75;
 4. the reading is not well formed (exactly the members of `guest.READING_MEMBERS`; `admitted`,
-   `forwarded_for`, `probe`, `probe_login_arrived` booleans; `hosts` and `login_headers` integers;
+   `forwarded_for`, `login_valid`, `probe`, `probe_login_arrived` booleans; `hosts` and
+   `login_headers` integers;
    `host` a string or null, a string when `host_form` is `exact` or `with_port`; `host_form` one of
    `guest.HOST_FORMS`; `reason` null or one of `guest.REASON_CODES`): `bad_reading`, exit 1;
 5. `forwarded_for` is false, a local request and not one through Serve: `not_through_serve`, 75;
@@ -38,7 +39,8 @@ The rules, read in this order, each printing one line:
    compares the kept `Host` with the current name and waits for a request at it;
 7. `host_form` is not `exact`, or `hosts` or `login_headers` is not 1: `not_met`, exit 1;
 8. `probe_login_arrived` is true, the prescribed forged login reached the service as a login whatever
-   probe header came with it: `not_met`, 1;
+   probe header came with it, or `login_valid` is false, a login header arrived that is not one
+   well-formed login (a combined value can carry the forged login without matching it): `not_met`, 1;
 9. `probe` is false, the Host half is shown and the prescribed probe value is still awaited:
    `no_probe`, 75;
 10. otherwise `met`, exit 0.
@@ -47,8 +49,8 @@ A `with_port` or other result is not met: it shows the strict rule refuses what 
 owner decides any change to the rule (ADR-console-066 D2), never this check.
 
 Output: exactly one stdout line, `json.dumps(result, sort_keys=True)`. From rule 5 on it has
-`admitted`, `forwarded_for`, `host_form`, `login_headers`, `probe`, `probe_login_arrived`, `reason`
-and `status`, and nothing else: it never prints the `Host` value, the tailnet name or any login,
+`admitted`, `forwarded_for`, `host_form`, `login_headers`, `login_valid`, `probe`,
+`probe_login_arrived`, `reason` and `status`, and nothing else: it never prints the `Host` value, the tailnet name or any login,
 because the output is recorded on the pull request. A usage error exits 2.
 
 The seam of `main` is `read_state`, the loopback read. The module imports only the standard library
@@ -65,7 +67,7 @@ from agent_tools.console import guest, service
 
 FORGED = guest.PROBE_LOGIN
 NOT_YET = 75
-_FLAGS = ("admitted", "forwarded_for", "probe", "probe_login_arrived")
+_FLAGS = ("admitted", "forwarded_for", "login_valid", "probe", "probe_login_arrived")
 _COUNTS = ("hosts", "login_headers")
 
 
@@ -130,7 +132,7 @@ def main(argv: list[str] | None = None, *,
         status, code = "stale", NOT_YET
     elif form != "exact" or reading["hosts"] != 1 or reading["login_headers"] != 1:
         status, code = "not_met", 1
-    elif reading["probe_login_arrived"]:
+    elif not reading["login_valid"] or reading["probe_login_arrived"]:
         status, code = "not_met", 1
     elif not reading["probe"]:
         status, code = "no_probe", NOT_YET

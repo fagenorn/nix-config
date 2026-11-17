@@ -144,8 +144,8 @@ class ReadingTest(unittest.TestCase):
         rows = [
             (access, [TAILNET], [COLLEAGUE], ["100.64.0.1"], [],
              {"admitted": True, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
-              "hosts": 1, "login_headers": 1, "probe": False, "probe_login_arrived": False,
-              "reason": None}),
+              "hosts": 1, "login_headers": 1, "login_valid": True, "probe": False,
+              "probe_login_arrived": False, "reason": None}),
             (access, [TAILNET + ":443"], [COLLEAGUE], [], [],
              {"admitted": False, "reason": "host", "host_form": "with_port",
               "host": TAILNET + ":443"}),
@@ -177,6 +177,12 @@ class ReadingTest(unittest.TestCase):
             (access, [TAILNET], [FORGED.upper()], [], [FORGED.upper()],
              {"probe": True, "probe_login_arrived": True}),
             (access, [TAILNET], [COLLEAGUE], [], [FORGED, FORGED], {"probe": False}),
+            (access, [TAILNET], [FORGED + ", " + COLLEAGUE], ["100.64.0.1"], [FORGED],
+             {"login_headers": 1, "login_valid": False, "probe": True,
+              "probe_login_arrived": False, "reason": "not_shared"}),
+            (access, [TAILNET], [COLLEAGUE, COLLEAGUE], [], [], {"login_valid": True}),
+            (access, [TAILNET], [COLLEAGUE, "not a login"], [], [], {"login_valid": False}),
+            (access, [TAILNET], [], [], [], {"login_valid": False}),
         ]
         self.assertEqual(guest.PROBE_LOGIN, FORGED)
         for a, hosts, logins, forwarded, probes, expected in rows:

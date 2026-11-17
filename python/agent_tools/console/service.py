@@ -3056,6 +3056,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
     do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _refuse_method
 
+    def __getattr__(self, name: str):
+        """Any other method (TRACE, CONNECT, an unknown one) is refused like the listed ones, never 501."""
+        if name.startswith("do_"):
+            return self._refuse_method
+        raise AttributeError(name)
+
 
 class GuestHandler(ConsoleHandler):
     """The guest port's one handler (#1237); it never calls the owner's route methods."""
@@ -3156,6 +3162,12 @@ class GuestHandler(ConsoleHandler):
         return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
+
+    def __getattr__(self, name: str):
+        """Any other method takes the same admission and owner-only refusals, never the 501."""
+        if name.startswith("do_"):
+            return self._guest_request
+        raise AttributeError(name)
 
 
 class GuestPortError(OSError):

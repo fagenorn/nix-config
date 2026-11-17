@@ -49,7 +49,9 @@ the `Host` itself only when exactly one arrived and it is a hostname of letters,
 hyphens with an optional port (so an `@` or a long value is never kept), and its `host_form`
 (`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`, `other`, `none`); whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
-`probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said). No member is
+`probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said); `login_valid`
+(at least one login header arrived and every one is a well-formed login, so a combined value such as
+two logins joined by a comma is false). No member is
 ever a login or a probe value. It does not change admission, and `whoami` is unchanged.
 
 `sharing_entry(access, state, last_request)` is the owner's `sharing` view member; `last_request` is
@@ -111,7 +113,7 @@ HOST_FORMS = ("exact", "with_port", "other", "none")
 REASON_CODES: Mapping[str, str] = MappingProxyType({
     SHARING_OFF_TEXT: "sharing_off", HOST_TEXT: "host", NOT_SHARED_TEXT: "not_shared"})
 READING_MEMBERS = ("admitted", "forwarded_for", "host", "host_form", "hosts", "login_headers",
-                   "probe", "probe_login_arrived", "reason")
+                   "login_valid", "probe", "probe_login_arrived", "reason")
 
 TAILNET_MAX = 253
 LOGIN_MAX = 254
@@ -254,6 +256,7 @@ def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
             "host_form": form,
             "hosts": len(hosts),
             "login_headers": len(logins),
+            "login_valid": bool(logins) and all(normal_login(value) is not None for value in logins),
             "probe": len(probes) == 1 and normal_login(probes[0]) == PROBE_LOGIN,
             "probe_login_arrived": any(normal_login(value) == PROBE_LOGIN for value in logins),
             "reason": None if text is None else REASON_CODES[text]}

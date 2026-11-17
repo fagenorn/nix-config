@@ -26,8 +26,8 @@ OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 OTHER_PROBE = "other-probe@example.invalid"
 GOOD = {"admitted": False, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
-        "hosts": 1, "login_headers": 1, "probe": True, "probe_login_arrived": False,
-        "reason": "not_shared"}
+        "hosts": 1, "login_headers": 1, "login_valid": True, "probe": True,
+        "probe_login_arrived": False, "reason": "not_shared"}
 
 
 def state_of(reading):
@@ -48,9 +48,9 @@ class HeldCheckTest(unittest.TestCase):
         code, printed, text = run_check(state_of(GOOD))
         self.assertEqual(code, 0)
         self.assertEqual(printed, {"admitted": False, "forwarded_for": True, "host_form": "exact",
-                                   "login_headers": 1, "probe": True,
-                                   "probe_login_arrived": False, "reason": "not_shared",
-                                   "status": "met"})
+                                   "login_headers": 1, "login_valid": True,
+                                   "probe": True, "probe_login_arrived": False,
+                                   "reason": "not_shared", "status": "met"})
         self.assertNotIn(TAILNET, text.lower())
 
     def test_the_rules_in_order(self):
@@ -83,6 +83,9 @@ class HeldCheckTest(unittest.TestCase):
             (state_of(reading(host_form="none", hosts=0, host=None)), 1, "not_met"),
             (state_of(reading(login_headers=2)), 1, "not_met"),
             (state_of(reading(login_headers=0)), 1, "not_met"),
+            (state_of(reading(login_valid=False)), 1, "not_met"),
+            (state_of(reading(login_valid=False, probe=False)), 1, "not_met"),
+            (state_of(reading(login_valid="yes")), 1, "bad_reading"),
             (state_of(reading(probe=False)), 75, "no_probe"),
             (state_of(reading(probe_login_arrived=True)), 1, "not_met"),
             (state_of(reading(probe=False, probe_login_arrived=True)), 1, "not_met"),
