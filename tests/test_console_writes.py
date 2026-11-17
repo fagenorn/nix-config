@@ -11,6 +11,7 @@ import stat
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -141,7 +142,8 @@ class WriteRouteTest(Case):
                           "/api/adoption-register", "/api/plan-defer",
                           "/api/register-confirm", "/api/trust-check",
                           "/api/register-cancel", "/api/owner-notice",
-                          "/api/owner-notice-withdraw", "/api/activate"})
+                          "/api/owner-notice-withdraw", "/api/project-question",
+                          "/api/activate"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -550,6 +552,7 @@ class GoalRouteTest(Case):
         self.assertEqual(set(payload), {"goal", "sprint_id"})
         self.assertEqual(payload["goal"], "make the importer resumable")
         self.assertTrue(sprints.SPRINT_ID.fullmatch(payload["sprint_id"]))
+        stated = datetime.fromisoformat(at.replace("Z", "+00:00"))
         self.assertEqual(self.sprints_of(svc, "owner/p01"), [{
             "type": "sprint", "sprint_id": payload["sprint_id"],
             "title": "make the importer resumable", "goal": "make the importer resumable",
@@ -564,7 +567,10 @@ class GoalRouteTest(Case):
             "sessions": [], "messages": [], "approval": None,
             "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
-            "state_until": None, "pictures": [], "checks": [], "waits": []}])
+            "state_until": None, "pictures": [], "checks": [], "waits": [],
+            "movement": {"sessions": [], "nudged_at": None,
+                         "base_at": stated.replace(microsecond=stated.microsecond // 1000 * 1000).isoformat(),
+                         "waits": {"ci_at": None, "commit_at": None, "release_at": None}}}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 
     def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):

@@ -46,6 +46,12 @@ Three kinds record a sprint's manager (#888): `MANAGER_STARTED` (`manager.starte
 column. They are not in `KEPT_KINDS`: retention removes them like any other row, and a sprint whose
 manager rows are gone reads as having none.
 
+Two kinds record a question about a project and its answer (#1176): `PROJECT_QUESTION_ASKED`
+(`project_question.asked`, payload `question_id`, `question`, `profile`, the project in its project
+column) and `PROJECT_QUESTION_ANSWERED` (`project_question.answered`, payload `question_id`,
+`outcome` and either `answer` or `reason`). Neither is in `KEPT_KINDS`, retention removes them like
+any other row and nothing folds them; the schema version is unchanged.
+
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
@@ -165,6 +171,8 @@ QUESTION_WITHDRAWN = "question.withdrawn"
 NOTICE_POSTED = "notice.posted"
 NOTICE_WITHDRAWN = "notice.withdrawn"
 NOTICE_NUDGED = "notice.nudged"
+PROJECT_QUESTION_ASKED = "project_question.asked"
+PROJECT_QUESTION_ANSWERED = "project_question.answered"
 SPRINT_CLOSED = "sprint.closed"
 SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"

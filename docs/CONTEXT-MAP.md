@@ -91,6 +91,7 @@
 | Probe | Verification |
 | Production rules | Project contract |
 | Project contract | Project contract |
+| Project question | Console |
 | Projection | Project contract |
 | Publication-free profile | Release |
 | Question round | Console |

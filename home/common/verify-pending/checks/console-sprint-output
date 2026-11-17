@@ -1,0 +1,7 @@
+#!/bin/sh
+# Verify check for issue 1185: a sprint whose sessions write output reads moving, never stuck.
+# Reads the running console's state once: not met when a sprint whose session output the console
+# has read reads quiet or the ball with nobody; met when a sprint reads moving on session output
+# alone, every older signal being old. Writes and posts nothing.
+# Exit 0 met, 1 not met, 75 not yet. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.movement_check "$@"
