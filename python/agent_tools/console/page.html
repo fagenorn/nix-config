@@ -1781,7 +1781,7 @@ async function postNotice(projectId) {
   }
   redrawNotices();
 }
-// The owner's one Activate click (ADR-console-043): posts the commit the line shows. The refusal stays on the line until a frame brings a different line.
+// The owner's Activate click (ADR-console-043): posts the commit the line shows and is disabled only while sending. The refusal stays on the line until a frame brings a different line.
 let activationPost = null;
 async function postActivation(commit, key) {
   if (activationPost !== null && activationPost.key === key && activationPost.refused === null) return;
@@ -1798,7 +1798,9 @@ async function postActivation(commit, key) {
     reason = "the console did not answer";
   }
   if (activationPost !== state) return;
-  if (reason !== null) state.refused = reason;
+  // An accepted click ends the sending state: a retry that fails the same way brings a line with the same key, so no frame would clear it.
+  if (reason === null) activationPost = null;
+  else state.refused = reason;
   redrawNotices();
 }
 async function withdrawNotice(projectId, id) {

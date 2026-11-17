@@ -835,6 +835,15 @@ class ActivationPageTest(unittest.TestCase):
         (refusal,) = [n for n in nodes(snap["projects"]) if has_class(n, "activation-refused")]
         self.assertEqual(full(refusal), "The console refused: an activation is already running.")
 
+    def test_an_accepted_click_can_be_pressed_again_when_the_line_comes_back_unchanged(self) -> None:
+        # a retry that fails the same way appends a finished row with the same line, so no frame changes the key
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([
+            {"frame": frame}, {"click": "activate"}, {"click": "activate"}, {"snapshot": True}])
+        self.assertEqual(len(snap["posts"]), 2)
+        (button,) = [n for n in nodes(snap["projects"]) if n["tag"] == "button" and has_class(n, "activate")]
+        self.assertIs(button["disabled"], False)
+
     def test_a_running_line_has_no_activate(self) -> None:
         running = dict(ACTIVATION, state="running", activate=False,
                        text="Activating this host at 0123456789ab. The console may restart before it reports.")
