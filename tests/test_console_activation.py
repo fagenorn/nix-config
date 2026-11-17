@@ -21,7 +21,7 @@ from agent_tools.console import activation, activation_run, console, service, vi
 from agent_tools.console.activation import (
     Activation, blob_id, console_files, origin_files, reader_for, reading)
 from agent_tools.console.event_log import EventLog
-from agent_tools.console.activation_run import NEXT_STEP, Activator, Outcome, Refused, Stopped
+from agent_tools.console.activation_run import NEXT_STEP, Activator, LastRun, Outcome, Refused, Stopped
 from agent_tools.project_contract import resolve_project
 
 from . import accounts_sandbox
@@ -242,26 +242,50 @@ class ActivationReadingTest(Trees):
             self.assertEqual(reader([str(self.checkout)]).changed, ())
 
 
-class ActivationViewTest(Trees):
-    def line(self, root, tail="."):
-        return {"text": f"A console change merged and is not active on this host: run just switch in {root}{tail}",
-                "command": "just switch", "root": root}
+C = "c" * 40
+READ = Activation("/srv/cfg", ("python/agent_tools/console/view.py",), C)
+NOW = 1_800_000_000_000
+FAILURE = "the activation command exited 3 (sudo: a password is required)"
+NEXT = "Its output is in /s/activation.log; press Activate again once the cause is fixed."
 
+
+class ActivationViewTest(Trees):
     def read(self):
         return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main")
 
-    def test_a_console_file_behind_origin_shows_the_line_after_the_checkout_is_updated(self):
-        self.advance({"python/agent_tools/console/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        result = view.derive_view([], activation=self.read())
-        self.assertEqual(
-            result["activation"],
-            self.line(str(self.checkout), " once it is updated to origin's integration branch."))
+    def test_a_pending_change_offers_activate_for_its_commit(self):
+        self.assertEqual(view.derive_view([], activation=READ)["activation"], {
+            "text": f"A console change merged at {C[:12]} is not active on this host.",
+            "state": "pending", "commit": C, "root": "/srv/cfg", "activate": True})
 
-    def test_an_updated_checkout_shows_the_plain_line(self):
-        self.advance({"python/agent_tools/console/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        git(self.checkout, "merge", "-q", "--ff-only", "origin/main")
-        result = view.derive_view([], activation=self.read())
-        self.assertEqual(result["activation"], self.line(str(self.checkout)))
+    def test_a_running_activation_reads_activating_and_offers_nothing(self):
+        run = LastRun(C, "/srv/cfg", "running", None, None, None)
+        line = view.derive_view([], activation=READ, activation_run=run, now_ms=NOW)["activation"]
+        self.assertEqual(line["text"], f"Activating this host at {C[:12]}. The console may restart before it reports.")
+        self.assertEqual((line["state"], line["commit"], line["activate"]), ("running", C, False))
+
+    def test_a_finished_activation_reads_activated_at_its_commit(self):
+        run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
+        line = view.derive_view([], activation=None, activation_run=run, now_ms=NOW)["activation"]
+        self.assertEqual(line["text"], f"Activated this host at {C[:12]}.")
+        self.assertEqual((line["state"], line["commit"], line["activate"]), ("activated", C, False))
+
+    def test_a_failed_activation_reads_its_reason_and_next_step(self):
+        run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
+        line = view.derive_view([], activation=READ, activation_run=run, now_ms=NOW)["activation"]
+        self.assertEqual(line["text"], f"Activating this host at {C[:12]} failed: {FAILURE}. {NEXT}")
+        self.assertEqual((line["state"], line["activate"]), ("failed", True))
+
+    def test_a_newer_pending_commit_replaces_an_old_outcome(self):
+        run = LastRun("d" * 40, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
+        line = view.derive_view([], activation=READ, activation_run=run, now_ms=NOW)["activation"]
+        self.assertEqual((line["state"], line["commit"], line["activate"]), ("pending", C, True))
+
+    def test_an_outcome_with_nothing_pending_clears_after_a_day(self):
+        for finished, shown in ((NOW - view.OUTCOME_MS, False), (NOW - view.OUTCOME_MS + 1, True)):
+            run = LastRun(C, "/srv/cfg", "activated", None, None, finished)
+            line = view.derive_view([], activation=None, activation_run=run, now_ms=NOW)["activation"]
+            self.assertEqual(line is not None, shown)
 
     def test_a_matching_tree_shows_no_line(self):
         self.assertIsNone(view.derive_view([], activation=self.read())["activation"])
@@ -275,8 +299,7 @@ class ActivationViewTest(Trees):
         self.assertIsNone(view.derive_view([], activation=None)["activation"])
 
     def test_the_line_is_not_an_inbox_item(self):
-        result = view.derive_view(
-            [], activation=Activation("/srv/cfg", ("python/agent_tools/console/view.py",), "a" * 40))
+        result = view.derive_view([], activation=READ)
         self.assertEqual(result["statement"], view.derive_view([])["statement"])
         self.assertEqual(result["statement"]["headline"], "Nothing needs you")
         self.assertEqual(json.loads(view.encode_view(result))["activation"]["root"], "/srv/cfg")
@@ -332,8 +355,8 @@ class ActivationServiceTest(Trees):
         svc = self.opened(Fake(CHANGED))
         svc.poll_activation()
         self.assertEqual(shown(svc), {
-            "text": "A console change merged and is not active on this host: run just switch in /srv/p00.",
-            "command": "just switch", "root": "/srv/p00"})
+            "text": f"A console change merged at {'a' * 12} is not active on this host.",
+            "state": "pending", "commit": "a" * 40, "root": "/srv/p00", "activate": True})
 
     def test_the_reader_is_given_the_registered_roots(self):
         reader = Fake(CHANGED)

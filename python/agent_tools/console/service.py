@@ -3220,6 +3220,7 @@ class ConsoleService:
             digest=digest.digest(self._moments, self._looked, self._now()),
             spend=self._spend_view,
             capacity=cap, activation=self._activation,
+            activation_run=self._activation_run,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
