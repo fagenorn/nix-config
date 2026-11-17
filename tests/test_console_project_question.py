@@ -161,6 +161,15 @@ class HookTableTest(unittest.TestCase):
             "gh pr list --repo=owner/p01",
             "gh pr view --repo owner/p01 12 --comments",
             "gh pr view -R owner/p01 12",
+            "gh release view v1.2.0 --repo owner/p01", "gh pr view 12 --repo owner/p01",
+            "gh issue view 7 -R owner/p01", "gh run view 123 --repo=owner/p01 --log-failed",
+            "gh release view v1.2.0 --repo owner/p01 --json body", "gh pr view 12 --repo owner/p01 --comments",
+            "gh pr view --repo owner/p01 12 --json title",
+            "gh run view --repo owner/p01 123 --attempt 2", "gh run view --repo owner/p01 123 -a 2",
+            "gh run view 123 --repo owner/p01 --attempt 2", "gh run view 123 --repo owner/p01 -a 2",
+            "gh run view --repo owner/p01 123 --job 9 --attempt 2",
+"gh release list --repo owner/p01 --limit 100",
+            "gh pr list --repo owner/p01 --state merged --search merged:2026-01-01..2026-01-31",
             "gh release list --repo owner/p01",
             "gh release view --repo owner/p01 v1.2.0",
             "gh issue list --repo owner/p01 --state closed",
@@ -201,8 +210,24 @@ class HookTableTest(unittest.TestCase):
             "gh pr list --repo owner/p01 --head feature/x",
             "gh pr list --search --repo=owner/p01",
             "gh release view -- --repo=owner/p01",
-            "gh pr view 12 --repo owner/p01",
             "gh release view --repo owner/p01 -- v1",
+            "gh release view v1 -- --repo owner/p01", "gh release view v1 v2 --repo owner/p01",
+            "gh release view v1 --repo owner/p01 v2", "gh release view --repo owner/p01 v1 v2",
+            "gh pr view 12 --repo owner/p01 13", "gh run view --repo owner/p01 123 --attempt 2 3",
+            "gh run view 123 --repo owner/p01 --attempt 2 3",
+"gh pr view 12 --repo other/repo",
+            "gh pr view 12 --repo owner/p01x", "gh pr view 12 --repo", "gh pr view 12",
+            "gh pr view 12 --state open", "gh issue view 7 --repo owner/p01 --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 --repo other/repo", "gh pr view 12 -R owner/p01 -R other/repo",
+            "gh pr view 12/x --repo owner/p01", "gh pr view https://github.com/other/repo/pull/1 --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 --web", "gh pr view 12 --repo owner/p01 -w",
+            "gh pr list 12 --repo owner/p01", "gh pr view -- 12 --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 | cat", "gh pr view 12 --repo owner/p01; rm x",
+            "gh pr view 12 --repo owner/p01 && ls", "gh pr view 12 --repo owner/p01 > out",
+            "gh pr view 12 --repo owner/p01\nls", "gh pr view $(echo 12) --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 `ls`",
+            "gh pr view 12 --repo owner/p01 &", "gh pr view 12 --repo owner/p01 || ls",
+            "gh pr view 12 --repo owner/p01 --jq .[0]",
             "gh pr list --repo owner/p01 --repo owner",
             "gh pr list --repo owner/p01 -R owner",
             "gh pr view --repo owner/p01 1 -cRowner",
@@ -221,7 +246,7 @@ class HookTableTest(unittest.TestCase):
             "gh pr list --repo owner/p01 | cat", "gh pr list --repo owner/p01 --jq .[0]",
         ):
             rows.append((command, REPO, reads))
-        for command in ("(git log)", "$(git log)", "`git log`", "FOO=1 git log"):
+        for command in ("(git log)", "(gh pr view 12 --repo owner/p01)", "$(git log)", "`git log`", "FOO=1 git log"):
             rows.append((command, REPO, undeclared))
         for command in ("gh pr merge 1 --repo owner/p01", "gh release create v1 --repo owner/p01",
                         "gh pr create --repo owner/p01 --title t", "git push"):
@@ -665,6 +690,12 @@ def wait_until(predicate):
     assert predicate(), "the condition did not become true within 5 s"
 
 
+FENCED_ANSWER = "The answer shape now ends like this:\n```\nRead: flake.nix\nQuestion for you: none\n```"
+FENCED = (
+    "Answer: " + FENCED_ANSWER + "\nRead: git log --since=7.days\nRan: just build\n"
+    "Question for you: none")
+
+
 class AnswerPartsTest(unittest.TestCase):
     def test_each_heading_of_the_prompt_shape_is_its_own_part(self):
         text = ("Answer: It builds the hosts.\nRead: flake.nix, lib/helpers.nix\nRan: just build\n"
@@ -714,6 +745,57 @@ class AnswerPartsTest(unittest.TestCase):
                 self.assertIn(label + ": <", project_question.LEAD)
         self.assertEqual([key for key, _ in project_question.HEADINGS],
                          ["answer", "read", "ran", "unknown", "back"])
+
+    def test_a_question_back_with_list_lines_carries_them_as_choices(self):
+        text = ("Answer: The bill is unread.\nQuestion for you: Which export should I run?\n"
+                "- The free summary\n* The paid export\n3. Neither")
+        parts = project_question.answer_parts(text)
+        self.assertEqual(parts.back, "Which export should I run?")
+        self.assertEqual(parts.choices, ("The free summary", "The paid export", "Neither"))
+        self.assertEqual(parts.answer, "The bill is unread.")
+
+    def test_one_list_line_or_more_than_five_are_no_choices(self):
+        six = "Which one?\n" + "".join(f"- c{i}\n" for i in range(6))
+        for part in ("May I run it?\n- Yes", six, "- Yes\n- No"):
+            with self.subTest(part=part):
+                parts = project_question.answer_parts("Answer: a\nQuestion for you: " + part)
+                self.assertEqual(parts.choices, ())
+                self.assertEqual(parts.back, part.strip())
+
+    def test_a_back_of_none_has_no_choices(self):
+        parts = project_question.answer_parts("Answer: ok\nQuestion for you: none")
+        self.assertIsNone(parts.back)
+        self.assertEqual(parts.choices, ())
+
+    def test_a_heading_like_line_inside_fenced_code_stays_in_its_part(self):
+        parts = project_question.answer_parts(FENCED)
+        self.assertEqual(parts.answer, FENCED_ANSWER)
+        self.assertEqual(parts.read, "git log --since=7.days")
+        self.assertEqual(parts.ran, "just build")
+        self.assertIsNone(parts.back)
+
+    def test_a_fence_opened_on_a_heading_line_is_closed_before_the_next_heading(self):
+        parts = project_question.answer_parts(
+            "Answer: ```\nnix build .#x\n```\nRead: flake.nix\nRan: just build\n"
+            "Question for you: Which export should I run?\n- The free summary\n- The paid export")
+        self.assertEqual(parts.answer, "```\nnix build .#x\n```")
+        self.assertEqual(parts.read, "flake.nix")
+        self.assertEqual(parts.ran, "just build")
+        self.assertEqual(parts.back, "Which export should I run?")
+        self.assertEqual(parts.choices, ("The free summary", "The paid export"))
+
+    def test_an_unclosed_fence_keeps_the_rest_in_its_part(self):
+        parts = project_question.answer_parts("Answer: See:\n```\nRead: x\nRan: y")
+        self.assertEqual(parts.answer, "See:\n```\nRead: x\nRan: y")
+        self.assertIsNone(parts.read)
+        self.assertIsNone(parts.ran)
+
+    def test_lead_names_the_formatting_subset_and_the_choice_shape(self):
+        for phrase in ("**bold**", "`inline code`", "fenced code blocks",
+                       "no headings, tables, links or HTML", "two to five answers",
+                       'starting with "- "'):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, project_question.LEAD)
 
 
 def _row(seq, kind, project, payload):
@@ -898,6 +980,16 @@ class AnswerRulesTest(unittest.TestCase):
             "production read, not from its decision records alone.",
             "If a command you run fails, say plainly in the answer which command failed and what "
             "it printed.",
+            "When the question covers a time window, count every release, pull request or deploy "
+            "dated inside it from the dates you read: raise the list limit (for example --limit) "
+            "until a list returns fewer items than the limit, so you have read every item, never "
+            "stop at a first page or an arbitrary limit and never stop at the first item older "
+            "than the window, because gh lists by creation date and a release published or a "
+            "pull request merged inside the window can have been created before it; when a list "
+            "is too long to read whole, filter it by the date that counts (for example --search "
+            "merged:2026-01-01..2026-01-31), and say in the answer where the count comes from.",
+            'Format only with **bold**, list lines starting with "- ", `inline code` and fenced '
+            "code blocks; use no headings, tables, links or HTML.",
         )
         for rule in rules:
             self.assertIn(rule, project_question.LEAD)
@@ -908,6 +1000,8 @@ class AnswerRulesTest(unittest.TestCase):
         text = project_question.prompt("q", (), repo="owner/p01")
         examples = ("git log --since=7.days.ago --oneline", "git tag -l",
                     "gh pr list --repo owner/p01 --state merged --limit 30",
+                    "gh release list --repo owner/p01 --limit 100",
+                    "gh release view v1.2.0 --repo owner/p01",
                     "gh release list --repo owner/p01")
         for example in examples:
             self.assertIn(example, text)
@@ -968,7 +1062,8 @@ def _project_entries(shown):
 
 
 QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
-                 "read_text", "ran_text", "unknown_text", "back_text", "production_text"}
+                 "read_text", "ran_text", "unknown_text", "back_text", "back_choices",
+                 "production_text"}
 
 
 class QuestionViewTest(unittest.TestCase):
@@ -1010,6 +1105,9 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(q1["ran_text"], "Ran: just build")
         self.assertEqual(q1["unknown_text"], "Could not find out: which host is deployed")
         self.assertIsNone(q1["back_text"])
+        self.assertEqual(q1["back_choices"], [])
+        self.assertIsNone(q4["back_choices"])
+        self.assertIsNone(q2["back_choices"])
         self.assertIsNone(q1["production_text"])
         self.assertEqual(q1["state_text"], "Answered")
         self.assertEqual(q1["answered_at"], events[2].at)
@@ -1037,6 +1135,27 @@ class QuestionViewTest(unittest.TestCase):
                          "Question for you: May I run the paid billing export?")
         self.assertEqual(question["production_text"], project_question.NO_PRODUCTION_LINE)
         self.assertEqual(question["answer"], "I cannot read the bill.")
+
+    def _only_question(self, answer):
+        events = [_registered(1, self.P1), _asked(2, self.P1, "q1"),
+                  _answered(3, self.P1, "q1", outcome="answered", answer=answer)]
+        shown = view.derive_view(view.project_states(events).values(),
+                                 project_questions=project_question.asked_questions(events))
+        return shown["entries"][0]["questions"]["threads"][0]["questions"][0]
+
+    def test_a_question_back_with_choices_reads_its_question_and_its_choices(self):
+        question = self._only_question(
+            "Answer: I cannot read the bill.\nQuestion for you: Which export should I run?\n"
+            "- The free summary\n- The paid export")
+        self.assertEqual(question["back_text"], "Question for you: Which export should I run?")
+        self.assertEqual(question["back_choices"], ["The free summary", "The paid export"])
+
+    def test_a_stored_answer_with_heading_like_code_lines_keeps_them_in_the_answer(self):
+        question = self._only_question(FENCED)
+        self.assertEqual(question["answer"], FENCED_ANSWER)
+        self.assertEqual(question["read_text"], "Read: git log --since=7.days")
+        self.assertEqual(question["ran_text"], "Ran: just build")
+        self.assertIsNone(question["back_text"])
 
     def test_a_project_in_a_quiet_group_carries_its_questions(self):
         events = [_registered(n, f"owner/p0{n}") for n in range(1, 6)]
