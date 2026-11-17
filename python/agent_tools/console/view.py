@@ -7,7 +7,9 @@ orders and folds the state into the wire view; `encode_view` renders it as one
 line of JSON.
 
 Events: `project.registered` (payload `{"root": ...}`) sets a project, keeping
-its open work; `project.unregistered` removes it; any other event that names a
+its open work; `project.unregistered` removes it; a project question's asked or answered event
+(#1178) changes nothing, so a question or follow-up neither reorders projects nor resets a
+project's untouched age; any other event that names a
 project updates only that project's last sequence and time; an event naming no
 project, or a project not registered, is ignored.
 
@@ -366,7 +368,8 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
 "notices": [<notice entry>, ...], "notice_post": <bool>, "waits": [<wait entry>, ...],
-"questions": [<question entry>, ...],
+"questions": null | {"label": "Questions", "count": <int>,
+"threads": [{"id", "questions": [<question entry>, ...], "follow_up": <bool>}, ...]},
 "tracker_read": {"ok": <bool>, "read_at": "<ISO time>" | null,
 "began_at": "<ISO time>" | null} | null}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
@@ -627,8 +630,13 @@ sprints' ones: an owner entry is `{"id", "sprint_id": null, "poster": NOTICE_YOU
 open (not finished) sprints `takes_notices`, so the page offers the owner's post, and false for a
 quiet project, one whose only sprints are finished or stopping, and every entry in a quiet group.
 Every project entry, quiet ones and those inside a quiet group too, carries `questions`
-(`project_questions`, a map from project id to its folded `AskedQuestion`s, default none), newest
-first by descending `seq`, `[]` when none. A question entry is `{"id", "question", "asked_at",
+(`project_questions`, a map from project id to its folded `AskedQuestion`s, default none): null
+when the project has no question, else `{"label": QUESTIONS_LABEL, "count", "threads"}` with one
+thread per `project_question.threads` group, newest first by the last question's `seq`, `count`
+their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first question's
+`thread_id` (its own id when it has none), `questions` its question entries ascending by `seq`, and
+`follow_up` true exactly when its last question is answered (#1178, ADR-console-059 D4).
+A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
 "production_text"}`. `state_text` is `ASK_WORKING_TEXT`, `ASK_ANSWERED_TEXT`, or for a timed-out or
@@ -638,7 +646,7 @@ answered: `answer` is the parsed answer part, `read_text`, `ran_text`, `unknown_
 `back_text` are `ASK_READ_TEXT`, `ASK_RAN_TEXT`, `ASK_UNKNOWN_TEXT` and `ASK_BACK_TEXT` over their
 part and each null when the part is, and `production_text` is the parsed production line as is.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
-order (#1177, ADR-console-059 D3).
+order (#1177, #1178, ADR-console-059 D3, D4).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -664,7 +672,8 @@ from agent_tools.console.deliveries import (
     stage_text,
 )
 from agent_tools.console.event_log import (
-    Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_UNREGISTERED as UNREGISTERED)
+    Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_QUESTION_ANSWERED,
+    PROJECT_QUESTION_ASKED, PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, quota_wait, session_name
 from agent_tools.console.movement import NUDGE_REPLY_MS, ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
@@ -790,6 +799,7 @@ HEADLINE = "Nothing needs you"
 OUTSIDE_LABEL = "Outside sprints"
 CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
+QUESTIONS_LABEL = "Questions"
 UNMANAGED_LABEL = "Not yet managed"
 NOTICE_KIND_TEXT = {"claim": "Claim", "heads-up": "Heads-up", "hand-off": "Hand-off"}
 NOTICE_UNTIL_TEXT = "until {until}"
@@ -889,6 +899,8 @@ def project_states(
                 previous.open_work if previous else 0)
         elif event.kind == UNREGISTERED:
             result.pop(project, None)
+        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED):
+            continue
         elif project in result:
             result[project] = replace(
                 result[project], last_seq=event.seq, last_at=event.at)
@@ -1699,7 +1711,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
                    waits: Sequence[Mapping] = (),
                    read: ReadState | None = None,
-                   questions: Sequence[Mapping] = ()) -> dict:
+                   questions: Mapping | None = None) -> dict:
     manager_ids: dict[str, set[str]] = {}
     for sprint in sprints:
         ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
@@ -1735,12 +1747,12 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
         "waits": [dict(w) for w in waits],
-        "questions": [dict(q) for q in questions],
+        "questions": questions,
         "tracker_read": None if read is None else {"ok": read.ok, "read_at": read.read_at, "began_at": read.began_at},
     }
 
 
-def _question_entries(questions: Sequence[project_question.AskedQuestion]) -> list[dict]:
+def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> dict | None:
     def one(question: project_question.AskedQuestion) -> dict:
         reason = question.reason
         state_text = _ASK_STATE_TEXT[question.state]
@@ -1768,7 +1780,14 @@ def _question_entries(questions: Sequence[project_question.AskedQuestion]) -> li
             "production_text": None if parts is None else parts.production,
         }
 
-    return [one(q) for q in sorted(questions, key=lambda q: -q.seq)]
+    threads = project_question.threads(questions)
+    if not threads:
+        return None
+    return {"label": QUESTIONS_LABEL, "count": len(threads),
+            "threads": [{"id": group[0].thread_id or group[0].question_id,
+                         "questions": [one(q) for q in group],
+                         "follow_up": group[-1].state == project_question.ANSWERED}
+                        for group in threads]}
 
 
 def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
@@ -2106,7 +2125,7 @@ def derive_view(
                                     open_owner_notices(owner_notices or {}, pid))
                for pid in registered}
     notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
-    asks = {pid: _question_entries((project_questions or {}).get(pid, ())) for pid in registered}
+    asks = {pid: _question_threads((project_questions or {}).get(pid, ())) for pid in registered}
 
     sprint_waits: dict[str, list[dict]] = {}
     project_waits: dict[str, list[dict]] = {}

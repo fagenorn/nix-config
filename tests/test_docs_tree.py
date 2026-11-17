@@ -648,7 +648,7 @@ class DocsTreeTest(unittest.TestCase):
         decided = next(
             line for line in (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md")
             .read_text().splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1136, #1137, #1177"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178"), decided)
 
     def test_the_desk_spend_figure_decision_is_recorded(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -671,7 +671,7 @@ class DocsTreeTest(unittest.TestCase):
         status = next(line for line in lines if line.startswith("- **Status:**"))
         decided = next(line for line in lines if line.startswith("- **Decided in:**"))
         self.assertTrue(status.endswith("ADR-console-052, ADR-console-056"), status)
-        self.assertTrue(decided.endswith("#1136, #1137, #1177"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178"), decided)
         self.assertIn("ADR-console-056", desk)
         spend = self.doc("docs/areas/console/adr/052-the-spend-page-is-a-second-read-only-page-of-the-console.md")
         self.assertIn("- **Status:** accepted; amended by ADR-console-056", spend)
@@ -972,6 +972,11 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
 
+    def test_the_desk_page_rules_name_the_follow_up_box(self):
+        adr = " ".join(self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md").split())
+        for needle in ("Ask a follow-up", "Follow-up about <project>"):
+            self.assertIn(needle, adr)
+
     def test_the_question_milestone_decisions_are_recorded(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         found = sorted(adr_dir.glob("059-*.md"))
@@ -1015,6 +1020,25 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-059", thread)
         self.assertIn("Questions (n)", thread)
         self.assertIn("| Question thread | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        desk = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in ("Questions (n)", "same row as"):
+            self.assertIn(needle, desk)
+
+    def test_the_follow_up_decision_is_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("062-*.md"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].name, "062-a-follow-up-carries-its-thread-in-its-prompt-and-"
+                                        "continues-only-an-answered-thread.md")
+        text = found[0].read_text()
+        self.assertEqual(text.splitlines()[0],
+                         "# ADR-console-062 \u2014 A follow-up carries its thread in its prompt "
+                         "and continues only an answered thread")
+        adr = " ".join(text.split())
+        for needle in ("- **Status:** accepted", "- **Decided in:** #1178", "thread_id",
+                       "MAX_THREAD_BYTES", "131072", "--resume", "retention",
+                       "ADR-console-058", "ADR-console-059"):
+            self.assertIn(needle, adr)
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
@@ -1729,7 +1753,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177"))
+        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177, #1178"))
         self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
         self.assertIn('"Hand-off for you, from <title>"', adr)
         self.assertIn("its paths in the code style", adr)
