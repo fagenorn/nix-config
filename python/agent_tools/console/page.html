@@ -3632,10 +3632,11 @@ function fireAnswer(id) {
   const item = lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
   if (item === undefined) {
     // A question that left during the undo window sends nothing; its typed words stay reachable as a failed answer.
-    if (keptWords({ phase: "failed", pending: state.pending })) {
+    if (roundWords(state.pending)) {
       state.phase = "failed";
       state.again = false;
       state.reason = "the question was withdrawn before the answer was sent";
+      state.kept = state.reason;
       redraw();
     } else {
       answers.delete(id);
@@ -3700,9 +3701,11 @@ async function sendAnswer(id, state, item) {
   } else if (reason === null) {
     dropDrafts(id, ["note", "confirm", "words", "draft"]);
     state.phase = "sent";
+    delete state.kept;
   } else {
     state.phase = "failed";
     state.reason = reason;
+    if (roundWords(state.pending)) state.kept = reason;
   }
   redraw();
 }
@@ -3991,14 +3994,17 @@ function statusLine(act, state, item) {
   return true;
 }
 // A failed question answer that carried the owner's words keeps them even when its question has left the view, so a withdrawn or replaced question cannot lose what was typed.
+// The failure is remembered in state.kept, so a pick or unpick after it (which clears the phase and the reason) does not release the words.
+function roundWords(pending) {
+  return pending !== null && pending !== undefined && pending.round === true && typeof pending.body.text === "string";
+}
 function keptWords(state) {
-  return state.phase === "failed" && state.pending !== null && state.pending !== undefined
-    && state.pending.round === true && typeof state.pending.body.text === "string";
+  return state.kept !== undefined && roundWords(state.pending);
 }
 function keptWordsCard(id, state) {
   const card = el("article", "card kept-words");
   card.appendChild(el("p", "q", state.headline || "A question that is no longer open"));
-  card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.reason));
+  card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.kept));
   const area = typedArea("kept-words-text field-area", "Your words, not sent", "");
   // The words are the box's current draft, so edits made after the failure survive; the submitted text stands when the draft is empty.
   const edited = draftOf(id + "\nwords").value;

@@ -3325,6 +3325,20 @@ class PageQuestionTest(unittest.TestCase):
         self.assertEqual(field(failed, "words-text")["value"], "make the line shorter")
         self.assertEqual(field(gone, "kept-words-text")["value"], "make the line much shorter")
 
+    def test_a_failed_send_then_a_pick_change_then_withdrawn_keeps_the_words(self) -> None:
+        failed, changed, gone = render([
+            START, {"frame": frame([QC])}, {"key": "3"},
+            {"type": {"class": "words-text", "text": "make the line shorter"}},
+            {"respond": {"status": 500, "text": "round answer failed"}},
+            {"click": "send"}, {"clock": 5000}, {"snapshot": True},
+            {"key": "1"}, {"snapshot": True},
+            {"frame": frame([])}, {"snapshot": True},
+        ])
+        self.assertIn("Could not send: round answer failed", full(failed["inbox"]))
+        self.assertNotIn("Could not send", full(changed["inbox"]))
+        self.assertEqual(field(gone, "kept-words-text")["value"], "make the line shorter")
+        self.assertIn("Could not send: round answer failed", full(gone["inbox"]))
+
     def test_a_question_that_left_during_the_undo_window_keeps_the_words_reachable(self) -> None:
         waiting, kept, later, dismissed = render([
             START, {"frame": frame([QC])}, {"key": "3"},
