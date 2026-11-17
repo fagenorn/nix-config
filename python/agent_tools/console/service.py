@@ -848,9 +848,12 @@ tip of origin's integration branch` (the body's commit is not the shown reading'
 integration branch could not be read`) or is not the commit (the same text as before). The claim on
 the activation is one flag taken under the ingest lock together with the first three checks, so two
 concurrent requests cannot both pass; the last check releases it when it refuses. An admitted request
-calls `activator.start(root, commit)` on the request thread. An `Outcome` (nothing was launched) is
+calls `activator.start(root, commit, record)` on the request thread, `record` being what writes the
+`activation.started` row. An `Outcome` (nothing was launched) is
 one `activation.finished` row, the claim released and an empty `204`; the page shows the failure. A
-`Run` is one `activation.started {root, commit, tree}` row, a thread `ACTIVATE_THREAD` that runs
+`Run` is one `activation.started {root, commit, tree}` row, written by the activator's `record` callback
+before the process is launched where the tree is named in advance (a scope) and right after it otherwise (a
+failed write then kills the process group), a thread `ACTIVATE_THREAD` that runs
 `activator.wait(run, stop)`, and an empty `204`. Any other exception from `start` is a failed
 `activation.finished` row ("the activation could not run (<Type>: <message>)"), one stderr line
 `console: activation_run_failed <Type>: <message>` and the claim released. The claim lasts until
@@ -865,7 +868,7 @@ started row carries a `tree` takes the claim and a new `ACTIVATE_THREAD` waits f
 outlived the old console, and its recorded exit decides); a `running` run with no `tree` is settled
 by a failed `activation.finished` row, `activation_run.UNRECORDED_REASON`. `close()` sets the stop
 flag and joins the thread, which raises `Stopped` within `activation_run.POLL_SECONDS`. Neither kind
-is kept past retention (not in `KEPT_KINDS`), and the page token appears in no row, answer or line.
+is in `KEPT_KINDS`, but retention leaves the newest row of each kind whatever its age (`EventLog.retain`), so the last run folds after a restart, and the page token appears in no row, answer or line.
 
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
@@ -6360,7 +6363,7 @@ class ConsoleService:
             self._release_activation()
             raise
         try:
-            started = self._activator.start(root, commit)
+            started = self._activator.start(root, commit, self._record_started)
         except Exception as error:
             print(f"console: activation_run_failed {type(error).__name__}: {error}", file=sys.stderr)
             started = activation_run.Outcome(
@@ -6372,11 +6375,12 @@ class ConsoleService:
             finally:
                 self._release_activation()
             return
-        try:
-            with self._ingest:
-                self._apply(self.log.append([activation_run.started_row(started)]))
-        finally:
-            self._wait_for_activation(started)
+        self._wait_for_activation(started)
+
+    def _record_started(self, run: activation_run.Run) -> None:
+        """Persist the run's ownership; the activator calls it before a scope's launch, so no run lacks a record."""
+        with self._ingest:
+            self._apply(self.log.append([activation_run.started_row(run)]))
 
     def _release_activation(self) -> None:
         with self._ingest:

@@ -270,6 +270,18 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual([row[2] for row in rows(self.store)], ["edge", "new"])
         self.assertEqual([e.kind for e in log.events()], ["edge", "new"])
 
+    def test_the_newest_activation_rows_outlive_the_window(self):
+        # #1193: the page folds the last activation at construction, after retention, so a failed
+        # run older than 90 days must still read as failed, with its reason.
+        log = self.open()
+        for kind in ("activation.started", "activation.finished", "activation.started",
+                     "activation.finished"):
+            self.at(log, OLD, kind)
+        self.at(log, OLD, "old")
+        self.assertEqual(self.retain_at(log, NOW), 3)
+        self.assertEqual([(row[0], row[2]) for row in rows(self.store)],
+                         [(3, "activation.started"), (4, "activation.finished")])
+
     def test_a_raw_delete_of_a_kept_row_is_refused_after_a_pass(self):
         log = self.three_rows()
         self.retain_at(log, NOW)

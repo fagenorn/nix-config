@@ -75,7 +75,7 @@ class LinuxUnit(unittest.TestCase):
     def test_the_service_path_finds_gh_the_user_profile_and_the_system_tools(self):
         self.assertRegex(self.got["gh"], r"^/nix/store/[0-9a-z]{32}-gh-")
         self.assertEqual(self.got["path"].split(":"), [
-            f"{self.got['gh']}/bin", f"{self.got['profile']}/bin",
+            f"{self.got['gh']}/bin", "/run/wrappers/bin", f"{self.got['profile']}/bin",
             "/run/current-system/sw/bin", "/usr/bin", "/bin"])
 
     def test_the_unit_path_carries_every_launch_tool(self):

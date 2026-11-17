@@ -51,6 +51,12 @@ nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_pr
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
 owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`.
 
+Two kinds are kept in part (#1193): `ACTIVATION_STARTED` (`activation.started`) and
+`ACTIVATION_FINISHED` (`activation.finished`) are not in `KEPT_KINDS`, but the retention pass leaves
+the newest row of each kind in place whatever its age, because the console folds them into the last
+activation's state at construction and a failed activation must still show its reason and next step
+while its commit stays pending (ADR-system-004 D9).
+
 One kind is kept in part (#1010): `SIGNIN_READING` (`signin.reading`) is not in `KEPT_KINDS`, but the
 retention pass leaves the newest row of each profile (by sequence number, the profile being the
 payload's `profile`) in place whatever its age, and also the newest row of each profile whose
@@ -373,7 +379,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -430,12 +436,14 @@ class EventLog:
                     "AND EXISTS (SELECT 1 FROM events AS hook WHERE hook.kind = ? "
                     "AND hook.at >= ? AND hook.seq > events.seq AND "
                     "json_extract(hook.payload, '$.session_id') "
-                    "IS json_extract(events.payload, '$.session_id')))",
+                    "IS json_extract(events.payload, '$.session_id'))) "
+                    "AND NOT (kind IN (?, ?) AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind = events.kind))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
-                     SESSION_HOOK, cutoff)).rowcount
+                     SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED)).rowcount
 
             return self._transaction(remove)
 

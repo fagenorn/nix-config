@@ -16,7 +16,12 @@ Own scope. On Linux the run is started inside its own systemd user scope (`syste
 --scope`, the form the manager uses), because the activation restarts the console, and a process
 left in the console unit's cgroup would be killed with it. Elsewhere the run is a process group of
 its own. `Run.tree` names the run's process tree (`scope:<unit>.scope` or `group:<pgid>`), so a
-console that restarts mid-run can keep waiting for it.
+console that restarts mid-run can keep waiting for it. `Activator.start` takes a `record(run)`
+callback that persists that name: for a scope, whose unit is chosen before the launch, it runs
+before the process starts, so a run never exists without its record; for a process group, whose id
+exists only after the launch, it runs right after, and a record that fails kills the group. The
+`record` command below runs under this interpreter's own flags (`siblings.sibling_argv`), isolated
+when the console is.
 
 Recorded exit. The command is not started directly but through this module's `record` command,
 `python -m agent_tools.console.activation_run record --commit SHA --cwd DIR --log PATH --result
@@ -55,7 +60,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -64,6 +69,7 @@ from agent_tools.console import activation
 from agent_tools.console.event_log import ACTIVATION_FINISHED, ACTIVATION_STARTED, Event
 from agent_tools.console.sessions import at_ms
 from agent_tools.project_contract import resolve_project
+from agent_tools.system.siblings import sibling_argv
 
 ACTIVATE_SECONDS = 3600.0
 REVISION_SECONDS = 10.0
@@ -337,8 +343,16 @@ class Activator:
                     return f"git {verb} exited {code}"
         return None
 
-    def start(self, root: str, commit: str) -> Run | Outcome:
-        """Launch the activation of `commit`; an `Outcome` (a failure) means nothing was launched."""
+    def start(
+        self, root: str, commit: str, record: Callable[[Run], None] | None = None,
+    ) -> Run | Outcome:
+        """Launch the activation of `commit`; an `Outcome` (a failure) means nothing was launched.
+
+        `record(run)` persists the run's ownership so a restarted console can find it. Where the
+        run's tree is named before the launch (a scope) it is called before the process starts, and
+        if it raises nothing is launched. Where the tree is the process group it is called right
+        after the launch, and if it raises the group is killed and the exception propagates.
+        """
         try:
             argv, relative = self._command_of(root)
         except Refused as error:
@@ -355,7 +369,7 @@ class Activator:
         if failed is not None:
             return self._failure(commit, f"the tree at {commit[:12]} could not be prepared ({failed})")
         command = [
-            sys.executable, "-m", "agent_tools.console.activation_run", "record",
+            *sibling_argv("console.activation_run"), "record",
             "--commit", commit, "--cwd", str(tree / relative), "--log", str(self.log_path),
             "--result", str(result), "--", *argv]
         unit = f"{UNIT_PREFIX}{commit[:12]}-{secrets.token_hex(4)}"
@@ -364,6 +378,8 @@ class Activator:
                        f"--unit={unit}", f"--description=agent console activation {commit[:12]}",
                        "--", *command]
         env = {**os.environ, "PYTHONPATH": str(Path(agent_tools.__file__).resolve().parent.parent)}
+        if self._scoped and record is not None:
+            record(Run(root, commit, f"scope:{unit}.scope"))
         try:
             process = self._popen(
                 command, cwd=self.state_dir, env=env, stdin=subprocess.DEVNULL,
@@ -373,7 +389,17 @@ class Activator:
                 commit, f"the activation command could not start ({type(error).__name__}: {error})")
         name = f"scope:{unit}.scope" if self._scoped else f"group:{process.pid}"
         _CHILDREN[name] = process
-        return Run(root, commit, name)
+        run = Run(root, commit, name)
+        if not self._scoped and record is not None:
+            try:
+                record(run)
+            except BaseException:
+                stop_tree(name, signal.SIGKILL, run=self._run)
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    process.wait(timeout=KILL_GRACE_SECONDS)
+                _CHILDREN.pop(name, None)
+                raise
+        return run
 
     def wait(self, run: Run, stop: threading.Event) -> Outcome:
         """Block until the run's whole tree is gone; `Stopped` when `stop` is set first."""

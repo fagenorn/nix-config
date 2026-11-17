@@ -2,6 +2,9 @@
 
 Run: just agent-workflow-tests
 """
+import contextlib
+import io
+import json
 import os
 import sqlite3
 import subprocess
@@ -10,8 +13,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import activation_check
+from agent_tools.console import activation_check, event_log
 from tests.test_verify_checks import committed_mode
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-activation"
@@ -96,6 +100,29 @@ class StoreTest(unittest.TestCase):
         connection = sqlite3.connect(store)
         self.addCleanup(connection.close)
         self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
+
+    def test_a_newer_schema_store_is_read_normally(self):
+        # A later merge bumped the console's schema and the running console migrated the store
+        # forward; the check, run at an earlier merge's tree, must still read its rows.
+        store = self.dir / "new.sqlite3"
+        connection = sqlite3.connect(store)
+        connection.execute(f"PRAGMA user_version = {event_log.SCHEMA_VERSION + 1}")
+        connection.execute(
+            "CREATE TABLE events(seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, kind TEXT, "
+            "project TEXT, payload TEXT)")
+        connection.execute(
+            "INSERT INTO events(at, kind, project, payload) VALUES (?, 'activation.finished', NULL, ?)",
+            ("2026-11-17T00:00:00+00:00", json.dumps(finished(True, C1))))
+        connection.commit()
+        connection.close()
+        self.assertEqual(activation_check.read_rows(store), [finished(True, C1)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = activation_check.main(
+                ["--merge", C1, "--store", str(store)], revision=lambda: C1)
+        self.assertEqual(
+            (code, json.loads(out.getvalue())),
+            (0, {"status": "met", "commit": C1, "revision": C1}))
 
     def test_the_wrapper_is_committed_executable(self):
         self.assertEqual("100755", committed_mode(ROOT / WRAPPER))

@@ -276,12 +276,5 @@
         "limits": {}
       }
     }
-  },
-  "production": {
-    "none": false,
-    "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
-    "read_only": {"commands": ["nix-build"], "mcp_tools": []},
-    "release_profile": "github-release",
-    "console_activation": "nix-activate"
   }
 }

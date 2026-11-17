@@ -15,14 +15,17 @@ undecided is not yet. The host's revision is `activation_run.host_revision()`: i
 
 Read-only. The store is opened `mode=ro` with `PRAGMA query_only = ON`, never through `EventLog`, so
 a missing store is not created and an older-schema store is not migrated. A store whose
-`PRAGMA user_version` is not `event_log.SCHEMA_VERSION` cannot be read at the current schema. The
-only write is the objects-only fetch.
+`PRAGMA user_version` is below `event_log.SCHEMA_VERSION` is unreadable: it has not been migrated
+to the schema this build knows. A store at a newer schema is read normally, because the console
+only migrates a store forward and a later merge may have bumped the version past the one this
+check runs at; the query names `events(seq, kind, payload)` alone. The only write is the
+objects-only fetch.
 
 Output and exits, one JSON line with sorted keys. 0 met `{"commit": C, "revision": C, "status":
 "met"}`; 1 not met `{"commit": C, "revision": <read or null>, "status": "not_met"}` (the last
 success contains the merge, and the host runs another revision or none could be read); 75 not yet
 `{"status": "waiting"}` (no success, or the last success does not contain the merge, or
-containment could not be decided); 2 the store is absent or unreadable at the current schema
+containment could not be decided); 2 the store is absent or older than the current schema
 (`{"reason", "status": "unreadable"}`). `verdict` is the pure core.
 """
 
@@ -97,7 +100,7 @@ def read_rows(store: Path) -> list[dict]:
     try:
         connection.execute("PRAGMA query_only = ON")
         version = connection.execute("PRAGMA user_version").fetchone()[0]
-        if version != event_log.SCHEMA_VERSION:
+        if version < event_log.SCHEMA_VERSION:
             raise sqlite3.DatabaseError(
                 f"store schema is {version}, this build reads {event_log.SCHEMA_VERSION}")
         found = connection.execute(

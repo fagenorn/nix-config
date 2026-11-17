@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -597,6 +598,60 @@ class ActivatePageWriteTest(Trees):
         self.assertEqual((status, body.strip()), (409, b"nothing to activate"))
         self.assertEqual(self.kinds(), [])
 
+    def scoped_activator(self, popen):
+        def systemctl_inactive(argv, **kwargs):
+            if argv[0] != "systemctl":
+                return subprocess.run(argv, **kwargs)
+            return subprocess.CompletedProcess(argv, 0, stdout="inactive\n")
+
+        return activation_run.Activator(
+            self.tmp / "state", command_of=lambda root: ([sys.executable, "-c", "pass"], "."),
+            revision=lambda: self.commit, tip=lambda root: self.commit, scoped=True, popen=popen,
+            run=systemctl_inactive)
+
+    def test_the_started_row_is_committed_before_the_run_launches(self):
+        seen = []
+
+        class Process:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+        def popen(argv, **kwargs):
+            seen.append(self.kinds())
+            return Process()
+
+        svc = self.open(activator=self.scoped_activator(popen))
+        self.assertEqual(self.post(svc)[0], 204)
+        self.await_finished()
+        self.assertEqual(seen, [["activation.started"]])
+
+    def test_a_started_row_that_cannot_be_written_launches_nothing(self):
+        launched = []
+
+        def popen(*args, **kwargs):
+            launched.append(args)
+            raise OSError("no launch in this test")
+
+        svc = self.open(activator=self.scoped_activator(popen))
+        append = svc.log.append
+
+        def refuse_started(entries):
+            if any(kind == "activation.started" for kind, _, _ in entries):
+                raise sqlite3.OperationalError("database is locked")
+            return append(entries)
+
+        with mock.patch.object(svc.log, "append", refuse_started):
+            self.assertEqual(self.post(svc)[0], 204)
+        (finished,) = self.payloads("activation.finished")
+        self.assertIs(finished["ok"], False)
+        self.assertIn("database is locked", finished["reason"])
+        self.assertEqual(self.payloads("activation.started"), [])
+        self.assertEqual(launched, [])
+        self.assertEqual(self.post(svc)[0], 204)
+        self.assertEqual(len(launched), 1)
+
     def test_a_bad_activation_body_is_refused(self):
         svc = self.open()
         for body in ({}, {"commit": "ABC"}, {"commit": self.commit, "x": 1}):
@@ -846,6 +901,76 @@ class ActivationRunTest(Trees):
         self.assertIn("PYTHONPATH", launched["kwargs"]["env"])
         self.assertEqual(run.tree, "scope:" + argv[5][len("--unit="):] + ".scope")
 
+    def test_a_scoped_run_is_recorded_before_its_process_launches(self):
+        order = []
+
+        class Process:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+        def popen(argv, **kwargs):
+            order.append("launch")
+            return Process()
+
+        a = self.activator("pass", scoped=True, popen=popen)
+        run = a.start(str(self.checkout), self.commit, lambda run: order.append(("record", run.tree)))
+        self.assertEqual(order, [("record", run.tree), "launch"])
+        self.assertTrue(run.tree.startswith("scope:"))
+
+    def test_a_scoped_run_whose_record_fails_launches_nothing(self):
+        def popen(*args, **kwargs):
+            raise AssertionError("nothing may be launched")
+
+        def record(run):
+            raise sqlite3.OperationalError("database is locked")
+
+        a = self.activator("pass", scoped=True, popen=popen)
+        with self.assertRaises(sqlite3.OperationalError):
+            a.start(str(self.checkout), self.commit, record)
+
+    def test_a_group_run_whose_record_fails_is_killed(self):
+        launched = []
+
+        def popen(argv, **kwargs):
+            process = subprocess.Popen(argv, **kwargs)
+            launched.append(process)
+            return process
+
+        def record(run):
+            raise sqlite3.OperationalError("database is locked")
+
+        a = self.activator(self.hold(), popen=popen)
+        with self.assertRaises(sqlite3.OperationalError):
+            a.start(str(self.checkout), self.commit, record)
+        self.addCleanup(lambda: launched[0].poll() is None and launched[0].kill())
+        self.assertIsNotNone(launched[0].poll())
+        self.assertFalse(activation_run.tree_alive(f"group:{launched[0].pid}"))
+
+    def test_the_record_command_runs_under_the_consoles_own_isolation(self):
+        launched = []
+
+        class Process:
+            pid = 4242
+
+            def poll(self):
+                return 0
+
+        def popen(argv, **kwargs):
+            launched.append(argv)
+            return Process()
+
+        for isolated in (0, 1):
+            with self.subTest(isolated=isolated), \
+                    mock.patch.object(sys, "flags", mock.Mock(isolated=isolated)):
+                self.activator("pass", popen=popen).start(str(self.checkout), self.commit)
+                argv = launched[-1]
+                self.assertEqual(
+                    argv[:argv.index("record")],
+                    [sys.executable, *(["-I"] if isolated else []), "-m",
+                     "agent_tools.console.activation_run"])
+
     def test_a_launched_child_not_yet_reaped_keeps_the_run_alive(self):
         # Before systemd-run registers the scope, systemctl shows the unit as inactive (exit 0).
         polls = []
@@ -900,9 +1025,32 @@ class ActivationRunTest(Trees):
         shutil.copy(REPO_ROOT / "home/common/agent-skills/platform-manifest.json",
                     home / ".agents/share/platform-manifest.json")
 
+    def contract_root(self, production=None) -> Path:
+        """A project root carrying this repository's contract, with `production` added when given."""
+        root = self.tmp / "contract-root"
+        (root / ".agents/instructions").mkdir(parents=True)
+        contract = json.loads((REPO_ROOT / ".agents/project.json").read_text(encoding="utf-8"))
+        if production is not None:
+            contract["production"] = production
+        (root / ".agents/project.json").write_text(json.dumps(contract), encoding="utf-8")
+        for name in (".agents/instructions/bootstrap.md", "AGENTS.md", "CLAUDE.md"):
+            shutil.copy(REPO_ROOT / name, root / name)
+        return root
+
     def test_the_activation_command_is_the_contracts_console_activation(self):
         self.manifest_home()
-        self.assertEqual(activation_run.activation_command(str(REPO_ROOT)), (["just", "switch"], "."))
+        root = self.contract_root({
+            "none": False,
+            "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+            "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+            "release_profile": "github-release",
+            "console_activation": "nix-activate"})
+        self.assertEqual(activation_run.activation_command(str(root)), (["just", "switch"], "."))
+
+    def test_this_repositorys_own_contract_names_no_console_activation_until_issue_1206(self):
+        self.manifest_home()
+        with self.assertRaises(Refused):
+            activation_run.activation_command(str(REPO_ROOT))
 
     def test_a_contract_without_console_activation_names_no_command(self):
         self.manifest_home()
