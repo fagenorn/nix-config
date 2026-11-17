@@ -51,6 +51,11 @@ It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux the o
 repository on the page and sees what adopting it would change, or registers it when it is adopted
 (`agent_tools.console.register`); elsewhere the route refuses.
 
+It is also given `project_question.asker_for(sys.platform)` (#1176): on Linux a question from the page
+about a registered project starts one read-only session under a chosen account
+(`agent_tools.console.project_question`) and its answer is recorded in the log; elsewhere the route
+refuses.
+
 It is also given `trust_home=Path.home()` (#1078), so the owner's Apply approval grants the folder's
 client trust in `~/.claude.json` as well as in every profile (`agent_tools.console.folder_trust`).
 It is given `trust_at_start` (#1183), so every registered project is granted its folder trust in every
@@ -86,8 +91,8 @@ from pathlib import Path
 
 import agent_tools
 from agent_tools.console import (
-    account_add, activation, account_remove, approve, inbox, manager, movement, nudge, probe, register, service, signin,
-    signin_run)
+    account_add, activation, account_remove, approve, inbox, manager, movement, nudge, probe, project_question, register,
+    service, signin, signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -125,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             signer_out=account_remove.signer_out_for(sys.platform),
             account_remover=account_remove.remover_for(sys.platform),
             adopter=register.adopter_for(sys.platform),
+            project_asker=project_question.asker_for(sys.platform),
             forge=approve.forge_for(sys.platform), trust_home=Path.home(), trust_at_start=True,
             activation_reader=activation.reader_for(Path(agent_tools.__file__).resolve().parent.parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots)

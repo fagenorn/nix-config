@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -18,6 +19,34 @@ SOURCES = (
 SECTION_MAP_REL = "docs/archive/readme-section-map.md"
 SECTION_MAP = REPO_ROOT / SECTION_MAP_REL
 KINDS = frozenset({"contract", "decision", "evidence", "how-to", "overview", "superseded"})
+
+LAND_QUEUE_DOC = "docs/archive/land-lock-queue-2026-11-16.md"
+LAND_QUEUE_HEADER = (
+    "| PR | Issue | Merged (UTC) | Ask to merge (min) | Wait (min) | Hold (min) | Handoff (min) |"
+    " CI runs | Nix Eval (min) | Agent Workflow Tests (min) | AWT before test step (min) |"
+    " AWT test step (min) | Instruction Budget (min) | Final-head CI wall (min) | Green to merge (min) |"
+)
+LAND_QUEUE_SEPARATOR = "|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+LAND_QUEUE_PROVENANCE_HEADER = (
+    "| PR | Head | Nix Eval check run | Agent Workflow Tests check run |"
+    " Instruction Budget check run | CI run attempts |"
+)
+LAND_QUEUE_FENCE = re.compile(r"^```sh\n(.*?)^```$", re.S | re.M)
+
+
+def land_queue_section(text: str, name: str) -> str:
+    """The text after the line `## <name>` up to the next `## ` line; "" when absent."""
+    lines = text.splitlines(keepends=True)
+    if f"## {name}\n" not in lines:
+        return ""
+    start = lines.index(f"## {name}\n") + 1
+    out = []
+    for line in lines[start:]:
+        if line.startswith("## "):
+            break
+        out.append(line)
+    return "".join(out)
+
 ADR_PATH_RE = re.compile(r"docs/areas/[a-z0-9-]+/adr/\d{3}-[a-z0-9-]+\.md")
 # The [E] and [l] classes match the same text as the letters; they keep this
 # line from matching its own pattern, so a grep for the phrases skips this file.
@@ -757,7 +786,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056"),
@@ -791,13 +820,39 @@ class DocsTreeTest(unittest.TestCase):
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
-                                          "ADR-console-036, ADR-console-037, ADR-console-053"),
+                                          "ADR-console-036, ADR-console-037, ADR-console-053, "
+                                          "ADR-console-058"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
+
+    def test_the_project_question_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "058-a-question-about-a-project-is-answered-by-a-read-only-session.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-058 \u2014 A question about a project is "
+                                "answered by a read-only session")
+        adr = self.doc(path)
+        for needle in ("#1176", "POST /api/project-question", "PAGE_WRITES",
+                       "project_question.asked", "project_question.answered", "timed_out",
+                       "--model sonnet", "not enforced", "onFailure", "dontAsk",
+                       "--setting-sources", "--tools", "300", "production.read_only.commands",
+                       "project_question_hook",
+                       "Production cannot be read for this project", "ADR-console-008",
+                       "ADR-console-011", "ADR-console-023", "ADR-guard-011"):
+            self.assertIn(needle, adr)
+        adr008 = self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        self.assertIn("POST /api/project-question", adr008)
+        self.assertIn("ADR-console-058", adr008)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Project question**:", context)
+        self.assertIn("ADR-console-058", context)
+        self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
@@ -828,7 +883,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
@@ -1563,6 +1618,252 @@ class DocsTreeTest(unittest.TestCase):
     def test_the_goal_field_focus_is_recorded(self):
         text = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
         self.assertIn("In focus the field shows one border", text)
+
+
+    def test_the_land_queue_measurement_holds_thirty_landings(self):
+        path = REPO_ROOT / LAND_QUEUE_DOC
+        text = path.read_text(encoding="utf-8")
+        lines = land_queue_section(text, "Measurements").splitlines()
+
+        def cells(row):
+            return [c.strip() for c in row.strip().strip("|").split("|")]
+
+        def rows_after(header):
+            at = lines.index(header)
+            self.assertLess(at + 1, len(lines))
+            rows = []
+            for line in lines[at + 2 :]:
+                if not line.startswith("|"):
+                    break
+                if line.startswith("| #"):
+                    rows.append(line)
+            return at, rows
+
+        self.assertIn(LAND_QUEUE_HEADER, lines)
+        at, rows = rows_after(LAND_QUEUE_HEADER)
+        self.assertEqual(lines[at + 1], LAND_QUEUE_SEPARATOR)
+        self.assertGreaterEqual(len(rows), 30)
+        for row in rows:
+            self.assertEqual(len(cells(row)), 15, row)
+        firsts = [cells(row)[0] for row in rows]
+        self.assertEqual(len(set(firsts)), len(firsts))
+        for row in rows:
+            for index in (6, 14):
+                value = cells(row)[index]
+                self.assertTrue(value == "-" or float(value) >= 0, row)
+        self.assertIn(LAND_QUEUE_PROVENANCE_HEADER, lines)
+        pat, provenance = rows_after(LAND_QUEUE_PROVENANCE_HEADER)
+        self.assertEqual(lines[pat + 1], "|---:|---|---:|---:|---:|---|")
+        self.assertEqual([cells(row)[0] for row in provenance], firsts)
+        fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Reproduce"))
+        self.assertEqual(len(fences), 1)
+        self.assertIn('["gh", ', fences[0])
+        self.assertIn("python3 -I -", fences[0])
+
+    def test_the_land_queue_program_measures_only_the_landing_interval(self):
+        text = (REPO_ROOT / LAND_QUEUE_DOC).read_text(encoding="utf-8")
+        fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Reproduce"))
+        self.assertEqual(len(fences), 1)
+        fence = fences[0]
+        repo = "repos/fagenorn/nix-config"
+
+        def stamp(base, minutes):
+            from datetime import datetime, timedelta, timezone
+
+            value = datetime.strptime(base, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            return (value + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        pulls = []
+        merged = {1000: "2026-11-16T07:00:00Z", 1042: "2026-11-16T23:00:00Z"}
+        for step, number in enumerate(range(1001, 1042)):
+            merged[number] = stamp("2026-11-16T08:00:00Z", 20 * step)
+        self.assertEqual(merged[1041], "2026-11-16T21:20:00Z")
+        for number in sorted(merged):
+            head = {1040: "release-v1", 1041: "issue-77-x"}.get(number, f"issue-{number}-x")
+            pulls.append(
+                {
+                    "number": number,
+                    "createdAt": stamp(merged[number], -60),
+                    "mergedAt": merged[number],
+                    "headRefName": head,
+                    "headRefOid": "a" * 40 if number == 1041 else f"{number:040d}",
+                    "mergeCommit": {"oid": f"{number + 5000:040d}"},
+                }
+            )
+        # An indirect merge: the forge marks it merged because its own head reached main
+        # inside another landing, so its merge commit is its head and it held no lock cycle.
+        pulls.append(
+            {
+                "number": 1500,
+                "createdAt": "2026-11-16T13:30:00Z",
+                "mergedAt": "2026-11-16T14:30:00Z",
+                "headRefName": "issue-1500-x",
+                "headRefOid": f"{1500:040d}",
+                "mergeCommit": {"oid": f"{1500:040d}"},
+            }
+        )
+        fixture = {
+            "pr list --repo fagenorn/nix-config --state merged --base main --search"
+            " merged:2026-11-13..2026-11-16 --limit 300"
+            " --json number,createdAt,mergedAt,headRefName,headRefOid,mergeCommit": pulls
+        }
+        for pull in pulls:
+            if not 1002 <= pull["number"] <= 1040:
+                continue
+            fixture[
+                f"api {repo}/actions/workflows/ci.yaml/runs?branch={pull['headRefName']}"
+                "&event=pull_request&per_page=100"
+            ] = {"total_count": 0, "workflow_runs": []}
+            fixture[f"api {repo}/commits/{pull['headRefOid']}/check-runs?per_page=100&filter=all"] = {
+                "total_count": 0,
+                "check_runs": [],
+            }
+        day = "2026-11-16T"
+        fixture[
+            f"api {repo}/actions/workflows/ci.yaml/runs?branch=issue-77-x&event=pull_request&per_page=100"
+        ] = {
+            "total_count": 2,
+            "workflow_runs": [
+                {"id": 500, "run_attempt": 1, "run_started_at": "2026-11-15T19:20:00Z"},
+                {"id": 501, "run_attempt": 2, "run_started_at": day + "21:50:00Z"},
+            ],
+        }
+        fixture[f"api {repo}/actions/runs/501/attempts/1"] = {"run_attempt": 1, "run_started_at": day + "21:02:00Z"}
+        fixture[f"api {repo}/actions/runs/501/attempts/2"] = {"run_attempt": 2, "run_started_at": day + "21:50:00Z"}
+
+        def check(ident, name, conclusion, start, end, app=15368):
+            return {
+                "id": ident,
+                "name": name,
+                "status": "completed",
+                "conclusion": conclusion,
+                "started_at": day + start + "Z",
+                "completed_at": day + end + "Z",
+                "app": {"id": app},
+            }
+
+        fixture[f"api {repo}/commits/{'a' * 40}/check-runs?per_page=100&filter=all"] = {
+            "total_count": 7,
+            "check_runs": [
+                check(9001, "Agent Workflow Tests", "success", "21:03:00", "21:11:00"),
+                check(9002, "Agent Workflow Tests", "success", "21:51:00", "21:59:00"),
+                check(9003, "Nix Eval", "success", "21:03:00", "21:04:00"),
+                check(9004, "Instruction Budget", "success", "21:03:00", "21:03:06"),
+                check(9005, "Nix Eval", "failure", "21:05:00", "21:05:30"),
+                check(9006, "Flake Checker", "success", "21:00:30", "21:12:00"),
+                check(9007, "Agent Workflow Tests", "success", "21:12:00", "21:13:00", app=99),
+            ],
+        }
+        fixture[f"api {repo}/actions/jobs/9001"] = {
+            "id": 9001,
+            "started_at": day + "21:03:00Z",
+            "steps": [
+                {"name": "Set up job", "started_at": day + "21:03:00Z", "completed_at": day + "21:03:05Z"},
+                {
+                    "name": "Run agent workflow tests",
+                    "started_at": day + "21:03:30Z",
+                    "completed_at": day + "21:11:00Z",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "python3").symlink_to(sys.executable)
+            fixture_path = root / "fixture.json"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+            gh = bin_dir / "gh"
+            gh.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "key = ' '.join(sys.argv[1:])\n"
+                "data = json.load(open(os.environ['FAKE_GH_FIXTURE']))\n"
+                "if key not in data:\n"
+                "    sys.stderr.write('unexpected gh call: ' + key + '\\n')\n"
+                "    sys.exit(1)\n"
+                "print(json.dumps(data[key]))\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", fence],
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "FAKE_GH_FIXTURE": str(fixture_path),
+                },
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        for expected in (
+            "| #1041 | 77 | 2026-11-16 21:20:00 | 60.0 | 40.0 | 20.0 | 2.0 | 1 | 1.0 | 8.0 | 0.5 | 7.5 | 0.1 | 8.0 | 9.0 |",
+            "| #1041 | aaaaaaaaaaaa | 9003 | 9001 | 9004 | 501/1 |",
+            "| Hold (min) | 20.0 | 20.0 | 20.0 | 780.0 |",
+            "| CI runs | 0.0 | 0.0 | 1.0 | 1.0 |",
+            "| Green to merge (min) | 9.0 | 9.0 | 9.0 | 9.0 |",
+            "Landings: 39, merged 2026-11-16 08:40:00 to 2026-11-16 21:20:00 (UTC).",
+        ):
+            self.assertIn(expected, out)
+        self.assertTrue(any(line.startswith("| #1040 | - | 2026-11-16 21:00:00 |") for line in out))
+        self.assertTrue(
+            any(line.startswith("| #1021 | 1021 | 2026-11-16 14:40:00 | 60.0 | 40.0 | 20.0 |") for line in out),
+            "an indirect merge must not be the predecessor of the landing after it",
+        )
+        self.assertIn(
+            "Indirect merges (no lock cycle of their own): #1500 merged 2026-11-16 14:30:00 (UTC).", out
+        )
+        for number in (1000, 1001, 1002, 1042, 1500):
+            self.assertFalse(any(line.startswith(f"| #{number} ") for line in out), number)
+        self.assertEqual(sum(1 for line in out if line.startswith("| #")), 78)
+
+
+    def test_the_land_queue_proposal_keeps_every_required_check(self):
+        protection = json.loads((REPO_ROOT / ".github/branch-protection.json").read_text(encoding="utf-8"))
+        contexts = [c["context"] for c in protection["required_status_checks"]["checks"]]
+        text = (REPO_ROOT / LAND_QUEUE_DOC).read_text(encoding="utf-8")
+        lines = land_queue_section(text, "Measurements").splitlines()
+        at = lines.index("| Figure | Median | p90 | Max | Sum |")
+        summary = {}
+        for line in lines[at + 2 :]:
+            if not line.startswith("|"):
+                break
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            summary[cells[0]] = cells[1]
+        self.assertIn("\n## Proposal\n", text)
+        self.assertIn("\n## Alternatives considered\n", text)
+        proposal = land_queue_section(text, "Proposal")
+        alternatives = land_queue_section(text, "Alternatives considered")
+        m = re.search(
+            r"(?m)^\*\*Expected saving per queued pull request \(an assumed scenario, not a bound\):\*\*"
+            r" assume (\d+\.\d) min per landing ahead of it \(the median of `([^`]+)`\)",
+            proposal,
+        )
+        self.assertEqual(len(contexts), 3)
+        for context in contexts:
+            self.assertIn(context, proposal)
+        self.assertIn("`strict`", proposal)
+        self.assertIn("`.github/branch-protection.json`", proposal)
+        self.assertIsNotNone(m)
+        self.assertIn(m[2], ("AWT before test step (min)", "Green to merge (min)", "Handoff (min)"))
+        self.assertEqual(m[1], summary[m[2]])
+        if m[2] == "Handoff (min)":
+            self.assertIn("its own hold is unchanged", proposal)
+            saving = next(p for p in proposal.split("\n\n") if p.startswith("**Expected saving"))
+            self.assertNotIn("at most", saving)
+            self.assertNotIn("upper bound", saving)
+            self.assertIn("does not bound", saving)
+            self.assertIn("sync push", saving)
+            self.assertIn("removable polling delay is unknown", saving)
+            self.assertNotRegex(alternatives + proposal.split("**Expected saving")[0], r"[Ss]aving at most")
+            self.assertIn("`python/agent_tools/claims/forge_land_lock.py`", proposal)
+        else:
+            self.assertIn(f"its own hold is at most {m[1]} min shorter", proposal)
+            self.assertIn("`forge-claim land` is unchanged", proposal)
+        self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 3)
 
 
 if __name__ == "__main__":
