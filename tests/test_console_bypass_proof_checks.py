@@ -16,10 +16,12 @@ from agent_tools.console.bypass_proof import (
     expected_fragments)
 from agent_tools.console.event_log import EventLog
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .wake_proof_world import LINUX_ONLY, WakeProofWorld
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORD_SCRIPT = "home/common/verify-pending/checks/bypass-proof-record"
 MANAGERS_SCRIPT = "home/common/verify-pending/checks/bypass-proof-managers"
+WAKES_SCRIPT = "home/common/verify-pending/checks/bypass-proof-wakes"
 PROJECT = "fagenorn/nix-config"
 BYPASS, AUTO = "bypassPermissions", "auto"
 T = datetime(2026, 11, 16, 12, 0, 0, tzinfo=timezone.utc)
@@ -253,6 +255,43 @@ class BypassProofChecksTest(unittest.TestCase):
         for script in (RECORD_SCRIPT, MANAGERS_SCRIPT):
             with self.subTest(script):
                 self.assertTrue(os.access(ROOT / script, os.X_OK))
+
+
+class WakeCheckTest(unittest.TestCase):
+    """The wake check's exit is the wake step's exit, unchanged (#1230)."""
+
+    def run_check(self, *args, **extra):
+        world = WakeProofWorld(self)
+        done = subprocess.run([str(ROOT / WAKES_SCRIPT), *args], cwd=ROOT,
+                              env={**world.env, **extra}, capture_output=True, text=True,
+                              timeout=120)
+        return done.returncode, done.stdout
+
+    @LINUX_ONLY
+    def test_the_wake_check_is_met_when_both_wakes_reach_the_manager(self):
+        code, out = self.run_check()
+        self.assertEqual(0, code)
+        self.assertEqual("passed", json.loads(out)["outcome"])
+
+    @LINUX_ONLY
+    def test_the_wake_check_is_not_met_when_a_wake_is_held(self):
+        code, out = self.run_check("--wake-wait", "2", FAKE_CLIENT_HOLD_AFTER="1")
+        self.assertEqual(1, code)
+        self.assertEqual("failed", json.loads(out)["outcome"])
+
+    def test_the_wake_check_is_not_yet_when_the_step_cannot_start(self):
+        code, out = self.run_check(CLAUDECODE="1")
+        self.assertEqual(75, code)
+        self.assertEqual("refused", json.loads(out)["outcome"])
+
+    def test_the_wake_check_refuses_a_bad_argument(self):
+        code, _ = self.run_check("--wake-wait", "nope")
+        self.assertEqual(2, code)
+
+    def test_the_wake_check_is_committed_executable(self):
+        done = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-s", WAKES_SCRIPT],
+                              capture_output=True, text=True, timeout=60)
+        self.assertTrue(done.stdout.startswith("100755 "), done.stdout)
 
 
 if __name__ == "__main__":

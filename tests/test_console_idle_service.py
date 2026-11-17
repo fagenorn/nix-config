@@ -87,6 +87,14 @@ class IdleCase(ReviveCase):
 
 
 class IdleServiceTest(IdleCase):
+    def test_an_idle_continue_to_a_bypass_manager_comes_from_a_bypass_sender(self):
+        svc, sid = self.idle_service(permission_reader=lambda project_id, root: permission.Permission(
+            permission.BYPASS, permission.RULES_IN_PLACE))
+        self.poll(svc, 300)
+        self.assertEqual(self.continues(), [
+            nudge.Nudge(sid, "continue", self.name(sid), "s-1", "work", "/srv/p01",
+                        sender_bypass=True)])
+
     def test_an_idle_manager_of_a_sprint_with_work_gets_one_nudge_after_five_minutes(self):
         svc, sid = self.idle_service()
         self.poll(svc, 299.999)
