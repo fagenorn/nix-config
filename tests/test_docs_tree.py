@@ -536,7 +536,7 @@ class DocsTreeTest(unittest.TestCase):
         adr = self.doc(path)
         for needle in ("#1212", "ADR-console-042", "ADR-console-050", "ADR-console-061",
                        "ADR-console-005", "ADR-console-048", "waiting its turn to merge",
-                       "wait_text", "journal_at", "its own session"):
+                       "wait_text", "journal_at", "reading_at", "its own session"):
             self.assertIn(needle, adr)
         status = [line for line in (REPO_ROOT / (
             "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"

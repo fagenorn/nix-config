@@ -489,12 +489,14 @@ class DeliveryViewTest(unittest.TestCase):
              "summary": "1 issue in delivery: 1 queued, moved just now",
              "moved_at": "1970-01-01T00:00:02+00:00",
              "journal_at": "1970-01-01T00:00:02+00:00",
+             "reading_at": "1970-01-01T00:00:02+00:00",
              "issues": [{"issue": 860, "stage": "queued", "stage_text": "queued"}]},
             {"run_id": "wf_a", "quiet": False, "moved_text": "moved just now",
              "wait_text": None,
              "summary": "2 issues in delivery: 1 building, 1 plan review, moved just now",
              "moved_at": "1970-01-01T00:00:01+00:00",
              "journal_at": "1970-01-01T00:00:01+00:00",
+             "reading_at": "1970-01-01T00:00:01+00:00",
              "issues": [
                  {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
                  {"issue": 857, "stage": "plan review", "stage_text": "plan review"}]},
@@ -2068,7 +2070,7 @@ class SprintRunLineViewTest(unittest.TestCase):
                                          deliveries=self.run_of(moved=now - 2 * MIN)))
             self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
                              (False, "moved 1 min ago", None))
-            self.assertEqual(r["moved_at"],
+            self.assertEqual(r["reading_at"],
                              datetime.fromtimestamp((now - MIN) / 1000, timezone.utc).isoformat())
         with self.subTest("session output moves it too"):
             r = self.run_line(self.shown(moving(
@@ -2084,10 +2086,10 @@ class SprintRunLineViewTest(unittest.TestCase):
                 sessions=(SessionMovement("d1", A, now - 3 * MIN, None, None),))))
             self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
                              (False, "moved 3 min ago", None))
-            self.assertEqual(r["moved_at"],
+            self.assertEqual(r["reading_at"],
                              datetime.fromtimestamp((now - 3 * MIN) / 1000, timezone.utc).isoformat())
-            self.assertEqual(r["journal_at"],
-                             datetime.fromtimestamp(R / 1000, timezone.utc).isoformat())
+            journal = datetime.fromtimestamp(R / 1000, timezone.utc).isoformat()
+            self.assertEqual((r["journal_at"], r["moved_at"]), (journal, journal))
         with self.subTest("a running check"):
             r = self.run_line(self.shown(moving(
                 sessions=(SessionMovement("d1", A, None, now - 2 * MIN, None),))))
@@ -2113,7 +2115,7 @@ class SprintRunLineViewTest(unittest.TestCase):
             r = self.run_line(view)
             self.assertEqual((r["quiet"], r["moved_text"], r["wait_text"]),
                              (True, "quiet for 16 min", None))
-            self.assertEqual(r["moved_at"],
+            self.assertEqual(r["reading_at"],
                              datetime.fromtimestamp((now - 16 * MIN) / 1000, timezone.utc).isoformat())
             self.assertEqual(entry(view)["state_text"], "quiet for 16 min \u2014 may be stuck")
         with self.subTest("another issue's wait"):

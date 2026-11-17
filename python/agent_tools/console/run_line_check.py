@@ -17,12 +17,15 @@ The rules are read in this order:
    `now_text == sprints.NOW_LOCK_TEXT`. None prints `{"queued", "status": "no_wait_shown"}`, exit 75.
 4. The judged run lines are the delivery entries of that project entry, in
    `outside_sprints.sessions[].deliveries[]` and in each running sprint's
-   `sessions[].deliveries[]`, whose `issues[].issue` meet both the union of the `issues` of the queued
-   pull requests and the issues of some waiting sprint (`issues[].issue` united with
-   `movement.issues`). None prints `{"queued", "status": "no_run"}` and exits 75.
+   `sessions[].deliveries[]`, that carry one issue common to all three of the union of the `issues` of
+   the queued pull requests, the issues of one waiting sprint (`issues[].issue` united with
+   `movement.issues`) and the run's own `issues[].issue`. None prints `{"queued", "status":
+   "no_run"}` and exits 75.
 5. Any judged run line with `quiet` exactly true is not met: `{"queued", "quiet": [sorted run ids],
    "status": "not_met"}`, exit 1.
-6. Otherwise met: `{"queued", "runs": [{"run_id", "moved_text"}] sorted by run id, "status":
+6. Any other judged run line whose `quiet` is not exactly false (absent, null or not a boolean) is
+   evidence not read: `{"queued", "runs": [sorted run ids], "status": "unreadable_run"}`, exit 75.
+7. Otherwise met: `{"queued", "runs": [{"run_id", "moved_text"}] sorted by run id, "status":
    "met"}`, exit 0.
 
 A usage error exits 2. `--pattern` defaults to `deliveries.configured_branch_pattern(os.getcwd())`;
@@ -115,8 +118,8 @@ def main(argv=None, *, read_pulls=movement.read_pulls,
         for sprint in entry.get("sprints") or []:
             if isinstance(sprint, dict) and sprint.get("ended_at") is None:
                 runs += _session_runs(sprint.get("sessions"))
-        judged += [run for run in runs if _run_issues(run) & queue_issues
-                   and any(_run_issues(run) & issues for issues in waiting_issues)]
+        judged += [run for run in runs
+                   if any(_run_issues(run) & queue_issues & issues for issues in waiting_issues)]
     if not judged:
         manager_check._print({"queued": queued, "status": "no_run"})
         return NOT_YET
@@ -124,6 +127,10 @@ def main(argv=None, *, read_pulls=movement.read_pulls,
     if quiet:
         manager_check._print({"queued": queued, "quiet": quiet, "status": "not_met"})
         return 1
+    unreadable = sorted(str(run.get("run_id")) for run in judged if run.get("quiet") is not False)
+    if unreadable:
+        manager_check._print({"queued": queued, "runs": unreadable, "status": "unreadable_run"})
+        return NOT_YET
     shown = sorted(({"run_id": run.get("run_id"), "moved_text": run.get("moved_text")}
                     for run in judged), key=lambda row: str(row["run_id"]))
     manager_check._print({"queued": queued, "runs": shown, "status": "met"})

@@ -34,8 +34,8 @@ Exits, one JSON line with sorted keys.
   or older than `OLD_MS` (the console's own wait signals, read as published and never inferred from
   the now-sentence, which a moving session hides), no `sessions[]` entry in state `working`, and no delivery entry with a
   `journal_at` (the run journal's own last movement, ADR-console-062) missing or younger than
-  `OLD_MS`; `moved_at` is not read, since its extra parts are the run session's output and running
-  check (the evidence itself) and the run's wait signals, which `movement.waits` already judges.
+  `OLD_MS`; `reading_at`, which adds the run session's output and running check (the evidence
+  itself) and the run's wait signals, which `movement.waits` already judges, is not read.
   That covers every delivery entry of a session entry of the project (the
   sprint's `sessions[]` and `outside_sprints.sessions[]`) whose `session_id` is one of the sprint's
   associations or whose `issues[].issue` meets the sprint's `issues[].issue`. Only the session

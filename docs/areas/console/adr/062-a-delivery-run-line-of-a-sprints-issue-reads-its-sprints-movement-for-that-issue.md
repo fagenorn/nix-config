@@ -15,7 +15,7 @@ A delivery run line read only the run journal, so a run of a sprint's issue read
 
 **D3. The sentence.** When the waits alone move the line, that is, the journal and its own session are fifteen minutes old and a wait is not, the line ends with the wait's sentence instead of an age: the first of waiting for CI on its pull request, a delivery is committing, waiting for a release step, and waiting its turn to merge, in the order of ADR-console-050 D3 and ADR-console-061 D3. The page shows that sentence without an age. A merge refusal stays on the sprint line (ADR-console-048). The word "stalled" is never written.
 
-**D4. The wire.** A delivery entry carries `wait_text`, the sentence or null, and null for a run outside a sprint. `moved_at` is the time of the reading of D2. `journal_at` is the run journal's own last movement, equal to `moved_at` outside a sprint. The host check of #1185 (`movement_check`) reads `journal_at`, so a run moved only by the output of its session does not count as other movement of the sprint.
+**D4. The wire.** A delivery entry carries `wait_text`, the sentence or null, and null for a run outside a sprint. `reading_at` is the time of the reading of D2, which the page ages. `moved_at` keeps its earlier meaning, the run journal's own last movement, and `journal_at` repeats it, so a host check pinned to an earlier commit (the #1185 verification reads `moved_at`) still judges the journal alone. The check of this change (`movement_check`) reads `journal_at`, so a run moved only by the output of its session does not count as other movement of the sprint.
 
 ## Consequences
 

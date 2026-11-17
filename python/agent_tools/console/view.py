@@ -434,7 +434,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     <delivery entry> = {"run_id", "quiet": <bool>, "moved_text": "<text>",
                         "wait_text": "<text>" | null,
                         "summary": "<one sentence>", "moved_at": "<ISO time>",
-                        "journal_at": "<ISO time>",
+                        "journal_at": "<ISO time>", "reading_at": "<ISO time>",
                         "issues": [{"issue": <int>, "stage", "stage_text"}, ...]}
     <unmanaged entry> = {"type": "unmanaged", "root": "<repo>", "name": "<name>",
                          "label": "Not yet managed", "outside_sprints": <line>}
@@ -465,9 +465,10 @@ and the land lock (the order of `sprint_wait`) whose time is inside the window. 
 otherwise and always outside a sprint. `summary` is the run as one
 sentence, `run_summary(issues, moved_text)`: "<n> issue(s) in delivery: <count> <stage>, ...,
 <moved_text>" with the stages in a fixed order and no issue number, or "No issue in delivery yet,
-<moved_text>" with none; `moved_at` is the reading's latest movement as an ISO UTC time, which lets
-the page age the sentence's end itself, and `journal_at` is the run journal's own last movement
-(equal to `moved_at` outside a sprint). An unmanaged entry's `name` is the last segment of its `root` (the root
+<moved_text>" with none; `reading_at` is the reading's latest movement as an ISO UTC time, which lets
+the page age the sentence's end itself, and `moved_at` and `journal_at` are the run journal's own
+last movement (`moved_at` keeps the meaning a pinned verify script reads; `reading_at` equals both
+outside a sprint). An unmanaged entry's `name` is the last segment of its `root` (the root
 itself when it has none). `now_ms` is injected by the
 caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
 ended or unlisted session appear nowhere, and they change no count, summary, order or the
@@ -1053,8 +1054,9 @@ def _delivery_entry(state: DeliveryState, now_ms: int | None,
         "moved_text": reading.moved_text,
         "wait_text": reading.wait_text,
         "summary": run_summary(state.issues, reading.moved_text),
-        "moved_at": _utc(reading.moved_ms),
+        "moved_at": _utc(state.moved_ms),
         "journal_at": _utc(state.moved_ms),
+        "reading_at": _utc(reading.moved_ms),
         "issues": [
             {"issue": i.issue, "stage": i.stage, "stage_text": stage_text(i)}
             for i in sorted(state.issues, key=lambda i: i.issue)

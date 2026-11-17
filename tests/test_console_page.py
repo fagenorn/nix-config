@@ -667,7 +667,7 @@ RUN = {
     "quiet": False,
     "moved_text": "moved 3 min ago",
     "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago",
-    "moved_at": "2026-11-11T11:57:00+00:00",
+    "reading_at": "2026-11-11T11:57:00+00:00",
     "issues": [
         {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
         {"issue": 857, "stage": "plan review", "stage_text": "plan review"},
@@ -710,7 +710,7 @@ class PageRenderTest(unittest.TestCase):
 
     def test_a_quiet_run_says_quiet_and_never_stalled(self) -> None:
         quiet = dict(RUN, quiet=True, moved_text="quiet for 22 min",
-                     moved_at="2026-11-11T11:38:00+00:00")
+                     reading_at="2026-11-11T11:38:00+00:00")
         entry = project(0, [session("s1", "working", "working", deliveries=[quiet])])
         (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
                           {"frame": view([entry])}, {"open": "line:owner/p00"},
@@ -727,7 +727,7 @@ class PageRenderTest(unittest.TestCase):
         wait = "waiting its turn to merge"
         summary = f"2 issues in delivery: 1 building, 1 plan review, {wait}"
         waiting = {**RUN, "quiet": False, "moved_text": wait, "wait_text": wait,
-                   "summary": summary, "moved_at": "2026-11-11T11:15:00+00:00"}
+                   "summary": summary, "reading_at": "2026-11-11T11:15:00+00:00"}
         entry = project(0, [session("s1", "working", "working", deliveries=[waiting])])
         entry["outside_sprints"]["summary"] = "1 working"
         before, after = render([
@@ -1953,10 +1953,10 @@ class PageTimeTest(unittest.TestCase):
             self.assertEqual(seen.get(words), title, words)
 
     def test_a_delivery_age_reads_from_its_movement_time_and_moves_with_the_clock(self) -> None:
-        moving = {**RUN, "moved_at": "2026-11-11T11:57:00+00:00"}
+        moving = {**RUN, "reading_at": "2026-11-11T11:57:00+00:00"}
         quiet = {**RUN, "run_id": "wf_q", "quiet": True, "moved_text": "quiet for 22 min",
                  "summary": "No issue in delivery yet, quiet for 22 min", "issues": [],
-                 "moved_at": "2026-11-11T11:38:00+00:00"}
+                 "reading_at": "2026-11-11T11:38:00+00:00"}
         entry = project(0, [session("s1", "working", "working", deliveries=[moving, quiet])])
         entry["outside_sprints"]["summary"] = "1 working"
         before, after = render([

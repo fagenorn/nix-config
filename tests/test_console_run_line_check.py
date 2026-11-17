@@ -90,6 +90,26 @@ class RunLineCheckTest(unittest.TestCase):
         self.assertEqual(75, code)
         self.assertEqual("no_run", printed["status"])
 
+    def test_a_run_needs_one_issue_shared_by_the_queue_its_sprint_and_itself(self):
+        waiting = sprint(inbox=5)
+        waiting["movement"]["issues"] = [5, 6]
+        straddling = run_entry(issue=4, quiet=True, moved_text="quiet for 45 min")
+        straddling["issues"].append({"issue": 6, "stage": "landing"})
+        code, printed = self.run_check(state=state_of([waiting], [straddling]))
+        self.assertEqual((75, "no_run"), (code, printed["status"]))
+
+    def test_a_quiet_field_that_is_not_an_explicit_false_is_not_yet(self):
+        for label, change in (("absent", None), ("null", None), ("string", "no"), ("zero", 0)):
+            with self.subTest(label):
+                run = run_entry()
+                if label == "absent":
+                    del run["quiet"]
+                else:
+                    run["quiet"] = change
+                code, printed = self.run_check(state=state_of([sprint()], [run]))
+                self.assertEqual((75, "unreadable_run"), (code, printed["status"]))
+                self.assertEqual(["wf_l1"], printed["runs"])
+
     def test_no_queue_no_console_no_wait_shown_and_no_run_are_not_yet(self):
         def refuse(slug, pattern):
             raise ForgeError("rate limited")
