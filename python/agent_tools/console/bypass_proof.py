@@ -882,6 +882,15 @@ class Deadline:
         return self._end - self._clock()
 
 
+def _in_own_session(argv, **kwargs):
+    """`manager.run_in_own_group` for a stop or removal call of the client.
+
+    The account wrapper waits for its Claude child, so a timeout must end the whole group: killing
+    the wrapper alone leaves the child running after teardown has returned.
+    """
+    return manager.run_in_own_group(argv, start_new_session=True, **kwargs)
+
+
 def _bounded(run, deadline):
     """`run` with each call's timeout capped at what `deadline` has left; `OutOfTime` once none is."""
     def bounded(argv, **kwargs):
@@ -1116,7 +1125,7 @@ class _WakeRun:
 
     def teardown(self):
         """The entries of `WAKE_TEARDOWN_STEPS`, each attempted whatever the previous one did."""
-        run = _bounded(subprocess.run, self.hard)
+        run = _bounded(_in_own_session, self.hard)
         ids = self._session_ids() if self.launched else []
         entries = [self._manager_step("stop_manager", "stop", manager.stop_session, ids, run),
                    self._manager_step("remove_manager", "rm", manager.remove_session, ids, run)]

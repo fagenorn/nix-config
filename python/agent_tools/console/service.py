@@ -5288,7 +5288,7 @@ class ConsoleService:
         return chosen
 
     def _relays_in_bypass(self, sprint_id: str) -> bool:
-        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060 D4) is bypass, so its relay must come from a bypassing sender (ADR-console-067)."""
+        """Under the ingest lock: whether the sprint's newest logged mode (ADR-console-060 D4) is bypass, so its relay must come from a bypassing sender (ADR-console-068)."""
         sprint = self._sprints.get(sprint_id)
         return (sprint is not None and sprint.permission is not None
                 and sprint.permission.mode == permission.BYPASS)

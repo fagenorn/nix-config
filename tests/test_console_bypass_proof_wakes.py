@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 import json
 import os
+import signal
 import sys
 import unittest
 from unittest import mock
@@ -23,6 +24,13 @@ def verdicts(report):
 
 def teardown(report):
     return {entry["step"]: entry for entry in report["teardown"]}
+
+
+def _kill(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def stops_and_removals(world):
@@ -231,6 +239,19 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertEqual(stops_and_removals(world), [["run", "stop", "m1aaaaaa"],
                                                      ["run", "rm", "m1aaaaaa"]])
         self.assertEqual(world.live_daemons(), [])
+        self.assertEqual(code, 1)
+
+    def test_a_stop_cut_at_the_time_limit_takes_its_client_child_with_it(self):
+        world = WakeProofWorld(self)
+        self.addCleanup(lambda: world.stop_child() and _kill(world.stop_child()))
+
+        code, report, _, _ = world.run("--time-limit", "10", "--teardown-reserve", "5",
+                                       env={"FAKE_CLIENT_STOP_HANGS": "1"})
+
+        child = world.stop_child()
+        self.assertIsNotNone(child)
+        self.assertFalse(world._running(child), "the stop's client child outlived teardown")
+        self.assertIs(teardown(report)["stop_manager"]["ok"], False)
         self.assertEqual(code, 1)
 
     def test_a_session_that_cannot_be_found_fails_teardown_with_the_recovery(self):

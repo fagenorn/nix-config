@@ -757,16 +757,16 @@ class DocsTreeTest(unittest.TestCase):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
 
-    def test_the_relay_sender_decision_is_recorded_as_adr_067_and_cited_by_number(self):
+    def test_the_relay_sender_decision_is_recorded_as_adr_068_and_cited_by_number(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
-        found = sorted(adr_dir.glob("067-*.md"))
+        found = sorted(adr_dir.glob("068-*.md"))
         self.assertEqual(len(found), 1, found)
-        self.assertTrue(found[0].read_text().splitlines()[0].startswith("# ADR-console-067 \u2014 "))
+        self.assertTrue(found[0].read_text().splitlines()[0].startswith("# ADR-console-068 \u2014 "))
         context = self.doc("docs/areas/console/CONTEXT.md")
         entry = context.split("**Nudge**:", 1)[1].split("_Avoid_", 1)[0]
-        self.assertIn("ADR-console-067", entry)
+        self.assertIn("ADR-console-068", entry)
         proof = self.doc("docs/areas/console/adr/063-a-bypass-proof-runs-on-a-throwaway-repository-it-registers-and-removes.md")
-        self.assertIn("`bypass-proof wakes` (ADR-console-067)", proof)
+        self.assertIn("`bypass-proof wakes` (ADR-console-068)", proof)
 
     def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
         self.assertEqual(

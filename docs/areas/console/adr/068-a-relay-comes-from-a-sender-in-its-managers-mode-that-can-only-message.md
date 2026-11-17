@@ -1,4 +1,4 @@
-# ADR-console-067 — A relay comes from a sender in its manager's mode that can only message
+# ADR-console-068 — A relay comes from a sender in its manager's mode that can only message
 
 - **Status:** accepted
 - **Decided in:** #1230

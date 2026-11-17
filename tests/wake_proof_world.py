@@ -18,7 +18,8 @@ receiver and goes idle. The `FAKE_CLIENT_*` variables of a run's environment mak
 `RELAY_DELAY=S`, `FORCE_DEFAULT_SENDER`, `HOLD_AFTER=N`, `LATE_INBOX=S` (the same turn calls
 `sprint inbox` again after `S` seconds), `LATE_REGISTER=S` (the launch hangs like an account wrapper
 waiting for its client, which registers its session only after `S` seconds, in the wrapper's
-process group) and `STOP_FAILS`.
+process group), `STOP_FAILS` and `STOP_HANGS` (a stop whose client child outlives the wrapper's
+wait; the child's pid is logged in `stop_child.pid`).
 
 `LINUX_ONLY` marks a test that needs a launch to succeed: the step refuses other hosts.
 """
@@ -236,6 +237,11 @@ if argv[:2] in (["run", "stop"], ["run", "rm"]) and len(argv) == 3:
         sys.stderr.write("no such session\\n")
         sys.exit(1)
     if argv[1] == "stop":
+        if os.environ.get("FAKE_CLIENT_STOP_HANGS"):
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"],
+                                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            (LOG / "stop_child.pid").write_text(str(child.pid), encoding="utf-8")
+            child.wait()
         if os.environ.get("FAKE_CLIENT_STOP_FAILS"):
             sys.stderr.write("cannot stop\\n")
             sys.exit(1)
@@ -331,6 +337,10 @@ class WakeProofWorld:
 
     def relay_argvs(self) -> list[list[str]]:
         return [argv for argv in self.argv_log() if argv[1:2] == ["run"] and "-p" in argv]
+
+    def stop_child(self) -> int | None:
+        path = self.log / "stop_child.pid"
+        return int(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def record(self) -> dict | None:
         path = self.home / ".agents/state/console/bypass-proof-wakes.json"
