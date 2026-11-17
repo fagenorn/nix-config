@@ -443,12 +443,12 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                    "issues": [<int>],
                                    "waits": {"ci_at", "commit_at", "release_at", "lock_at":
                                              "<ISO time>" | null}}}
-    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
+    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop" | "answer",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null, "new": <bool>}
+                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -607,6 +607,8 @@ not ended (an ended one has no Tell box and no stop or drop control to point at)
 pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
 `TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
 changes `retry` and never hides a message.
+`words` is the message's own `words` (the owner's words sent with an option, on an `answer`
+message), else null; the page reads the option and the words together.
 `new` is true exactly when the message has a `reply_at` and `derive_view(..., looked=<ISO time>)`
 (the owner's last look; the service passes its own) is None or earlier than `reply_at`, compared as
 aware datetimes. `new_replies` (always present, possibly empty) lists every message entry with `new`
@@ -1538,7 +1540,8 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
     return {"id": message.message_id, "kind": message.kind, "version": message.version,
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
-            "reply_at": message.reply_at, "new": _is_new(message, looked)}
+            "reply_at": message.reply_at, "words": message.words,
+            "new": _is_new(message, looked)}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,

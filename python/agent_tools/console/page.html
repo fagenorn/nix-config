@@ -810,7 +810,7 @@ let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
-  return message.text;
+  return typeof message.words === "string" ? message.text + ": " + message.words : message.text;
 }
 function messageList(messages) {
   const list = el("ul", "sprint-messages");
@@ -3553,11 +3553,11 @@ function planBusy(item, state) {
   }
   return false;
 }
-// Whether the manager marked this option as needing words (a missing or malformed list marks none).
+// Whether the manager marked this option as needing words.
 function needsWords(question, index) {
   return Array.isArray(question.needs_words_index) && question.needs_words_index.includes(index);
 }
-// One send for a manager question: the pick, the words (verbatim) or both; an option that needs words is refused without them.
+// One send for a manager question: the pick, the words or both; an option that needs words is refused without them.
 function startQuestion(item, state) {
   const words = draftOf(wordsKey(item)).value;
   const typed = words.trim() !== "";

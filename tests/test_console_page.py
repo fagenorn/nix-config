@@ -4973,6 +4973,16 @@ class PageMessageTest(unittest.TestCase):
         (line,) = sprint_lines(snap)
         self.assertIn("Asked for changes to version 1: smaller slices", full(line))
 
+    def test_an_answer_with_words_reads_the_option_and_the_words(self) -> None:
+        sent = message_entry(3, "answer", "sent", version=None, text="Ask for changes",
+                             words="split the reader slice")
+        (snap,) = render([
+            START, {"frame": with_sprints([{**SPRINT, "messages": [sent], "reach_text": None}])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn("You: Ask for changes: split the reader slice", full(line))
+
     def test_two_failed_nudges_read_manager_not_reachable(self) -> None:
         (snap,) = render([
             START,
