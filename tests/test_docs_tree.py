@@ -36,6 +36,15 @@ LAND_QUEUE_PROVENANCE_HEADER = (
 LAND_QUEUE_FENCE = re.compile(r"^```sh\n(.*?)^```$", re.S | re.M)
 
 
+TAILNET_PLACEHOLDER = "<host>.<tailnet>.ts.net"
+TAILNET_NAME = re.compile(r"[^\s/()\[\]`\"'<>]*(?:<[^<>\s]*>[^\s/()\[\]`\"'<>]*)*\.ts\.net")
+
+
+def tailnet_names_other_than_placeholder(text: str) -> list:
+    """Every tailnet hostname in `text` that is not exactly the placeholder, each checked alone."""
+    return [name for name in TAILNET_NAME.findall(text) if name != TAILNET_PLACEHOLDER]
+
+
 def land_queue_section(text: str, name: str) -> str:
     """The text after the line `## <name>` up to the next `## ` line; "" when absent."""
     lines = text.splitlines(keepends=True)
@@ -697,12 +706,21 @@ class DocsTreeTest(unittest.TestCase):
             "<host>.<tailnet>.ts.net", "<colleague-login>",
         ):
             self.assertIn(needle, text)
-        for found_name in re.findall(r"\S*ts\.net\S*", text):
-            self.assertIn("<host>.<tailnet>.ts.net", found_name)
+        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
         context = self.doc("docs/areas/console/CONTEXT.md")
         for term in ("**Console**:", "**Guest**:"):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
+
+    def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
+        self.assertEqual(
+            tailnet_names_other_than_placeholder(
+                "[<host>.<tailnet>.ts.net](https://box.tail1234.ts.net/) and `<host>.<tailnet>.ts.net`"),
+            ["box.tail1234.ts.net"])
+        self.assertEqual(
+            tailnet_names_other_than_placeholder("at https://<host>.<tailnet>.ts.net/ only"), [])
+        self.assertEqual(tailnet_names_other_than_placeholder("see box.tail1234.ts.net."),
+                         ["box.tail1234.ts.net"])
 
     def test_the_held_review_decision_is_recorded(self):
         path = ("docs/areas/console/adr/054-a-held-issue-whose-only-open-criterion-is-an-owner-"
