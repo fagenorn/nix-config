@@ -995,7 +995,8 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         amended = (
             ("058-a-question-about-a-project-is-answered-by-a-read-only-session.md",
-             "accepted; amended by ADR-console-059", "**D2.", "**D3.", ("--session-id",)),
+             "accepted; amended by ADR-console-059, ADR-console-065", "**D2.", "**D3.",
+             ("--session-id",)),
             ("049-spend-is-read-from-transcripts-into-memory-and-never-logged.md",
              "accepted; amended by ADR-console-059", "**D3.", "**D4.",
              ("project_question.asked",)),
@@ -1039,6 +1040,27 @@ class DocsTreeTest(unittest.TestCase):
                        "MAX_THREAD_BYTES", "131072", "--resume", "retention",
                        "ADR-console-058", "ADR-console-059"):
             self.assertIn(needle, adr)
+
+    def test_the_question_reads_decision_is_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("065-*.md"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].name, "065-a-question-session-reads-the-projects-history-"
+                                        "tracker-and-live-state-and-answers-plainly.md")
+        text = found[0].read_text()
+        self.assertEqual(text.splitlines()[0],
+                         "# ADR-console-065 \u2014 A question session reads the project's history, "
+                         "tracker and live state and answers plainly")
+        adr = " ".join(text.split())
+        for needle in ("- **Status:** accepted", "- **Decided in:** #1225", "git log",
+                       "gh pr list", "repo_slug", "--repo", "devenv shell --", "devenv.nix",
+                       "two or three sentences", "onFailure", "ADR-console-058"):
+            self.assertIn(needle, adr)
+        raw = self.doc("docs/areas/console/adr/058-a-question-about-a-project-is-answered-by-"
+                       "a-read-only-session.md")
+        for start, end in (("**D4.", "**D5."), ("**D6.", "**D7."), ("**D7.", "**D8."),
+                           ("**D8.", "**D9.")):
+            self.assertIn("ADR-console-065", raw[raw.index(start):raw.index(end)])
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
