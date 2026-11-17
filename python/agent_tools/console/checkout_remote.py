@@ -5,12 +5,15 @@ cancellable: `compare(root, cancel=None)` says whether the checkout is behind it
 branch and whether that branch carries a `.agents/project.json`, and `update(root, cancel=None)` moves
 the checkout forward to it when that is safe. `cancel` is a `threading.Event` (or anything with
 `is_set()`); a set event ends the running child's whole process group and no later child starts, so
-a cancelled fetch is never followed by a merge.
+a cancelled fetch is never followed by a merge. The merge is the one child that is never ended: it
+is checked once before it starts, and a started merge runs to its own end (git writes the working
+tree before it moves `HEAD`, and a kill would leave a half-written tree and a stale `index.lock`).
 
 Children. Every child is `git -c core.hooksPath=/dev/null -C <root> <args>`, with no shell, stdin
 from `DEVNULL`, stdout and stderr piped, `GIT_TERMINAL_PROMPT=0`, run in its own session through
-`manager.run_in_own_group`. A local read is bound by `GIT_TIMEOUT` (10 seconds); `ls-remote`,
-`fetch` and `merge` by `FETCH_TIMEOUT` (120 seconds). The listing argv and its parse are
+`manager.run_in_own_group` (the merge, which is never ended, through `subprocess.run`). A local read
+is bound by `GIT_TIMEOUT` (10 seconds); `ls-remote` and `fetch` by `FETCH_TIMEOUT` (120 seconds);
+the merge has no bound. The listing argv and its parse are
 `adopt_inspection.REMOTE_HEADS_ARGS` and `adopt_inspection.parse_remote_heads`, the fetch argv is
 `adopt_inspection.fetch_pinned_args(branch)`: this module writes no argv of its own for either, so
 there is one fetch policy (only `refs/remotes/origin/<branch>` and its objects are written).
@@ -89,22 +92,31 @@ def safe_branch(name: str | None) -> bool:
             and not name.endswith(("/", ".", ".lock")))
 
 
-def _git(root: str, step: str, *arguments: str, timeout: float,
+def _git(root: str, step: str, *arguments: str, timeout: float | None,
          cancel: threading.Event | None):
-    """One git child: `(CompletedProcess, None)` or `(None, Failure)`."""
-    if cancel is not None and cancel.is_set():
+    """One git child: `(CompletedProcess, None)` or `(None, Failure)`.
+
+    A `timeout` of None is a child that is never interrupted: it ignores `cancel` and runs to its own
+    end (the merge, which writes the working tree before it moves `HEAD`).
+    """
+    if timeout is not None and cancel is not None and cancel.is_set():
         return None, Failure(step, "cancelled")
     argv = ["git", "-c", "core.hooksPath=/dev/null", "-C", root, *arguments]
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     try:
-        done = manager.run_in_own_group(
-            argv, timeout=timeout, cancel=cancel, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=True)
+        if timeout is None:
+            done = subprocess.run(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, start_new_session=True, check=False)
+        else:
+            done = manager.run_in_own_group(
+                argv, timeout=timeout, cancel=cancel, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, start_new_session=True)
     except subprocess.TimeoutExpired:
         return None, Failure(step, f"timed out after {timeout:g} s")
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return None, Failure(step, f"{type(error).__name__}: {error}")
-    if cancel is not None and cancel.is_set():
+    if timeout is not None and cancel is not None and cancel.is_set():
         return None, Failure(step, "cancelled")
     return done, None
 
@@ -200,8 +212,10 @@ def update(root: str, cancel: threading.Event | None = None) -> Updated:
         return Updated(NOT_MOVED, failure)
     if ahead > 0:
         return Updated(DIVERGED, None)
+    if cancel is not None and cancel.is_set():
+        return Updated(NOT_MOVED, Failure("merge", "cancelled"))
     merged, failure = _git(root, "merge", "merge", "--ff-only", "--no-overwrite-ignore",
-                           "--quiet", tracking, timeout=FETCH_TIMEOUT, cancel=cancel)
+                           "--quiet", tracking, timeout=None, cancel=None)
     if failure is not None:
         return Updated(NOT_MOVED, failure)
     if merged.returncode != 0:

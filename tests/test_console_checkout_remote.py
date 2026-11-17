@@ -212,6 +212,57 @@ class CheckoutRemoteTest(unittest.TestCase):
         self.assertEqual(seen.state, "unreadable")
         self.assertEqual(seen.failure, cr.Failure("config", "cancelled"))
 
+    def slow_merge(self, checkout, seconds):
+        """A checkout whose fast-forward writes a file through a smudge filter that takes `seconds`."""
+        marker = self.parent / "merging"
+        git(checkout, "config", "filter.slow.smudge", f"touch {marker}; sleep {seconds}; cat")
+        return marker
+
+    def test_a_cancel_during_the_merge_lets_it_finish(self):
+        checkout, seed = self.pair(
+            1, contract=True, extra={".gitattributes": "slow.txt filter=slow\n", "slow.txt": "x\n"})
+        merging = self.slow_merge(checkout, 3)
+
+        class StopWhenMerging:
+            def is_set(self):
+                return merging.exists()
+
+        done = cr.update(str(checkout), cancel=StopWhenMerging())
+        self.assertEqual(done, cr.Updated(None, None))
+        self.assertEqual(git(checkout, "rev-parse", "HEAD"), git(seed, "rev-parse", "HEAD"))
+        self.assertEqual(git(checkout, "status", "--porcelain"), "")
+        self.assertFalse((checkout / ".git" / "index.lock").exists())
+
+    def test_a_merge_that_runs_past_the_fetch_bound_is_not_killed(self):
+        checkout, seed = self.pair(
+            1, contract=True, extra={".gitattributes": "slow.txt filter=slow\n", "slow.txt": "x\n"})
+        self.slow_merge(checkout, 4)
+        with mock.patch.object(cr, "FETCH_TIMEOUT", 2):
+            done = cr.update(str(checkout))
+        self.assertEqual(done, cr.Updated(None, None))
+        self.assertEqual(git(checkout, "rev-parse", "HEAD"), git(seed, "rev-parse", "HEAD"))
+        self.assertFalse((checkout / ".git" / "index.lock").exists())
+
+    def test_a_cancel_before_the_merge_starts_moves_nothing(self):
+        checkout, _ = self.pair(1, contract=True)
+        head = git(checkout, "rev-parse", "HEAD")
+        stopped = threading.Event()
+        steps = []
+        real = cr._git
+
+        def count_then_stop(root, step, *arguments, **kwargs):
+            steps.append(step)
+            done = real(root, step, *arguments, **kwargs)
+            if step == "rev-list" and steps.count("rev-list") == 2:
+                stopped.set()
+            return done
+
+        with mock.patch.object(cr, "_git", count_then_stop):
+            done = cr.update(str(checkout), cancel=stopped)
+        self.assertEqual(done, cr.Updated(cr.NOT_MOVED, cr.Failure("merge", "cancelled")))
+        self.assertNotIn("merge", steps)
+        self.assertEqual(git(checkout, "rev-parse", "HEAD"), head)
+
     def test_update_fast_forwards_a_clean_checkout_to_the_remote(self):
         checkout, seed = self.pair(1, contract=True)
         self.assertEqual(cr.update(str(checkout)), cr.Updated(None, None))
