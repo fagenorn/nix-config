@@ -912,11 +912,16 @@ drops the reading of every project not in that set, so a project with no such sp
 call. For a project it reads the local half, `local_reader(root, pattern)` (default
 `movement.read_local`: the branch reflogs and the release store), where `pattern` is the project's
 branch pattern, and the forge half, `pull_reader(slug, pattern, cancelled=...)` (`movement.read_pulls`:
-one call for the open pull requests), through `answer.with_retries`, so a transient `ForgeError`
+two calls, the GraphQL pulls query and the REST lock listing), through `answer.with_retries`, so a transient `ForgeError`
 is retried on ADR-console-032's schedule within its 30-second deadline and a non-transient one is
 not. A forge read that cannot be made (no `pull_reader`, no slug) or that failed leaves `pulls`
 None, and `movement.merged` keeps the last good reading of the pull requests: the sprint reads
-its wait for the quiet window from the last time anything moved, then goes quiet. The merged reading
+its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
+receives the issues whose run is in a session not ended (`live`) and those of them in a lock step (`IssueStage.locking`,
+#1184); a holding pull request's issues count only when live (a run that died holding the lock leaves its pull request
+holding until a waiter takes it over, ADR-console-061 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
+of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
 log. The stop flag cancels the read in flight and a read finished after the stop changes nothing.
 Stderr lines: `console: movement_read_failed <project_id> <Type>: <message>` (a forge read that
@@ -924,7 +929,7 @@ failed), `console: movement_local_failed <project_id> <Type>: <message>` (the lo
 it reads as no movement), `console: movement_release_invalid <project_id> <transaction id>...` (the
 release store holds a transaction that is not readable; one line until a good read, and it moves
 nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
-loop goes on). The cost is one forge call per project with a running sprint per `MOVEMENT_SECONDS`.
+loop goes on). The cost is two forge calls per project with a running sprint per `MOVEMENT_SECONDS`.
 The sessions half (#1185): under the same lock the poll computes, per running project,
 `view.sprint_sessions_of` (the live sessions that carry a running sprint's manager name, are its
 `manager_session` or run a delivery of one of its issues); only for a project with at least one
@@ -6954,9 +6959,21 @@ class ConsoleService:
             with self._ingest:
                 if project_id not in self._states or self._closed:
                     continue
+                live, locking = self._live_issues(project_id)
                 self._movement[project_id] = movement.merged(
-                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local)
+                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local,
+                    locking=locking, live=live)
                 self._publish()
+
+    def _live_issues(self, project_id: str) -> tuple[frozenset[int], frozenset[int]]:
+        """Under the ingest lock: the issues of the runs in sessions not ended, and those of them sitting in a lock step."""
+        sids = {sid for sid, session in self._sessions.items()
+                if session.state != sessions.ENDED and session.repo is not None
+                and project_for(session.repo, self._states) == project_id}
+        stages = [stage for (sid, _), state in self._deliveries.items() if sid in sids
+                  for stage in state.issues]
+        return (frozenset(stage.issue for stage in stages),
+                frozenset(stage.issue for stage in stages if stage.locking))
 
     def _move(self) -> None:
         while True:

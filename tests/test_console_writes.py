@@ -571,7 +571,9 @@ class GoalRouteTest(Case):
             "permission_text": None,
             "movement": {"sessions": [], "nudged_at": None,
                          "base_at": stated.replace(microsecond=stated.microsecond // 1000 * 1000).isoformat(),
-                         "waits": {"ci_at": None, "commit_at": None, "release_at": None}}}])
+                         "issues": [],
+                         "waits": {"ci_at": None, "commit_at": None, "release_at": None,
+                                   "lock_at": None}}}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 
     def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):
