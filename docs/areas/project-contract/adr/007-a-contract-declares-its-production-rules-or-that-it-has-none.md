@@ -1,6 +1,6 @@
 # ADR-project-contract-007 — A contract declares its production rules, or that it has none
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-system-004
 - **Decided in:** issue 1148
 
 ## Context
