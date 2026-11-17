@@ -1,7 +1,12 @@
 """A manager's permission mode, chosen per project from its production rules (#1151).
 
-`read(project_id, root)` returns a `Permission(mode, reason)`: `BYPASS` only when nothing the
-manager runs could reach production unguarded, else `AUTO`. The rule (ADR-project-contract-007
+`read(project_id, root)` returns a `Permission(mode, reason)`. Until the console can wake a bypass
+manager (the client holds a message from a prompting session for a human's approval when the
+receiving session bypasses prompts, so a bypass manager never receives a wake; ADR-console-060
+D6) it never returns `BYPASS`: wherever the rule below chooses bypass it returns `AUTO` with the
+reason `WAKE_BLOCKED`, "waking a bypass manager is not yet possible". The rule that chooses
+bypass, which is unchanged and still decides every other reason, is `BYPASS` only when nothing the
+manager runs could reach production unguarded, else `AUTO`: (ADR-project-contract-007
 declares the three production statuses, ADR-guard-011 D3 says a loaded row's `production` member
 is enforced without the row check):
 
@@ -46,6 +51,7 @@ AUTO = "auto"
 
 NO_PRODUCTION = "no production"
 RULES_IN_PLACE = "production rules in place"
+WAKE_BLOCKED = "waking a bypass manager is not yet possible"
 NOT_DECLARED = "no production rules declared"
 NOT_ENFORCED = "production rules declared but not in the guard's policy"
 POLICY_UNREADABLE = "the guard's policy cannot be read"
@@ -264,7 +270,7 @@ def read(project_id: str, root: str, *, resolve=resolve_project.resolve,
     if not isinstance(status, str):
         return Permission(AUTO, UNRESOLVED)
     if status == "none":
-        return Permission(BYPASS, NO_PRODUCTION)
+        return Permission(AUTO, WAKE_BLOCKED)
     if status != "declared":
         return Permission(AUTO, NOT_DECLARED)
     rows = policy_rows(policy_path or policy_file())
@@ -276,5 +282,5 @@ def read(project_id: str, root: str, *, resolve=resolve_project.resolve,
     for value in rows.values():
         if (value["evidence"].get("project_id") == project_id and "production" in value
                 and _covers(value["production"], declared)):
-            return Permission(BYPASS, RULES_IN_PLACE)
+            return Permission(AUTO, WAKE_BLOCKED)
     return Permission(AUTO, NOT_ENFORCED)

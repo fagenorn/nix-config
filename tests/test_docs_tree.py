@@ -36,6 +36,15 @@ LAND_QUEUE_PROVENANCE_HEADER = (
 LAND_QUEUE_FENCE = re.compile(r"^```sh\n(.*?)^```$", re.S | re.M)
 
 
+TAILNET_PLACEHOLDER = "<host>.<tailnet>.ts.net"
+TAILNET_NAME = re.compile(r"[^\s/()\[\]`\"'<>]*(?:<[^<>\s]*>[^\s/()\[\]`\"'<>]*)*\.ts\.net")
+
+
+def tailnet_names_other_than_placeholder(text: str) -> list:
+    """Every tailnet hostname in `text` that is not exactly the placeholder, each checked alone."""
+    return [name for name in TAILNET_NAME.findall(text) if name != TAILNET_PLACEHOLDER]
+
+
 def land_queue_section(text: str, name: str) -> str:
     """The text after the line `## <name>` up to the next `## ` line; "" when absent."""
     lines = text.splitlines(keepends=True)
@@ -725,6 +734,39 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-064", entry)
         self.assertNotIn("or at once when its manager failed to start", entry)
 
+    def test_the_tailscale_serve_boundary_decision_is_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("066-*.md"))
+        self.assertEqual(len(found), 1, found)
+        path = "docs/areas/console/adr/" + found[0].name
+        text = (REPO_ROOT / path).read_text()
+        self.assertTrue(text.splitlines()[0].startswith("# ADR-console-066 \u2014 "))
+        self.assertIn("- **Status:** accepted", text)
+        for needle in (
+            "#1235", "ADR-console-008", "Tailscale-User-Login", "X-Forwarded-For",
+            "mirrored", "guest port", "guest token", "Funnel",
+            "Confirming a release", "spend", "project registration", "the access list",
+            "every manager route",
+            "tailscale.exe", "serve --bg --https=443", "serve status", "--https=443 off",
+            "<host>.<tailnet>.ts.net", "<colleague-login>",
+        ):
+            self.assertIn(needle, text)
+        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for term in ("**Console**:", "**Guest**:"):
+            entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
+            self.assertIn("ADR-console-066", entry)
+
+    def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
+        self.assertEqual(
+            tailnet_names_other_than_placeholder(
+                "[<host>.<tailnet>.ts.net](https://box.tail1234.ts.net/) and `<host>.<tailnet>.ts.net`"),
+            ["box.tail1234.ts.net"])
+        self.assertEqual(
+            tailnet_names_other_than_placeholder("at https://<host>.<tailnet>.ts.net/ only"), [])
+        self.assertEqual(tailnet_names_other_than_placeholder("see box.tail1234.ts.net."),
+                         ["box.tail1234.ts.net"])
+
     def test_the_held_review_decision_is_recorded(self):
         path = ("docs/areas/console/adr/054-a-held-issue-whose-only-open-criterion-is-an-owner-"
                 "review-gets-an-owner-check-card.md")
@@ -1040,7 +1082,8 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         amended = (
             ("058-a-question-about-a-project-is-answered-by-a-read-only-session.md",
-             "accepted; amended by ADR-console-059", "**D2.", "**D3.", ("--session-id",)),
+             "accepted; amended by ADR-console-059, ADR-console-065", "**D2.", "**D3.",
+             ("--session-id",)),
             ("049-spend-is-read-from-transcripts-into-memory-and-never-logged.md",
              "accepted; amended by ADR-console-059", "**D3.", "**D4.",
              ("project_question.asked",)),
@@ -1084,6 +1127,27 @@ class DocsTreeTest(unittest.TestCase):
                        "MAX_THREAD_BYTES", "131072", "--resume", "retention",
                        "ADR-console-058", "ADR-console-059"):
             self.assertIn(needle, adr)
+
+    def test_the_question_reads_decision_is_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("065-*.md"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].name, "065-a-question-session-reads-the-projects-history-"
+                                        "tracker-and-live-state-and-answers-plainly.md")
+        text = found[0].read_text()
+        self.assertEqual(text.splitlines()[0],
+                         "# ADR-console-065 \u2014 A question session reads the project's history, "
+                         "tracker and live state and answers plainly")
+        adr = " ".join(text.split())
+        for needle in ("- **Status:** accepted", "- **Decided in:** #1225", "git log",
+                       "gh pr list", "repo_slug", "--repo", "devenv shell --", "devenv.nix",
+                       "two or three sentences", "onFailure", "ADR-console-058"):
+            self.assertIn(needle, adr)
+        raw = self.doc("docs/areas/console/adr/058-a-question-about-a-project-is-answered-by-"
+                       "a-read-only-session.md")
+        for start, end in (("**D4.", "**D5."), ("**D6.", "**D7."), ("**D7.", "**D8."),
+                           ("**D8.", "**D9.")):
+            self.assertIn("ADR-console-065", raw[raw.index(start):raw.index(end)])
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"

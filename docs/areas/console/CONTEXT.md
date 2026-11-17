@@ -10,7 +10,7 @@ Console covers the local pages, the desk page that tells the owner whether they 
 ## Language
 
 **Console**:
-The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001).
+The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` reaches it, and a named colleague reaches it only through Tailscale Serve on a guest port (ADR-console-066).
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
@@ -33,6 +33,10 @@ _Avoid_: age
 A registered project with no open work, no live session and no open sprint. It renders as one line, and more than three of them fold into one group, "N quiet projects".
 _Avoid_: dormant project, idle project
 
+**Guest**:
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest port of its own and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066).
+_Avoid_: user, viewer
+
 **Goal**:
 The sentence or two the owner states on the page for one registered project, kept in the console's log and never on the tracker (ADR-console-011).
 _Avoid_: task, request
@@ -42,7 +46,7 @@ The manager's answer to a goal: a title of at most 60 characters that names the 
 _Avoid_: plan, proposal
 
 **Manager**:
-The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile the console chooses for every new session (ADR-console-023: the most weekly allowance left among the profiles not signed out; the per-project account binding is no longer read), drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015). It reads the owner's messages with `sprint inbox` at the start of every turn, and after approval its contract tells it to end the turn before any tracker action once the sprint is no longer open (ADR-console-016). A manager gone two minutes while its sprint has work is woken in place or replaced (ADR-console-017). A manager idle five minutes while its sprint has work is told to go on (not while its own delivery run is in progress and has moved in the last 30 minutes), and waits out its account's quota (ADR-console-020). Its session runs with the client's background isolation guard off and every permission prompt refused with one fixed sentence, so a delivery can write its plan and nothing waits on a prompt nobody sees (ADR-console-021). Its session runs in `bypassPermissions` where its project declares no production or its production rules are in the guard's policy, else in `auto`, and its sprint's detail says which and why (ADR-console-060).
+The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile the console chooses for every new session (ADR-console-023: the most weekly allowance left among the profiles not signed out; the per-project account binding is no longer read), drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015). It reads the owner's messages with `sprint inbox` at the start of every turn, and after approval its contract tells it to end the turn before any tracker action once the sprint is no longer open (ADR-console-016). A manager gone two minutes while its sprint has work is woken in place or replaced (ADR-console-017). A manager idle five minutes while its sprint has work is told to go on (not while its own delivery run is in progress and has moved in the last 30 minutes), and waits out its account's quota (ADR-console-020). Its session runs with the client's background isolation guard off and every permission prompt refused with one fixed sentence, so a delivery can write its plan and nothing waits on a prompt nobody sees (ADR-console-021). Its session runs in `auto`, and its sprint's detail says why: where its project declares no production or its production rules are in the guard's policy it would run in `bypassPermissions`, which waits on a wake path a bypass manager can receive (ADR-console-060 D6).
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
