@@ -28,9 +28,10 @@ request's commit list (oldest first) and M its head, which must be in C.
 Answers. `pre` is the counted issue's comments created before the pull request's `merged_at`, as the
 merge guard saw them. The answers are the trusted live `look` markers of `pre` naming the issue and the
 pull request, in comment id order, whatever their answer; the approvals are those whose answer is in
-`look_marker.CARRIED`. A comment created before the merge but updated at or after it, whose current
-body is a marker, has a pre-merge body this read cannot see: that is incomplete evidence (exit 2), as
-is a marker comment with no readable `updated_at`.
+`look_marker.CARRIED`. A trusted comment created before the merge but updated at or after it, whose
+current body is a `look` marker naming the issue, has a pre-merge body this read cannot see: that is
+incomplete evidence (exit 2), as is such a marker with no readable `updated_at`. Any other marker (a
+`claim` that `forge-claim release` edits after the merge, say) is not an answer and is not judged.
 
 Needless. `gains(P, h)` holds when P's head and h are in C, P's first, and some commit c of C after P's
 head up to h has one parent p, a readable compare `p...c` listing at least one file and no file
@@ -193,6 +194,14 @@ class Pull:
         return look_marker.settle(candidate, head, self.base, self.read_path)
 
 
+def _names_issue(comment: dict, issue: int) -> bool:
+    """Whether a trusted comment's current body is a `look` marker naming the issue."""
+    if comment.get("author_association") not in look_marker.TRUSTED:
+        return False
+    marker = forge_markers.parse(comment)
+    return marker is not None and marker.kind == look_marker.KIND and marker.fields.get("issue") == str(issue)
+
+
 def _answers(pre: list[dict], issue: int, pr: int) -> list[forge_markers.Marker]:
     parsed = [forge_markers.parse(c) for c in pre if c.get("author_association") in look_marker.TRUSTED]
     markers = [m for m in parsed if m is not None]
@@ -256,10 +265,10 @@ def landing(get: Get, repo: str, globs: list[str], boundary) -> dict | None:
                 if created is None:
                     raise ForgeError("payload_invalid", f"comment {comment.get('id')} has no readable created_at")
                 if created < merged:
-                    if forge_markers.parse(comment) is not None:
+                    if _names_issue(comment, issue):
                         updated = parse_time(comment.get("updated_at"))
                         if updated is None or updated >= merged:
-                            raise ForgeError("payload_invalid", f"marker comment {comment.get('id')} was "
+                            raise ForgeError("payload_invalid", f"look marker comment {comment.get('id')} was "
                                              "edited at or after the merge: its pre-merge body is unknown")
                     pre.append(comment)
             approvals, second, carried = _grade(kept, issue, pre)

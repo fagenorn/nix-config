@@ -269,6 +269,19 @@ class LookKeptCheckTest(unittest.TestCase):
         early = {**approval(5, A), "updated_at": "2026-11-17T11:30:00Z"}
         self.assertEqual(0, run([early, plain])[0])
 
+    def test_a_claim_marker_released_after_the_merge_is_not_an_answer(self):
+        claim = stamped(3, forge_markers.render("claim", {"issue": "7"}, "claimed"),
+                        created="2026-11-17T10:30:00Z")
+        released = {**claim, "body": forge_markers.with_fields(forge_markers.parse(claim), released="done"),
+                    "updated_at": AFTER}
+        for name, comments in {"claim released": [released, approval(5, A)],
+                               "claim unedited": [claim, approval(5, A)]}.items():
+            with self.subTest(name):
+                code, out = run(comments)
+                self.assertEqual((0, "met"), (code, out["status"]))
+        foreign = {**stamped(4, "x", association="NONE"), "updated_at": AFTER}
+        self.assertEqual(0, run([foreign, approval(5, A)])[0])
+
     def test_activation_unknown_waits(self):
         running = Run(world([approval(5, A)]))
         self.assertEqual((75, {"status": "activation_unknown"}), running.check(activated=None))
