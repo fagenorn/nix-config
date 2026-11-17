@@ -778,8 +778,8 @@ class RowTest(unittest.TestCase):
         running = register.view_entry("/x/sample-app", None)
         self.assertIsNone(running["draft"])
         self.assertIsNone(running["draft_more"])
-        self.assertEqual(len(running), 21)
-        self.assertEqual(len(entry), 21)
+        self.assertEqual(len(running), 22)
+        self.assertEqual(len(entry), 22)
         full = contract_draft.draft("/x/sample-app", {
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
@@ -848,7 +848,7 @@ class RowTest(unittest.TestCase):
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
             "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
             "refused": None, "draft": None, "draft_more": None, "adoption": None,
-            "approve": None, "cancel": False})
+            "approve": None, "cancel": False, "remote": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
@@ -857,7 +857,8 @@ class RowTest(unittest.TestCase):
             "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
             "line": "Register r: ready to apply", "refused": None, "draft": None,
-            "draft_more": None, "adoption": None, "approve": None, "cancel": False})
+            "draft_more": None, "adoption": None, "approve": None, "cancel": False,
+            "remote": None})
         self.assertTrue(register.view_entry(None, latest, cancel=True)["cancel"])
         self.assertFalse(register.view_entry("/srv/r", None, cancel=True)["cancel"])
         self.assertIsNone(register.view_entry(None, None))
@@ -925,6 +926,75 @@ if [ "$FAKE_SLEEP" = 1 ]; then sleep 30; fi
 printf '%s' "$FAKE_OUT"
 exit "$FAKE_EXIT"
 """
+
+
+class BehindTest(unittest.TestCase):
+    """The behind row, its Update card, the failed update and the unread-remote sentence (#1233)."""
+
+    def behind_latest(self):
+        return {**register.behind("/x/r", 1, True), "at": "t"}
+
+    def test_a_behind_row_says_the_count_and_whether_the_remote_has_a_contract(self):
+        row = register.behind("/x/r", 1, True)
+        self.assertEqual(row["headline"],
+                         "r is 1 commit behind its remote, which already has a project contract.")
+        self.assertEqual(register.behind("/x/r", 3, False)["headline"],
+                         "r is 3 commits behind its remote, which has no project contract yet.")
+        self.assertEqual(row["result"], "behind")
+        self.assertEqual(row["note"], register.BEHIND_NOTE)
+        self.assertIsNone(row["plan_id"])
+        self.assertEqual(row["lines"], [])
+        self.assertEqual(row["questions"], [])
+        self.assertEqual(register.ended(row)[2], row)
+
+    def test_a_behind_row_is_one_update_card(self):
+        latest = self.behind_latest()
+        (card,) = register.confirm_items(latest, running=False)
+        self.assertEqual(card["reason"], "register_behind")
+        self.assertEqual(card["key"], "register-behind//x/r/t")
+        self.assertEqual(card["questions"][0]["options"], ["Update it", "Not now"])
+        self.assertEqual(card["values"], ["update", "not_now"])
+        self.assertEqual(card["headline"], latest["headline"])
+        self.assertEqual(card["why"], register.BEHIND_NOTE)
+        self.assertEqual(register.confirm_items(latest, running=True), [])
+        self.assertEqual(register.failure_items(latest, running=False), [])
+        self.assertIs(register.waiting(latest), False)
+        self.assertIs(register.failing(latest), False)
+
+    def test_not_now_on_a_behind_row_removes_its_card(self):
+        gone = {**register.dismissed(self.behind_latest()), "at": "u"}
+        self.assertEqual(gone["result"], "behind")
+        self.assertEqual(gone["note"], register.LATER_NOTE)
+        self.assertEqual(register.confirm_items(gone, running=False), [])
+        self.assertEqual(register.failure_items(gone, running=False), [])
+
+    def test_parse_confirm_request_takes_update(self):
+        self.assertEqual(register.parse_confirm_request(b'{"root": "/x/r", "choice": "update"}'),
+                         ("/x/r", "update"))
+
+    def test_a_failed_update_is_a_try_again_card(self):
+        row = register.update_failed("/x/r", "it has changes that are not committed")
+        self.assertEqual(row["headline"], "r could not be updated: it has changes that are not committed.")
+        self.assertEqual(row["note"], "Update the checkout in a terminal, then choose Try again.")
+        self.assertEqual(row["result"], "failed")
+        latest = {**row, "at": "t"}
+        self.assertIs(register.failing(latest), True)
+        (item,) = register.failure_items(latest, running=False)
+        self.assertEqual(item["values"], ["try_again", "not_now"])
+
+    def test_an_unread_remote_rides_on_the_row_and_the_entry(self):
+        row = register.unread(register.summary("/x/r", plan_doc()))
+        self.assertEqual(row["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(row["lines"], register.summary("/x/r", plan_doc())["lines"])
+        self.assertEqual(register.ended(row)[2], row)
+        with self.assertRaises(ValueError):
+            register.ended({**row, "remote": 5})
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        self.assertEqual(register.view_entry(None, found)["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(register.dismissed(found)["remote"], register.REMOTE_UNREAD)
+        plain = {**register.summary("/x/r", plan_doc()), "at": "t"}
+        self.assertIsNone(register.view_entry(None, plain)["remote"])
+        self.assertIsNone(register.view_entry("/x/r", None)["remote"])
 
 
 class AdopterTest(unittest.TestCase):
