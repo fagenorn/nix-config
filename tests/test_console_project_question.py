@@ -164,7 +164,12 @@ class HookTableTest(unittest.TestCase):
             "gh release view v1.2.0 --repo owner/p01", "gh pr view 12 --repo owner/p01",
             "gh issue view 7 -R owner/p01", "gh run view 123 --repo=owner/p01 --log-failed",
             "gh release view v1.2.0 --repo owner/p01 --json body", "gh pr view 12 --repo owner/p01 --comments",
-            "gh pr view --repo owner/p01 12 --json title", "gh release list --repo owner/p01 --limit 100",
+            "gh pr view --repo owner/p01 12 --json title",
+            "gh run view --repo owner/p01 123 --attempt 2", "gh run view --repo owner/p01 123 -a 2",
+            "gh run view 123 --repo owner/p01 --attempt 2", "gh run view 123 --repo owner/p01 -a 2",
+            "gh run view --repo owner/p01 123 --job 9 --attempt 2",
+"gh release list --repo owner/p01 --limit 100",
+            "gh pr list --repo owner/p01 --state merged --search merged:2026-01-01..2026-01-31",
             "gh release list --repo owner/p01",
             "gh release view --repo owner/p01 v1.2.0",
             "gh issue list --repo owner/p01 --state closed",
@@ -208,7 +213,9 @@ class HookTableTest(unittest.TestCase):
             "gh release view --repo owner/p01 -- v1",
             "gh release view v1 -- --repo owner/p01", "gh release view v1 v2 --repo owner/p01",
             "gh release view v1 --repo owner/p01 v2", "gh release view --repo owner/p01 v1 v2",
-            "gh pr view 12 --repo owner/p01 13", "gh pr view 12 --repo other/repo",
+            "gh pr view 12 --repo owner/p01 13", "gh run view --repo owner/p01 123 --attempt 2 3",
+            "gh run view 123 --repo owner/p01 --attempt 2 3",
+"gh pr view 12 --repo other/repo",
             "gh pr view 12 --repo owner/p01x", "gh pr view 12 --repo", "gh pr view 12",
             "gh pr view 12 --state open", "gh issue view 7 --repo owner/p01 --repo owner/p01",
             "gh pr view 12 --repo owner/p01 --repo other/repo", "gh pr view 12 -R owner/p01 -R other/repo",
@@ -975,8 +982,12 @@ class AnswerRulesTest(unittest.TestCase):
             "it printed.",
             "When the question covers a time window, count every release, pull request or deploy "
             "dated inside it from the dates you read: raise the list limit (for example --limit) "
-            "until the oldest item you read is older than the window, never stop at a first page "
-            "or an arbitrary limit, and say in the answer where the count comes from.",
+            "until a list returns fewer items than the limit, so you have read every item, never "
+            "stop at a first page or an arbitrary limit and never stop at the first item older "
+            "than the window, because gh lists by creation date and a release published or a "
+            "pull request merged inside the window can have been created before it; when a list "
+            "is too long to read whole, filter it by the date that counts (for example --search "
+            "merged:2026-01-01..2026-01-31), and say in the answer where the count comes from.",
             'Format only with **bold**, list lines starting with "- ", `inline code` and fenced '
             "code blocks; use no headings, tables, links or HTML.",
         )

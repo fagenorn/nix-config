@@ -84,7 +84,8 @@ PLAIN_COMMAND = re.compile(r" *[A-Za-z0-9_./:@%+=,-]+(?: +[A-Za-z0-9_./:@%+=,-]+
 GIT_READS: tuple[str, ...] = ("log", "show", "diff", "status", "blame", "ls-files", "tag")
 GH_READ_GROUPS: tuple[str, ...] = ("pr", "release", "issue", "run")
 GH_READ_VERBS: tuple[str, ...] = ("list", "view")
-GH_VIEW_VALUE_FLAGS: tuple[str, ...] = ("--json", "--jq", "-q", "--template", "-t", "--job", "-j")
+GH_VIEW_VALUE_FLAGS: tuple[str, ...] = (
+    "--json", "--jq", "-q", "--template", "-t", "--job", "-j", "--attempt", "-a")
 GIT_DENIED_PREFIXES: tuple[str, ...] = ("--ou", "--ext")
 TAG_VALUE_OPTIONS: tuple[str, ...] = ("--sort", "--format")
 TAG_LIST_OPTIONS: tuple[str, ...] = (
