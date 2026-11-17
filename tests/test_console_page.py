@@ -1794,6 +1794,29 @@ class PageAskTest(unittest.TestCase):
                 self.assertEqual(d["posts"][0]["url"], "/api/project-question")
                 self.assertEqual(self.found(gone, "ask"), [])
 
+    def test_a_second_question_sent_before_the_first_is_shown_keeps_its_working_row(self) -> None:
+        second = "which credentials are required?"
+        first_row = ask(id="q1")
+        second_row = ask(id="q2", question=second)
+        one, two, three, four = render([
+            *self.sent({"click": "ask-send"}, {"snapshot": True},
+                       {"type": {"class": "ask-text", "text": second}}, {"click": "ask-send"},
+                       {"snapshot": True},
+                       {"frame": view([asking(project(0, []), first_row)])}, {"snapshot": True},
+                       {"frame": view([asking(project(0, []), second_row, first_row)])},
+                       {"snapshot": True})])
+
+        def lines(snap: dict) -> list:
+            return [(next((q for q in (self.question, second) if full(r["children"][0]).startswith(q)), None),
+                     full(r["children"][1])) for r in self.found(snap, "ask")]
+
+        working = "Working on it"
+        self.assertEqual(lines(one), [(self.question, working)])
+        self.assertEqual(lines(two), [(second, working), (self.question, working)])
+        self.assertEqual(lines(three), [(second, working), (self.question, working)])
+        self.assertEqual(lines(four), [(second, working), (self.question, working)])
+        self.assertEqual(len(four["posts"]), 2)
+
 
 class PageTimeTest(unittest.TestCase):
     begin = {"start": {"focused": False, "clock": NOW_MS}}

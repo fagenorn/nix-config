@@ -65,7 +65,8 @@ never mutated. `answer_parts(text)` splits a stored answer by the `HEADINGS` of 
 asks for: a heading matches at line start after optional spaces, case-insensitively, followed by
 `:`; the lines after a heading up to the next one belong to it (joined with a newline, stripped);
 text before the first heading starts the answer part, and a text with no heading is wholly the
-answer; an empty part or one that is `none` (any case, a trailing `.` ignored) is None; a text
+answer; an empty part is None, and so is a part other than the answer that is `none` (any case, a
+trailing `.` ignored): an answer of `None.` is an answer and keeps its text; a text
 ending with `NO_PRODUCTION_LINE` carries that line as `production` and in no other part.
 """
 
@@ -391,9 +392,11 @@ class AskedQuestion:
     answered_at: str | None = None
 
 
-def _part(lines: list[str]) -> str | None:
+def _part(lines: list[str], key: str) -> str | None:
     text = "\n".join(lines).strip()
-    return None if not text or text.rstrip(".").strip().lower() == "none" else text
+    if not text or (key != "answer" and text.rstrip(".").strip().lower() == "none"):
+        return None
+    return text
 
 
 def answer_parts(text: str) -> AnswerParts:
@@ -408,7 +411,7 @@ def answer_parts(text: str) -> AnswerParts:
             current = _KEY_OF[match.group(1).lower()]
             line = match.group(2)
         buckets[current].append(line)
-    return AnswerParts(*(_part(buckets[key]) for key, _ in HEADINGS), production)
+    return AnswerParts(*(_part(buckets[key], key) for key, _ in HEADINGS), production)
 
 
 def _answered(question: AskedQuestion, event: Event) -> AskedQuestion:

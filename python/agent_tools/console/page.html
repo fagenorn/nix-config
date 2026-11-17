@@ -745,6 +745,7 @@ const noticeWithdrawals = new Map();
 const askDrafts = new Map();
 const askOpen = new Set();
 const askPosts = new Map();
+const askSent = new Map();
 const askLatest = new Map();
 let sprintRedraw = 0;
 function messageLabel(message) {
@@ -1957,15 +1958,44 @@ function cancelAsk(projectId) {
   askOpen.delete(projectId);
   askDrafts.delete(projectId);
   askPosts.delete(projectId);
+  askSent.delete(projectId);
   redrawNotices();
 }
 function askIds(entry) {
   return (entry !== undefined && Array.isArray(entry.questions) ? entry.questions : []).map((question) => question.id);
 }
-// True when the entry already holds a question the sent one did not have to begin with: the view represents the sent question, so the pending row is not drawn beside it.
-function askShown(projectId, entry) {
+// Every submission still outstanding for a project: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own row, one the project did not hold when the first of them was sent and that carries the same text (the console stores it stripped), the oldest submission taking the oldest such row, so one question's row never stands for another.
+function askMatches(projectId, entry) {
+  const sent = askSent.get(projectId);
   const post = askPosts.get(projectId);
-  return post !== undefined && askIds(entry).some((id) => !post.before.has(id));
+  const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
+  const taken = new Map();
+  if (sent !== undefined && entry !== undefined && Array.isArray(entry.questions)) {
+    const fresh = entry.questions.filter((question) => !sent.base.has(question.id)).reverse();
+    const used = new Set();
+    for (const submission of submissions) {
+      const found = fresh.find((question) => !used.has(question.id) && question.question === submission.text.trim());
+      if (found !== undefined) {
+        used.add(found.id);
+        taken.set(submission, found.id);
+      }
+    }
+  }
+  return { submissions, taken };
+}
+function askOutstanding(projectId, entry) {
+  const { submissions, taken } = askMatches(projectId, entry);
+  return submissions.filter((submission) => !taken.has(submission));
+}
+// Drops the accepted submissions the view now shows and counts their rows as held, so a later submission is matched only to a row of its own.
+function askReconcile(projectId, entry) {
+  const sent = askSent.get(projectId);
+  if (sent === undefined) return;
+  const { taken } = askMatches(projectId, entry);
+  for (const submission of sent.list) {
+    if (taken.has(submission)) sent.base.add(taken.get(submission));
+  }
+  sent.list = sent.list.filter((submission) => !taken.has(submission));
 }
 async function postAsk(projectId, entry) {
   const current = askPosts.get(projectId);
@@ -1973,7 +2003,9 @@ async function postAsk(projectId, entry) {
   const draft = askDrafts.get(projectId);
   const text = draft === undefined ? "" : draft.value;
   if (text.trim() === "") return;
-  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString(), before: new Set(askIds(entry)) };
+  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString() };
+  const sent = askSent.get(projectId);
+  if (sent === undefined || sent.list.length === 0) askSent.set(projectId, { base: new Set(askIds(entry)), list: [] });
   askPosts.set(projectId, state);
   redrawNotices();
   let reason;
@@ -1989,8 +2021,9 @@ async function postAsk(projectId, entry) {
   if (reason === null) {
     const typed = askDrafts.get(projectId);
     if (typed !== undefined && typed.value === text) askDrafts.delete(projectId);
-    if (askShown(projectId, askLatest.get(projectId))) askPosts.delete(projectId);
-    else state.phase = "sent";
+    askPosts.delete(projectId);
+    askSent.get(projectId).list.push({ text, at: state.at, phase: "sent" });
+    askReconcile(projectId, askLatest.get(projectId));
   } else {
     state.phase = "failed";
     state.reason = reason;
@@ -2046,7 +2079,7 @@ function askRow(question) {
   }
   return row;
 }
-// One block per registered project: the Ask control, then its questions, newest first as the view orders them, with the question being sent drawn first until the view carries it.
+// One block per registered project: the Ask control, then its questions, newest first as the view orders them, with the questions sent drawn first, newest first, until the view carries each.
 function askBlock(entry, afterLine) {
   const id = entry.project_id;
   const item = el("li", afterLine ? "line asks after-line" : "line asks");
@@ -2054,8 +2087,7 @@ function askBlock(entry, afterLine) {
   if (!afterLine) item.appendChild(el("span", "asks-project", id));
   item.appendChild(askOpen.has(id) ? askBox(id, entry) : actionButton("ask-open btn-quiet", "Ask a question", () => openAsk(id)));
   const rows = [];
-  const post = askPosts.get(id);
-  if (post !== undefined && (post.phase === "sending" || post.phase === "sent") && !askShown(id, entry)) {
+  for (const post of askOutstanding(id, entry).reverse()) {
     const pending = el("li", "ask");
     pending.appendChild(phrase("p", "ask-question", post.text, timeEl("ago", post.at, "ask-age")));
     pending.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending…" : "Working on it"));
@@ -4101,8 +4133,11 @@ function drawProjects(view) {
     if (!asked.has(id)) askOpen.delete(id);
   }
   for (const id of [...askPosts.keys()]) {
-    const post = askPosts.get(id);
-    if (!asked.has(id) || (post.phase === "sent" && askShown(id, askLatest.get(id)))) askPosts.delete(id);
+    if (!asked.has(id)) askPosts.delete(id);
+  }
+  for (const id of [...askSent.keys()]) {
+    if (asked.has(id)) askReconcile(id, askLatest.get(id));
+    else askSent.delete(id);
   }
   for (const id of [...askLatest.keys()]) {
     if (!asked.has(id)) askLatest.delete(id);

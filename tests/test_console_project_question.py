@@ -437,6 +437,13 @@ class AnswerPartsTest(unittest.TestCase):
             project_question.AnswerParts("It builds the hosts.", "flake.nix, lib/helpers.nix",
                                          "just build", None, None, None))
 
+    def test_an_answer_of_none_keeps_its_text_while_other_parts_of_none_are_empty(self):
+        parts = project_question.answer_parts("Answer: None.\nRead: None.\nQuestion for you: none")
+        self.assertEqual(parts.answer, "None.")
+        self.assertIsNone(parts.read)
+        self.assertIsNone(parts.back)
+        self.assertEqual(project_question.answer_parts("None.").answer, "None.")
+
     def test_a_part_runs_on_until_the_next_heading(self):
         parts = project_question.answer_parts("Answer: first\nsecond line\nread: none")
         self.assertEqual(parts.answer, "first\nsecond line")
