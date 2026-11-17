@@ -1039,16 +1039,12 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(orchestration["attempt_budget_minutes"], 240)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
-    def test_the_repositorys_own_contract_declares_its_production_rules(self):
+    def test_the_repositorys_own_contract_declares_no_production_rules(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        # Issue 1191, interim: the host activation command is not declared as production.
         code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
         self.assertEqual(code, 0, err or out)
-        self.assertEqual(json.loads(out)["production"], {
-            "status": "declared",
-            "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
-            "read_only": {"commands": ["nix-build"], "mcp_tools": []},
-            "release_profile": "github-release",
-        })
+        self.assertEqual(json.loads(out)["production"], {"status": "not_declared"})
 
     def test_nix_activate_is_exact_and_the_snapshot_has_no_deploy(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.

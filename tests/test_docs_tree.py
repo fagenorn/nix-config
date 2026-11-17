@@ -438,16 +438,36 @@ class DocsTreeTest(unittest.TestCase):
         status = [line for line in (REPO_ROOT / "docs/areas/console/adr/042-a-sprint-reads-stuck-"
                                     "only-when-nothing-it-reads-has-moved.md").read_text().splitlines()
                   if line.startswith("- **Status:**")]
-        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-050"])
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-050, ADR-console-057"])
         context = self.doc("docs/areas/console/CONTEXT.md")
         for needle in ("a delivery committing or a release step moves it", "ADR-console-050"):
             self.assertIn(needle, context)
         sprint_entry = next(
             line for line in (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
             if line.startswith("One goal, later its issues"))
-        self.assertTrue(sprint_entry.endswith("ADR-console-042, ADR-console-050, ADR-console-051)."))
+        self.assertTrue(sprint_entry.endswith(
+            "ADR-console-042, ADR-console-050, ADR-console-051, ADR-console-057)."))
         self.assertNotIn("ADR-console-046", sprint_entry)
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("050-*.md"))), 1)
+
+    def test_the_session_movement_decision_is_recorded(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("057-*.md"))
+        self.assertEqual(len(found), 1)
+        path = found[0].relative_to(REPO_ROOT).as_posix()
+        first = found[0].read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-057 — Session output and a running check "
+                                "move a sprint")
+        adr = self.doc(path)
+        for needle in ("#1185", "ADR-console-005", "ADR-console-020", "ADR-console-042",
+                       "ADR-console-050", "/proc", "subagents", "one second",
+                       "movement_sessions_failed", "nudge", "read_at"):
+            self.assertIn(needle, adr)
+        self.assertNotIn("reads stalled", adr)
+        sprint_entry = next(
+            line for line in (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
+            if line.startswith("One goal, later its issues"))
+        for needle in ("session output", "a running check", "ADR-console-057"):
+            self.assertIn(needle, sprint_entry)
 
     def test_the_owner_check_pictures_decision_is_recorded(self):
         adr = self.doc(
@@ -766,7 +786,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056"),
@@ -800,13 +820,39 @@ class DocsTreeTest(unittest.TestCase):
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
-                                          "ADR-console-036, ADR-console-037, ADR-console-053"),
+                                          "ADR-console-036, ADR-console-037, ADR-console-053, "
+                                          "ADR-console-058"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
+
+    def test_the_project_question_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "058-a-question-about-a-project-is-answered-by-a-read-only-session.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-058 \u2014 A question about a project is "
+                                "answered by a read-only session")
+        adr = self.doc(path)
+        for needle in ("#1176", "POST /api/project-question", "PAGE_WRITES",
+                       "project_question.asked", "project_question.answered", "timed_out",
+                       "--model sonnet", "not enforced", "onFailure", "dontAsk",
+                       "--setting-sources", "--tools", "300", "production.read_only.commands",
+                       "project_question_hook",
+                       "Production cannot be read for this project", "ADR-console-008",
+                       "ADR-console-011", "ADR-console-023", "ADR-guard-011"):
+            self.assertIn(needle, adr)
+        adr008 = self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        self.assertIn("POST /api/project-question", adr008)
+        self.assertIn("ADR-console-058", adr008)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Project question**:", context)
+        self.assertIn("ADR-console-058", context)
+        self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
@@ -837,7 +883,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
