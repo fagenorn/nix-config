@@ -2004,6 +2004,18 @@ class PageReadingTest(unittest.TestCase):
         self.assertEqual(css_decls(".reading"), [])
         self.assertEqual([d.get("font-weight") for d in css_decls("p.reading")], ["600"])
 
+    def test_enter_on_the_reading_heading_does_not_approve_an_outstanding_brief(self) -> None:
+        # The heading takes focus on open; the inbox answer keys (here Enter, which would schedule the lead brief's
+        # recommended answer) must stay out of the reading panel (#1226).
+        both = {**view([asking(project(0, []), thread(ASK_FIRST))]), "inbox": frame([ANSWERABLE])["inbox"]}
+        steps = [self.begin, {"frame": both}, {"open": "questions:owner/p00"}, {"click": "thread-open"}]
+        (focused, pressed, later) = render([*steps, {"snapshot": True}, {"key": "Enter", "follow": True},
+                                            {"snapshot": True}, {"clock": NOW_MS + 5000}, {"snapshot": True}])
+        self.assertEqual(role(focused["active"]), "reading-question")
+        self.assertIs(focused["reading"]["hidden"], False)
+        self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
+        self.assertEqual(answers(later), [])
+
     def test_opening_a_thread_shows_it_in_the_main_column_and_close_hides_it(self) -> None:
         shown, closed = render([*self.opened(thread(ASK_FIRST)), {"snapshot": True},
                                 {"click": "reading-close"}, {"snapshot": True}])

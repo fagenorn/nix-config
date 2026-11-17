@@ -2487,6 +2487,11 @@ function toggleReading(projectId, thread) {
   const heading = document.querySelector("h2.reading-question");
   if (heading !== null) heading.focus();
 }
+function inReadingPanel(target) {
+  const panel = document.getElementById("reading");
+  for (let node = target; node; node = node.parentNode) if (node === panel) return true;
+  return false;
+}
 function closeReading() {
   const was = reading;
   reading = null;
@@ -5522,6 +5527,8 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
+  // The reading panel's heading takes focus when a thread opens: its keys are not the inbox's answer keys, so Enter there never approves an unrelated brief.
+  if (inReadingPanel(event.target)) return;
   const current = currentEntry(lastView.inbox.open);
   if (current === null) return;
   const { item, state } = current;
