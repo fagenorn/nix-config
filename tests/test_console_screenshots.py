@@ -40,14 +40,63 @@ def all_sprints(view):
     return found
 
 
+def fake_browser(present):
+    class Page:
+        def __init__(self):
+            self.clicks = []
+            self.waits = []
+            self.reads = 0
+
+        def goto(self, url):
+            pass
+
+        def wait_for_selector(self, selector):
+            self.waits.append(selector)
+
+        def query_selector(self, selector):
+            return object() if selector in present else None
+
+        def click(self, selector):
+            self.clicks.append(selector)
+
+        def evaluate(self, expression):
+            if expression == shots.ASK_READING:
+                self.reads += 1
+                return list(shots.OPEN_ASK)
+            if expression == shots.THREAD_READING:
+                self.reads += 1
+                return list(shots.OPEN_THREAD if shots.ASK_FOLD in present else shots.BASE_THREAD)
+            if expression == shots.ACTS_ROW:
+                return []
+            if expression == shots.SCROLL_Y:
+                return 0.0
+            if expression == "document.documentElement.scrollWidth":
+                return 480
+            if expression == shots.SHORT_CONTROLS:
+                return []
+            return 0
+
+        def screenshot(self, path, full_page):
+            pass
+
+        def close(self):
+            pass
+
+    page = Page()
+
+    class Browser:
+        def new_page(self, viewport):
+            return page
+
+    return Browser(), page
+
+
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 20)
+    def test_the_set_is_twenty_two_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 22)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
-        self.assertEqual(shots.STATES[-9:], ("owner-check", "spend-page", "notices-fold",
-                                             "notice-post-open", "desk-spend", "goal-open",
-                                             "inbox-card", "accounts-panel", "ask-box"))
+        self.assertEqual(shots.STATES[-3:], ("ask-box", "questions-closed", "questions-open"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -102,62 +151,81 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_ask_box_shot_opens_owner_webs_box_only_on_a_page_that_has_one(self) -> None:
         field = 'li.asks[data-project="owner/web"] textarea.ask-text'
 
-        def fake(has_ask):
-            class Page:
-                def __init__(self):
-                    self.clicks = []
-                    self.waits = []
-                    self.reads = 0
-
-                def goto(self, url):
-                    pass
-
-                def wait_for_selector(self, selector):
-                    self.waits.append(selector)
-
-                def query_selector(self, selector):
-                    return object() if has_ask and selector == "li.asks" else None
-
-                def click(self, selector):
-                    self.clicks.append(selector)
-
-                def evaluate(self, expression):
-                    if expression == shots.ASK_READING:
-                        self.reads += 1
-                        return list(shots.OPEN_ASK)
-                    if expression == shots.SCROLL_Y:
-                        return 0.0
-                    if expression == "document.documentElement.scrollWidth":
-                        return 480
-                    if expression == shots.SHORT_CONTROLS:
-                        return []
-                    return 0
-
-                def screenshot(self, path, full_page):
-                    pass
-
-                def close(self):
-                    pass
-
-            page = Page()
-
-            class Browser:
-                def new_page(self, viewport):
-                    return page
-
-            return Browser(), page
-
-        cases = (("head", "ask-box", True, [shots.ASK_OPEN], shots.OPEN_ASK),
-                 ("base", "ask-box", False, [], None),
-                 ("other state", "live-several", True, [], None))
-        for name, state, has_ask, clicks, ask in cases:
+        head = {shots.ASK_OPEN, shots.ASK_FOLD}
+        opened = [shots.ASK_OPEN, shots.ASK_FOLD, *shots.ASK_THREADS]
+        cases = (("head", "ask-box", head | {"li.asks"}, opened, shots.OPEN_ASK),
+                 # The page of #1178: the line holds the button and no li.asks exists until the box opens.
+                 ("head, no Ask block before opening", "ask-box", head, opened, shots.OPEN_ASK),
+                 # The page of #1177: li.asks holds the button and there is no fold.
+                 ("base", "ask-box", {shots.ASK_OPEN, "li.asks"}, [shots.ASK_OPEN], shots.OPEN_ASK),
+                 ("no Ask control", "ask-box", set(), [], None),
+                 ("other state", "live-several", head, [], None))
+        for name, state, present, clicks, ask in cases:
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                browser, page = fake(has_ask)
+                browser, page = fake_browser(present)
                 shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
                 self.assertEqual(page.clicks, clicks)
                 self.assertEqual(shot.ask, ask)
                 self.assertEqual(page.reads, 1 if ask else 0)
                 self.assertEqual(field in page.waits, bool(clicks))
+
+    def test_a_shot_with_ask_off_the_give_goal_row_fails_the_command(self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        code, text = run(lambda path: shots.Shot("questions-closed", 1440, path, 1440,
+                                                 acts=("owner/api",)))
+        self.assertEqual(code, 1)
+        self.assertIn("puts Ask a question on another row than Give it a goal (owner/api)", text)
+        code, text = run(lambda path: shots.Shot("questions-closed", 1440, path, 1440, acts=()))
+        self.assertEqual(code, 0)
+
+    def test_a_questions_open_shot_must_show_the_opened_thread(self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        phrase = "does not show the opened thread"
+        for thread in ((False, None, False), (True, None, True)):
+            with self.subTest(thread=thread):
+                code, text = run(lambda path: shots.Shot("questions-open", 480, path, 480,
+                                                         thread=thread))
+                self.assertEqual(code, 1)
+                self.assertIn(phrase, text)
+        for thread in (shots.OPEN_THREAD, shots.BASE_THREAD, None):
+            with self.subTest(thread=thread):
+                code, text = run(lambda path: shots.Shot("questions-open", 480, path, 480,
+                                                         thread=thread))
+                self.assertEqual(code, 0)
+                self.assertNotIn(phrase, text)
+
+    def test_the_questions_open_shot_opens_the_fold_only_on_a_page_that_has_it(self) -> None:
+        newest = 'details[data-key="thread:owner/web:1178a2"] > summary'
+        cases = (("head", {shots.ASK_FOLD}, [shots.ASK_FOLD, newest], shots.OPEN_THREAD),
+                 ("base", set(), [], shots.BASE_THREAD))
+        for name, present, clicks, thread in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                shot = shots._shoot(browser, "http://console.test/", "questions-open", 480,
+                                    Path(tmp))
+                self.assertEqual(page.clicks, clicks)
+                self.assertEqual(shot.thread, thread)
+                self.assertEqual(page.reads, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            browser, page = fake_browser({shots.ASK_FOLD})
+            shot = shots._shoot(browser, "http://console.test/", "questions-closed", 480, Path(tmp))
+            self.assertEqual(page.clicks, [])
+            self.assertIsNone(shot.thread)
+            self.assertEqual(shot.acts, ())
 
     def test_a_shot_with_a_short_control_fails_the_command(self) -> None:
         out = StringIO()
@@ -214,7 +282,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         return self.y
                     if expression == "document.documentElement.scrollWidth":
                         return 480
-                    if expression == shots.SHORT_CONTROLS:
+                    if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
                         return []
                     return 0
 
@@ -387,13 +455,26 @@ class ScreenshotFixtureTest(unittest.TestCase):
                           False)])
                 elif state == "ask-box":
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
-                    self.assertEqual([q["state"] for q in web["questions"]],
-                                     ["working", "answered"])
-                    self.assertEqual([q["question"] for q in web["questions"]],
+                    threads = web["questions"]["threads"]
+                    asked = [q for t in threads for q in t["questions"]]
+                    self.assertEqual([len(t["questions"]) for t in threads], [1, 1])
+                    self.assertEqual([q["state"] for q in asked], ["working", "answered"])
+                    self.assertEqual([q["question"] for q in asked],
                                      [shots.ASK_WORKING_QUESTION, shots.ASK_ANSWERED_QUESTION])
-                    self.assertEqual(web["questions"][1]["read_text"], shots.ASK_READ_LINE)
-                    self.assertEqual(web["questions"][1]["ran_text"], "Ran: just build")
+                    self.assertEqual(asked[1]["read_text"], shots.ASK_READ_LINE)
+                    self.assertEqual(asked[1]["ran_text"], "Ran: just build")
                     self.assertEqual(view["statement"]["inbox_items"], 0)
+                elif state in ("questions-closed", "questions-open"):
+                    web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+                    self.assertEqual(web["questions"]["count"], 2)
+                    newest = web["questions"]["threads"][0]["questions"]
+                    self.assertEqual([q["question"] for q in newest],
+                                     [shots.THREAD_QUESTION, shots.FOLLOW_QUESTION])
+                    self.assertEqual([q["state"] for q in newest], ["answered", "answered"])
+                    self.assertEqual(newest[1]["read_text"], shots.FOLLOW_READ_LINE)
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
+                    self.assertEqual(running, [])
+                    self.assertTrue(all(p.get("quiet") for p in entries_of(view)))
                 days = (view["spend"] or {"days": []})["days"]
                 self.assertIsNotNone(view["spend"])
                 if state == "desk-spend":
@@ -448,6 +529,11 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 [s.width for s in taken if s.state == "ask-box" and s.ask == shots.OPEN_ASK],
                 list(shots.WIDTHS))
             self.assertEqual([s for s in taken if s.state != "ask-box" and s.ask is not None], [])
+            self.assertEqual(
+                [s.width for s in taken
+                 if s.state == "questions-open" and s.thread == shots.OPEN_THREAD],
+                list(shots.WIDTHS))
+            self.assertEqual([s for s in taken if s.acts != ()], [])
             self.assertEqual(shots.main(["--out", str(out)]), 0)
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
@@ -567,7 +653,46 @@ class ScreenshotReadingTest(unittest.TestCase):
             list(shots.OPEN_ASK),
             [False, "Working on it", "Read: flake.nix, lib/helpers.nix"],
             [True, None, "Read: flake.nix, lib/helpers.nix"],
-            None])
+            [False, None, None]])
+
+    def test_the_row_reading_flags_ask_below_give_goal(self) -> None:
+        def line(wrapper_open="", wrapper_close="", project="owner/web"):
+            return ('<ul><li class="line quiet" data-project="' + project + '">'
+                    '<span class="line-acts"><button class="give-goal">Give it a goal</button>'
+                    + wrapper_open + '<button class="ask-open">Ask a question</button>'
+                    + wrapper_close + '</span></li></ul>')
+
+        found = self.read_pages(
+            [line(), line('<span style="display:block">', '</span>'),
+             "<ul><li class=\"line\" data-project=\"owner/web\">"
+             "<button class=\"give-goal\">Give it a goal</button></li></ul>"],
+            shots.ACTS_ROW)
+        self.assertEqual(found, [[], ["owner/web"], []])
+
+    def test_the_thread_reading_reads_the_opened_thread(self) -> None:
+        def page(*, open_fold=True, show_follow=True, rows=True):
+            row = ('<li class="ask"><p class="ask-question">' + shots.FOLLOW_QUESTION
+                   + ' <time>just now</time></p><p class="ask-read">' + shots.FOLLOW_READ_LINE
+                   + '</p></li>')
+            return ('<ul><li class="line questions"><details data-key="questions:owner/web"'
+                    + (" open" if open_fold else "") + '><summary>Questions (2)</summary>'
+                    '<ul class="ask-list">' + (row if rows else "") + '</ul>'
+                    + ('<button class="follow-open">Ask a follow-up</button>' if show_follow else "")
+                    + '</details></li></ul>')
+
+        base = ('<ul><li class="line asks" data-project="owner/web"><ul class="ask-list">'
+                '<li class="ask"><p class="ask-question">' + shots.FOLLOW_QUESTION
+                + '</p><p class="ask-read">' + shots.FOLLOW_READ_LINE + '</p></li></ul></li></ul>')
+        found = self.read_pages(
+            [page(), page(open_fold=False), page(show_follow=False), page(rows=False), base,
+             "<ul><li>nothing</li></ul>"], shots.THREAD_READING)
+        self.assertEqual(found, [
+            list(shots.OPEN_THREAD),
+            [False, None, False],
+            [True, shots.FOLLOW_READ_LINE, False],
+            [True, None, True],
+            list(shots.BASE_THREAD),
+            [False, None, False]])
 
 
 if __name__ == "__main__":
