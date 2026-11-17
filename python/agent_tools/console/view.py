@@ -285,7 +285,8 @@ is none. Its entry is
      "project_id", "sprint_id", "title", "round": <int>, "index": <int>, "blocker": <bool>,
      "blocks": "<text>", "headline": "<ask>", "context": "<text>" | null, "more_questions": 0,
      "questions": [{"question": "<ask>", "options": [<str>, ...], "chosen": null,
-                    "recommended": "<option>", "recommended_index": <int>}],
+                    "recommended": "<option>", "recommended_index": <int>,
+                    "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
 
@@ -295,7 +296,9 @@ The texts are shown cut, never refused, though a round logged before the limits 
 with `sprints.cut`; each picture's line to `MAX_PICTURE_LINE_CHARS` (140), and `pictures`
 is `[]` when the question has none. `recommended_index` is the recommendation's index among the
 logged options, so it names the right option even when two cut options read the same; the owner's
-answer is still an option index into the full logged options.
+answer is still an option index into the full logged options. `needs_words_index` lists, ascending,
+the indices among the logged options of the options the manager marked `needs_words` (`[]` when
+none): the page refuses such an option until the owner has written words with it.
 
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
@@ -1823,7 +1826,9 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "options": [cut(o, MAX_OPTION_CHARS) for o in question.options],
                            "chosen": None, "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
-                           "recommended_index": question.options.index(question.recommended)}],
+                           "recommended_index": question.options.index(question.recommended),
+                           "needs_words_index": [i for i, option in enumerate(question.options)
+                                                 if option in question.needs_words]}],
             "pictures": _picture_entries(question.pictures),
             "items": [], "answers": [], "answered": False, "waiting_since": question.at}
 

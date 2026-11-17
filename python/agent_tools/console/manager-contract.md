@@ -86,7 +86,7 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
 
 1. Report it: list the issue in `issues` at stage `landing` and in `inbox`, and say why in `status`, in plain words with no issue number, for example `a slice waits for your look before it merges`.
 2. Take or collect the before and after pictures of the pull request's head, and keep the full sha of the head the delivery returned: the pictures it returned, or, when it returned none, pictures you take of the integration branch (before) and of that head (after).
-3. Ask the owner on a card with `sprint ask`, under the Questions rules: one question saying what to look at, its two pictures marked `"pair": "before"` and `"pair": "after"`, each with its line, and the options to approve this head, to approve it with one fix (the owner's words), or to ask for changes.
+3. Ask the owner on a card with `sprint ask`, under the Questions rules: one question saying what to look at, its two pictures marked `"pair": "before"` and `"pair": "after"`, each with its line, and the options to approve this head, to approve it with one fix (the owner's words), or to ask for changes, listing the fix and the changes options in `needs_words`.
 4. Give the owner's answer back to the same delivery's resume with three values: the full 40-hex sha of the head the pictures show, the id of the owner's `answer` message as `sprint inbox` printed it, and the answer, approve for that head, fix for that head with the owner's own words, or changes with the owner's own words. The resume records the approval with that message id, so it traces to the owner's answer. Never merge it any other way: never record an approval yourself, never start another delivery of the issue, and never answer the look for the owner.
 
 ## Questions
@@ -98,6 +98,7 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
    - `blocks`: one line, what waits behind the answer.
    - `options`: two to four one-line options of at most 80 characters each.
    - `recommended`: the exact text of the option you recommend.
+   - `needs_words`: optional, the exact text of each option the owner must explain in their own words (for example ask for changes); the page refuses that option until the owner writes what to change.
    - `replaces`: optional, `{"round": <id>, "index": <n>}`: names one open question of this sprint by its round id and its index, which counts from 0 in the order the round was sent; see item 4.
    - `pictures`: optional, at most 8 to a question: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`. `sprint ask` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once in a question) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and nothing is sent.
 
@@ -112,7 +113,7 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
    It prints `sprint: round <id> sent, <n> questions`.
 3. A sprint has one open round at a time: until every question of it is answered or taken back, another round is refused with `a round of questions is already open`. A round that replaces questions of the open round is taken only when it replaces every one of them still open: while another question of the open round stays open, a replacement round is still refused. Only a question that stops all work goes out as a further round, with `"blocker": true` beside `questions`.
 4. To re-ask a question (to add the pictures you forgot, fix its words or change an option), send the new round with `"replaces": {"round": <id>, "index": <n>}` on the new question, and never ask it again as a new question. The console takes the old question back in the same write, so the owner sees one card; item 3's rule still applies to the replacing round. To take back a question you no longer need, run `sprint withdraw-question --round <id> --index <n>` (`<n>` counts from 0). An answered question, one already taken back, or another sprint's question is refused with the reason and nothing is sent. An owner who answers a question you took back is told "the manager took this question back".
-5. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, the chosen option or the owner's own words: act on it and answer it with `sprint reply` like any message.
+5. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, `chosen` (the option, or null) and `words` (the owner's own words, or null), either or both: act on it and answer it with `sprint reply` like any message.
 
 ## Notices
 

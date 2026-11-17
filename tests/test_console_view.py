@@ -1618,7 +1618,8 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
             "headline": text, "context": None, "more_questions": 0,
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
-                           "recommended_index": options.index(recommended)}],
+                           "recommended_index": options.index(recommended),
+                           "needs_words_index": []}],
             "pictures": [],
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
@@ -1637,6 +1638,14 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["sentence"], QUESTION_SENTENCE)
         self.assertEqual(QUESTION_SENTENCE,
                          "Choose an option with its number and press Enter, or answer in your own words.")
+
+    def test_a_question_names_the_options_that_need_words_by_index(self):
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(
+            state_, questions=(dataclasses.replace(first, needs_words=("files",)), *rest))
+        shown = derive_view([state("p00", 1)], sprints={A: state_})
+        self.assertEqual(shown["inbox"]["open"][0]["questions"][0]["needs_words_index"], [1])
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
