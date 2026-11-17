@@ -1,6 +1,6 @@
 # ADR-console-065 — A question session reads the project's history, tracker and live state and answers plainly
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-066
 - **Decided in:** #1225
 
 ## Context
