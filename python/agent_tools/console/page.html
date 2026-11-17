@@ -3332,6 +3332,7 @@ function startQuestion(item, state) {
     state.notice = WORDS_NEEDED_NOTICE;
     return true;
   }
+  state.headline = item.headline;
   const answer = {};
   if (picked) answer.choice = pick;
   if (typed) answer.text = words;
@@ -3748,6 +3749,28 @@ function statusLine(act, state, item) {
     return false;
   }
   return true;
+}
+// A failed question answer that carried the owner's words keeps them even when its question has left the view, so a withdrawn or replaced question cannot lose what was typed.
+function keptWords(state) {
+  return state.phase === "failed" && state.pending !== null && state.pending !== undefined
+    && state.pending.round === true && typeof state.pending.body.text === "string";
+}
+function keptWordsCard(id, state) {
+  const card = el("article", "card kept-words");
+  card.appendChild(el("p", "q", state.headline || "A question that is no longer open"));
+  card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.reason));
+  const area = typedArea("kept-words-text field-area", "Your words, not sent", "");
+  area.value = state.pending.body.text;
+  area.readOnly = true;
+  card.appendChild(area);
+  const act = el("div", "act");
+  act.appendChild(actionButton("kept-words-dismiss btn-quiet", "Dismiss", () => {
+    answers.delete(id);
+    dropDrafts(id, ["words"]);
+    redraw();
+  }));
+  card.appendChild(act);
+  return card;
 }
 function actionLine(item, state, lead, card) {
   const act = el("div", "act");
@@ -4183,7 +4206,7 @@ function drawInbox(view) {
         continue;
       }
     }
-    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
+    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending" && !keptWords(state);
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
   }
   for (const id of [...replaced.keys()]) {
@@ -4193,7 +4216,7 @@ function drawInbox(view) {
     if (key.startsWith("draft:")) continue;
     const id = key.split("\n")[0];
     const state = answers.get(id);
-    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending");
+    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending" || keptWords(state));
     if (!present.has(id) && !busy) drafts.delete(key);
   }
   const current = currentEntry(open);
@@ -4206,6 +4229,9 @@ function drawInbox(view) {
   for (const item of starts) section.appendChild(failedStartCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
+  for (const [id, state] of answers) {
+    if (!present.has(id) && keptWords(state)) section.appendChild(keptWordsCard(id, state));
+  }
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);

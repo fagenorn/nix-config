@@ -2982,6 +2982,21 @@ class PageQuestionTest(unittest.TestCase):
                 (post,) = round_posts(snap)
                 self.assertEqual(posted(post)["text"], "make the line shorter")
 
+    def test_a_refusal_after_the_question_left_keeps_the_words_reachable(self) -> None:
+        sending, gone, dismissed = render([
+            START, {"frame": frame([QC])}, {"key": "3"},
+            {"type": {"class": "words-text", "text": "make the line shorter"}},
+            {"hold": True}, {"click": "send"}, {"clock": 5000}, {"snapshot": True},
+            {"frame": frame([])},
+            {"release": {"status": 409, "text": "this question is already answered"}},
+            {"snapshot": True},
+            {"click": "kept-words-dismiss"}, {"snapshot": True},
+        ])
+        self.assertEqual(count(sending, "kept-words"), 0)
+        self.assertEqual(field(gone, "kept-words-text")["value"], "make the line shorter")
+        self.assertIn("Could not send: this question is already answered", full(gone["inbox"]))
+        self.assertEqual(count(dismissed, "kept-words"), 0)
+
     def test_the_send_waits_for_an_option_or_words(self) -> None:
         first, second = render([
             START, {"frame": frame([Q0, Q1])}, {"click": "opt", "nth": 1}, {"snapshot": True},

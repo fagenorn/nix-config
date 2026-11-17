@@ -11,9 +11,9 @@ ADR-console-019 lets the owner answer a manager's question with an option or wit
 
 **D1. One send.** The card has one send. It posts the picked option, the owner's words, or both in one answer. The separate "Send my words" button is gone.
 
-**D2. The manager marks which option needs words.** A question carries `needs_words`, the index of the option whose answer needs the owner's words. The console exposes it to the page as `needs_words_index`, counted like `recommended_index` against the logged options (ADR-console-027). The page never guesses it from an option's label: an option the manager did not mark sends without words, as before.
+**D2. The manager marks which option needs words.** A question carries `needs_words`, a list of the exact texts of the options whose answer needs the owner's words (one or more). The console exposes it to the page as `needs_words_index`, the list of those options' indices counted like `recommended_index` against the logged options (ADR-console-027). The page never guesses it from an option's label: an option the manager did not mark sends without words, as before.
 
-**D3. The body and the rows.** The body of `POST /api/round-answer` carries `choice`, `text` or both. With both, the `question.answered` row gains `"words"`, the owner's words, beside `answer` and `chosen`; with one of them the row is the row it was. The `sprint inbox` entry of an answer gains `words` only when the row has them, so an entry without words keeps its keys.
+**D3. The body and the rows.** The body of `POST /api/round-answer` carries `choice`, `text` or both. With both, the `question.answered` row gains `"words"`, the owner's words, beside `answer` and `chosen`; with one of them the row is the row it was. The `sprint inbox` entry of an answer always carries `words`: null for an option alone, the answer text for words alone, and the owner's words beside the option for both.
 
 **D4. `differs` is unchanged.** `differs` stays `chosen != recommended`. Words do not make an answer differ, and the digest speaks the answer text only when `differs` is true, as before.
 
