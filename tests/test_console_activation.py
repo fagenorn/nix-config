@@ -20,6 +20,7 @@ from unittest import mock
 from agent_tools.console import activation, activation_run, console, service, view
 from agent_tools.console.activation import (
     Activation, blob_id, console_files, origin_files, reader_for, reading)
+from agent_tools.console.event_log import EventLog
 from agent_tools.console.activation_run import NEXT_STEP, Activator, Outcome, Refused, Stopped
 from agent_tools.project_contract import resolve_project
 
@@ -408,6 +409,225 @@ class ActivationServiceTest(Trees):
         lines = captured.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("console: activation_failed ReadFailed: "), lines[0])
+
+
+class ActivatePageWriteTest(Trees):
+    """The Activate page write (#1193): one run for the shown commit, held until its whole tree is gone."""
+
+    def setUp(self):
+        super().setUp()
+        self.advance({f"{CONSOLE}/view.py": "VALUE = 2\n"})
+        self.commit = git(self.checkout, "rev-parse", "origin/main").strip()
+        self.store = self.tmp / "console" / "events.sqlite3"
+        self.registry = self.tmp / "fleet" / "registry.json"
+        support.write_registry(self.registry, support.entries(2))
+        self.release = self.tmp / "release"
+        self.ran = self.tmp / "ran"
+        self.addCleanup(self.kill_trees)
+        self.addCleanup(self.release.touch)
+
+    def kill_trees(self):
+        if not self.store.exists():
+            return
+        for _, _, kind, _, payload in support.log_rows(self.store):
+            tree = json.loads(payload).get("tree") if kind == "activation.started" else None
+            if isinstance(tree, str) and tree.startswith("group:"):
+                activation_run.stop_tree(tree, signal.SIGKILL)
+
+    def hold(self):
+        return ("import time, pathlib\n"
+                f"r = pathlib.Path({str(self.release)!r})\n"
+                "end = time.time() + 30\n"
+                "while not r.exists() and time.time() < end:\n    time.sleep(0.05)\n")
+
+    def standin(self, tail="", head=""):
+        return (head + "import subprocess, pathlib\n"
+                f"open({str(self.ran)!r}, 'a').write("
+                "subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True, text=True)"
+                ".stdout.strip() + '\\n')\n" + self.hold() + tail)
+
+    def activator(self, body=None, tip=None):
+        return activation_run.Activator(
+            self.tmp / "state", command_of=lambda root: ([sys.executable, "-c", body or self.standin()], "."),
+            revision=lambda: self.commit, tip=tip or (lambda root: self.commit), scoped=False)
+
+    def reading(self):
+        return Fake(Activation(str(self.checkout), (CONSOLE + "/view.py",), self.commit))
+
+    def open(self, reader=None, activator=None, **kwargs):
+        svc = support.service(
+            self, self.store, self.registry, activation_reader=reader or self.reading(),
+            activator=activator or self.activator(), activation_seconds=3600, **kwargs)
+        svc.poll_activation()
+        return svc
+
+    def headers(self, svc, **changes):
+        headers = {"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": svc.page_token, **changes}
+        return {name: value for name, value in headers.items() if value is not None}
+
+    def post(self, svc, body=None, **changes):
+        body = {"commit": self.commit} if body is None else body
+        return support.post_page(
+            svc.address, "/api/activate", self.headers(svc, **changes), json.dumps(body).encode())
+
+    def payloads(self, kind):
+        return [json.loads(row[4]) for row in support.log_rows(self.store) if row[2] == kind]
+
+    def kinds(self):
+        return [row[2] for row in support.log_rows(self.store) if row[2].startswith("activation.")]
+
+    def await_finished(self, count=1, seconds=20):
+        deadline = time.monotonic() + seconds
+        while len(self.payloads("activation.finished")) < count:
+            self.assertLess(time.monotonic(), deadline, "no finished row")
+            time.sleep(0.05)
+
+    def await_file(self, path, seconds=10):
+        deadline = time.monotonic() + seconds
+        while not path.exists():
+            self.assertLess(time.monotonic(), deadline, f"{path} never appeared")
+            time.sleep(0.05)
+
+    def test_an_approved_activation_runs_the_stand_in_once_for_the_shown_commit(self):
+        svc = self.open()
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body), (204, b""))
+        self.release.touch()
+        self.await_finished()
+        self.assertEqual(self.ran.read_text().splitlines(), [self.commit])
+        self.assertNotEqual(self.commit, git(self.checkout, "rev-parse", "HEAD").strip())
+        (started,) = self.payloads("activation.started")
+        self.assertEqual((started["root"], started["commit"]), (str(self.checkout), self.commit))
+        self.assertTrue(started["tree"].startswith("group:"))
+        (finished,) = self.payloads("activation.finished")
+        self.assertEqual(finished["root"], str(self.checkout))
+        self.assertEqual(finished["commit"], self.commit)
+        self.assertIs(finished["ok"], True)
+        self.assertIsNone(finished["reason"])
+
+    def test_an_activation_without_the_token_is_refused_and_runs_nothing(self):
+        svc = self.open()
+        for change in ({"X-Console-Token": None}, {"X-Console-Token": "wrong"}):
+            status, _, body = self.post(svc, **change)
+            self.assertEqual((status, body.strip()), (403, b"token refused"))
+        status, _, body = self.post(svc, Origin="http://example.invalid")
+        self.assertEqual((status, body.strip()), (403, b"origin refused"))
+        self.assertFalse(self.ran.exists())
+        self.assertEqual(self.kinds(), [])
+
+    def test_a_second_activation_while_one_runs_is_refused(self):
+        svc = self.open()
+        self.assertEqual(self.post(svc)[0], 204)
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body.strip()), (409, b"an activation is already running"))
+        self.release.touch()
+        self.await_finished()
+        self.assertEqual(self.ran.read_text().splitlines(), [self.commit])
+        self.assertEqual(len(self.payloads("activation.started")), 1)
+
+    def test_a_second_activation_is_refused_while_a_descendant_of_the_first_runs(self):
+        body = ("import subprocess, sys\n"
+                f"subprocess.Popen([sys.executable, '-c', {self.hold()!r}])\n")
+        svc = self.open(activator=self.activator(body))
+        self.assertEqual(self.post(svc)[0], 204)
+        self.await_file(self.tmp / "state" / "activation.result")
+        status, _, answer = self.post(svc)
+        self.assertEqual((status, answer.strip()), (409, b"an activation is already running"))
+        self.assertEqual(self.payloads("activation.finished"), [])
+        self.release.touch()
+        self.await_finished()
+        (finished,) = self.payloads("activation.finished")
+        self.assertIs(finished["ok"], True)
+
+    def test_an_activation_for_a_commit_that_is_not_the_shown_tip_is_refused(self):
+        svc = self.open(activator=self.activator(tip=lambda root: "f" * 40))
+        status, _, body = self.post(svc, {"commit": "f" * 40})
+        self.assertEqual(
+            (status, body.strip()),
+            (409, b"that commit is no longer the tip of origin's integration branch"))
+        self.assertEqual(self.kinds(), [])
+        self.assertFalse(self.ran.exists())
+
+    def test_an_activation_after_the_tip_moved_is_refused(self):
+        svc = self.open(activator=self.activator(tip=lambda root: "e" * 40))
+        status, _, body = self.post(svc)
+        self.assertEqual(
+            (status, body.strip()),
+            (409, b"that commit is no longer the tip of origin's integration branch"))
+        self.assertEqual(self.kinds(), [])
+
+        def unreadable(root):
+            raise activation.ReadFailed("x")
+
+        other = self.open(activator=self.activator(tip=unreadable))
+        status, _, body = self.post(other)
+        self.assertEqual(
+            (status, body.strip()),
+            (409, b"the tip of origin's integration branch could not be read"))
+        self.assertEqual(self.kinds(), [])
+        self.assertFalse(self.ran.exists())
+
+    def test_an_activation_with_no_line_shown_is_refused(self):
+        svc = self.open(reader=Fake(None))
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body.strip()), (409, b"nothing to activate"))
+        self.assertEqual(self.kinds(), [])
+
+    def test_a_bad_activation_body_is_refused(self):
+        svc = self.open()
+        for body in ({}, {"commit": "ABC"}, {"commit": self.commit, "x": 1}):
+            status, _, answer = self.post(svc, body)
+            self.assertEqual((status, answer.strip()), (400, b"bad activation"), body)
+        self.assertEqual(self.kinds(), [])
+
+    def test_a_run_cut_by_a_restart_is_settled_from_its_recorded_exit(self):
+        body = self.standin(tail="print('switch-to-configuration failed')\nraise SystemExit(4)\n")
+        first = self.open(activator=self.activator(body))
+        self.assertEqual(self.post(first)[0], 204)
+        first.close()
+        self.assertEqual(self.payloads("activation.finished"), [])
+        second = self.open(activator=self.activator(body))
+        status, _, answer = self.post(second)
+        self.assertEqual((status, answer.strip()), (409, b"an activation is already running"))
+        self.release.touch()
+        self.await_finished()
+        (finished,) = self.payloads("activation.finished")
+        self.assertIs(finished["ok"], False)
+        self.assertEqual(
+            finished["reason"], "the activation command exited 4 (switch-to-configuration failed)")
+
+    def test_a_started_row_without_a_tree_is_settled_as_unrecorded(self):
+        log = EventLog(self.store)
+        log.append([("activation.started", None, {"root": str(self.checkout), "commit": self.commit})])
+        log.close()
+        self.open()
+        (finished,) = self.payloads("activation.finished")
+        self.assertIs(finished["ok"], False)
+        self.assertEqual(finished["reason"], activation_run.UNRECORDED_REASON)
+        self.assertIsNotNone(finished["next_step"])
+
+    def test_closing_during_a_run_appends_no_finished_row(self):
+        svc = self.open()
+        self.assertEqual(self.post(svc)[0], 204)
+        (started,) = self.payloads("activation.started")
+        began = time.monotonic()
+        svc.close()
+        self.assertLess(time.monotonic() - began, 15)
+        self.assertEqual(self.payloads("activation.finished"), [])
+        self.assertTrue(activation_run.tree_alive(started["tree"]))
+
+    def test_console_main_gives_the_service_an_activator(self):
+        recorded = {}
+
+        def recorder(*args, **kwargs):
+            recorded.update(kwargs)
+            raise OSError("stop here")
+
+        with mock.patch.object(console.service, "ConsoleService", recorder), \
+                contextlib.redirect_stderr(io.StringIO()):
+            console.main(["--port", "0"])
+        self.assertIsInstance(recorded["activator"], activation_run.Activator)
 
 
 class ActivationRunTest(Trees):

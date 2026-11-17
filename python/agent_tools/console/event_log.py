@@ -185,6 +185,8 @@ SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
 PICTURE_STORED = "picture.stored"
+ACTIVATION_STARTED = "activation.started"
+ACTIVATION_FINISHED = "activation.finished"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the three question kinds, the two notice kinds, the

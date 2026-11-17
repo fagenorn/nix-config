@@ -627,7 +627,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
                                            "/api/adoption-register", "/api/plan-defer",
                                            "/api/register-confirm", "/api/register-cancel",
                                        "/api/trust-check", "/api/owner-notice",
-                                       "/api/owner-notice-withdraw"})
+                                       "/api/owner-notice-withdraw", "/api/activate"})
         keys = [PAID10["key"], LIVE12["key"]]
         single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
                   "confirm": "octo/widgets#12"}

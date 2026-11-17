@@ -1889,7 +1889,7 @@ def derive_view(
                 key=lambda p: (p.failed_at, p.sprint_id))],
         "activation": (
             None if activation is None or not activation.changed else
-            {"text": (ACTIVATION_BEHIND_TEXT if activation.local_behind else ACTIVATION_TEXT).format(
+            {"text": ACTIVATION_TEXT.format(
                 command=ACTIVATE_COMMAND, root=activation.root),
              "command": ACTIVATE_COMMAND, "root": activation.root}),
         "spend": dict(spend) if spend is not None else None,

@@ -55,12 +55,14 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import agent_tools
 from agent_tools.console import activation
+from agent_tools.console.event_log import ACTIVATION_FINISHED, ACTIVATION_STARTED, Event
+from agent_tools.console.sessions import at_ms
 from agent_tools.project_contract import resolve_project
 
 ACTIVATE_SECONDS = 3600.0
@@ -81,6 +83,7 @@ _REVISION_COMMANDS = {
     "darwin": "/run/current-system/sw/bin/darwin-version",
 }
 _COULD_NOT_RUN = 127
+_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 class Refused(Exception):
@@ -104,6 +107,58 @@ class Run:
     root: str
     commit: str
     tree: str
+
+
+@dataclass(frozen=True)
+class LastRun:
+    """The newest activation the log records: `running`, or settled as `activated` or `failed`."""
+
+    commit: str
+    root: str
+    state: str
+    reason: str | None
+    next_step: str | None
+    finished_ms: int | None
+    tree: str | None = None
+
+
+def started_row(run: Run) -> tuple[str, None, dict]:
+    return ACTIVATION_STARTED, None, {"root": run.root, "commit": run.commit, "tree": run.tree}
+
+
+def finished_row(root: str, outcome: Outcome) -> tuple[str, None, dict]:
+    return ACTIVATION_FINISHED, None, {
+        "root": root, "commit": outcome.commit, "ok": outcome.ok, "reason": outcome.reason,
+        "next_step": outcome.next_step}
+
+
+def _text(value) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def fold(events: Iterable[Event], last: LastRun | None = None) -> LastRun | None:
+    """The last run of `events` after `last`: a started row is running; a finished row for its commit settles it."""
+    for event in events:
+        payload = event.payload
+        root, commit = _text(payload.get("root")), _text(payload.get("commit"))
+        if root is None or commit is None:
+            continue
+        if event.kind == ACTIVATION_STARTED:
+            last = LastRun(commit, root, "running", None, None, None, _text(payload.get("tree")))
+        elif event.kind == ACTIVATION_FINISHED and isinstance(payload.get("ok"), bool):
+            last = LastRun(
+                commit, root, "activated" if payload["ok"] else "failed", _text(payload.get("reason")),
+                _text(payload.get("next_step")), at_ms(event.at))
+    return last
+
+
+def parse_request(body: bytes) -> str:
+    """The commit of an Activate request, `{"commit": <40 lowercase hex>}` and nothing else; ValueError otherwise."""
+    document = json.loads(body.decode("utf-8"))
+    if not (isinstance(document, dict) and list(document) == ["commit"]
+            and isinstance(document["commit"], str) and _COMMIT.fullmatch(document["commit"])):
+        raise ValueError("not an activation request")
+    return document["commit"]
 
 
 def activation_command(root: str) -> tuple[list[str], str]:
