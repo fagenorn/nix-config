@@ -1,4 +1,4 @@
-# ADR-console-069 — A failed adoption commit shows its hook and last lines, and Cancel waits until it was shown
+# ADR-console-071 — A failed adoption commit shows its hook and last lines, and Cancel waits until it was shown
 
 - **Status:** accepted
 - **Decided in:** #1236

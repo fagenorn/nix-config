@@ -56,8 +56,9 @@ def session(sid, state="idle", deliveries=()):
     return {"session_id": sid, "state": state, "deliveries": list(deliveries)}
 
 
-def delivery(issue, moved_age):
+def delivery(issue, moved_age, journal_age=None):
     return {"run_id": "r", "moved_at": iso(NOW - moved_age),
+            "journal_at": iso(NOW - (moved_age if journal_age is None else journal_age)),
             "issues": [{"issue": issue, "stage": "building", "stage_text": "building"}]}
 
 
@@ -165,6 +166,17 @@ class MovementCheckTest(unittest.TestCase):
                     if name == "inbox delivery" else []
                 code, out = self.check(view(project(self.moving(**kw), outside=outside)))
                 self.assertEqual((75, "waiting"), (code, out["status"]))
+
+    def test_a_delivery_moved_only_by_its_sessions_output_does_not_keep_met_away(self):
+        with self.subTest("fresh output, old journal"):
+            code, out = self.check(view(project(self.moving(
+                sessions=[session("s1", deliveries=[delivery(4, 5 * MIN, journal_age=40 * MIN)])]))))
+            self.assertEqual((0, "met"), (code, out["status"]))
+        with self.subTest("no journal time"):
+            bare = {k: v for k, v in delivery(4, 40 * MIN).items() if k != "journal_at"}
+            code, out = self.check(view(project(self.moving(
+                sessions=[session("s1", deliveries=[bare])]))))
+            self.assertEqual((75, "waiting"), (code, out["status"]))
 
     def test_a_stuck_sprint_known_only_through_its_associations_is_found(self):
         for session_id, manager, relative in (

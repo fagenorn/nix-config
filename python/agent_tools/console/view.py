@@ -239,8 +239,9 @@ The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
 "lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft",
-"draft_more", "adoption", "approve", "cancel"}`, the owner's latest registration of a repository from the page
-(twenty-one keys), with the plan's plain open questions and, when the plan refused the last answer, the
+"draft_more", "adoption", "approve", "cancel", "remote"}`, the owner's latest registration of a repository from the page
+(twenty-two keys; `remote`, #1233, is the sentence that the remote could not be read, else null, and
+the reduced entry keeps it beside the needs-you line), with the plan's plain open questions and, when the plan refused the last answer, the
 refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
 contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
 null; `draft_more` is the counted line for the shown settings outside the main ones
@@ -361,7 +362,10 @@ builds it. It has reason `register_confirm`, key `register-confirm/<root>/<at>`,
 the options `Register it` and `Not now` with the values `register` and `not_now`, and the
 folder-trust sentence as its `why`. It is copied as given and not filtered by the registered
 projects, sits right after the apply items, and counts once in `inbox_items` and the headline.
-While one is open the sentence is `REGISTER_SENTENCE`. Without `confirm_items` the view is unchanged.
+While one is open the sentence is `REGISTER_SENTENCE`. It also carries the behind card of a checkout
+behind its remote (#1233, ADR-console-070): reason `register_behind`, key `register-behind/<root>/<at>`,
+`plan_id` null, the options `Update it` and `Not now` with the values `update` and `not_now`. Without
+`confirm_items` the view is unchanged.
 
 Each failure item a caller passes (`failure_items`; #1085, ADR-console-035) is one entry of
 `inbox.open` too: a registration that failed in plain words, as `register.failure_items` builds it.
@@ -451,7 +455,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
                        "deliveries": [<delivery entry>, ...]}
     <delivery entry> = {"run_id", "quiet": <bool>, "moved_text": "<text>",
+                        "wait_text": "<text>" | null,
                         "summary": "<one sentence>", "moved_at": "<ISO time>",
+                        "journal_at": "<ISO time>", "reading_at": "<ISO time>",
                         "issues": [{"issue": <int>, "stage", "stage_text"}, ...]}
     <unmanaged entry> = {"type": "unmanaged", "root": "<repo>", "name": "<name>",
                          "label": "Not yet managed", "outside_sprints": <line>}
@@ -467,11 +473,25 @@ characters of its id.
 `deliveries` (always present, possibly empty) are the in-flight workflow runs of that listed
 session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
 session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
-`quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `summary` is the run as one
+`quiet` and `moved_text` come from `moved_text(now_ms - latest)` where `latest` is the run's
+reading (#1212, ADR-console-069): the journal's `moved_ms` alone for a run outside a running
+sprint. A run belongs to the first of the project's shown sprints (newest stated first) that has
+not ended and either names one of the run's issue numbers (`sprint_issue_numbers`) or lists the
+run's session (a session of its `sessions`, or its `manager_session`); it then also reads the
+sprint's own signals for that run alone (`wait_signals` narrowed to the run's issues and session):
+the newest of its session's transcript write and running check (with the journal, the run's
+`base`), and of CI, a commit, a release step and the land lock of the run's issues. `moved_text`
+and `latest` follow `moved_text(now_ms - latest)` as before; the wait is named (`wait_text` set,
+`moved_text` equal to it, `quiet` false) only with a clock, when the journal and the session
+signals alone are `QUIET_AFTER_MS` old and a wait is not: the first of CI, a commit, a release step
+and the land lock (the order of `sprint_wait`) whose time is inside the window. `wait_text` is null
+otherwise and always outside a sprint. `summary` is the run as one
 sentence, `run_summary(issues, moved_text)`: "<n> issue(s) in delivery: <count> <stage>, ...,
 <moved_text>" with the stages in a fixed order and no issue number, or "No issue in delivery yet,
-<moved_text>" with none; `moved_at` is the journal's last movement as an ISO UTC time, which lets
-the page age the sentence's end itself. An unmanaged entry's `name` is the last segment of its `root` (the root
+<moved_text>" with none; `reading_at` is the reading's latest movement as an ISO UTC time, which lets
+the page age the sentence's end itself, and `moved_at` and `journal_at` are the run journal's own
+last movement (`moved_at` keeps the meaning a pinned verify script reads; `reading_at` equals both
+outside a sprint). An unmanaged entry's `name` is the last segment of its `root` (the root
 itself when it has none). `now_ms` is injected by the
 caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
 ended or unlisted session appear nowhere, and they change no count, summary, order or the
@@ -540,11 +560,13 @@ phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track
 sprint has exactly one ball and a non-empty now-sentence, and `state` and `state_text` are
 unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
-set, its manager failed to start with no brief (`sprints.failed_start`), or one of the sprint's listed sessions is waiting for an answer or a permission (the manager
-waits on the owner at its terminal); `manager` ("manager working") while the movement reading moves;
+set, its manager failed to start with no brief (`sprints.failed_start`), one of the sprint's listed sessions is waiting for an answer or a permission (the manager
+waits on the owner at its terminal), or its manager cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
 else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
-that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, then for
-a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
+that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, `NOW_ANSWER_TEXT`; a manager that cannot hear the console
+(#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
+being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed session waiting for a
+permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
 `drafting`); no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
@@ -655,7 +677,7 @@ refused, no newline.
 
 import json
 from collections import Counter
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
@@ -722,6 +744,7 @@ from agent_tools.console.sprints import (
     NOW_BRIEF_TEXT,
     NOW_CI_TEXT,
     NOW_COMMITTING_TEXT,
+    NOW_DEAF_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
     NOW_FAILED_START_TEXT,
@@ -854,7 +877,8 @@ REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
 ADOPTING_SENTENCE = "An adoption is under way; nothing is waiting on you."
-ASKING_REASONS = ("register_failed", "register_apply", "register_retry", "register_confirm")
+ASKING_REASONS = ("register_failed", "register_apply", "register_retry", "register_confirm",
+                  "register_behind")
 NEEDS_LINE = "Register {name}: needs you"
 REGISTER_TYPE_SENTENCE = "Type the answer on its card and press Enter."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
@@ -1064,14 +1088,18 @@ def repo_name(root: str) -> str:
     return PurePosixPath(root).name or root
 
 
-def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
-    quiet, text = moved_text(0 if now_ms is None else now_ms - state.moved_ms)
+def _delivery_entry(state: DeliveryState, now_ms: int | None,
+                    waits: "WaitSignals | None" = None) -> dict:
+    reading = run_reading(state, now_ms, waits)
     return {
         "run_id": state.run_id,
-        "quiet": quiet,
-        "moved_text": text,
-        "summary": run_summary(state.issues, text),
-        "moved_at": datetime.fromtimestamp(state.moved_ms / 1000, timezone.utc).isoformat(),
+        "quiet": reading.quiet,
+        "moved_text": reading.moved_text,
+        "wait_text": reading.wait_text,
+        "summary": run_summary(state.issues, reading.moved_text),
+        "moved_at": _utc(state.moved_ms),
+        "journal_at": _utc(state.moved_ms),
+        "reading_at": _utc(reading.moved_ms),
         "issues": [
             {"issue": i.issue, "stage": i.stage, "stage_text": stage_text(i)}
             for i in sorted(state.issues, key=lambda i: i.issue)
@@ -1082,7 +1110,9 @@ def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
 def _session_entry(session: SessionState,
                    deliveries: Mapping[str, Sequence[DeliveryState]],
                    now_ms: int | None,
-                   texts: Mapping[str, str] = STATE_TEXT) -> dict:
+                   texts: Mapping[str, str] = STATE_TEXT,
+                   waits_of: "Callable[[DeliveryState], WaitSignals | None]" = lambda run: None,
+                   ) -> dict:
     runs = sorted(deliveries.get(session.session_id, ()),
                   key=lambda d: (-d.moved_ms, d.run_id))
     return {
@@ -1091,7 +1121,7 @@ def _session_entry(session: SessionState,
         "state": session.state,
         "state_text": texts[session.state],
         "cwd": session.cwd,
-        "deliveries": [_delivery_entry(d, now_ms) for d in runs],
+        "deliveries": [_delivery_entry(d, now_ms, waits_of(d)) for d in runs],
     }
 
 
@@ -1101,7 +1131,8 @@ def _ordered(sessions: Iterable[SessionState]) -> list[SessionState]:
 
 def _line(sessions: Iterable[SessionState],
           deliveries: Mapping[str, Sequence[DeliveryState]],
-          now_ms: int | None) -> dict:
+          now_ms: int | None,
+          waits_of: "Callable[[DeliveryState], WaitSignals | None]" = lambda run: None) -> dict:
     ordered = _ordered(sessions)
     summary = ", ".join(
         f"{n} {text}" for text, members in _SUMMARY_PARTS
@@ -1111,7 +1142,7 @@ def _line(sessions: Iterable[SessionState],
         "working": sum(s.state == WORKING for s in ordered),
         "waiting": sum(s.state in _WAITING for s in ordered),
         "summary": summary or "No sessions",
-        "sessions": [_session_entry(s, deliveries, now_ms) for s in ordered],
+        "sessions": [_session_entry(s, deliveries, now_ms, waits_of=waits_of) for s in ordered],
     }
 
 
@@ -1223,6 +1254,20 @@ def sprint_sessions_of(project_id: str, sprints: Iterable[SprintState],
     return found
 
 
+def sprint_absent_managers(project_id: str, sprints: Iterable[SprintState],
+                           belonging: Mapping[str, frozenset[str]]) -> dict[str, frozenset[str]]:
+    """The running sprints of `project_id` each known `manager_session` that is not a live session of
+    theirs (absent from the registry or ended, so absent from `belonging`) manages (#1229). Its
+    transcript is still read for a held peer message, whatever became of the session."""
+    found: dict[str, set[str]] = {}
+    for sprint in sprints:
+        if (sprint.project_id == project_id and ended_at(sprint) is None
+                and sprint.manager_session is not None
+                and sprint.sprint_id not in belonging.get(sprint.manager_session, ())):
+            found.setdefault(sprint.manager_session, set()).add(sprint.sprint_id)
+    return {sid: frozenset(ids) for sid, ids in found.items()}
+
+
 def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
                          sessions: Iterable[SessionState],
                          states: Mapping[str, ProjectState]) -> dict[str, tuple[tuple[str, int], ...]]:
@@ -1257,16 +1302,19 @@ def sprint_issue_numbers(state: SprintState) -> set[int]:
 
 
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
-                 manager_ids: Collection[str] = ()) -> WaitSignals:
+                 manager_ids: Collection[str] = (), *, issues: Collection[int] | None = None,
+                 session_id: str | None = None) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
     belongs when its issues meet them, a branch when its issue is one of them, a land lock time
     when its issue is one of them, and the release whatever the issues. The session signals are the newest transcript write and the newest
     running check among the associations of this sprint; a manager session's time inside the reply
-    window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out."""
+    window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out. `issues` replaces
+    the sprint's issues with the given ones (a run's own, #1212) and `session_id` keeps only the
+    associations of that session; both default to the whole sprint."""
     if movement is None:
         return NO_WAITS
-    issues = sprint_issue_numbers(state)
+    issues = sprint_issue_numbers(state) if issues is None else set(issues)
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
@@ -1280,7 +1328,8 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
             return None
         return ms
 
-    mine = [own for own in movement.sessions if own.sprint_id == state.sprint_id]
+    mine = [own for own in movement.sessions if own.sprint_id == state.sprint_id
+            and (session_id is None or own.session_id == session_id)]
     outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
     checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
@@ -1356,12 +1405,62 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
+    return _fresh_wait(waits, now_ms)
+
+
+def _fresh_wait(waits: WaitSignals, now_ms: int) -> str | None:
+    """The first of CI, a committing delivery, a release step and the land lock whose signal is
+    inside `QUIET_AFTER_MS`."""
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
-                     (waits.release_ms, NOW_RELEASE_TEXT),
-                     (waits.lock_ms, NOW_LOCK_TEXT)):
+                     (waits.release_ms, NOW_RELEASE_TEXT), (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:
             return text
     return None
+
+
+@dataclass(frozen=True)
+class RunReading:
+    """One run line's movement reading (#1212): whether it reads quiet, its sentence, the time of
+    its latest movement and the wait it names, None when it names none."""
+    quiet: bool
+    moved_text: str
+    moved_ms: int
+    wait_text: str | None
+
+
+def run_reading(run: DeliveryState, now_ms: int | None,
+                waits: WaitSignals | None = None) -> RunReading:
+    """A run's reading. Without `waits` it is the journal's alone. With them its base is the newest
+    of the journal and the run's session output and running check, and its latest also takes the
+    wait signals; the wait is named only with a clock when the base is `QUIET_AFTER_MS` old and a
+    wait is not (ADR-console-050 D3, ADR-console-069)."""
+    signals = [run.moved_ms]
+    if waits is not None:
+        signals += [ms for ms in (waits.output_ms, waits.check_ms) if ms is not None]
+    base = max(signals)
+    latest = base
+    if waits is not None:
+        latest = max([base] + [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms,
+                                             waits.lock_ms) if ms is not None])
+    quiet, text = moved_text(0 if now_ms is None else now_ms - latest)
+    wait = None
+    if (waits is not None and now_ms is not None and now_ms - base >= QUIET_AFTER_MS
+            and now_ms - latest < QUIET_AFTER_MS):
+        wait = _fresh_wait(waits, now_ms)
+    if wait is not None:
+        quiet, text = False, wait
+    return RunReading(quiet, text, latest, wait)
+
+
+def run_sprint(run: DeliveryState, sprints: Iterable[SprintState],
+               manager_ids: Mapping[str, Collection[str]]) -> SprintState | None:
+    """The sprint a run belongs to: the first of `sprints` (newest stated first) that has not ended
+    and either names one of the run's issues or lists the run's session (ADR-console-042 D3)."""
+    numbers = {i.issue for i in run.issues}
+    return next((s for s in sprints
+                 if ended_at(s) is None
+                 and (sprint_issue_numbers(s) & numbers
+                      or run.session_id in manager_ids.get(s.sprint_id, ()))), None)
 
 
 def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
@@ -1398,7 +1497,7 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
 
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
                 listed: Collection[str], waits: WaitSignals = NO_WAITS,
-                failed_start: bool = False) -> str | None:
+                failed_start: bool = False, deaf: bool = False) -> str | None:
     """Who holds a running sprint's ball (#1086), or None once it has ended. `listed` is the
     `state` of each of the sprint's own listed sessions. The owner when anything waits on them: an
     open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
@@ -1407,11 +1506,12 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
-    against the failure. `waits` are the sprint's wait signals."""
+    against the failure. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
+    shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
     brief = state.brief
-    if (waiting or (brief is not None and brief.decision == NONE) or state.stalled is not None
+    if (waiting or deaf or (brief is not None and brief.decision == NONE) or state.stalled is not None
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
@@ -1445,10 +1545,12 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
-               wait: str | None = None, failed_start: bool = False) -> str | None:
+               wait: str | None = None, failed_start: bool = False,
+               deaf: bool = False) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
-    `ball`, `wait` (`sprint_wait`) and `failed_start` are the entry's own."""
+    `ball`, `wait` (`sprint_wait`), `failed_start` and `deaf` (the manager holds the console's wake
+    behind a prompt no one at a terminal answers, #1229) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1456,6 +1558,8 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_STOPPING_TEXT
     if WAITING_ANSWER in listed:
         return NOW_ANSWER_TEXT
+    if deaf:
+        return NOW_DEAF_TEXT
     if WAITING_PERMISSION in listed:
         return NOW_PERMISSION_TEXT
     if failed_start:
@@ -1546,7 +1650,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
                   nudges: bool = True, looked: str | None = None,
                   movement: ProjectMovement | None = None,
-                  wait_lines: Sequence[Mapping] = ()) -> dict:
+                  wait_lines: Sequence[Mapping] = (),
+                  waits_of: Callable[[DeliveryState], WaitSignals | None] = lambda run: None,
+                  ) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1575,10 +1681,11 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
     failed = failed_start(state, bool(sessions), managers)
-    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed)
-    minute = nudges and state.manager is not None and state.manager.state == STARTED
     own = sorted((m for m in (() if movement is None else movement.sessions)
                   if m.sprint_id == state.sprint_id), key=lambda m: m.session_id)
+    deaf = any(m.held and m.session_id in manager_ids for m in own)
+    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf)
+    minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,
@@ -1589,7 +1696,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
         "now_text": sprint_now(state, quota, listed, waiting, stages, ball,
-                               sprint_wait(state, now_ms, listed, waits), failed_start=failed),
+                               sprint_wait(state, now_ms, listed, waits), failed_start=failed,
+                               deaf=deaf),
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
@@ -1615,7 +1723,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                     "text": CHECK_LINE_TEXT.format(question=r.item["question"])}
                    for r in checks],
         "waits": [dict(w) for w in wait_lines],
-        "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
+        "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT, waits_of)
                      for s in _ordered(sessions)],
         "messages": [_message_entry(m, now_ms, minute, retry, looked, ended is not None)
                      for m in _shown_messages(state.messages, looked)],
@@ -1661,10 +1769,24 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    waits: Sequence[Mapping] = (),
                    read: ReadState | None = None,
                    questions: Mapping | None = None) -> dict:
+    manager_ids: dict[str, set[str]] = {}
+    for sprint in sprints:
+        ids = {s.session_id for s in (sprint_sessions or {}).get(sprint.sprint_id, ())}
+        if sprint.manager_session is not None:
+            ids.add(sprint.manager_session)
+        manager_ids[sprint.sprint_id] = ids
+
+    def waits_of(run: DeliveryState) -> WaitSignals | None:
+        sprint = run_sprint(run, sprints, manager_ids)
+        if sprint is None:
+            return None
+        return wait_signals(sprint, movement, manager_ids[sprint.sprint_id],
+                            issues={i.issue for i in run.issues}, session_id=run.session_id)
+
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
-                              (sprint_waits or {}).get(s.sprint_id, ()))
+                              (sprint_waits or {}).get(s.sprint_id, ()), waits_of)
                 for s in group]
 
     return {
@@ -1678,7 +1800,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "finished_sprints": (None if not finished else
                              {"label": FINISHED_LABEL, "count": len(finished),
                               "sprints": entries(finished)}),
-        "outside_sprints": _line(sessions, deliveries, now_ms),
+        "outside_sprints": _line(sessions, deliveries, now_ms, waits_of),
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
         "waits": [dict(w) for w in waits],
