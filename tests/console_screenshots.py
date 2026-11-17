@@ -70,7 +70,8 @@ Contract:
   button does not show `owner/web`'s open field, its working question and its answered question's
   Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a
   `question-read` shot on a page with the panel does not read `READ_SHOWN` (`READ_READING`: the
-  panel in the main column at the column's full width, the question once, the answer holding bold,
+  panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
+  the script), the answer holding bold,
   a list, inline code and a block of code, the call-out last in its row after the answer, three
   choices visible); or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
   opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
@@ -207,7 +208,7 @@ READ_ANSWER = "\n".join((
     "Could not find out: none",
     "Question for you: Which step should I take next?",
     *(f"- {choice}" for choice in READ_CHOICES)))
-READ_READING = """(() => {
+READ_READING = """((needle) => {
   const panel = document.querySelector('#reading');
   const main = document.querySelector('main');
   if (!panel || !main) return [false, 0, false, false, 0];
@@ -216,7 +217,6 @@ READ_READING = """(() => {
   const inMain = panel.getClientRects().length > 0 && main.contains(panel)
     && panel.getBoundingClientRect().width >= content - 1;
   const text = panel.innerText;
-  const needle = %s;
   let count = 0;
   for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + needle.length)) count++;
   const answer = panel.querySelector('.ask-answer');
@@ -228,7 +228,7 @@ READ_READING = """(() => {
   const choices = Array.from(panel.querySelectorAll('.ask-callout button.ask-choice')).filter(
     (button) => button.getClientRects().length > 0).length;
   return [inMain, count, formatted, calloutLast, choices];
-})()""" % json.dumps(READ_QUESTION)
+})"""
 READ_SHOWN = (True, 1, True, True, 3)
 READING_GOAL = "#reading button.ask-goal"
 READ_BASE_THREAD = 'details[data-key="thread:owner/web:1226a1"] > summary'
@@ -684,7 +684,8 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                         for width in widths:
                             path = "spend" if state == "spend-page" else ""
                             taken.append(
-                                _shoot(browser, f"http://{host}:{port}/{path}", state, width, out))
+                                _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
+                                      question=read[0]))
                     finally:
                         service.close()
         finally:
@@ -827,7 +828,8 @@ SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
 
-def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
+def _shoot(browser, url: str, state: str, width: int, out: Path, *,
+           question: str = READ_QUESTION) -> Shot:
     page = browser.new_page(viewport={"width": width, "height": HEIGHT})
     try:
         page.goto(url)
@@ -852,7 +854,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
-        paneled = page.query_selector(READING_PANEL) is not None
+        paneled = (state in ("ask-box", "ask-goal", "questions-open", "question-read")
+                   and page.query_selector(READING_PANEL) is not None)
         ask = None
         if state == "ask-box" and page.query_selector(ASK_OPEN):
             page.click(ASK_OPEN)
@@ -885,7 +888,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             if paneled:
                 for selector in (ASK_FOLD, thread_line("1226a1")):
                     page.click(selector)
-                reading = tuple(page.evaluate(READ_READING))
+                reading = tuple(page.evaluate(READ_READING, question))
             elif page.query_selector(ASK_FOLD):
                 for selector in (ASK_FOLD, READ_BASE_THREAD):
                     page.click(selector)

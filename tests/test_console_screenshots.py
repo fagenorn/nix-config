@@ -59,12 +59,13 @@ def fake_browser(present):
         def click(self, selector):
             self.clicks.append(selector)
 
-        def evaluate(self, expression):
+        def evaluate(self, expression, arg=None):
             if expression == shots.ASK_READING:
                 self.reads += 1
                 return list(shots.HEAD_ASK if shots.READING_PANEL in present else shots.OPEN_ASK)
             if expression == shots.READ_READING:
                 self.reads += 1
+                self.counted = arg
                 return list(shots.READ_SHOWN)
             if expression == shots.THREAD_READING:
                 self.reads += 1
@@ -330,6 +331,14 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                     Path(tmp))
                 self.assertEqual(page.clicks, clicks)
                 self.assertEqual(shot.reading, reading)
+
+    def test_the_question_read_shot_counts_the_question_it_was_given(self) -> None:
+        browser, page = fake_browser({shots.READING_PANEL, shots.ASK_FOLD})
+        with tempfile.TemporaryDirectory() as tmp:
+            shots._shoot(browser, "http://console.test/", "question-read", 480, Path(tmp),
+                         question="What is in production?")
+        self.assertEqual(page.counted, "What is in production?")
+        self.assertNotIn("What was done", shots.READ_READING)
 
     def test_a_real_answer_run_shoots_only_the_question_read_state_with_that_answer(self) -> None:
         def run(reading, jargon=0):
