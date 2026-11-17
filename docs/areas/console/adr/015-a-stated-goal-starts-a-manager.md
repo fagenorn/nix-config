@@ -1,6 +1,6 @@
 # ADR-console-015 — A stated goal starts a manager in its own scope
 
-- **Status:** accepted; amended by ADR-console-017, ADR-console-023, ADR-console-061
+- **Status:** accepted; amended by ADR-console-017, ADR-console-023, ADR-console-064
 - **Decided in:** #831, #835, #839, #888, #1016, #1182
 
 ## Context

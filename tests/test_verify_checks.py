@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -269,6 +269,254 @@ class RequiredChecksCommandTest(unittest.TestCase):
 
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/required-checks"), "100755")
+
+
+class SuiteWorld:
+    """A forge for the suite-regressions check: before runs 1..N, the merge run 100 and after runs 100..119."""
+    REPO, WORKFLOW, JOB, BRANCH = "fagenorn/nix-config", "ci.yaml", "Agent Workflow Tests", "main"
+    MERGE = "c" * 40
+    STAMP = "2026-11-18T00:00:00Z"
+    LISTING = "repos/fagenorn/nix-config/actions/workflows/ci.yaml/runs?branch=main&event=push"
+    PAGE = 100
+
+    def __init__(self, before=20, after=21, after_base=100):
+        self.after_base = after_base
+        self.before_ids = list(range(1, before + 1))
+        self.after_ids = list(range(after_base, after_base + after))
+        self.attempts = {}
+        self.jobs = {}
+        self.logs = {}
+
+    @staticmethod
+    def log(rows=(("tests/a.py", True), ("tests/b.py", True)), summary=None, prefix="\ufeff"):
+        stamp = "2026-11-18T00:00:01.1234567Z "
+        lines = []
+        for member, passed in rows:
+            state = "passed" if passed else "failed"
+            lines += [f"suite-runner: begin {member}", f"{member} output", f"end noise",
+                      f"suite-runner: end {member} {state} exit={0 if passed else 1} 1.0s"]
+        for member, passed in rows:
+            lines.append(f"suite-runner:     1.0s wall     1.0s cpu {'passed' if passed else 'failed'} {member}")
+        if summary is None:
+            ok = sum(1 for _, passed in rows if passed)
+            summary = (len(rows), ok, len(rows) - ok)
+        lines.append("suite-runner: summary members=%d passed=%d failed=%d jobs=4 wall=2.0s cpu=2.0s" % summary)
+        return prefix + "\n".join(stamp + line for line in lines) + "\n"
+
+    def run(self, run_id, created):
+        return {"id": run_id, "created_at": created, "run_attempt": self.attempts.get(run_id, 1)}
+
+    def before_created(self, run_id):
+        return (datetime(2026, 11, 1, tzinfo=timezone.utc) + timedelta(minutes=run_id)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def after_created(self, run_id):
+        return (datetime(2026, 11, 18, tzinfo=timezone.utc)
+                + timedelta(minutes=run_id - self.after_base)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def set_job(self, run_id, status="completed", conclusion="success", attempt=1):
+        self.jobs[(run_id, attempt)] = (status, conclusion)
+
+    def fail(self, run_id, rows=(("tests/a.py", True), ("tests/b.py", False)), attempt=1, log=None):
+        self.set_job(run_id, conclusion="failure", attempt=attempt)
+        self.logs[1000 * attempt + run_id] = self.log(rows) if log is None else log
+
+    def gets(self):
+        gets = {f"{self.LISTING}&head_sha={self.MERGE}&per_page=100":
+                {"workflow_runs": [self.run(100, self.STAMP)]},
+                }
+        for run_id in self.before_ids + self.after_ids:
+            for attempt in range(1, self.attempts.get(run_id, 1) + 1):
+                status, conclusion = self.jobs.get((run_id, attempt), ("completed", "success"))
+                gets[f"repos/{self.REPO}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"] = {
+                    "jobs": [{"id": 5, "name": "Nix Eval", "status": "completed", "conclusion": "failure"},
+                             {"id": 1000 * attempt + run_id, "name": self.JOB,
+                              "status": status, "conclusion": conclusion}]}
+        return gets
+
+    def pages(self):
+        runs = [self.run(i, self.after_created(i)) for i in reversed(self.after_ids)]
+        earlier = [self.run(i, self.before_created(i)) for i in reversed(self.before_ids)]
+        return {f"{self.LISTING}&created=>={self.STAMP}&per_page=100":
+                [{"total_count": len(runs), "workflow_runs": runs}],
+                f"{self.LISTING}&created=<{self.STAMP}&per_page=100":
+                [{"total_count": len(earlier), "workflow_runs": earlier[at:at + self.PAGE]}
+                 for at in range(0, len(earlier), self.PAGE)]}
+
+    def check(self, n=20):
+        def run_gh(argv, allow=()):
+            prefix = f"repos/{self.REPO}/actions/jobs/"
+            if argv[0] != "api" or not argv[1].startswith(prefix) or not argv[1].endswith("/logs"):
+                raise AssertionError(f"unexpected gh {argv}")
+            job_id = int(argv[1][len(prefix):-len("/logs")])
+            return 0, self.logs.get(job_id, self.log())
+        get, pages = forge(self.gets(), self.pages())
+        with get, pages, mock.patch.object(forge_api, "run_gh", side_effect=run_gh):
+            return verify_checks.suite_regressions(
+                self.REPO, self.WORKFLOW, self.JOB, self.BRANCH, self.MERGE, n)
+
+
+class SuiteRegressionsTest(unittest.TestCase):
+    def test_all_after_runs_passing_is_met(self):
+        code, report = SuiteWorld().check()
+        self.assertEqual((code, report["regressions"], report["unattributed"]), (0, {}, []))
+        self.assertEqual(len(report["after"]), 20)
+        self.assertEqual(report["before"], list(range(20, 0, -1)))
+
+    def test_a_member_failing_after_that_passed_before_is_not_met(self):
+        world = SuiteWorld()
+        world.fail(105)
+        code, report = world.check()
+        self.assertEqual((code, report["regressions"]), (1, {"tests/b.py": [105]}))
+
+    def test_a_member_that_failed_before_too_is_not_a_regression(self):
+        world = SuiteWorld()
+        world.fail(3)
+        world.fail(105)
+        self.assertEqual(world.check()[0], 0)
+
+    def test_a_member_absent_before_is_not_a_regression(self):
+        world = SuiteWorld()
+        world.fail(105, rows=(("tests/a.py", True), ("tests/new.py", False)))
+        self.assertEqual(world.check()[0], 0)
+
+    def test_fewer_than_n_completed_after_runs_is_not_yet(self):
+        world = SuiteWorld()
+        world.set_job(110, status="in_progress", conclusion=None)
+        self.assertEqual(world.check()[0], 75)
+
+    def test_no_run_at_the_merge_is_not_yet(self):
+        world = SuiteWorld()
+        gets = world.gets()
+        gets[f"{world.LISTING}&head_sha={world.MERGE}&per_page=100"] = {"workflow_runs": []}
+        get, pages = forge(gets, world.pages())
+        with get, pages:
+            code, report = verify_checks.suite_regressions(
+                world.REPO, world.WORKFLOW, world.JOB, world.BRANCH, world.MERGE, 20)
+        self.assertEqual((code, report["merge_run"]), (75, None))
+
+    def test_an_after_failure_without_a_summary_is_not_met(self):
+        world = SuiteWorld()
+        world.fail(105, log="2026-11-18T00:00:01Z the job died\n")
+        code, report = world.check()
+        self.assertEqual((code, report["unattributed"]), (1, [105]))
+
+    def test_timing_rows_inside_a_member_block_are_not_read(self):
+        world = SuiteWorld()
+        stamp = "2026-11-18T00:00:01.1234567Z "
+        inside = (stamp + "suite-runner:     1.0s wall     1.0s cpu failed tests/b.py\n")
+        text = world.log()
+        text = text.replace(stamp + "tests/a.py output\n", stamp + "tests/a.py output\n" + inside, 1)
+        world.logs[1000 + 3] = text
+        world.fail(106)
+        code, report = world.check()
+        self.assertEqual((code, report["regressions"]), (1, {"tests/b.py": [106]}))
+
+    def test_cancelled_after_runs_are_passed_over(self):
+        world = SuiteWorld()
+        world.set_job(101, conclusion="cancelled")
+        code, report = world.check()
+        self.assertEqual(code, 0)
+        self.assertNotIn(101, report["after"])
+        self.assertEqual(len(report["after"]), 20)
+
+    def test_fewer_than_n_before_runs_is_a_forge_error(self):
+        with self.assertRaises(forge_api.ForgeError) as raised:
+            SuiteWorld(before=19).check()
+        self.assertEqual(raised.exception.code, "payload_invalid")
+
+    def test_a_failure_hidden_by_a_passing_rerun_is_not_met(self):
+        world = SuiteWorld()
+        world.attempts[105] = 2
+        world.fail(105, attempt=1)
+        world.set_job(105, attempt=2)
+        code, report = world.check()
+        self.assertEqual((code, report["regressions"]), (1, {"tests/b.py": [105]}))
+        self.assertEqual(report["after"].count(105), 1)
+        self.assertEqual(len(report["after"]), 20)
+
+    def test_an_after_summary_that_disagrees_with_its_rows_is_not_met(self):
+        world = SuiteWorld()
+        world.fail(105, log=world.log(rows=(("tests/a.py", True),), summary=(2, 1, 1)))
+        code, report = world.check()
+        self.assertEqual((code, report["unattributed"], report["regressions"]), (1, [105], {}))
+
+    def test_a_before_run_without_a_complete_summary_is_passed_over(self):
+        world = SuiteWorld(before=22)
+        world.fail(22, log="no summary here\n")
+        world.fail(21, rows=(("tests/a.py", True), ("tests/b.py", True)),
+                   log=world.log(summary=(3, 2, 0)))
+        code, report = world.check()
+        self.assertEqual(code, 0)
+        self.assertEqual(report["before"], list(range(20, 0, -1)))
+        self.assertEqual(report["before_skipped"], [22, 21])
+
+    def test_a_baseline_short_of_complete_logs_is_a_forge_error(self):
+        world = SuiteWorld(before=21)
+        world.fail(21, log="no summary here\n")
+        world.fail(20, log=world.log(summary=(3, 1, 1)))
+        with self.assertRaises(forge_api.ForgeError) as raised:
+            world.check()
+        self.assertEqual(raised.exception.code, "payload_invalid")
+
+    def test_a_baseline_larger_than_a_page_is_read_across_pages(self):
+        world = SuiteWorld(before=101, after=101, after_base=1000)
+        code, report = world.check(n=101)
+        self.assertEqual((code, report["regressions"]), (0, {}))
+        self.assertEqual(report["before"], list(range(101, 0, -1)))
+        self.assertEqual(len(report["after"]), 101)
+
+    def test_a_baseline_that_skips_past_the_first_page_still_reaches_n(self):
+        world = SuiteWorld(before=120, after_base=1000)
+        for run_id in range(21, 121):
+            world.fail(run_id, log="no summary here\n")
+        code, report = world.check()
+        self.assertEqual(code, 0)
+        self.assertEqual(report["before"], list(range(20, 0, -1)))
+        self.assertEqual(report["before_skipped"], list(range(120, 20, -1)))
+
+    def test_a_truncated_before_listing_is_a_forge_error(self):
+        world = SuiteWorld()
+        pages = world.pages()
+        key = f"{world.LISTING}&created=<{world.STAMP}&per_page=100"
+        pages[key][0]["total_count"] += 1
+        get, patched = forge(world.gets(), pages)
+        with get, patched, self.assertRaises(forge_api.ForgeError) as raised:
+            verify_checks.suite_regressions(
+                world.REPO, world.WORKFLOW, world.JOB, world.BRANCH, world.MERGE, 20)
+        self.assertEqual(raised.exception.code, "payload_invalid")
+
+    def test_a_member_that_failed_in_a_before_attempt_is_not_a_regression(self):
+        world = SuiteWorld()
+        world.attempts[3] = 2
+        world.fail(3, attempt=1)
+        world.set_job(3, attempt=2)
+        world.fail(105)
+        self.assertEqual(world.check()[0], 0)
+
+
+class SuiteRegressionsCommandTest(unittest.TestCase):
+    ARGS = ["--repo", "fagenorn/nix-config", "--workflow", "ci.yaml", "--job", "Agent Workflow Tests",
+            "--branch", "main", "--merge", "c" * 40, "--n", "20"]
+
+    def test_wrapper_maps_a_forge_error_to_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.symlink(sys.executable, Path(tmp) / "python3")
+            done = run_from_root(["/bin/sh", str(ROOT / CHECKS / "suite-regressions"), *self.ARGS],
+                                 {"PATH": tmp})
+        self.assertEqual((done.returncode, done.stdout), (2, ""), done.stderr)
+        self.assertIn("forge_error", done.stderr)
+
+    def test_a_short_merge_sha_is_a_usage_error(self):
+        args = [*self.ARGS[:-4], "--merge", "abc", "--n", "20"]
+        with mock.patch.object(verify_checks, "suite_regressions",
+                               side_effect=AssertionError("reached the forge")):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    verify_checks.main(["suite-regressions", *args])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/suite-regressions"), "100755")
 
 
 class IssueClosedTest(unittest.TestCase):

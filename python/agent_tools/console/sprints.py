@@ -228,8 +228,8 @@ order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
-`NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT`, #1110) or the stage phrase
-(`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
+`NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184)) or
+the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
 line and never shortened. A sprint's check line (#1111) reads `CHECK_LINE_TEXT`. The now-sentence of a report whose status marks a refused merge
 (`refused_reason`) is `NOW_REFUSED_TEXT` in place of the stage phrase, shown by `merge_refused`
 until a later report without the marker or a closing clears it (no run observation clears it: the
@@ -696,6 +696,7 @@ CHECK_LINE_TEXT = "Your check: {question}"
 NOW_CI_TEXT = "waiting for CI on its pull request"
 NOW_COMMITTING_TEXT = "a delivery is committing"
 NOW_RELEASE_TEXT = "waiting for a release step"
+NOW_LOCK_TEXT = "waiting its turn to merge"
 NOW_REFUSED_TEXT = "merge refused: {reason}"
 REFUSED_STATUS = re.compile(r"merge refused:\s*(\S.*)", re.IGNORECASE | re.DOTALL)
 SECRETS_DIR = "sprint-secrets"

@@ -184,6 +184,32 @@ when `closed` with any other reason (its comments unread), or as `completed` unv
 read. A payload that is not an object, or whose state is neither `open` nor `closed`, or a malformed
 comment page, is a `payload_invalid` forge error (exit 2), as is any other forge error; a bad `--repo`
 or `--issue` (a positive integer) is a usage error (2).
+
+`suite-regressions --repo R --workflow W --job J --branch B --merge SHA --n N`
+(`verify_checks.suite_regressions`, issue 1215) is met when no member of the agent workflow suite failed in
+any of the first N completed push runs of workflow W on branch B from the merge's run on that passed, in
+a run of the N before it, and failed in none. It only reads the forge. The merge's run is the earliest
+push run listed at `--merge` (none: 75). The after runs are the runs created from its time on, oldest
+first: a run with a job J still unfinished in any attempt stops the scan, a run whose attempts all ended
+other than `success` or `failure` (cancelled, skipped) is passed over, and every other run counts, until N
+count (fewer: 75). The before runs are the runs listed before that time, newest first, counted the same
+way, and a candidate with any counted attempt whose log has no complete summary is listed in
+`before_skipped` and never counted; fewer than N before runs with complete logs is a `payload_invalid`
+forge error, so the baseline is always N runs of complete logs. Every attempt of a counted run is read, a
+run counts once toward N however many attempts it has, and a failure followed by a passing rerun still
+counts as the failure. A log is read as the timestamped text of job J: a leading BOM and each line's
+timestamp are dropped, every line from `suite-runner: begin M` to `suite-runner: end M ` is skipped, and
+outside those blocks the `suite-runner: <wall>s wall <cpu>s cpu passed|failed M` rows give each member's
+state and the `suite-runner: summary members=.. passed=.. failed=..` line closes them. The summary is
+complete only when it agrees with the rows (one row per member, `members=` rows, `passed=` and `failed=`
+matching the rows). A regression is a member failed in some attempt of a counted after run and passed in at
+least one attempt of a before run and failed in none. An after attempt that failed with no complete summary
+cannot be attributed and is listed in `unattributed`, never passed. Exit 0 when neither `regressions` nor
+`unattributed` is set, 1 when one is, 75 as above, 2 on a forge error. The report is `{"merge_run",
+"before", "before_skipped", "after", "regressions": {member: [after run ids]}, "unattributed"}`, one JSON
+line; a malformed payload is a `payload_invalid` forge error. A bad `--repo`, an empty `--workflow`,
+`--job` or `--branch`, a `--merge` that is not 40 lowercase hex characters, or an `--n` that is not a
+positive integer is a usage error (2).
 """
 from __future__ import annotations
 
@@ -373,6 +399,155 @@ def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
                if held is not None else None)
     report["verified"] = closing is not None and closing.fields.get("outcome") == "verified"
     return (0 if report["verified"] else 1), report
+
+
+SUITE_ROW = re.compile(r"^suite-runner:\s+[0-9.]+s wall\s+[0-9.]+s cpu (passed|failed) (\S+)$")
+SUITE_SUMMARY = re.compile(
+    r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) jobs=\d+ wall=[0-9.]+s cpu=[0-9.]+s$")
+SUITE_BEGIN = re.compile(r"^suite-runner: begin (.+)$")
+LOG_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z ")
+
+
+def suite_results(log: str) -> dict[str, bool] | None:
+    """Member to passed from a job log, or None when the log has no complete, consistent summary."""
+    rows: dict[str, bool] = {}
+    duplicate = False
+    summary = None
+    ending = None
+    for line in log.removeprefix("\ufeff").splitlines():
+        line = LOG_STAMP.sub("", line, count=1)
+        if ending is not None:
+            if line.startswith(ending):
+                ending = None
+            continue
+        begun = SUITE_BEGIN.match(line)
+        if begun:
+            ending = f"suite-runner: end {begun[1]} "
+            continue
+        row = SUITE_ROW.match(line)
+        if row:
+            duplicate = duplicate or row[2] in rows
+            rows[row[2]] = row[1] == "passed"
+            continue
+        found = SUITE_SUMMARY.match(line)
+        if found:
+            summary = tuple(int(part) for part in found.groups())
+    if summary is None or duplicate:
+        return None
+    passed = sum(1 for state in rows.values() if state)
+    if summary != (len(rows), passed, len(rows) - passed):
+        return None
+    return rows
+
+
+def _suite_run(entry: object) -> tuple[datetime, int, int, str]:
+    if not isinstance(entry, dict) or not _is_int(entry.get("id")):
+        raise _invalid("workflow run has no id")
+    attempts = entry.get("run_attempt")
+    if not _is_int(attempts) or attempts < 1:
+        raise _invalid("workflow run has no run_attempt of at least 1")
+    created = _forge_time(entry.get("created_at"), "run created_at")
+    return created, entry["id"], attempts, entry["created_at"]
+
+
+def _suite_runs(listing: object) -> list[tuple[datetime, int, int, str]]:
+    if not isinstance(listing, dict) or not isinstance(listing.get("workflow_runs"), list):
+        raise _invalid("run listing has no workflow_runs list")
+    return sorted(_suite_run(entry) for entry in listing["workflow_runs"])
+
+
+def _suite_attempts(repo: str, job: str, run: tuple[datetime, int, int, str]
+                    ) -> tuple[bool, list[tuple[int, str]]]:
+    """(pending, counted attempts as (job id, conclusion)) of one run's job across every attempt."""
+    counted: list[tuple[int, str]] = []
+    for attempt in range(1, run[2] + 1):
+        listing = forge_api.api_get(
+            f"repos/{repo}/actions/runs/{run[1]}/attempts/{attempt}/jobs?per_page=100")
+        if not isinstance(listing, dict) or not isinstance(listing.get("jobs"), list):
+            raise _invalid("attempt job listing has no jobs list")
+        for entry in listing["jobs"]:
+            if not isinstance(entry, dict):
+                raise _invalid("attempt job is not an object")
+            if entry.get("name") != job:
+                continue
+            if not _is_int(entry.get("id")) or not isinstance(entry.get("status"), str):
+                raise _invalid("job has no id and status")
+            if entry["status"] != "completed":
+                return True, []
+            if entry.get("conclusion") in ("success", "failure"):
+                counted.append((entry["id"], entry["conclusion"]))
+    return False, counted
+
+
+def _suite_log(repo: str, job_id: int) -> str:
+    status, text = forge_api.run_gh(["api", f"repos/{repo}/actions/jobs/{job_id}/logs"])
+    if status != 0:
+        raise forge_api.ForgeError("gh_failed", f"job {job_id} log")
+    return text
+
+
+def suite_regressions(repo: str, workflow: str, job: str, branch: str, merge: str,
+                      n: int) -> tuple[int, dict]:
+    """Met when no member passing in the N push runs before `merge` failed in the N runs from it on."""
+    listing = f"repos/{repo}/actions/workflows/{workflow}/runs?branch={branch}&event=push"
+    report: dict = {"merge_run": None, "before": [], "before_skipped": [], "after": [],
+                    "regressions": {}, "unattributed": []}
+    at_merge = _suite_runs(forge_api.api_get(f"{listing}&head_sha={merge}&per_page=100"))
+    if not at_merge:
+        return 75, report
+    report["merge_run"] = at_merge[0][1]
+    start = at_merge[0][3]
+    after: list[tuple[int, list[tuple[int, str]]]] = []
+    pages = _counted_pages(forge_api.api_pages(f"{listing}&created=>={start}&per_page=100"),
+                           "workflow_runs", "run listing")
+    for run in sorted(_suite_run(entry) for entry in pages):
+        pending, counted = _suite_attempts(repo, job, run)
+        if pending:
+            break
+        if counted:
+            after.append((run[1], counted))
+            if len(after) == n:
+                break
+    report["after"] = [run_id for run_id, _ in after]
+    if len(after) < n:
+        return 75, report
+    passed_before: set[str] = set()
+    failed_before: set[str] = set()
+    counted_before = 0
+    candidates = sorted(_suite_run(entry) for entry in _counted_pages(
+        forge_api.api_pages(f"{listing}&created=<{start}&per_page=100"), "workflow_runs", "run listing"))
+    for run in reversed(candidates):
+        if counted_before == n:
+            break
+        pending, counted = _suite_attempts(repo, job, run)
+        if pending or not counted:
+            continue
+        results = [suite_results(_suite_log(repo, job_id)) for job_id, _ in counted]
+        if any(result is None for result in results):
+            report["before_skipped"].append(run[1])
+            continue
+        counted_before += 1
+        report["before"].append(run[1])
+        for result in results:
+            for member, state in result.items():  # type: ignore[union-attr]
+                (passed_before if state else failed_before).add(member)
+    if counted_before < n:
+        raise _invalid(f"only {counted_before} before runs with complete logs, need {n}")
+    for run_id, counted in after:
+        for job_id, conclusion in counted:
+            if conclusion != "failure":
+                continue
+            result = suite_results(_suite_log(repo, job_id))
+            if result is None:
+                if run_id not in report["unattributed"]:
+                    report["unattributed"].append(run_id)
+                continue
+            for member, state in result.items():
+                if not state and member in passed_before and member not in failed_before:
+                    seen = report["regressions"].setdefault(member, [])
+                    if run_id not in seen:
+                        seen.append(run_id)
+    return (1 if report["regressions"] or report["unattributed"] else 0), report
 
 
 def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
@@ -1761,6 +1936,12 @@ def _issue_number(value: str) -> int:
     return number
 
 
+def _merge_sha(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
+    return value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -1832,6 +2013,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="issue 1010: an issue was closed as completed, by its own verify run")
     closed.add_argument("--repo", type=_repo, required=True)
     closed.add_argument("--issue", type=_issue_number, required=True)
+    regress = checks.add_parser(
+        "suite-regressions",
+        help="issue 1215: no suite member that passed before the merge failed in the runs from it on")
+    regress.add_argument("--repo", type=_repo, required=True)
+    regress.add_argument("--workflow", type=_nonempty, required=True)
+    regress.add_argument("--job", type=_nonempty, required=True)
+    regress.add_argument("--branch", type=_nonempty, required=True)
+    regress.add_argument("--merge", type=_merge_sha, required=True)
+    regress.add_argument("--n", type=_issue_number, required=True)  # a positive integer
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
@@ -1919,6 +2109,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
         elif args.check == "issue-closed":
             code, report = issue_closed(args.repo, args.issue)
+        elif args.check == "suite-regressions":
+            code, report = suite_regressions(args.repo, args.workflow, args.job, args.branch,
+                                             args.merge, args.n)
         else:
             code, report = required_checks(args.repo, args.base, args.since)
     except forge_api.ForgeError as error:

@@ -7,7 +7,9 @@ orders and folds the state into the wire view; `encode_view` renders it as one
 line of JSON.
 
 Events: `project.registered` (payload `{"root": ...}`) sets a project, keeping
-its open work; `project.unregistered` removes it; any other event that names a
+its open work; `project.unregistered` removes it; a project question's asked or answered event
+(#1178) changes nothing, so a question or follow-up neither reorders projects nor resets a
+project's untouched age; any other event that names a
 project updates only that project's last sequence and time; an event naming no
 project, or a project not registered, is ignored.
 
@@ -382,7 +384,8 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
 "notices": [<notice entry>, ...], "notice_post": <bool>, "waits": [<wait entry>, ...],
-"questions": [<question entry>, ...],
+"questions": null | {"label": "Questions", "count": <int>,
+"threads": [{"id", "questions": [<question entry>, ...], "follow_up": <bool>}, ...]},
 "tracker_read": {"ok": <bool>, "read_at": "<ISO time>" | null,
 "began_at": "<ISO time>" | null} | null}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
@@ -434,7 +437,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "movement": {"sessions": [{"session_id", "manager": <bool>,
                                                  "read_at": "<ISO time>" | null}, ...],
                                    "nudged_at": "<time>" | null, "base_at": "<ISO time>",
-                                   "waits": {"ci_at", "commit_at", "release_at": "<ISO time>" | null}}}
+                                   "issues": [<int>],
+                                   "waits": {"ci_at", "commit_at", "release_at", "lock_at":
+                                             "<ISO time>" | null}}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
@@ -509,8 +514,9 @@ time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms`
 report, approval or wait signal still moves the sprint whatever its order against the failure); with
 nothing else left it reads quiet at once. The wait signals are the last time CI ran on a pull
 request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
-(`commit_ms`) and the last time a release was in progress (`release_ms`), each read from the
-project's `ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
+(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery
+of the sprint held or waited for the land lock (`lock_ms`, #1184), each read from the project's
+`ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
 pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
 numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
 signal moves the sprint for `QUIET_AFTER_MS` after its time. Two session signals (#1185) join the
@@ -544,8 +550,8 @@ a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; a manager that failed to
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
 wait, `NOW_QUOTA_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
-(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT` whose
-signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
+whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
 `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
 (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
@@ -625,8 +631,13 @@ sprints' ones: an owner entry is `{"id", "sprint_id": null, "poster": NOTICE_YOU
 open (not finished) sprints `takes_notices`, so the page offers the owner's post, and false for a
 quiet project, one whose only sprints are finished or stopping, and every entry in a quiet group.
 Every project entry, quiet ones and those inside a quiet group too, carries `questions`
-(`project_questions`, a map from project id to its folded `AskedQuestion`s, default none), newest
-first by descending `seq`, `[]` when none. A question entry is `{"id", "question", "asked_at",
+(`project_questions`, a map from project id to its folded `AskedQuestion`s, default none): null
+when the project has no question, else `{"label": QUESTIONS_LABEL, "count", "threads"}` with one
+thread per `project_question.threads` group, newest first by the last question's `seq`, `count`
+their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first question's
+`thread_id` (its own id when it has none), `questions` its question entries ascending by `seq`, and
+`follow_up` true exactly when its last question is answered (#1178, ADR-console-059 D4).
+A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
 "production_text"}`. `state_text` is `ASK_WORKING_TEXT`, `ASK_ANSWERED_TEXT`, or for a timed-out or
@@ -636,7 +647,7 @@ answered: `answer` is the parsed answer part, `read_text`, `ran_text`, `unknown_
 `back_text` are `ASK_READ_TEXT`, `ASK_RAN_TEXT`, `ASK_UNKNOWN_TEXT` and `ASK_BACK_TEXT` over their
 part and each null when the part is, and `production_text` is the parsed production line as is.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
-order (#1177, ADR-console-059 D3).
+order (#1177, #1178, ADR-console-059 D3, D4).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -662,7 +673,8 @@ from agent_tools.console.deliveries import (
     stage_text,
 )
 from agent_tools.console.event_log import (
-    Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_UNREGISTERED as UNREGISTERED)
+    Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_QUESTION_ANSWERED,
+    PROJECT_QUESTION_ASKED, PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, plain_reason, quota_wait, session_name
 from agent_tools.console.movement import NUDGE_REPLY_MS, ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
@@ -712,6 +724,7 @@ from agent_tools.console.sprints import (
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
     NOW_FAILED_START_TEXT,
+    NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
     NOW_PERMISSION_TEXT,
     NOW_QUESTION_TEXT,
@@ -789,6 +802,7 @@ HEADLINE = "Nothing needs you"
 OUTSIDE_LABEL = "Outside sprints"
 CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
+QUESTIONS_LABEL = "Questions"
 UNMANAGED_LABEL = "Not yet managed"
 NOTICE_KIND_TEXT = {"claim": "Claim", "heads-up": "Heads-up", "hand-off": "Hand-off"}
 NOTICE_UNTIL_TEXT = "until {until}"
@@ -891,6 +905,8 @@ def project_states(
                 previous.open_work if previous else 0)
         elif event.kind == UNREGISTERED:
             result.pop(project, None)
+        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED):
+            continue
         elif project in result:
             result[project] = replace(
                 result[project], last_seq=event.seq, last_at=event.at)
@@ -1163,10 +1179,11 @@ def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
 
 @dataclass(frozen=True)
 class WaitSignals:
-    """The last time each wait of #1110 was seen for one sprint, None when never."""
+    """The last time each wait of #1110 and #1184 was seen for one sprint, None when never."""
     ci_ms: int | None = None
     commit_ms: int | None = None
     release_ms: int | None = None
+    lock_ms: int | None = None
     output_ms: int | None = None
     check_ms: int | None = None
 
@@ -1230,23 +1247,30 @@ def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
     return {sid: tuple(sorted(pairs)) for sid, pairs in found.items()}
 
 
+def sprint_issue_numbers(state: SprintState) -> set[int]:
+    """The sprint's issues as the movement reads them: the report's issue numbers united with its
+    `inbox` numbers (none without a report)."""
+    report = state.report
+    return (set() if report is None
+            else {issue for issue, _ in report.issues} | set(report.inbox))
+
+
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
                  manager_ids: Collection[str] = ()) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
-    belongs when its issues meet them, a branch when its issue is one of them, and the release
-    whatever the issues. The session signals are the newest transcript write and the newest
+    belongs when its issues meet them, a branch when its issue is one of them, a land lock time
+    when its issue is one of them, and the release whatever the issues. The session signals are the newest transcript write and the newest
     running check among the associations of this sprint; a manager session's time inside the reply
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out."""
     if movement is None:
         return NO_WAITS
-    report = state.report
-    issues = (set() if report is None
-              else {issue for issue, _ in report.issues} | set(report.inbox))
+    issues = sprint_issue_numbers(state)
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
     commits += [moved for issue, moved in movement.branches if issue in issues]
+    locks = [moved for issue, moved in movement.locks if issue in issues]
     nudged = None if state.idle_nudged_at is None else _millis(state.idle_nudged_at)
 
     def counted(own: SessionMovement, ms: int | None) -> int | None:
@@ -1259,7 +1283,8 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
     checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
-                       movement.release_ms, max(outputs, default=None), max(checks, default=None))
+                       movement.release_ms, max(locks, default=None), max(outputs, default=None),
+                       max(checks, default=None))
 
 
 def _utc(ms: int) -> str:
@@ -1308,8 +1333,8 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
         signals.append(_millis(report.at))
     if state.moved_ms is not None:
         signals.append(state.moved_ms)
-    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms, waits.output_ms,
-                              waits.check_ms) if ms is not None]
+    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms, waits.lock_ms,
+                              waits.output_ms, waits.check_ms) if ms is not None]
     failed = state.manager is not None and state.manager.state == FAILED and not listed
     if not failed:
         signals.append(_millis(state.stated_at))
@@ -1324,14 +1349,15 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     """The wait sentence of #1110, or None. It names the wait only when the wait signals alone
     move the sprint (the session signals are part of the base reading and never name a wait): with
     no clock, or when something else moves it, or when it is quiet whatever
-    the waits say, it is None. Else the first of CI, a committing delivery and a release step whose
-    signal is inside `QUIET_AFTER_MS`."""
+    the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
+    land lock whose signal is inside `QUIET_AFTER_MS`."""
     base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms)
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
-                     (waits.release_ms, NOW_RELEASE_TEXT)):
+                     (waits.release_ms, NOW_RELEASE_TEXT),
+                     (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:
             return text
     return None
@@ -1608,9 +1634,11 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                           "read_at": None if m.read_ms is None else _utc(m.read_ms)}
                          for m in own],
             "nudged_at": state.idle_nudged_at,
+            "issues": sorted(sprint_issue_numbers(state)),
             "waits": {"ci_at": None if waits.ci_ms is None else _utc(waits.ci_ms),
                       "commit_at": None if waits.commit_ms is None else _utc(waits.commit_ms),
-                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms)},
+                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms),
+                      "lock_at": None if waits.lock_ms is None else _utc(waits.lock_ms)},
             "base_at": _utc(_base_ms(state)),
         },
     }
@@ -1631,7 +1659,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
                    waits: Sequence[Mapping] = (),
                    read: ReadState | None = None,
-                   questions: Sequence[Mapping] = ()) -> dict:
+                   questions: Mapping | None = None) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
@@ -1653,12 +1681,12 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
         "waits": [dict(w) for w in waits],
-        "questions": [dict(q) for q in questions],
+        "questions": questions,
         "tracker_read": None if read is None else {"ok": read.ok, "read_at": read.read_at, "began_at": read.began_at},
     }
 
 
-def _question_entries(questions: Sequence[project_question.AskedQuestion]) -> list[dict]:
+def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> dict | None:
     def one(question: project_question.AskedQuestion) -> dict:
         reason = question.reason
         state_text = _ASK_STATE_TEXT[question.state]
@@ -1686,7 +1714,14 @@ def _question_entries(questions: Sequence[project_question.AskedQuestion]) -> li
             "production_text": None if parts is None else parts.production,
         }
 
-    return [one(q) for q in sorted(questions, key=lambda q: -q.seq)]
+    threads = project_question.threads(questions)
+    if not threads:
+        return None
+    return {"label": QUESTIONS_LABEL, "count": len(threads),
+            "threads": [{"id": group[0].thread_id or group[0].question_id,
+                         "questions": [one(q) for q in group],
+                         "follow_up": group[-1].state == project_question.ANSWERED}
+                        for group in threads]}
 
 
 def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
@@ -2038,7 +2073,7 @@ def derive_view(
                                     open_owner_notices(owner_notices or {}, pid))
                for pid in registered}
     notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
-    asks = {pid: _question_entries((project_questions or {}).get(pid, ())) for pid in registered}
+    asks = {pid: _question_threads((project_questions or {}).get(pid, ())) for pid in registered}
 
     sprint_waits: dict[str, list[dict]] = {}
     project_waits: dict[str, list[dict]] = {}

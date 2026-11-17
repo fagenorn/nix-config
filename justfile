@@ -228,10 +228,16 @@ agent-workflow-tests *args:
     tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
     tests/test_console_permission_check.py \
+    tests/test_console_bypass_proof_checks.py \
+    tests/test_console_bypass_proof_github.py \
+    tests/test_console_bypass_proof.py \
+    tests/test_console_bypass_proof_mcp.py \
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
+    tests/test_console_lock_wait_check.py \
     tests/test_console_look_check.py \
+    tests/test_console_look_kept_check.py \
     tests/test_console_page.py \
     tests/test_console_controls.py \
     tests/test_console_service.py \

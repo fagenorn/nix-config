@@ -68,6 +68,7 @@ EXPECTED_ALLOW = [
 # GitHub's plan-gated protection answer) and `gh: <message> (HTTP <status>)` on
 # stderr, or `gh: HTTP 403` when the body holds no string message and status.
 FAKE_GH_SCRIPT = '''
+import base64
 import json
 import os
 import sys
@@ -89,10 +90,15 @@ for name in ("GITHUB_TOKEN", "GH_TOKEN"):
         raise SystemExit(64)
 
 argv = sys.argv[1:]
+log = os.environ.get("FAKE_GH_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(argv) + "\\n")
 stage = None
 number = ""
 slug = ""
 branch = ""
+key = ""
 if (
     len(argv) == 7
     and argv[0:2] == ["pr", "view"]
@@ -124,6 +130,24 @@ elif len(argv) == 2 and argv[0] == "api":
         stage = "issue"
         slug = parts[1] + "/" + parts[2]
         number = parts[4]
+    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "branches":
+        stage = "branch"
+        slug = parts[1] + "/" + parts[2]
+        branch = parts[4]
+    elif (
+        len(parts) == 6
+        and parts[0] == "repos"
+        and parts[3] == "contents"
+        and parts[4] == ".github"
+        and "?ref=" in parts[5]
+    ):
+        stage = "contents"
+        slug = parts[1] + "/" + parts[2]
+        key = parts[5].split("?ref=")[1]
+    elif len(parts) == 5 and parts[0] == "repos" and parts[3] == "compare":
+        stage = "compare"
+        slug = parts[1] + "/" + parts[2]
+        key = parts[4]
 elif (
     len(argv) == 4
     and argv[0:3] == ["api", "--paginate", "--slurp"]
@@ -181,6 +205,19 @@ elif stage == "issue":
 elif stage == "comments":
     issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
     default = json.dumps([issue.get("comments", [])])
+elif stage == "branch":
+    default = json.dumps({"name": branch, "commit": {"sha": os.environ.get("FAKE_BASE_SHA", "b" * 40)}})
+elif stage in ("contents", "compare"):
+    table = json.loads(os.environ.get("FAKE_LOOK_FILES" if stage == "contents" else "FAKE_COMPARES", "{}"))
+    if key not in table:
+        print('{"message":"Not Found","status":"404"}')
+        print("gh: Not Found (HTTP 404)", file=sys.stderr)
+        raise SystemExit(1)
+    if stage == "contents":
+        raw = base64.b64encode(table[key].encode()).decode()
+        default = json.dumps({"type": "file", "encoding": "base64", "content": raw})
+    else:
+        default = json.dumps(table[key])
 else:
     default = (
         '{"required_status_checks":{"contexts":["Nix Eval"]},'
@@ -6024,6 +6061,285 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             self.LOOK_PINNED.replace(self.LOOK_HEAD, "f" * 40), repo,
             self.marked_with(self.look_comment(10), head="f" * 40))
         self.assert_look_refusal(moved, self.LOOK_REFUSAL.replace("1a2b3c4", "fffffff"))
+
+    # ------------------------------------------------------------------
+    # A kept look approval (issue 1211): an approval of an earlier head holds for
+    # the current head while no commit after it changed the look files.
+    # ------------------------------------------------------------------
+
+    LOOK_BASE = "b" * 40
+    LOOK_APPROVED = "5" * 40
+    LOOK_T = "6" * 40
+    LOOK_X = "8" * 40
+    LOOK_F = "9" * 40
+    LOOK_F1 = "4" * 40
+    LOOK_FORK = "3" * 40
+    PAGE = "python/agent_tools/console/page.html"
+    INBOX = "python/agent_tools/console/inbox.py"
+    TESTF = "tests/test_console_page.py"
+    DOC = "docs/x.md"
+    CONSOLE_SET = '{"version": 1, "sets": {"console": ["python/agent_tools/console/**"]}}'
+
+    @staticmethod
+    def look_edit(name, tag="e"):
+        return {"filename": name, "status": "modified",
+                "patch": f"@@ -1,2 +1,2 @@\n {name} line 0\n-{name} old\n+{name} {tag}"}
+
+    def look_compare(self, files=(), status="ahead", commits=()):
+        listed = []
+        for entry in files:
+            if isinstance(entry, dict):
+                listed.append(entry)
+            elif isinstance(entry, tuple):
+                listed.append(self.look_edit(*entry))
+            else:
+                listed.append(self.look_edit(entry))
+        return {"status": status, "files": listed, "total_commits": len(commits),
+                "commits": [{"sha": sha, "parents": [{"sha": q} for q in parents]}
+                            for sha, parents in commits]}
+
+    def look_world(self, after, ah_files, extra=()):
+        base, approved, head = self.LOOK_BASE, self.LOOK_APPROVED, self.LOOK_HEAD
+        compares = {
+            f"{base}...{approved}": self.look_compare(
+                [self.PAGE], commits=[(approved, [self.LOOK_FORK])]),
+            f"{approved}...{head}": self.look_compare(ah_files),
+            f"{base}...{head}": self.look_compare(
+                commits=[(approved, [self.LOOK_FORK])] + list(after)),
+        }
+        for a, b, files in extra:
+            compares[f"{a}...{b}"] = self.look_compare(files)
+        return compares
+
+    def look_carry_env(self, comments, compares, look_files=None, **env):
+        return {**self.marked_with(*comments),
+                "FAKE_COMPARES": json.dumps(compares),
+                "FAKE_LOOK_FILES": json.dumps(
+                    {self.LOOK_BASE: self.CONSOLE_SET} if look_files is None else look_files),
+                **env}
+
+    def test_a_kept_look_approval_admits_a_later_head(self):
+        repo = self.look_repo()
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        page, inbox, testf, doc = self.PAGE, self.INBOX, self.TESTF, self.DOC
+        cases = {
+            "a test-only commit": self.look_world([(h, [a])], [testf]),
+            "a clean merge of main": self.look_world(
+                [(h, [a, x])], [doc],
+                extra=[(a, x, [doc]), (x, a, [page]), (x, h, [page])]),
+            "a clean merge where main and the pull request edited different parts of page.html":
+                self.look_world(
+                    [(h, [a, x])], [(page, "x")],
+                    extra=[(a, x, [(page, "x")]), (x, a, [(page, "a")]), (x, h, [(page, "a")])]),
+            "a clean merge that brings a look change from main": self.look_world(
+                [(h, [a, x])], [inbox],
+                extra=[(a, x, [inbox]), (x, a, [page]), (x, h, [page])]),
+            "both": self.look_world(
+                [(t, [a]), (h, [t, x])], [inbox, testf],
+                extra=[(a, t, [testf]), (t, x, [inbox]), (x, t, [page]), (t, h, [inbox]),
+                       (x, h, [page, testf])]),
+        }
+        for name, compares in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env([self.look_comment(10, head=a)], compares))
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stderr)
+
+    def test_a_kept_look_approval_still_needs_the_pinned_head(self):
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        compares = self.look_world(
+            [(t, [a]), (h, [t, x])], [self.INBOX, self.TESTF],
+            extra=[(a, t, [self.TESTF]), (t, x, [self.INBOX]), (x, t, [self.PAGE]),
+                   (t, h, [self.INBOX]), (x, h, [self.PAGE, self.TESTF])])
+        result = self.run_guard(
+            self.LOOK_MERGE, self.look_repo(),
+            self.look_carry_env([self.look_comment(10, head=a)], compares))
+        self.assert_look_refusal(result, self.LOOK_UNPINNED_REFUSAL)
+
+    def test_the_look_gate_refuses_each_shape_a_kept_approval_does_not_cover(self):
+        repo = self.look_repo()
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        page, inbox, testf, doc, base = self.PAGE, self.INBOX, self.TESTF, self.DOC, self.LOOK_BASE
+        approved = [self.look_comment(10, head=a)]
+        world = self.look_world
+        incomplete = world([(h, [a])], [testf])
+        incomplete[f"{base}...{h}"]["total_commits"] += 1
+        diverged = world([(h, [a])], [testf])
+        diverged[f"{a}...{h}"]["status"] = "diverged"
+        forced = world([(h, [a])], [testf])
+        del forced[f"{a}...{h}"]
+        many = world([(h, [a])], [testf])
+        many[f"{a}...{h}"] = self.look_compare([f"tests/t{n}.py" for n in range(300)])
+        weird = world([(h, [a])], [testf])
+        weird[f"{a}...{h}"] = self.look_compare([{"filename": testf, "status": "weird"}])
+        empty = world([(h, [a])], [testf])
+        empty[f"{a}...{h}"] = {}
+        outside = world([(h, [a])], [testf])
+        outside[f"{base}...{a}"] = self.look_compare(
+            [doc], commits=[(a, [self.LOOK_FORK])])
+        plain = world([(h, [a])], [testf])
+        unknown = '{"version": 1, "sets": {"console": ["python/agent_tools/console/**"]}, "x": 1}'
+        cases = {
+            "a look file changed": (approved, world([(h, [a])], [page]), {}),
+            "an edit moved within a look file": (approved, world(
+                [(t, [a]), (h, [t])], [page], extra=[(a, t, [page]), (t, h, [page])]), {}),
+            "a conflict resolved inside a look file": (approved, world(
+                [(h, [a, x])], [(page, "r")],
+                extra=[(a, x, [(page, "x")]), (x, a, [(page, "a")]), (x, h, [(page, "r")])]), {}),
+            "an edit inside a merge": (approved, world(
+                [(h, [a, x])], [doc, page],
+                extra=[(a, x, [doc]), (x, a, [page]), (x, h, [page])]), {}),
+            "a merge that drops main's look edit": (approved, world(
+                [(h, [a, x])], [doc],
+                extra=[(a, x, [inbox, doc]), (x, a, [page]), (x, h, [page, inbox])]), {}),
+            "a look edit and its revert": (approved, world(
+                [(t, [a]), (h, [t])], [testf],
+                extra=[(a, t, [page]), (t, h, [(page, "revert"), testf])]), {}),
+            "incomplete commits under an unchanged look diff": (approved, incomplete, {}),
+            "an approved head the head does not contain": (approved, diverged, {}),
+            "a force-push": (approved, forced, {}),
+            "a failed comparison": (approved, plain, {"FAKE_COMPARE_MODE": "nonzero"}),
+            "an unreadable comparison": (approved, plain, {"FAKE_COMPARE_MODE": "invalid"}),
+            "a comparison of 300 files": (approved, many, {}),
+            "an unknown file status": (approved, weird, {}),
+            "a compare answering an empty object": (approved, empty, {}),
+            "a failed base read": (approved, plain, {"FAKE_BRANCH_MODE": "nonzero"}),
+            "no declared set": (approved, plain, {"look_files": {}}),
+            "an unreadable set file": (approved, plain, {"look_files": {base: "{"}}),
+            "a set with an unknown field": (approved, plain, {"look_files": {base: unknown}}),
+            "a change outside every set": (approved, outside, {}),
+            "a later changes answer": ([
+                self.look_comment(10, head=a),
+                self.look_comment(11, head=x, answer="changes")], plain, {}),
+            "an untrusted approval": ([
+                self.look_comment(10, head=a, association="COLLABORATOR")], plain, {}),
+        }
+        for name, (comments, compares, extra) in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo, self.look_carry_env(comments, compares, **extra))
+                self.assert_look_refusal(result)
+
+    def test_a_worded_fix_admits_one_look_commit(self):
+        repo = self.look_repo()
+        a, h, f, f1 = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_F, self.LOOK_F1
+        page, testf = self.PAGE, self.TESTF
+
+        def fix(head=a):
+            return {"id": 10,
+                    "body": look_marker.approval_body(
+                        1200, 1300, head, "fix", "m10", words="make the heading bold"),
+                    "updated_at": "2026-11-16T10:00:00Z", "author_association": "OWNER"}
+
+        world = self.look_world
+        admitted = world([(f, [a]), (h, [f])], [page, testf],
+                         extra=[(a, f, [page]), (f, h, [testf])])
+        refused = {
+            "a second look commit": (fix(), world(
+                [(f1, [a]), (f, [f1]), (h, [f])], [page],
+                extra=[(a, f1, [page]), (f1, f, [page]), (f, h, [testf])])),
+            "two look commits on a side branch merged in": (fix(), world(
+                [(f1, [a]), (f, [f1]), (h, [a, f])], [page])),
+            "a fix with no look commit": (fix(), world(
+                [(f, [a]), (h, [f])], [testf], extra=[(a, f, [testf]), (f, h, [testf])])),
+            "a fix answer naming the current head": (fix(h), world([(h, [a])], [testf])),
+        }
+        result = self.run_guard(
+            self.LOOK_PINNED, repo, self.look_carry_env([fix()], admitted))
+        self.assertEqual(0, result.returncode, result.stderr)
+        for name, (comment, compares) in refused.items():
+            with self.subTest(case=name):
+                self.assert_look_refusal(self.run_guard(
+                    self.LOOK_PINNED, repo, self.look_carry_env([comment], compares)))
+
+    def gh_log(self, path):
+        text = Path(path).read_text(encoding="utf-8") if Path(path).exists() else ""
+        return [json.loads(line) for line in text.splitlines()]
+
+    def test_a_pull_request_cannot_change_its_look_files(self):
+        a, h, base = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_BASE
+        shrunk = '{"version": 1, "sets": {"console": ["python/agent_tools/console/*.py"]}}'
+        compares = {
+            f"{base}...{a}": self.look_compare(
+                [self.PAGE, "python/agent_tools/console/view.py"],
+                commits=[(a, [self.LOOK_FORK])]),
+            f"{a}...{h}": self.look_compare([self.PAGE, ".github/look-files.json"]),
+            f"{base}...{h}": self.look_compare(commits=[(a, [self.LOOK_FORK]), (h, [a])]),
+        }
+        look_files = {base: self.CONSOLE_SET, h: shrunk, "main": shrunk,
+                      "issue-1200-page": shrunk}
+        log = Path(self.fixture_dir.name) / "gh-log-pull-request-files"
+        log.unlink(missing_ok=True)
+        result = self.run_guard(
+            self.LOOK_PINNED, self.look_repo(),
+            self.look_carry_env([self.look_comment(10, head=a)], compares, look_files,
+                                FAKE_GH_LOG=str(log)))
+        self.assert_look_refusal(result)
+        argvs = self.gh_log(log)
+        contents = [argv for argv in argvs if "contents/" in argv[-1]]
+        self.assertEqual(1, len(contents), argvs)
+        self.assertTrue(contents[0][-1].endswith("?ref=" + base), contents)
+        compared = [argv[-1] for argv in argvs if "/compare/" in argv[-1]]
+        self.assertTrue(compared)
+        for path in compared:
+            self.assertRegex(path.split("/compare/")[1], r"[0-9a-f]{40}\.\.\.[0-9a-f]{40}")
+
+    def test_the_look_carry_reads_only_what_its_grammar_allows(self):
+        repo = self.look_repo()
+        a, base = self.LOOK_APPROVED, self.LOOK_BASE
+        compare = {"status": "ahead", "files": []}
+        answers = {f"{base}...{n:040x}": compare for n in range(4)}
+        cases = {
+            "a path outside the grammar": ('["pulls/1300/merge"]', lambda argvs: [
+                x for x in argvs if x[-1].endswith("pulls/1300/merge")], 0, None),
+            "more reads than the limit": (
+                "[f'compare/{n:040x}...{n:040x}' for n in range(49)]",
+                lambda argvs: [x for x in argvs if "/compare/" in x[-1]], 0, None),
+            "a judge that keeps asking": (
+                "[f'compare/{BASE}...{len(reads):040x}']",
+                lambda argvs: [x for x in argvs if "/compare/" in x[-1]],
+                2, 4),
+            "a contents path at another ref": (
+                "[f\"contents/.github/look-files.json?ref={'c' * 40}\"]",
+                lambda argvs: [x for x in argvs if "contents/" in x[-1]], 0, None),
+        }
+        for name, (need, pick, expected, runs) in cases.items():
+            with self.subTest(case=name):
+                directory = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+                counter, log = directory / "runs", directory / "gh-log"
+                stub = directory / "stub-look-bin"
+                stub.write_text(
+                    f"#!{sys.executable}\n"
+                    "import json, sys\n"
+                    "payload = json.load(sys.stdin)\n"
+                    f"open({str(counter)!r}, 'a').write('run\\n')\n"
+                    "carry = payload.get('carry') or {}\n"
+                    f"BASE = carry.get('base', {base!r})\n"
+                    "reads = carry.get('reads', {})\n"
+                    "print(json.dumps({'verdict': 'refuse', 'issue': 1200, 'covers': ['x'],\n"
+                    f"    'candidates': [{{'issue': 1200, 'head': {a!r}, 'answer': 'approved'}}],\n"
+                    f"    'need': {need}}}))\n"
+                    "sys.exit(1)\n", encoding="utf-8")
+                stub.chmod(0o755)
+                env = {**self.marked_with(self.look_comment(10, head=a)),
+                       "FAKE_COMPARES": json.dumps(answers), "FAKE_GH_LOG": str(log)}
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo, env,
+                    guard_args=("--gh-bin", str(self.fake_gh), "--look-bin", str(stub)))
+                self.assert_look_refusal(result)
+                self.assertEqual(expected, len(pick(self.gh_log(log))))
+                if runs is not None:
+                    self.assertEqual(runs, len(counter.read_text().splitlines()))
+
+    def test_the_guard_and_the_reader_share_the_carry_constants(self):
+        spec = importlib.util.spec_from_file_location("lifecycle_guard_look", GUARD_SOURCE)
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        self.assertEqual(look_marker.LOOK_FILES_PATH, guard.LOOK_FILES_PATH)
+        self.assertEqual(look_marker.CARRY_RUNS, guard.LOOK_CARRY_RUNS)
+        self.assertEqual(look_marker.READ_LIMIT, guard.LOOK_READ_LIMIT)
 
     RELEASE_MERGE = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
 

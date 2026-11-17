@@ -38,7 +38,7 @@ def sprint(sid, *, state="on_track", ball="manager", status_age=40 * MIN, base_a
                           "read_at": None if r is None else iso(r)} for s, m, r in assoc],
             "nudged_at": None if nudged_at is None else iso(nudged_at),
             "base_at": iso(NOW - base_age),
-            "waits": {"ci_at": None, "commit_at": None, "release_at": None,
+            "waits": {"ci_at": None, "commit_at": None, "release_at": None, "lock_at": None,
                       **{k: iso(NOW - v) for k, v in (waits or {}).items()}}},
     }
 
@@ -130,12 +130,13 @@ class MovementCheckTest(unittest.TestCase):
                 self.assertEqual((75, "waiting"), (code, out["status"]))
 
     def test_a_wait_signal_the_console_publishes_keeps_met_away_whatever_the_sentence_says(self):
-        for key in ("ci_at", "commit_at", "release_at"):
+        for key in ("ci_at", "commit_at", "release_at", "lock_at"):
             with self.subTest(key):
                 kw = dict(waits={key: 5 * MIN}, now_text="building 1 of 7: Importer resumes")
                 code, out = self.check(view(project(self.moving(**kw))))
                 self.assertEqual((75, "waiting"), (code, out["status"]))
-        old = dict(waits={"ci_at": 20 * MIN, "commit_at": 20 * MIN, "release_at": 20 * MIN})
+        old = dict(waits={"ci_at": 20 * MIN, "commit_at": 20 * MIN, "release_at": 20 * MIN,
+                          "lock_at": 20 * MIN})
         self.assertEqual(0, self.check(view(project(self.moving(**old))))[0])
         bare = self.moving()
         del bare["movement"]["waits"]
