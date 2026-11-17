@@ -99,7 +99,7 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_four_states_at_two_widths(self) -> None:
+    def test_the_set_is_twenty_five_states_at_two_widths(self) -> None:
         self.assertEqual(len(shots.STATES), 25)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
@@ -111,7 +111,10 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
     def test_the_module_contract_counts_the_screens_the_set_names(self) -> None:
-        self.assertIn("`STATES` names the twenty-four screens", shots.__doc__.replace("\n", " "))
+        doc = shots.__doc__.replace("\n", " ")
+        self.assertIn("`STATES` names the twenty-five screens", doc)
+        self.assertIn("a full run writes 50 files", doc)
+        self.assertEqual(len(shots.STATES) * len(shots.WIDTHS), 50)
 
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
