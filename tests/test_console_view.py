@@ -1382,6 +1382,56 @@ class SprintQuotaViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["sentence"], view.MANAGER_SENTENCE)
 
 
+class HeadingCountsOwnerBallTest(unittest.TestCase):
+    """The heading never says "Nothing needs you" beside a sprint whose ball is the owner's (#1247)."""
+
+    def shown(self, sprint_state, sessions=(), records=None):
+        return derive_view([state("p00", 1)], records, sprints={A: sprint_state},
+                           sessions=sessions, now_ms=R + 2 * MIN, managers=True)
+
+    def test_every_sprint_state_with_the_owners_ball_is_counted_in_the_heading(self):
+        base = with_manager(reported(started(A), R))
+        answer = [session("s1", "waiting_answer", name=NAME)]
+        permission = [session("s1", "waiting_permission", name=NAME)]
+        table = [
+            ("a manager waiting for an answer at its terminal", base, answer, None, 1),
+            ("a manager waiting for a permission at its terminal", base, permission, None, 1),
+            ("a brief", dataclasses.replace(sprint(A), brief=Brief(1, PARTS, T0, NONE, None, None)),
+             [], None, 1),
+            ("a stall", dataclasses.replace(base, stalled="r", stalled_at=iso(R + MIN)), [], None, 1),
+            ("no progress", dataclasses.replace(base, no_progress_at=iso(R + MIN)), [], None, 1),
+            ("a failed start", dataclasses.replace(
+                with_manager(sprint(A), state="failed"),
+                manager=Manager("failed", T0, "work", NAME, reason="x")), [], None, 1),
+            ("an open item the sprint names", reported(started(A), R, inbox=(12,)), [],
+             {("p00", "k1"): open_item("p00", "k1", 12)}, 1),
+            ("a stall and a terminal wait", dataclasses.replace(
+                base, stalled="r", stalled_at=iso(R + MIN)), answer, None, 1),
+            ("an open item and a terminal wait", reported(started(A), R, inbox=(12,)), answer,
+             {("p00", "k1"): open_item("p00", "k1", 12)}, 1),
+        ]
+        for label, sprint_state, sessions, records, count in table:
+            with self.subTest(label):
+                shown = self.shown(sprint_state, sessions, records)
+                self.assertEqual(entry(shown)["ball"], "owner")
+                self.assertEqual(shown["statement"]["inbox_items"], count)
+                self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+
+    def test_a_sprint_waiting_at_its_terminal_is_named_in_a_plain_sentence(self):
+        shown = self.shown(with_manager(reported(started(A), R)),
+                           [session("s1", "waiting_answer", name=NAME)])
+        self.assertEqual(shown["statement"]["sentence"], view.TERMINAL_SENTENCE)
+        self.assertEqual(view.TERMINAL_SENTENCE, "Answer it in the manager's terminal.")
+        self.assertEqual(shown["inbox"]["open"], [])
+
+    def test_a_sprint_the_manager_holds_is_not_counted(self):
+        shown = self.shown(with_manager(reported(started(A), R)),
+                           [session("s1", "working", name=NAME)])
+        self.assertEqual(entry(shown)["ball"], "manager")
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+
+
 class SprintReportViewTest(unittest.TestCase):
     def test_a_reports_pictures_reach_the_sprint_entry_cut(self):
         it = reported(started(A), R)

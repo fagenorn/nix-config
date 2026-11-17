@@ -88,7 +88,9 @@ null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
 and so is each open question of the registration's plan, and each retry, apply, confirm,
-failure or trust card, see below), else
+failure or trust card, see below, and each running sprint whose `ball` is `owner` and that no item
+above already counts: its manager waits for an answer or a permission at its terminal, #1247; it
+has no card, so the heading and its `TERMINAL_SENTENCE` are all that name it), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
@@ -96,7 +98,8 @@ stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` whe
 stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
 when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
-merge, else `QUESTION_SENTENCE` when any manager question is open, else
+merge, else `QUESTION_SENTENCE` when any manager question is open, else `TERMINAL_SENTENCE` when
+only a manager waiting at its terminal is counted, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
@@ -849,6 +852,7 @@ FAILED_START_SENTENCE = "Retry to start the manager, or drop the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
+TERMINAL_SENTENCE = "Answer it in the manager's terminal."
 ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
@@ -2031,42 +2035,6 @@ def derive_view(
     starts = sorted((s for group in drafted.values() for s in group
                      if failed_start(s, bool(in_sprint.get(s.sprint_id)), managers)),
                     key=lambda s: (s.manager.at, s.sprint_id))
-    open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(failures) + len(trusts) + len(open_items))
-    all_out = bool(capacity["all_out"])
-    if all_out:
-        sentence = ALL_OUT_SENTENCE
-    elif stale_projects:
-        sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
-    elif briefs:
-        sentence = BRIEF_SENTENCE
-    elif stalls:
-        sentence = MANAGER_SENTENCE
-    elif starts:
-        sentence = FAILED_START_SENTENCE
-    elif unprogressed:
-        sentence = PROGRESS_SENTENCE
-    elif signins:
-        sentence = SIGNIN_SENTENCE
-    elif adoptions:
-        sentence = ADOPTION_SENTENCE
-    elif asked:
-        sentence = QUESTION_SENTENCE
-    elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
-        sentence = REGISTER_SENTENCE
-    elif any(e["text"] for e in registering):
-        sentence = REGISTER_TYPE_SENTENCE
-    elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
-        sentence = CHOOSE_SENTENCE
-    elif any(r.item.get("answers") for r in open_items):
-        sentence = ANSWER_SENTENCE
-    elif registering and not open_items:
-        sentence = REGISTER_STEP_SENTENCE
-    elif open_count:
-        sentence = NEEDS_SENTENCE
-    else:
-        sentence = _sentence(len(states), adopting)
     runs: dict[str, list[DeliveryState]] = {}
     for delivery in (deliveries or {}).values():
         runs.setdefault(delivery.session_id, []).append(delivery)
@@ -2112,6 +2080,50 @@ def derive_view(
                                     notice_post=notice_post[s.project_id],
                                     read=health.get(s.project_id), questions=asks[s.project_id])
                      for s in quiet]
+    counted = {s.sprint_id for s in (*briefs, *stalls, *starts, *unprogressed)}
+    counted.update(s.sprint_id for s, _ in asked)
+    at_terminal = [sprint["sprint_id"] for project in (*entries, *quiet_entries)
+                   for sprint in project["sprints"]
+                   if sprint["ball"] == BALL_OWNER and not sprint["waiting"]
+                   and sprint["sprint_id"] not in counted]
+    open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
+                  + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
+                  + len(failures) + len(trusts) + len(open_items) + len(at_terminal))
+    all_out = bool(capacity["all_out"])
+    if all_out:
+        sentence = ALL_OUT_SENTENCE
+    elif stale_projects:
+        sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
+    elif briefs:
+        sentence = BRIEF_SENTENCE
+    elif stalls:
+        sentence = MANAGER_SENTENCE
+    elif starts:
+        sentence = FAILED_START_SENTENCE
+    elif unprogressed:
+        sentence = PROGRESS_SENTENCE
+    elif signins:
+        sentence = SIGNIN_SENTENCE
+    elif adoptions:
+        sentence = ADOPTION_SENTENCE
+    elif asked:
+        sentence = QUESTION_SENTENCE
+    elif at_terminal:
+        sentence = TERMINAL_SENTENCE
+    elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
+        sentence = REGISTER_SENTENCE
+    elif any(e["text"] for e in registering):
+        sentence = REGISTER_TYPE_SENTENCE
+    elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
+        sentence = CHOOSE_SENTENCE
+    elif any(r.item.get("answers") for r in open_items):
+        sentence = ANSWER_SENTENCE
+    elif registering and not open_items:
+        sentence = REGISTER_STEP_SENTENCE
+    elif open_count:
+        sentence = NEEDS_SENTENCE
+    else:
+        sentence = _sentence(len(states), adopting)
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
           "title": sprint["title"], "message_id": message["id"], "reply_at": message["reply_at"]}
