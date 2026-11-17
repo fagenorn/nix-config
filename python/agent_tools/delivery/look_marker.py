@@ -42,8 +42,10 @@ immediately followed by `before[\\s_-]*merg`. Prose, a bullet that only talks ab
 marker and text inside inline code are never near misses. `near_misses` returns them in body order with their 1-based
 line numbers; `look-lint` prints them, and a body with any is refused even beside a valid marker.
 
-The console reads a look-marker line with `marker_line`, and the head commit of a merged REST
-pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
+The console reads a look-marker line with `marker_line`. It names the pull requests an issue's
+approvals mention with `look_prs` and asks `merged_under_look` whether a merged pull request's
+head was merged under an approval, exact or kept; `merged_under_look` reads the head commit of
+the merged REST pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
 look-marker line outside fences changed from `- [ ]` to `- [x]` and the number it changed; every
 other byte of the body, the rest of a changed line (trailing spaces, `\\r`) included, is kept, and
 lines are split and joined on `\\n` alone.
