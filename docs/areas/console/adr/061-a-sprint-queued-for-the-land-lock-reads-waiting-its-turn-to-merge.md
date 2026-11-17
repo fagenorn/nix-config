@@ -1,4 +1,4 @@
-# ADR-console-060 — A sprint queued for the land lock reads waiting its turn to merge
+# ADR-console-061 — A sprint queued for the land lock reads waiting its turn to merge
 
 - **Status:** accepted
 - **Decided in:** #1184

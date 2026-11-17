@@ -31,6 +31,7 @@ from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.capacity import EMPTY, CapacityState, capacity_view
 from agent_tools.console.manager import session_name
+from agent_tools.console.permission import AUTO, BYPASS, NOT_DECLARED, RULES_IN_PLACE, Permission
 from agent_tools.console.movement import (
     LocalReading,
     ProjectMovement,
@@ -2301,12 +2302,27 @@ class SprintViewTest(unittest.TestCase):
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
-            "state_until": None, "pictures": [],
+            "state_until": None, "pictures": [], "permission_text": None,
         "movement": {"sessions": [], "nudged_at": None,
                      "base_at": "2026-11-12T10:00:00+00:00",
                      "issues": [],
                      "waits": {"ci_at": None, "commit_at": None, "release_at": None,
                                "lock_at": None}}}])
+
+    def test_a_sprint_shows_its_permission_mode_and_reason(self):
+        sprints = {
+            "a" * 16: dataclasses.replace(sprint("a" * 16),
+                                          permission=Permission(BYPASS, RULES_IN_PLACE)),
+            "b" * 16: dataclasses.replace(sprint("b" * 16),
+                                          permission=Permission(AUTO, NOT_DECLARED)),
+            "c" * 16: sprint("c" * 16),
+        }
+        view = derive_view([state("p00", 1)], sprints=sprints, now_ms=T0_MS)
+        shown = {entry["sprint_id"]: entry["permission_text"]
+                 for entry in view["entries"][0]["sprints"]}
+        self.assertEqual(shown, {"a" * 16: "bypass: production rules in place",
+                                 "b" * 16: "auto: no production rules declared",
+                                 "c" * 16: None})
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),

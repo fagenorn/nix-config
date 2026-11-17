@@ -47,7 +47,7 @@ The fold. `lock_held` is `any(p.holding for p in pulls)` for a read and the prev
 `pulls` is None. In a good read each issue of a read pull with `holding` that is in `live` (the issues whose delivery run is in a session not ended; None
 gates nothing), and each issue of `locking` (the issues whose journal sits at a lock step) when that read's
 `lock_held` is true, is seen: a run that died holding the lock leaves its pull request holding, so its issues
-are seen no more and the sprint ages out to may be stuck (ADR-console-060 D1); its `locks` time
+are seen no more and the sprint ages out to may be stuck (ADR-console-061 D1); its `locks` time
 becomes `max(now_ms, kept)`; an issue not seen keeps its time, never refreshed; `locks` is ascending by
 issue. A failed read sees nothing and keeps `locks` unchanged whatever `locking` holds, so a lock time ages
 out after the quiet window like every signal (ADR-console-050 D5), a journal lock step's included. `merged` keys pull requests by number and returns them ascending by number. With `pulls` None
