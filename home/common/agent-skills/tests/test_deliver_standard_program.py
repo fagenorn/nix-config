@@ -10522,6 +10522,16 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(stopped["stage"], "look-fix")
         self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": SHA})
 
+    def test_a_fix_answer_stops_at_look_when_the_setup_could_not_read_the_marker(self):
+        cont = self.look_cont()
+        unread = dict(self.FIXED, setup={"look": {"verdict": "error", "detail": "x"}, "head": SHA})
+        result, calls = self.fix(patch=unread, cont=cont)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "look")
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        for label in ("look-head", "look-post", "look-fix", "look-fix-review", "verify", "merge"):
+            self.assertNotIn(label, got)
+
     def test_a_fix_for_a_closed_pull_request_posts_nothing(self):
         result, calls = self.fix(replies={"look-head": {"head": SHA, "state": "CLOSED", "renew": {"verdict": "renewed"}}})
         self.assertEqual(result["stage"], "look-approve")

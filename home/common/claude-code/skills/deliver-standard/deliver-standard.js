@@ -1989,6 +1989,9 @@ const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'strin
 // #1211: the owner's fix answer approves the head it was given for with one fix. The approval is recorded before the fix, only while the pull request is open and its head is
 // both the head the owner saw and the head the awaiting-look stop left; anything else posts nothing and stops at awaiting-look with the head just read.
 const FIX_WORDS_FILE = `${setup.plan_dir}/look-fix-words.txt`
+// A look marker the setup could not read is neither marked nor unmarked: a fix answer stops here, before the head check, the approval and the fix round.
+const LOOK_UNREAD = () => stop('look', { details: clip(`the look marker of issue ${ISSUE} was not read: ${LOOK && present(LOOK.detail) ? LOOK.detail : 'no verdict'}`) })
+if (!LOOK_READ && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') return LOOK_UNREAD()
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') {
   const hd = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
@@ -2064,7 +2067,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 const PICTURES = picturesOf(verify)
 // #1139: a look read with neither verdict is not read as unmarked: nothing is pushed or landed until the marker is read.
-if (!LOOK_READ) return stop('look', { details: clip(`the look marker of issue ${ISSUE} was not read: ${LOOK && present(LOOK.detail) ? LOOK.detail : 'no verdict'}`) })
+if (!LOOK_READ) return LOOK_UNREAD()
 if (MODE === 'ready') {
   verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(PICTURES.length ? { pictures: PICTURES } : {}) }
   return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, look: { verdict: LOOK.verdict, covers: COVERS }, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
