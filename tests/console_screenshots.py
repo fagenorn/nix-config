@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twenty-nine screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -14,7 +14,10 @@ Contract:
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
   lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
   step (a run that is not live is no holder of the sprint's);
-  `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
+  `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
+  has a transcript whose last peer-message record is one the client held and did not deliver
+  (#1229), read once through the movement poll, so its line reads that the manager cannot hear
+  the console; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
@@ -57,7 +60,7 @@ Contract:
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 58 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 60 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -131,7 +134,7 @@ from .console_test_support import hook_body, write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
+          "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "accounts-panel", "ask-box",
           "questions-closed", "questions-open", "ask-goal", "question-read")
@@ -172,6 +175,7 @@ NEWEST_THREAD = 'details[data-key="thread:owner/web:1178a2"] > summary'
 OPEN_THREAD = (True, FOLLOW_READ_LINE, True)
 BASE_THREAD = (False, FOLLOW_READ_LINE, False)
 DESK_OUTSIDE = "outside-1136"
+DEAF_MANAGER = "manager-1229"
 READING_PANEL = "section#reading"
 HEAD_ASK = (True, ASK_WORKING_QUESTION, ASK_READ_LINE)
 READ_QUESTION = "What was done in the last 7 days, and what is in production?"
@@ -292,6 +296,7 @@ class Fixture:
     state: Path
     projects: tuple[Path, ...]
     holding: tuple[int, ...] = ()
+    deaf: bool = False
 
 
 @dataclass(frozen=True)
@@ -450,6 +455,12 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
                     asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "manager-cannot-hear":
+        sid, _ = seed.sprint(web, "Add resumable uploads", started=60 * MINUTE,
+                             report=45 * MINUTE)
+        seed.put(MINUTE, sessions.SEEN, web, {
+            "session_id": DEAF_MANAGER, "cwd": web_root, "repo": web_root, "state": "working",
+            "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state == "waiting-its-turn":
@@ -638,6 +649,16 @@ def _write_desk_spend(fixture: Fixture, now_s: float, running: str, ended: str) 
         assistant(DESK_OUTSIDE, web, ago, 80_000, 6_000) for ago in (0, 1, 3)]))
 
 
+def _write_held_manager(fixture: Fixture, now_s: float) -> None:
+    """The deaf manager's transcript: a delivered peer message, then the one the client held."""
+    slug = fixture.config / "projects" / "-web"
+    slug.mkdir(parents=True, exist_ok=True)
+    (slug / f"{DEAF_MANAGER}.jsonl").write_bytes(_transcript([
+        {"type": "user", "origin": {"kind": "peer"}, "message": {"content": "carry on"}},
+        {"type": "system", "content": "Held peer message from the console, not delivered until "
+                                      "you approve it at this terminal"}]))
+
+
 def build_fixture(root: Path, state: str, now_s: float, *,
                   read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> Fixture:
     root = Path(root)
@@ -653,7 +674,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         root=root, store=console / "events.sqlite3", registry=state_dir / "fleet" / "registry.json",
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
-        holding=(12,) if state == "waiting-its-turn" else ())
+        holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear")
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -665,6 +686,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
     if state == "accounts-panel":
         for name in ("work-main", "work-spare"):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
+    if state == "manager-cannot-hear":
+        _write_held_manager(fixture, now_s)
     if state == "spend-page":
         _write_spend(fixture, now_s, sprint_ids[0])
     elif state == "desk-spend":
@@ -696,11 +719,11 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
             launches.append(launch)
 
     forge: dict = {}
+    if fixture.holding or fixture.deaf:
+        forge = {"local_reader": lambda root, pattern: LocalReading((), False)}
     if fixture.holding:
-        forge = {
-            "pull_reader": lambda slug, pattern, *, cancelled: (
-                PullRequest(7, frozenset(fixture.holding), False, None, True),),
-            "local_reader": lambda root, pattern: LocalReading((), False)}
+        forge["pull_reader"] = lambda slug, pattern, *, cancelled: (
+            PullRequest(7, frozenset(fixture.holding), False, None, True),)
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
@@ -714,6 +737,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
     service.poll_spend()
     if fixture.holding:
         _seed_lock_run(service, fixture, now_s)
+        service.poll_movement()
+    elif fixture.deaf:
         service.poll_movement()
     return service
 

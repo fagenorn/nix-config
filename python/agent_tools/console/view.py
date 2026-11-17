@@ -543,11 +543,13 @@ phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track
 sprint has exactly one ball and a non-empty now-sentence, and `state` and `state_text` are
 unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
-set, its manager failed to start with no brief (`sprints.failed_start`), or one of the sprint's listed sessions is waiting for an answer or a permission (the manager
-waits on the owner at its terminal); `manager` ("manager working") while the movement reading moves;
+set, its manager failed to start with no brief (`sprints.failed_start`), one of the sprint's listed sessions is waiting for an answer or a permission (the manager
+waits on the owner at its terminal), or its manager cannot hear the console (below); `manager` ("manager working") while the movement reading moves;
 else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
-that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, then for
-a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
+that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, `NOW_ANSWER_TEXT`; a manager that cannot hear the console
+(#1229: the sprint's manager session has `SessionMovement.held`, its transcript's last peer message
+being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed session waiting for a
+permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
 `drafting`); no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
@@ -725,6 +727,7 @@ from agent_tools.console.sprints import (
     NOW_BRIEF_TEXT,
     NOW_CI_TEXT,
     NOW_COMMITTING_TEXT,
+    NOW_DEAF_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
     NOW_FAILED_START_TEXT,
@@ -1226,6 +1229,20 @@ def sprint_sessions_of(project_id: str, sprints: Iterable[SprintState],
     return found
 
 
+def sprint_absent_managers(project_id: str, sprints: Iterable[SprintState],
+                           belonging: Mapping[str, frozenset[str]]) -> dict[str, frozenset[str]]:
+    """The running sprints of `project_id` each known `manager_session` that is not a live session of
+    theirs (absent from the registry or ended, so absent from `belonging`) manages (#1229). Its
+    transcript is still read for a held peer message, whatever became of the session."""
+    found: dict[str, set[str]] = {}
+    for sprint in sprints:
+        if (sprint.project_id == project_id and ended_at(sprint) is None
+                and sprint.manager_session is not None
+                and sprint.sprint_id not in belonging.get(sprint.manager_session, ())):
+            found.setdefault(sprint.manager_session, set()).add(sprint.sprint_id)
+    return {sid: frozenset(ids) for sid, ids in found.items()}
+
+
 def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
                          sessions: Iterable[SessionState],
                          states: Mapping[str, ProjectState]) -> dict[str, tuple[tuple[str, int], ...]]:
@@ -1401,7 +1418,7 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
 
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
                 listed: Collection[str], waits: WaitSignals = NO_WAITS,
-                failed_start: bool = False) -> str | None:
+                failed_start: bool = False, deaf: bool = False) -> str | None:
     """Who holds a running sprint's ball (#1086), or None once it has ended. `listed` is the
     `state` of each of the sprint's own listed sessions. The owner when anything waits on them: an
     open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
@@ -1410,11 +1427,12 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
-    against the failure. `waits` are the sprint's wait signals."""
+    against the failure. `waits` are the sprint's wait signals. A `deaf` manager (its transcript
+    shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
     brief = state.brief
-    if (waiting or (brief is not None and brief.decision == NONE) or state.stalled is not None
+    if (waiting or deaf or (brief is not None and brief.decision == NONE) or state.stalled is not None
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
@@ -1448,10 +1466,12 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
-               wait: str | None = None, failed_start: bool = False) -> str | None:
+               wait: str | None = None, failed_start: bool = False,
+               deaf: bool = False) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
-    `ball`, `wait` (`sprint_wait`) and `failed_start` are the entry's own."""
+    `ball`, `wait` (`sprint_wait`), `failed_start` and `deaf` (the manager holds the console's wake
+    behind a prompt no one at a terminal answers, #1229) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1459,6 +1479,8 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_STOPPING_TEXT
     if WAITING_ANSWER in listed:
         return NOW_ANSWER_TEXT
+    if deaf:
+        return NOW_DEAF_TEXT
     if WAITING_PERMISSION in listed:
         return NOW_PERMISSION_TEXT
     if failed_start:
@@ -1578,10 +1600,11 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
     failed = failed_start(state, bool(sessions), managers)
-    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed)
-    minute = nudges and state.manager is not None and state.manager.state == STARTED
     own = sorted((m for m in (() if movement is None else movement.sessions)
                   if m.sprint_id == state.sprint_id), key=lambda m: m.session_id)
+    deaf = any(m.held and m.session_id in manager_ids for m in own)
+    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed, deaf=deaf)
+    minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,
@@ -1592,7 +1615,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
         "now_text": sprint_now(state, quota, listed, waiting, stages, ball,
-                               sprint_wait(state, now_ms, listed, waits), failed_start=failed),
+                               sprint_wait(state, now_ms, listed, waits), failed_start=failed,
+                               deaf=deaf),
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
