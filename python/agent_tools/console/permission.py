@@ -60,7 +60,7 @@ DERIVED_ROW_KEYS = frozenset(
 )
 DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
 PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
-PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools"})
+PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools", "console_activation"})
 MCP_TOOL_NAME = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+")
 PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 POLICY_MAX_BYTES = 1 << 20
@@ -175,7 +175,14 @@ def _production_ok(production) -> bool:
             ):
                 return False
     profile = production["release_profile"]
-    return isinstance(profile, str) and bool(profile)
+    if not isinstance(profile, str) or not profile:
+        return False
+    if "console_activation" in production:
+        activation = production["console_activation"]
+        return isinstance(activation, str) and activation in [
+            command["id"] for command in production["changes"]
+        ]
+    return True
 
 
 def policy_rows(path: Path) -> dict | None:

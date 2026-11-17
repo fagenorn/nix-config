@@ -88,6 +88,17 @@ def bad_mcp_tools():
     return document({"owner/p01": row("owner/p01"), "owner/p02": other})
 
 
+def with_activation(value, changes=("deploy",)):
+    """A policy whose one row's production carries `console_activation` `value`."""
+    entry = row("owner/p01")
+    entry["production"] = {
+        **entry["production"],
+        "changes": [{"id": name, "argv": ["x"]} for name in changes],
+        "console_activation": value,
+    }
+    return document({"owner/p01": entry})
+
+
 class PermissionReadTest(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -264,6 +275,11 @@ class PolicyParityTest(unittest.TestCase):
             "bad slug key": bad_slug_key(),
             "bad mcp tools": bad_mcp_tools(),
             "no evidence": document({"owner/p01": no_evidence}),
+            "activation names a change": with_activation("deploy"),
+            "activation names no change": with_activation("other"),
+            "activation empty": with_activation(""),
+            "activation not a string": with_activation(7),
+            "activation with no changes": with_activation("deploy", changes=()),
             "bad branch": mutated(default_branch="bad branch"),
             "duplicate checks": mutated(required_checks=["a", "a"]),
             "empty argv": with_command(argv=[]),
