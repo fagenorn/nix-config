@@ -41,11 +41,12 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_eighteen_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 18)
-        self.assertEqual(shots.STATES[-8:], ("owner-check", "spend-page", "notices-fold",
-                                             "notice-post-open", "desk-spend", "goal-open",
-                                             "inbox-card", "accounts-panel"))
+    def test_the_set_is_twenty_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 20)
+        self.assertEqual(shots.STATES[-10:], ("owner-check", "spend-page", "notices-fold",
+                                              "notice-post-open", "desk-spend", "goal-open",
+                                              "goal-near", "goal-over", "inbox-card",
+                                              "accounts-panel"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -153,6 +154,68 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(page.captured, [(reset_to, True)])
                 self.assertEqual(shot.scroll_y, reset_to)
                 self.assertEqual(shot.scroll_y, page.captured[0][0])
+
+    def test_the_goal_states_type_into_the_box_before_the_capture(self) -> None:
+        calls: list[tuple[str, tuple]] = []
+
+        class Page:
+            def goto(self, url):
+                calls.append(("goto", (url,)))
+
+            def wait_for_selector(self, selector):
+                calls.append(("wait_for_selector", (selector,)))
+
+            def focus(self, selector):
+                calls.append(("focus", (selector,)))
+
+            def fill(self, selector, text):
+                calls.append(("fill", (selector, text)))
+
+            def click(self, selector):
+                calls.append(("click", (selector,)))
+
+            def evaluate(self, expression):
+                if expression == shots.SCROLL_Y:
+                    return 0.0
+                if expression == "document.documentElement.scrollWidth":
+                    return 480
+                if expression == shots.SHORT_CONTROLS:
+                    return []
+                return 0
+
+            def screenshot(self, path, full_page):
+                calls.append(("screenshot", (path, full_page)))
+
+            def close(self):
+                pass
+
+        class Browser:
+            def new_page(self, viewport):
+                return Page()
+
+        self.assertEqual(shots.GOAL_NEAR_CHARS, 1900)
+        self.assertEqual(shots.GOAL_OVER_CHARS, 2100)
+        for state, typed, sent in (("goal-near", "x" * 1900, False),
+                                   ("goal-over", "x" * 2100, True)):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                calls.clear()
+                shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
+                shot_at = next(i for i, c in enumerate(calls) if c[0] == "screenshot")
+                before = calls[:shot_at]
+                focus = ("focus", ("textarea.goal-text",))
+                fill = ("fill", ("textarea.goal-text", typed))
+                self.assertIn(focus, before)
+                self.assertIn(fill, before)
+                self.assertLess(before.index(focus), before.index(fill))
+                send = ("click", ("button.goal-send",))
+                if sent:
+                    refusal = ("wait_for_selector", (".goal-status .fail",))
+                    self.assertIn(send, before)
+                    self.assertIn(refusal, before)
+                    self.assertLess(before.index(fill), before.index(send))
+                    self.assertLess(before.index(send), before.index(refusal))
+                else:
+                    self.assertNotIn(send, calls)
 
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -268,7 +331,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
-                elif state == "goal-open":
+                elif state in ("goal-open", "goal-near", "goal-over"):
                     other = shots.build_fixture(Path(tmp) / "other", "tell-box-open", now_s)
                     again = shots.start_service(other, now_s)
                     try:
