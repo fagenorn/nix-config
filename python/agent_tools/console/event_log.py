@@ -51,7 +51,8 @@ Two kinds record a question about a project and its answer (#1176): `PROJECT_QUE
 in its project column) and `PROJECT_QUESTION_ANSWERED` (`project_question.answered`, payload `question_id`,
 `outcome` and either `answer` or `reason`). Neither is in `KEPT_KINDS`, retention removes them like
 any other row; the spend fold reads the asked row's `session_id` and `profile`
-(`spend.question_sessions`) and nothing else folds them; the schema version is unchanged.
+(`spend.question_sessions`), and `project_question.asked_questions` folds both into the desk
+view's questions (#1177); the schema version is unchanged.
 
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
