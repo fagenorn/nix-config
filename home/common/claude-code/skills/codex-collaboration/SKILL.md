@@ -6,7 +6,7 @@ user-invocable: false
 
 # Codex Collaboration
 
-`plan-review` follows [PLAN-REVIEW.md](./PLAN-REVIEW.md); `diff-review` follows [DIFF-REVIEW.md](./DIFF-REVIEW.md). Codex only reviews.
+`plan-review` follows [PLAN-REVIEW.md](./PLAN-REVIEW.md); `diff-review` follows [DIFF-REVIEW.md](./DIFF-REVIEW.md).
 
 ## Entry and selection
 
