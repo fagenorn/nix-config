@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from typing import Callable
 
+from agent_tools.console import register
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASE = "58908955a256f53b09ff27702d3e9847ba030708"
@@ -768,6 +770,23 @@ class DocsTreeTest(unittest.TestCase):
         proof = self.doc("docs/areas/console/adr/063-a-bypass-proof-runs-on-a-throwaway-repository-it-registers-and-removes.md")
         self.assertIn("`bypass-proof wakes` (ADR-console-068)", proof)
 
+    def test_the_behind_checkout_decision_is_recorded_as_adr_069(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("069-*.md"))
+        self.assertEqual(len(found), 1, found)
+        self.assertTrue(found[0].read_text().splitlines()[0].startswith("# ADR-console-069 \u2014 "))
+        text = found[0].read_text()
+        for needle in ("#1233", "ls-remote --symref", "--refmap=", "--ff-only", "--no-overwrite-ignore",
+                       "registration_error", "register_behind", "Update it", register.REMOTE_UNREAD,
+                       register.UPDATE_STEP, "ADR-console-031", "ADR-console-035", "ADR-console-034"):
+            self.assertIn(needle, text)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        entry = context.split("**Registration**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("ADR-console-069", entry)
+        adr035 = (REPO_ROOT / "docs/areas/console/adr/035-every-registration-failure-is-a-counted-card-"
+                              "and-a-finished-registration-leaves-only-its-project.md").read_text()
+        status = next(row for row in adr035.splitlines() if row.startswith("- **Status:**"))
+        self.assertIn("ADR-console-069", status)
+
     def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
         self.assertEqual(
             tailnet_names_other_than_placeholder(
@@ -1221,8 +1240,8 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                          "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
-                         "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
-                         "extended by #1055 (D10, D11)")):
+                         "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035, "
+                         "ADR-console-069; extended by #1055 (D10, D11)")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -1253,7 +1272,8 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-029, ADR-console-030, "
-                 "ADR-console-031, ADR-console-034, ADR-console-035; extended by #1055 (D10, D11)"),
+                 "ADR-console-031, ADR-console-034, ADR-console-035, ADR-console-069; "
+                 "extended by #1055 (D10, D11)"),
                 ("docs/areas/console/adr/"
                  "029-the-owner-answers-the-adoptions-questions-on-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-030, ADR-console-031, "
@@ -1265,7 +1285,7 @@ class DocsTreeTest(unittest.TestCase):
                  "ADR-console-064"),
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
-                 "- **Status:** accepted; amended by ADR-console-033")):
+                 "- **Status:** accepted; amended by ADR-console-033, ADR-console-069")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
