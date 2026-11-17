@@ -11,11 +11,14 @@ Rows. Three kinds record an adoption approved on the page, `STEP` (`event_log.AD
 ADR-console-028 D10); none is in `KEPT_KINDS`. `step_row(payload)` returns `(STEP,
 None, dict(payload))` and raises `ValueError` unless the members are exactly `STEP_MEMBERS` (`by`,
 `plan_id`, `root`, `project_id`, `step`, `branch`, `commit`, `base`, `pull_request`, `reason`, `note`,
-`kept`), `by` is `owner`, `plan_id` and `root` are non-empty strings, `step` is one of `STEPS`
+`kept`, `evidence`), `by` is `owner`, `plan_id` and `root` are non-empty strings, `step` is one of `STEPS`
 (`applied`, `apply_failed`, `push_failed`, `open_failed`, `opened`), `project_id`, `branch`,
 `commit`, `base`, `reason` and `note` are each a string or None, `pull_request` is None or exactly
 `{number, url}` (a positive int, not a bool, and a string) and `kept` is None or exactly `{branch,
-worktree}` strings. A step in `RESUMABLE` (`applied`, `push_failed`, `open_failed`) or `opened` needs
+worktree}` strings and `evidence` is None or exactly `{hook, why, lines}` (`hook` None or
+matching `HOOK`, `why` None or a string, `lines` a list of at most `EVIDENCE_LINES` strings of at
+most `LINE_CHARS` characters; a stored step without `evidence` reads as None, so rows of an earlier
+release still fold). A step in `RESUMABLE` (`applied`, `push_failed`, `open_failed`) or `opened` needs
 a string `branch` and `commit`; `opened` also needs a `pull_request` and a string `base`.
 `pull_row(plan_id, number, url, state)` returns `(PULL, None, {plan_id, number, url, state})` and
 raises `ValueError` unless `state` is one of `PULL_STATES` (`open`, `ready`, `merged`, `closed`) and
@@ -69,11 +72,29 @@ removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavail
 `adopt.gate.*` gate; an uninstalled platform manifest (`MANIFEST_NOTE`, which names `just switch`);
 a repair id with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation
 message, so a formatter's output, a worktree path or a plan id never reaches a card (the service
-logs them). `kept` is not read: no note mentions a leftover copy except `RETAINED_NOTE`, none asks an
+logs them), except the failing hook that `commit_evidence(error, None)` names for `COMMIT_REPAIR`
+(reason `the project's <hook> hook stopped the adoption commit: <hook_why(exit)>`, note
+`HOOK_NOTE`) and for `SIGNING_REPAIR` (the reason stays `SIGNING_REASON`, so `Turn signed commits
+off` is still offered, and the note is `hook_signing_note(hook, why)`, two sentences).
+`kept` is not read: no note mentions a leftover copy except `RETAINED_NOTE`, none asks an
 agent to remove anything, and every note is at most two sentences. A signing failure whose plan
 holds a drafted `commit-signed` of `yes` offers a third option, `SIGNING_OFF_OPTION` (value
 `SIGNING_OFF_VALUE`), which the page sends as a draft change to `no`; no note carries a path, a
-branch, a hash or a command other than `just switch`. `run_failure(name, kind)` words a failed run by `register.RUN_WORDS` with the note `Choose
+branch, a hash or a command other than `just switch`.
+`commit_evidence(error, kept)` is `{hook, why, lines}` for the `commit_output` member of an apply
+error (None unless that member is exactly `{hook, exit, lines}` with `lines` a list of strings,
+`hook` None or matching `HOOK`, `exit` None or an int that is not a bool, and `hook` and `exit`
+None together): `lines` are the last `EVIDENCE_LINES` results of `evidence_line` that are not None
+and `why` is `hook_why(exit)` when a hook is named. `hook_why(code)` words a hook's exit status
+(127 a command it runs was not found, 126 could not be executed, -1 could not be started, else
+`it ended with exit status <code>`). `evidence_line(text, worktree)` makes one line of git's own
+words fit for the page: it removes ANSI CSI and OSC sequences and control characters, shows a path
+under the worktree relative to it and any other absolute path (`HOST_PATH`, which leaves a
+relative path and a URL whole) as its last segment, cuts a hex run of 12 or more to seven
+characters and an ellipsis, collapses whitespace, cuts to `LINE_CHARS` characters, and returns
+None for an empty line or one that still matches `PAGE_PATTERN`. These lines are git's own words,
+held to `PAGE_PATTERN` and not to the plain-words rule of the reasons and notes.
+`run_failure(name, kind)` words a failed run by `register.RUN_WORDS` with the note `Choose
 Apply it again. If it keeps failing, ask an agent to apply the adoption of <name> in a terminal,
 which shows the full reason.`
 `registration_outcome(root, report)` reads the answer of `verify --register` as exactly `{result,
@@ -91,7 +112,8 @@ no entry has a line of its own.
 
 View. `entry(adoption, *, running, name, registering=False)` is the registration's `adoption` member: None for no
 adoption, else exactly the keys `status`, `step`, `state`, `headline`, `lines`, `note`, `branch`,
-`commit` and `url` (`lines` is `[]` for every step; a failed push reads `The adoption of <name> was
+`commit` and `url` (`lines` is `[]` for every step, though `apply_items` shows the `lines` of a failed apply's
+`evidence` on its card; a failed push reads `The adoption of <name> was
 applied, but its branch was not pushed: <reason>.` and a failed open `The adoption of <name> was
 pushed, but its pull request was not opened: <reason>.`; an open pull request reads `The
 pull request of <name> is not ready to merge yet.`; `running` gives status `running`, the running
@@ -172,7 +194,21 @@ PULL_STATES = ("open", "ready", "merged", "closed")
 REGISTRATION_RESULTS = ("waiting", "registered", "refused")
 REGISTRATION_MEMBERS = {"plan_id", "number", "result", "project_id", "reason", "note"}
 STEP_MEMBERS = {"by", "plan_id", "root", "project_id", "step", "branch", "commit", "base",
-                "pull_request", "reason", "note", "kept"}
+                "pull_request", "reason", "note", "kept", "evidence"}
+EVIDENCE_LINES = 8
+LINE_CHARS = 160
+HOOK = re.compile(r"[a-z][a-z-]{0,39}")
+# What a line shown on the page may not hold (the page's own pattern, written out here).
+PAGE_PATTERN = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
+# An absolute path of the host: a "/" that no word character, ".", "~" or "/" precedes, and that
+# is not the "//" of a URL's authority.
+HOST_PATH = re.compile(r"(?<![\w.~/])(?!(?<=[A-Za-z0-9]:)//[^/\s])/[^\s\"'`)\]}>,;]*")
+ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+HEX_RUN = re.compile(r"[0-9a-f]{12,}")
+HOOK_NOTE = ("The hook ran in a fresh copy of the repository, without the project's development "
+             "environment. Make it pass there, then choose Apply it again.")
 BRANCH = re.compile(r"adopt-[0-9a-f]{12}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 PULL_URL = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/pull/([0-9]+)")
@@ -306,8 +342,23 @@ def _valid_kept(value: object) -> bool:
             and all(isinstance(text, str) for text in value.values()))
 
 
+def _valid_evidence(value: object) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) != {"hook", "why", "lines"}:
+        return False
+    hook, why, lines = value["hook"], value["why"], value["lines"]
+    return ((hook is None or (isinstance(hook, str) and HOOK.fullmatch(hook) is not None))
+            and (why is None or isinstance(why, str))
+            and isinstance(lines, list) and len(lines) <= EVIDENCE_LINES
+            and all(isinstance(line, str) and len(line) <= LINE_CHARS for line in lines))
+
+
 def step_row(payload: Mapping) -> tuple[str, None, dict]:
+    if isinstance(payload, Mapping) and "evidence" not in payload:
+        payload = {"evidence": None, **payload}
     if (not isinstance(payload, Mapping) or set(payload) != STEP_MEMBERS
+            or not _valid_evidence(payload["evidence"])
             or payload["by"] != "owner" or not _text(payload["plan_id"])
             or not _text(payload["root"]) or payload["step"] not in STEPS
             or not all(_text_or_none(payload[key]) for key in
@@ -474,6 +525,9 @@ def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping
     elif action in ("approve", "retry") and adoption is not None and entry is not None:
         key = f"register-apply/{plan_id}/{latest['at']}/{adoption['at']}"
         ask, why, lines = entry["headline"], entry["note"], []
+        evidence = adoption.get("evidence")
+        if action == "approve" and adoption["step"] == "apply_failed" and evidence is not None:
+            lines = list(evidence["lines"])
         if action == "approve":
             first, value = APPLY_AGAIN_OPTION, APPLY_VALUE
             since = adoption["pull_at"] or adoption["at"]
@@ -609,6 +663,62 @@ def forge_failure(error: BaseException, base: str) -> tuple[str, str]:
     return ("the forge answered in a way the console does not understand", OPEN_NOTE)
 
 
+def hook_why(code: int) -> str:
+    if code == 127:
+        return "a command it runs was not found"
+    if code == 126:
+        return "a command it runs could not be executed"
+    if code == -1:
+        return "it could not be started"
+    return f"it ended with exit status {code}"
+
+
+def hook_signing_note(hook: str, why: str) -> str:
+    return (f"The project's {hook} hook also stopped the commit: {why}. Make it pass in a fresh "
+            "copy of the repository, without the project's development environment, and set up a "
+            "signing key on this computer, then choose Apply it again.")
+
+
+def evidence_line(text: str, worktree: str | None) -> str | None:
+    text = ANSI_OSC.sub("", ANSI_CSI.sub("", text)).replace("\t", " ")
+    text = CONTROL.sub("", text)
+    if worktree is not None:
+        roots = sorted({worktree, os.path.realpath(worktree)}, key=len, reverse=True)
+        for root in roots:
+            text = text.replace(root + "/", "")
+        for root in roots:
+            text = text.replace(root, ".")
+    text = HOST_PATH.sub(lambda found: (found.group(0).rstrip("/").rsplit("/", 1)[-1]
+                                        or "\u2026"), text)
+    text = HEX_RUN.sub(lambda found: found.group(0)[:7] + "\u2026", text)
+    text = " ".join(text.split())
+    if not text:
+        return None
+    if len(text) > LINE_CHARS:
+        text = text[:LINE_CHARS - 1] + "\u2026"
+    return None if PAGE_PATTERN.search(text) else text
+
+
+def commit_evidence(error: Mapping, kept: Mapping | None) -> dict | None:
+    output = error.get("commit_output")
+    if not isinstance(output, dict) or set(output) != {"hook", "exit", "lines"}:
+        return None
+    hook, code, lines = output["hook"], output["exit"], output["lines"]
+    if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+        return None
+    if hook is not None and not (isinstance(hook, str) and HOOK.fullmatch(hook)):
+        return None
+    if code is not None and (not isinstance(code, int) or isinstance(code, bool)):
+        return None
+    if (hook is None) != (code is None):
+        return None
+    worktree = kept["worktree"] if kept else None
+    shown = [line for line in (evidence_line(line, worktree) for line in lines)
+             if line is not None]
+    return {"hook": hook, "why": None if hook is None else hook_why(code),
+            "lines": shown[-EVIDENCE_LINES:]}
+
+
 def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str, str]:
     repair = error.get("repair_id") or ""
     commit_note = register.unknown_step(name, "apply").replace("Try again", "Apply it again", 1)
@@ -626,10 +736,17 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
         return (DISCARD_REASON, RETAINED_NOTE)
     if repair == "adopt.worktree.unavailable":
         return ("the adoption's branch or worktree could not be created", commit_note)
+    found = commit_evidence(error, None) if repair in (SIGNING_REPAIR, COMMIT_REPAIR) else None
+    hook = found["hook"] if found else None
     if repair == SIGNING_REPAIR:
-        return (SIGNING_REASON, SIGNING_NOTE)
+        if hook is None:
+            return (SIGNING_REASON, SIGNING_NOTE)
+        return (SIGNING_REASON, hook_signing_note(hook, found["why"]))
     if repair == COMMIT_REPAIR:
-        return ("the adoption commit could not be made", commit_note)
+        if hook is None:
+            return ("the adoption commit could not be made", commit_note)
+        return (f"the project's {hook} hook stopped the adoption commit: {found['why']}",
+                HOOK_NOTE)
     if repair.startswith(GATE_PREFIX):
         return (f"the {repair[len(GATE_PREFIX):]} check did not pass",
                 "Fix what failed in the repository, then register the repository again.")
