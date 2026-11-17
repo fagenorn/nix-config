@@ -3045,6 +3045,25 @@ class RegisterConfirmTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
         self.assertEqual(register.confirm_items(self.WAITING, running=True), [])
 
+    def test_a_behind_card_is_counted_and_the_work_line_says_needs_you(self):
+        latest = {**register.behind("/srv/sample-app", 2, False), "at": "2026-11-15T08:00:00+00:00"}
+        shown = derive_view([], registration=register.view_entry(None, latest),
+                            confirm_items=register.confirm_items(latest, running=False))
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "register_behind")
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
+        self.assertEqual(shown["registration"]["line"], "Register sample-app: needs you")
+
+    def test_the_remote_sentence_stays_beside_the_needs_you_line(self):
+        latest = {**register.unread(register.update_failed("/srv/sample-app",
+                                                           "another branch is checked out")),
+                  "at": "t"}
+        shown = derive_view([], registration=register.view_entry(None, latest),
+                            failure_items=register.failure_items(latest, running=False))
+        self.assertEqual(shown["registration"]["line"], "Register sample-app: needs you")
+        self.assertEqual(shown["registration"]["remote"], register.REMOTE_UNREAD)
+
 
 class RegisterFailureViewTest(unittest.TestCase):
     ROOT = "/srv/fail-app"

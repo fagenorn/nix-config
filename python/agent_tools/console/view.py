@@ -239,8 +239,9 @@ The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
 "lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft",
-"draft_more", "adoption", "approve", "cancel"}`, the owner's latest registration of a repository from the page
-(twenty-one keys), with the plan's plain open questions and, when the plan refused the last answer, the
+"draft_more", "adoption", "approve", "cancel", "remote"}`, the owner's latest registration of a repository from the page
+(twenty-two keys; `remote`, #1233, is the sentence that the remote could not be read, else null, and
+the reduced entry keeps it beside the needs-you line), with the plan's plain open questions and, when the plan refused the last answer, the
 refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
 contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
 null; `draft_more` is the counted line for the shown settings outside the main ones
@@ -361,7 +362,10 @@ builds it. It has reason `register_confirm`, key `register-confirm/<root>/<at>`,
 the options `Register it` and `Not now` with the values `register` and `not_now`, and the
 folder-trust sentence as its `why`. It is copied as given and not filtered by the registered
 projects, sits right after the apply items, and counts once in `inbox_items` and the headline.
-While one is open the sentence is `REGISTER_SENTENCE`. Without `confirm_items` the view is unchanged.
+While one is open the sentence is `REGISTER_SENTENCE`. It also carries the behind card of a checkout
+behind its remote (#1233, ADR-console-069): reason `register_behind`, key `register-behind/<root>/<at>`,
+`plan_id` null, the options `Update it` and `Not now` with the values `update` and `not_now`. Without
+`confirm_items` the view is unchanged.
 
 Each failure item a caller passes (`failure_items`; #1085, ADR-console-035) is one entry of
 `inbox.open` too: a registration that failed in plain words, as `register.failure_items` builds it.
@@ -854,7 +858,8 @@ REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
 ADOPTING_SENTENCE = "An adoption is under way; nothing is waiting on you."
-ASKING_REASONS = ("register_failed", "register_apply", "register_retry", "register_confirm")
+ASKING_REASONS = ("register_failed", "register_apply", "register_retry", "register_confirm",
+                  "register_behind")
 NEEDS_LINE = "Register {name}: needs you"
 REGISTER_TYPE_SENTENCE = "Type the answer on its card and press Enter."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."

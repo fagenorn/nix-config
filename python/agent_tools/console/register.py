@@ -100,7 +100,7 @@ is waiting and no run is under way, else the one inbox item of reason `register_
 `register-confirm/<root>/<at>`, headline `CONFIRM_ASK`, `why` the folder-trust sentence, options
 `CONFIRM_OPTION` then `LATER_OPTION`, values `CONFIRM_VALUE` then `LATER_VALUE`). The page answers it
 with `parse_confirm_request(body)`, exactly `{"root", "choice"}`, `root` a string with no character
-below 0x20 and no 0x7F, `choice` one of `CONFIRM_VALUE`, `LATER_VALUE` and `TRY_VALUE` (`ValueError` otherwise).
+below 0x20 and no 0x7F, `choice` one of `CONFIRM_VALUE`, `LATER_VALUE`, `TRY_VALUE` and `UPDATE_VALUE` (`ValueError` otherwise).
 `dismissed(latest)` is the waiting row with the note `LATER_NOTE`: `Not now` appends it, `waiting` is
 false for it, and the card is gone until the owner presses Register again. The failure card (#1085):
 `failing(latest)` is true when the latest row's `result` is in `FAILED_RESULTS` and its note is neither
@@ -109,6 +109,20 @@ run is under way, else the one inbox item of reason `register_failed` (key `regi
 the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, values `TRY_VALUE` then `LATER_VALUE`).
 `parse_confirm_request` takes `TRY_VALUE` as a third choice. `NOT_WAITING` is the text of
 a confirmation for a root that is not the waiting one.
+
+Behind row (#1233, ADR-console-069). `RESULTS` ends with `behind`. `behind(root, count, contract)` is
+the row of a checkout that is `count` commits behind its remote: `result` `behind`, `plan_id` None,
+`lines` and `questions` empty, `note` `BEHIND_NOTE`, `headline` `<name> is <N> commit(s) behind its
+remote, which already has a project contract.` or `... which has no project contract yet.` by `contract`.
+`behind_waiting(latest)` is true when the latest row's `result` is `behind` and its note is `BEHIND_NOTE`
+(`dismissed` sets `LATER_NOTE`, so `Not now` ends it). A behind row is neither `waiting` nor `failing`:
+`confirm_items` gives for it the one inbox item of reason `register_behind` (key
+`register-behind/<root>/<at>`, `plan_id` null, headline the row's, `why` its note, options
+`UPDATE_OPTION` then `LATER_OPTION`, values `UPDATE_VALUE` then `LATER_VALUE`), `[]` while a run is
+under way; `parse_confirm_request` takes `UPDATE_VALUE` as a fourth choice. `update_failed(root, reason)`
+is the `failed` row `<name> could not be updated: <reason>.` with the note `UPDATE_STEP` (it raises the
+Try again card). `unread(payload)` is the row with the member `remote` set to `REMOTE_UNREAD`, the
+sentence that the remote could not be read and the checkout was used as it is; it changes no line.
 
 Cancel (#1088, ADR-console-037). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
 plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
@@ -129,8 +143,9 @@ when it has none), `headline` `What the console read from <name>: it has no proj
 or code.
 
 Row. `ended(payload)` is `("registration.ended", None, payload)` and raises `ValueError` unless the
-members are exactly `MEMBERS` (a legacy row), `MEMBERS | EXTRA` or `MEMBERS | EXTRA | {"draft"}`
-(thirteen members), `by` is `owner`,
+members are exactly `MEMBERS` (a legacy row), `MEMBERS | EXTRA`, `MEMBERS | EXTRA | {"draft"}`
+(thirteen members) or `EXTENDED`, those and `remote` (fourteen members; `remote` None or a string,
+#1233), `by` is `owner`,
 `result` is one of `RESULTS` and `lines` is a list of strings; for twelve members also unless
 `plan_id` and `state` are strings or None, `questions` is a list of dicts and `answered` is a list
 of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1); for thirteen
@@ -139,7 +154,7 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
 never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
-approve=None)` is that member, always the same twenty keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+approve=None)` is that member, always the same twenty-two keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
@@ -150,7 +165,8 @@ for any other row), and `draft_more` `contract_draft.more_line(draft)` under the
 counted line for the shown settings outside the main ones; None otherwise, including when no such
 setting is shown); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
 and carry the given values (the `approve.entry` object and the action the page offers, #1054) in the
-`done` entry. `line` is the entry's state in one line (D6, D7): the running headline while a run is
+`done` entry. `remote` (#1233) is None for the running entry and, for a done entry, the latest row's
+`remote` when it is a string, else None; a `dismissed` row keeps it. `line` is the entry's state in one line (D6, D7): the running headline while a run is
 under way; the given adoption's headline when there is one (the adoption is then the plan's latest
 state, so a ready plan never says `ready to apply` beside an applied branch); else `line_of(latest)`:
 for a plan or a drafting row with open questions `Register <name>: 1 question open` or `<N> questions
@@ -177,7 +193,7 @@ RUN_TIMEOUT = 300
 APPLY_TIMEOUT = 1800
 GIT_TIMEOUT = 10
 RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_repair", "failed",
-           "drafting")
+           "drafting", "behind")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
 UNAVAILABLE = "registering a project is not available on this host"
 EMPTY = "type the path of a repository"
@@ -188,6 +204,7 @@ OUTCOME_TEXT = {
 }
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
+EXTENDED = MEMBERS | EXTRA | {"draft", "remote"}
 DEFAULTS = {"plan_id": None, "state": None, "questions": [], "answered": [], "draft": None}
 FIELD_KEYS = contract_draft.FIELD_KEYS
 CONTRACT = ".agents/project.json"
@@ -240,6 +257,11 @@ LATER_VALUE = "not_now"
 LATER_NOTE = "Not registered. Press Register again to register it."
 TRY_OPTION = "Try again"
 TRY_VALUE = "try_again"
+BEHIND_NOTE = "Choose Update it to bring the checkout up to its remote; the console then plans from it."
+UPDATE_OPTION = "Update it"
+UPDATE_VALUE = "update"
+UPDATE_STEP = "Update the checkout in a terminal, then " + AGAIN
+REMOTE_UNREAD = "The remote could not be read, so the console used the checkout as it is."
 NOT_WAITING = "that project is not waiting to be registered"
 CANCEL_REFUSED = "only a registration that was not applied yet can be cancelled"
 CANCEL_DISCARD_FAILED = ("The copy that the failed attempt left on this computer could not be removed, "
@@ -521,6 +543,23 @@ def failed(root: str, kind: str, verb: str = "plan") -> dict:
     return _row(root, None, "failed", None, headline, [], run_next_step(root, kind, verb))
 
 
+def behind(root: str, count: int, contract: bool) -> dict:
+    """The row of a checkout behind its remote: the one Update card asks before the console updates it."""
+    headline = (f"{name_of(root)} is {_count(count, 'commit')} behind its remote, which "
+                + ("already has a project contract." if contract else "has no project contract yet."))
+    return _row(root, None, "behind", None, headline, [], BEHIND_NOTE)
+
+
+def update_failed(root: str, reason: str) -> dict:
+    return _row(root, None, "failed", None, f"{name_of(root)} could not be updated: {reason}.", [],
+                UPDATE_STEP)
+
+
+def unread(payload: Mapping) -> dict:
+    """The row with the sentence that the remote could not be read (it rides beside the line)."""
+    return {**payload, "remote": REMOTE_UNREAD}
+
+
 def _draft_valid(draft: object) -> bool:
     return draft is None or (isinstance(draft, list) and all(
         isinstance(f, dict) and set(f) == FIELD_KEYS for f in draft))
@@ -538,11 +577,13 @@ def _extras_valid(payload: Mapping) -> bool:
 
 
 def ended(payload: Mapping) -> tuple[str, None, dict]:
-    if (not isinstance(payload, Mapping) or set(payload) not in (MEMBERS, MEMBERS | EXTRA, MEMBERS | EXTRA | {"draft"})
+    if (not isinstance(payload, Mapping)
+            or set(payload) not in (MEMBERS, MEMBERS | EXTRA, MEMBERS | EXTRA | {"draft"}, EXTENDED)
             or payload["by"] != "owner"
             or payload["result"] not in RESULTS or not isinstance(payload["lines"], list)
             or not all(isinstance(line, str) for line in payload["lines"])
-            or (set(payload) != MEMBERS and not _extras_valid(payload))):
+            or (set(payload) != MEMBERS and not _extras_valid(payload))
+            or not (payload.get("remote") is None or isinstance(payload["remote"], str))):
         raise ValueError("not a registration row")
     return (ENDED, None, dict(payload))
 
@@ -576,13 +617,36 @@ def waiting(latest: Mapping | None) -> bool:
             and latest.get("outcome") == "no_change" and latest.get("note") == CONFIRM_NOTE)
 
 
+def behind_waiting(latest: Mapping | None) -> bool:
+    return (latest is not None and latest.get("result") == "behind"
+            and latest.get("note") == BEHIND_NOTE)
+
+
 def dismissed(latest: Mapping) -> dict:
-    return {**{key: latest[key] for key in MEMBERS | EXTRA | {"draft"} if key in latest},
+    return {**{key: latest[key] for key in EXTENDED if key in latest},
             "note": LATER_NOTE}
 
 
+def _behind_item(latest: Mapping) -> dict:
+    root, at = latest["root"], latest["at"]
+    name = name_of(root)
+    return {
+        "type": "inbox_item", "reason": "register_behind", "key": f"register-behind/{root}/{at}",
+        "project_id": None, "root": root, "name": name, "title": f"Register {name}",
+        "plan_id": None, "id": None, "subject": None, "headline": latest["headline"],
+        "why": latest["note"], "lines": [], "refusal": None, "more_questions": 0, "text": False,
+        "questions": [{"question": latest["headline"], "options": [UPDATE_OPTION, LATER_OPTION],
+                       "chosen": None, "recommended": None, "recommended_index": None}],
+        "values": [UPDATE_VALUE, LATER_VALUE], "items": [], "answers": [], "answered": False,
+        "waiting_since": at}
+
+
 def confirm_items(latest: Mapping | None, *, running: bool) -> list[dict]:
-    if running or not waiting(latest):
+    if running:
+        return []
+    if behind_waiting(latest):
+        return [_behind_item(latest)]
+    if not waiting(latest):
         return []
     root, at = latest["root"], latest["at"]
     name = name_of(root)
@@ -632,7 +696,7 @@ def parse_confirm_request(body: bytes) -> tuple[str, str]:
         raise ValueError("wrong types")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
         raise ValueError("control character")
-    if choice not in (CONFIRM_VALUE, LATER_VALUE, TRY_VALUE):
+    if choice not in (CONFIRM_VALUE, LATER_VALUE, TRY_VALUE, UPDATE_VALUE):
         raise ValueError("unknown choice")
     return root, choice
 
@@ -690,7 +754,7 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
                 "questions": [], "refusal": None, "line": headline, "refused": None,
                 "draft": None, "draft_more": None, "adoption": None, "approve": None,
-                "cancel": False}
+                "cancel": False, "remote": None}
     if latest is None:
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
@@ -710,7 +774,8 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
             "draft_more": contract_draft.more_line(draft) if isinstance(draft, list) else None,
-            "adoption": adoption, "approve": approve, "cancel": cancel}
+            "adoption": adoption, "approve": approve, "cancel": cancel,
+            "remote": latest["remote"] if isinstance(latest.get("remote"), str) else None}
 
 
 class RunFailed(Exception):
