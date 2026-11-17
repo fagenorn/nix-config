@@ -32,6 +32,10 @@ from .test_console_account_service import Listing
 from .test_console_writes import Case
 
 DECLARED = (("just", "build"),)
+REPO = "owner/p01"
+GIT_READ_RULES = [
+    "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
+    "Bash(git blame:*)", "Bash(git ls-files:*)", "Bash(git tag:*)"]
 ROUTES = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
 ENVIRON = {"HOME": "/home/u", "PATH": "/bin"}
 SESSION_ID = "0b5c8f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
@@ -132,11 +136,107 @@ class HookTableTest(unittest.TestCase):
             with self.subTest(document):
                 self.assertEqual(hook.decide(document, allowed), expected)
 
-    def test_with_no_declared_command_every_shell_command_is_denied(self):
+    def test_with_no_declared_command_only_the_git_reads_run(self):
         denied = ("deny", hook.NO_COMMANDS)
         self.assertEqual(hook.decide(bash("just build"), ()), denied)
         self.assertEqual(hook.decide(bash("ls"), ()), denied)
         self.assertEqual(hook.decide(tool("Read"), ()), ("allow", hook.ALLOWED))
+        self.assertEqual(hook.decide(bash("git log --oneline"), ()), ("allow", hook.ALLOWED))
+        self.assertEqual(
+            hook.decide(bash("gh pr list --repo owner/p01"), ()), ("deny", hook.reads_denied(None)))
+
+    def test_the_hook_admits_the_git_and_gh_reads_of_the_projects_own_repository(self):
+        allow = ("allow", hook.ALLOWED)
+        for command in (
+            "git log", "git log --since=7.days.ago --oneline", "git log -n 20 --stat",
+            "git show abc123 --stat", "git diff main..HEAD --stat", "git status",
+            "git status --short", "git blame -- README.md", "git ls-files", "git tag",
+            "git tag -l", "git tag --list v1.0", "git tag -l --sort=-creatordate -n3",
+            "gh pr list --repo owner/p01 --state merged --limit 30",
+            "gh pr list --repo=owner/p01",
+            "gh pr view --repo owner/p01 12 --comments",
+            "gh pr view -R owner/p01 12",
+            "gh release list --repo owner/p01",
+            "gh release view --repo owner/p01 v1.2.0",
+            "gh issue list --repo owner/p01 --state closed",
+            "gh issue view --repo owner/p01 7",
+            "gh run list --repo owner/p01 --limit 10",
+            "gh run view --repo owner/p01 123 --log-failed",
+            "gh pr list --repo owner/p01 --search merged",
+        ):
+            with self.subTest(command):
+                self.assertEqual(hook.decide(bash(command), DECLARED, repo=REPO), allow)
+        self.assertEqual(hook.decide(bash("git log"), (), repo=None), allow)
+        self.assertEqual(hook.decide(bash("just build"), DECLARED, repo=REPO), allow)
+
+    def test_the_hook_denies_git_and_gh_writes_other_repositories_and_compositions(self):
+        reads = ("deny", hook.reads_denied(REPO))
+        undeclared = ("deny", hook.COMMAND_DENIED.format(commands="just build"))
+        lifecycle = ("deny", hook.LIFECYCLE_DENIED)
+        rows = []
+        for command in (
+            "git commit -m x", "git checkout main", "git reset --hard", "git fetch", "git pull",
+            "git stash", "git config user.name", "git branch topic",
+            "git tag v9", "git tag -d v1", "git tag -l -d v1", "git tag -ld", "git tag -a v9 -m x",
+            "git tag -f v1",
+            "git log --output=/tmp/x", "git diff --output /tmp/x", "git log --outp=/tmp/x",
+            "git diff --ext-diff",
+            "git -C /other log", "git -c core.pager=x log", "git --git-dir=/x log",
+            "git --no-pager log",
+            "/usr/bin/git log", "/usr/bin/gh pr list --repo owner/p01",
+            "gh pr list", "gh pr list --state open", "gh pr list --repo other/repo",
+            "gh pr list --repo=owner/p01x",
+            "gh pr list --repo owner/p01 --repo other/repo",
+            "gh pr list --repo owner/p01 -R owner/p01", "gh pr list -R other/repo",
+            "gh pr list -Rowner/p01", "gh pr list --repo=other/repo", "gh pr list --repo owner/p01x",
+            "gh pr list --repo Owner/p01", "gh pr list --repo",
+            "gh pr view --repo owner/p01 https://github.com/other/repo/pull/1",
+            "gh pr list --repo owner/p01 --head feature/x",
+            "gh pr list --search --repo=owner/p01",
+            "gh release view -- --repo=owner/p01",
+            "gh pr view 12 --repo owner/p01",
+            "gh release view --repo owner/p01 -- v1",
+            "gh pr list --repo owner/p01 --repo owner",
+            "gh pr list --repo owner/p01 -R owner",
+            "gh pr view --repo owner/p01 1 -cRowner",
+            "gh pr view --repo owner/p01 1 --web", "gh pr view --repo owner/p01 1 -w",
+            "gh pr view --repo owner/p01 1 -cw",
+            "gh issue create --repo owner/p01 --title t",
+            "gh issue comment 1 --repo owner/p01 --body b",
+            "gh issue close 1 --repo owner/p01", "gh pr checkout 1 --repo owner/p01",
+            "gh pr review 1 --repo owner/p01 --approve",
+            "gh release delete v1 --repo owner/p01", "gh release download v1 --repo owner/p01",
+            "gh run rerun 1 --repo owner/p01", "gh run cancel 1 --repo owner/p01",
+            "gh api repos/owner/p01", "gh -R owner/p01 pr list", "gh pr -R owner/p01 list",
+            "git log | cat", "git log > out.txt", "git log; rm -rf x", "git log && echo ok",
+            "git log || true", "git log &", "git log\nrm x", "git\tlog", "git log\n",
+            "git log --format='%h'", "git diff HEAD~3",
+            "gh pr list --repo owner/p01 | cat", "gh pr list --repo owner/p01 --jq .[0]",
+        ):
+            rows.append((command, REPO, reads))
+        for command in ("(git log)", "$(git log)", "`git log`", "FOO=1 git log"):
+            rows.append((command, REPO, undeclared))
+        for command in ("gh pr merge 1 --repo owner/p01", "gh release create v1 --repo owner/p01",
+                        "gh pr create --repo owner/p01 --title t", "git push"):
+            rows.append((command, REPO, lifecycle))
+        for command in ("gh pr list --repo owner/p01", "gh release list --repo owner/p01"):
+            rows.append((command, None, ("deny", hook.reads_denied(None))))
+        for command, repo, expected in rows:
+            with self.subTest(command=command, repo=repo):
+                self.assertEqual(hook.decide(bash(command), DECLARED, repo=repo), expected)
+        self.assertNotEqual(hook.reads_denied(None), hook.reads_denied(REPO))
+        self.assertIn("owner/p01", hook.reads_denied(REPO))
+        self.assertNotIn("owner/p01", hook.reads_denied(None))
+
+    def test_parse_repo_accepts_only_a_slug_or_nothing(self):
+        self.assertIsNone(hook.parse_repo(""))
+        self.assertEqual(hook.parse_repo("owner/p01"), "owner/p01")
+        self.assertEqual(hook.parse_repo("fagenorn/nix-config"), "fagenorn/nix-config")
+        for text in ("owner", "owner/p01/x", "-x/y", "owner/p 01", "a/b;c",
+                     "https://github.com/a/b", "/p01"):
+            with self.subTest(text):
+                with self.assertRaises(ValueError):
+                    hook.parse_repo(text)
 
     def test_a_malformed_call_is_denied(self):
         for document in (
@@ -179,7 +279,7 @@ class HookProcessTest(unittest.TestCase):
         }
 
     def test_the_module_prints_the_decision_in_the_client_format(self):
-        args = ['[["just","build"]]']
+        args = ['[["just","build"]]', "owner/p01"]
         done = self.run_hook(args, json.dumps(bash("just build")))
         self.assertEqual(done.returncode, 0)
         self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
@@ -190,22 +290,32 @@ class HookProcessTest(unittest.TestCase):
             json.loads(done.stdout),
             self.wire("deny", hook.COMMAND_DENIED.format(commands="just build")),
         )
+        done = self.run_hook(args, json.dumps(bash("gh pr list --repo owner/p01")))
+        self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
+        done = self.run_hook(
+            ['[["just","build"]]', ""], json.dumps(bash("gh pr list --repo owner/p01")))
+        self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.reads_denied(None)))
 
     def test_a_bad_argument_denies_everything(self):
         read = json.dumps(tool("Read", {"file_path": "/x"}))
         deep = "[" * 100000  # under the 128 KiB limit of one argv word
         for args, stdin_text in (
             ([], read),
-            (["not json"], read),
-            (['[["just","build"]]'], "{"),
-            (['[["just","build"]]'], deep),
-            ([deep], read),
+            (["not json", "owner/p01"], read),
+            (['[["just","build"]]', "owner/p01"], "{"),
+            (['[["just","build"]]', "owner/p01"], deep),
+            ([deep, "owner/p01"], read),
+            (['[["just","build"]]'], read),
+            (['[["just","build"]]', "owner/p01", "extra"], read),
+            (['[["just","build"]]', "not-a-slug"], read),
         ):
             with self.subTest(args=args, stdin=stdin_text):
                 done = self.run_hook(args, stdin_text)
                 self.assertEqual(done.returncode, 0)
                 self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.MALFORMED))
                 self.assertEqual(len(done.stdout.splitlines()), 1)
+        done = self.run_hook(['[["just","build"]]', "owner/p01"], read)
+        self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
 
 
 class LaunchTest(unittest.TestCase):
@@ -276,7 +386,7 @@ class LaunchTest(unittest.TestCase):
         document = json.loads(self.settings["text"])
         self.assertEqual(document["permissions"], {
             "defaultMode": "dontAsk",
-            "allow": ["Read", "Grep", "Glob", "Bash(just build)"],
+            "allow": ["Read", "Grep", "Glob", "Bash(just build)", *GIT_READ_RULES],
             "deny": ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
                      "Bash(git push:*)", "Bash(gh pr create:*)", "Bash(gh pr merge:*)",
                      "Bash(git branch -d:*)", "Bash(gh release create:*)"],
@@ -285,10 +395,22 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(document["hooks"], {"PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": hooks["command"], "timeout": 10, "onFailure": "block"}]}]})
         self.assertEqual(shlex.split(hooks["command"]), [
-            *siblings.sibling_argv("console.project_question_hook"), '[["just","build"]]'])
+            *siblings.sibling_argv("console.project_question_hook"), '[["just","build"]]', ""])
         self.assertEqual(self.settings["mode"], 0o600)
         self.assertEqual(self.settings["parent_mode"], 0o700)
         self.assertFalse(self.ask.settings.exists())
+
+    def test_a_repository_adds_its_gh_reads_to_the_settings_and_the_hook(self):
+        document = project_question.settings_document(self.routes, "owner/p01")
+        self.assertEqual(document["permissions"]["allow"][-8:], [
+            "Bash(gh pr list:*)", "Bash(gh pr view:*)", "Bash(gh release list:*)",
+            "Bash(gh release view:*)", "Bash(gh issue list:*)", "Bash(gh issue view:*)",
+            "Bash(gh run list:*)", "Bash(gh run view:*)"])
+        command = document["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(shlex.split(command)[-2:], ['[["just","build"]]', "owner/p01"])
+        allow = project_question.settings_document(self.routes)["permissions"]["allow"]
+        self.assertFalse([rule for rule in allow if rule.startswith("Bash(gh")])
+        self.assertEqual(project_question.tools(()), "Read,Grep,Glob,Bash")
 
     def test_a_session_past_the_time_cap_is_timed_out(self):
         outcome = self.start(self.fake(error=subprocess.TimeoutExpired(["claude-account"], 300)))
@@ -365,11 +487,12 @@ class NoProductionTest(unittest.TestCase):
         self.assertEqual(
             outcome.answer, "Answer: it builds the hosts.\n" + project_question.NO_PRODUCTION_LINE)
         argv = seen["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash")
         self.assertIn("This project declares no read-only command, so production cannot be read", argv[-1])
         hook_command = seen["settings"]["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        self.assertEqual(shlex.split(hook_command)[-1], "[]")
-        self.assertEqual(seen["settings"]["permissions"]["allow"], ["Read", "Grep", "Glob"])
+        self.assertEqual(shlex.split(hook_command)[-2:], ["[]", ""])
+        self.assertEqual(seen["settings"]["permissions"]["allow"],
+                         ["Read", "Grep", "Glob", *GIT_READ_RULES])
 
     def test_declared_routes_get_no_production_line(self):
         self.assertNotIn(project_question.NO_PRODUCTION_LINE, project_question.answer_text("Answer: x", ROUTES))

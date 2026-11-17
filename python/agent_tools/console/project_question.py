@@ -28,11 +28,13 @@ or that none is declared so production cannot be read), then `QUESTION_MARK` and
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
 so the account's `auto` mode and its allows never apply; `dontAsk` denies every call that is not
-pre-approved; the allow list is `READ_RULES` plus one `Bash(<argv>)` per route; the deny list is
-`DENIED_RULES`, which wins over any allow; `--tools` removes every other built-in tool, and with no
-route the Bash tool does not exist at all. On top of those, a PreToolUse command hook
-(`project_question_hook`, run through `siblings.sibling_argv`) admits only reads and the bare
-declared commands; `"onFailure": "block"` makes the pinned client treat a hook that errors, fails
+pre-approved; the allow list is `READ_RULES`, one `Bash(<argv>)` per route, the `GIT_READ_RULES` and,
+when the project has a GitHub repository, the `GH_READ_RULES`; the deny list is `DENIED_RULES`,
+which wins over any allow; `--tools` removes every other built-in tool, and Bash is always a tool
+(the git reads need it even with no route). On top of those, a PreToolUse command hook
+(`project_question_hook`, run through `siblings.sibling_argv`, given the allowed argv and the
+repository) admits only reads, the bare declared commands and the plain git and gh reads;
+`"onFailure": "block"` makes the pinned client treat a hook that errors, fails
 to start or times out as a block, because without it such a hook is non-blocking and the call would
 fall to the permission rules. The file lives in `SETTINGS_DIR` under the console's state (a 0700
 directory, the file 0600, written atomically) and is removed when the run ends.
@@ -107,7 +109,8 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import manager
 from agent_tools.console.event_log import (
     PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, Event)
-from agent_tools.console.project_question_hook import PLAIN_WORD
+from agent_tools.console.project_question_hook import (
+    GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -129,6 +132,9 @@ TIMED_OUT = "timed_out"
 WORKING = "working"
 
 READ_RULES = ("Read", "Grep", "Glob")
+GIT_READ_RULES = tuple(f"Bash(git {verb}:*)" for verb in GIT_READS)
+GH_READ_RULES = tuple(
+    f"Bash(gh {group} {verb}:*)" for group in GH_READ_GROUPS for verb in GH_READ_VERBS)
 DENIED_RULES = (
     "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
     "Bash(git push:*)", "Bash(gh pr create:*)", "Bash(gh pr merge:*)",
@@ -311,23 +317,24 @@ def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = ()) 
 
 
 def tools(routes: Sequence[Route]) -> str:
-    return "Read,Grep,Glob,Bash" if routes else "Read,Grep,Glob"
+    return "Read,Grep,Glob,Bash"
 
 
-def hook_command(routes: Sequence[Route]) -> str:
+def hook_command(routes: Sequence[Route], repo: str | None = None) -> str:
     allowed = json.dumps([list(route.argv) for route in routes], separators=(",", ":"))
-    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed])
+    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or ""])
 
 
-def settings_document(routes: Sequence[Route]) -> dict:
+def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
     return {
         "permissions": {
             "defaultMode": PERMISSION_MODE,
-            "allow": [*READ_RULES, *(f"Bash({' '.join(route.argv)})" for route in routes)],
+            "allow": [*READ_RULES, *(f"Bash({' '.join(route.argv)})" for route in routes),
+                      *GIT_READ_RULES, *(GH_READ_RULES if repo else ())],
             "deny": list(DENIED_RULES),
         },
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
-            "type": "command", "command": hook_command(routes),
+            "type": "command", "command": hook_command(routes, repo),
             "timeout": HOOK_TIMEOUT, "onFailure": "block",
         }]}]},
     }
