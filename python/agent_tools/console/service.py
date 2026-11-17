@@ -336,7 +336,9 @@ pushes only the one adoption branch, at the commit apply recorded (`approve.push
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
 `push_failed` or `open_failed` with plain words; the original error (code, detail, traceback) is one
-stderr line `console: plan_approve_error <json>` and never reaches the page. A step in
+stderr line `console: plan_approve_error <json>` and never reaches the page, except that a failed
+adoption commit's row carries the page-safe `evidence` (`approve.commit_evidence`), shown as the
+failure card's lines, while the raw `commit_output` goes only to the `plan_approve_error` line. A step in
 `approve.RESUMABLE` is resumed by the next approval (the card's Try again or Apply it again) at the step that
 failed: apply is never run twice for a pushed or kept branch, and an `open_failed` step resumes at
 the open without pushing again. The console stops between steps and inside every child
@@ -4384,7 +4386,7 @@ class ConsoleService:
         payload = {"by": "owner", "plan_id": plan_id, "root": root,
                    "project_id": shown["project_id"], "step": step, "branch": None,
                    "commit": None, "base": None, "pull_request": None, "reason": None,
-                   "note": None, "kept": None, **members}
+                   "note": None, "kept": None, "evidence": None, **members}
         approve.step_row(payload)
         return payload
 
@@ -4535,8 +4537,10 @@ class ConsoleService:
                                           "error": result["error"]})
                 kept = approve.retained(plan_id)
                 reason, note = approve.apply_failure(name, result["error"], kept)
+                evidence = approve.commit_evidence(result["error"], kept)
                 return self._step(shown, plan_id, root, "apply_failed",
-                                         reason=approve.reason_of(reason), note=note, kept=kept)
+                                         reason=approve.reason_of(reason), note=note, kept=kept,
+                                         evidence=evidence)
             branch, commit = result["branch"], result["commit"]
             base = result.get("integration_branch")
             self._append_applied(self._step(
