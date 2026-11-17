@@ -419,6 +419,7 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-remote { font-size: .84375rem; color: var(--sub0); }
 .register-withdraw-reason { color: var(--red); margin-left: 8px; }
 .apply-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
@@ -3406,9 +3407,9 @@ function isRetry(item) {
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-034): a question card whose first option grants its folder trust and registers it and whose second sets it aside.
+// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-069): a question card whose first option grants its folder trust and registers it, or updates the checkout, and whose second sets it aside; both post to /api/register-confirm.
 function isConfirm(item) {
-  return item.reason === "register_confirm";
+  return item.reason === "register_confirm" || item.reason === "register_behind";
 }
 // A profile whose folder trust could not be read back (ADR-console-034): a question card that shows the terminal command and whose one option checks again.
 function isTrust(item) {
@@ -3566,7 +3567,7 @@ function start(item, state) {
   if (isConfirm(item)) {
     const choice = item.values[state.picks[0]];
     const body = { root: item.root, choice };
-    return begin(item, state, { confirm: true, body, words: choice === "register" ? "Answered, registering" : "Answered, not now" });
+    return begin(item, state, { confirm: true, body, words: choice === "update" ? "Answered, updating" : choice === "register" ? "Answered, registering" : "Answered, not now" });
   }
   if (isFailure(item)) {
     const choice = item.values[state.picks[0]];
@@ -5379,6 +5380,7 @@ async function withdrawRegistration(registration) {
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
+  if (typeof registration.remote === "string" && registration.remote !== "") parts.push(el("p", "register-remote", registration.remote));
   if (registration.lines.length > 0) {
     const list = el("ul", "register-lines");
     for (const line of registration.lines) list.appendChild(pathWords(el("li"), line));
