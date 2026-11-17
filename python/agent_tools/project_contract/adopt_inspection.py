@@ -283,18 +283,22 @@ NOTES = {
 class AdoptError(Exception):
     """One refusal: a closed code, a stable repair id, and ordered violations."""
 
-    def __init__(self, code: str, repair_id: str, violations: list[dict]) -> None:
+    def __init__(self, code: str, repair_id: str, violations: list[dict],
+                 commit_output: dict | None = None) -> None:
         super().__init__(f"{code}: {repair_id}")
         if code not in ADOPT_ERROR_CODES:
             raise ValueError(f"unknown adoption error code: {code!r}")
         self.code = code
         self.repair_id = repair_id
         self.violations = violations
+        self.commit_output = commit_output
 
 
-def refuse(code: str, repair_id: str, pointer: str, message: str) -> AdoptError:
+def refuse(code: str, repair_id: str, pointer: str, message: str, *,
+           commit_output: dict | None = None) -> AdoptError:
     return AdoptError(code, repair_id, [{"pointer": pointer,
-                                         "message": message}])
+                                         "message": message}],
+                      commit_output)
 
 # --------------------------------------------------------------------------
 # Exhaustive dispatch over the closed sets
@@ -699,7 +703,10 @@ def split_nul(data: bytes) -> list[str]:
 # pin of a listed commit and `export_commit`'s `git archive` export. Only
 # `remote_heads` and `fetch_pinned` touch the network, and `pin_listed` reaches
 # it through `fetch_pinned` alone: it writes nothing when the checkout already
-# holds the commit.
+# holds the commit. The listing's argv (`REMOTE_HEADS_ARGS`), its parse
+# (`parse_remote_heads`) and the fetch's argv (`fetch_pinned_args`) are public
+# names too: the console's `checkout_remote` runs them in its own process
+# group, so it can be cancelled, and keeps git's stderr.
 # --------------------------------------------------------------------------
 
 
@@ -767,6 +774,12 @@ class RemoteHeads:
     listed: Mapping[str, str]
 
 
+# The listing's argv after `git -C <root>`: the one home of it, so every caller
+# that lists `origin` asks the same question.
+REMOTE_HEADS_ARGS: tuple[str, ...] = (
+    "ls-remote", "--symref", REMOTE, "HEAD", "refs/heads/*")
+
+
 def remote_heads(root: Path,
                  timeout: float = GIT_TIMEOUT_SECONDS) -> RemoteHeads:
     """`origin`'s default branch, branch names and their commits, in one
@@ -776,11 +789,16 @@ def remote_heads(root: Path,
     `adopt.git.remote_unreachable`; a listing still running after `timeout`
     seconds refuses `adopt.git.unavailable`.
     """
-    code, out = run_git(root, "ls-remote", "--symref", REMOTE, "HEAD",
-                        "refs/heads/*", network=True, timeout=timeout)
+    code, out = run_git(root, *REMOTE_HEADS_ARGS, network=True,
+                        timeout=timeout)
     if code != 0:
         raise refuse("adopt_failure", "adopt.git.remote_unreachable", "",
                      "the remote could not be listed")
+    return parse_remote_heads(out)
+
+
+def parse_remote_heads(out: bytes) -> RemoteHeads:
+    """What `git ls-remote --symref` printed (`REMOTE_HEADS_ARGS`), as `RemoteHeads`."""
     target = None
     branches = set()
     listed = {}
@@ -799,6 +817,13 @@ def remote_heads(root: Path,
         listed=types.MappingProxyType(listed))
 
 
+def fetch_pinned_args(branch: str) -> tuple[str, ...]:
+    """The pinned fetch's argv after `git -C <root>`, for `branch` (D4, D11)."""
+    return ("fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+            "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=",
+            REMOTE, f"+refs/heads/{branch}:refs/remotes/{REMOTE}/{branch}")
+
+
 def fetch_pinned(root: Path, branch: str,
                  timeout: float = GIT_TIMEOUT_SECONDS) -> str:
     """Fetch `origin`'s `branch` into its remote-tracking ref; its commit id.
@@ -813,11 +838,8 @@ def fetch_pinned(root: Path, branch: str,
     keeps the default bound.
     """
     tracking = f"refs/remotes/{REMOTE}/{branch}"
-    code, _ = run_git(
-        root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-        "--no-auto-maintenance", "--no-recurse-submodules", "--refmap=",
-        REMOTE, f"+refs/heads/{branch}:{tracking}", network=True,
-        timeout=timeout)
+    code, _ = run_git(root, *fetch_pinned_args(branch), network=True,
+                      timeout=timeout)
     if code == 0:
         code, out = run_git(root, "rev-parse", "--verify", "--quiet",
                             f"{tracking}^{{commit}}")

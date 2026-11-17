@@ -10279,6 +10279,19 @@ CONFIRM_ITEM = {
     "values": ["register", "not_now"], "items": [], "answers": [], "answered": False,
     "waiting_since": "2026-11-15T08:00:00+00:00"}
 
+BEHIND_HEADLINE = "r is 1 commit behind its remote, which already has a project contract."
+BEHIND_WHY = "Choose Update it to bring the checkout up to its remote; the console then plans from it."
+BEHIND_ITEM = {
+    **CONFIRM_ITEM, "reason": "register_behind",
+    "key": "register-behind//srv/r/2026-11-15T08:00:00+00:00",
+    "headline": BEHIND_HEADLINE, "why": BEHIND_WHY,
+    "questions": [{"question": BEHIND_HEADLINE, "options": ["Update it", "Not now"],
+                   "chosen": None, "recommended": None, "recommended_index": None}],
+    "values": ["update", "not_now"]}
+BEHIND_SHOWN = {**WAITING_SHOWN, "result": "behind", "outcome": None, "headline": BEHIND_HEADLINE,
+                "note": None, "lines": [], "line": "Register r: needs you"}
+REMOTE_TEXT = "The remote could not be read, so the console used the checkout as it is."
+
 FAILED_HEADLINE = ("The adoption plan for r could not start: the agent platform's files are not "
                    "installed on this host.")
 FAILED_WHY = "Run just switch on this computer to install them, then choose Try again."
@@ -11208,6 +11221,42 @@ class RegisterConfirmPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/register-confirm")
         self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
         self.assertIn("Answered, not now", full(snap["inbox"]))
+
+
+class RegisterBehindPageTest(unittest.TestCase):
+    ANSWER = [{"respond": {"status": 204, "text": ""}}, {"clock": 5000}, {"snapshot": True}]
+
+    def test_the_behind_card_offers_update_it_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([BEHIND_ITEM], BEHIND_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Update it", "2Not now"])
+        self.assertEqual(full(lead).count(BEHIND_HEADLINE), 1)
+
+    def test_update_it_posts_the_root_and_update(self) -> None:
+        (snap,) = render([START, {"frame": cards([BEHIND_ITEM], BEHIND_SHOWN)},
+                          {"key": "1"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "update"})
+        self.assertIn("Answered, updating", full(snap["inbox"]))
+
+    def test_not_now_on_the_behind_card_posts_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([BEHIND_ITEM], BEHIND_SHOWN)},
+                          {"key": "2"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
+        self.assertIn("Answered, not now", full(snap["inbox"]))
+
+    def test_a_remote_that_could_not_be_read_is_one_line_under_the_result(self) -> None:
+        (snap,) = render([START, {"frame": cards([], {**REGISTERED, "remote": REMOTE_TEXT})},
+                          {"snapshot": True}])
+        (line,) = registered(snap, "register-remote")
+        self.assertEqual(full(line), REMOTE_TEXT)
+        (snap,) = render([START, {"frame": cards([], {**REGISTERED, "remote": None})},
+                          {"snapshot": True}])
+        self.assertEqual(registered(snap, "register-remote"), [])
 
 
 class RegisterFailurePageTest(unittest.TestCase):
