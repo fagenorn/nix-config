@@ -83,6 +83,23 @@ The record is `run`'s report, when a session ran, plus `schema_version`, `mode` 
 `refused`), `reason` and `teardown` (`step`, `ok`, `detail`). It is printed on stdout and written
 atomically, mode 0600, to `$HOME/.agents/state/console/bypass-proof.json`. Exit 0 when `passed` with
 every teardown step ok, 2 when `refused`, else 1.
+Verify checks (scripts `bypass-proof-record` and `bypass-proof-managers` under
+`home/common/verify-pending/checks/`). Both print one sorted-keys JSON line and exit 0 met, 1 not
+met, 75 not yet, 2 bad argument; both only read.
+
+`record-check [--record PATH]` reads the record (default `record_path()`). It trusts none of the
+record's summary fields: `record_problems` recomputes the verdict from the attempts (every name of
+`ATTEMPT_NAMES` once, in order, in bypass; the forbidden ones refused with the expected guard
+sentence, the route allowed) and from the teardown (every step of `TEARDOWN_STEPS` once, ok). An
+absent, unreadable or non-object record, or one whose `mode` is not `github`, is 75 `no_record`;
+no problem is 0 `met` (`repository`, `finished_at`); else 1 `not_met` (`repository`, `problems`).
+
+`managers-check --project ID [--record PATH] [--log PATH]` judges the first manager of `ID` started
+after the proof: a record `record-check` does not judge met is 75 `no_proof`; an unreadable event
+log is 75 `no_log`; the judged row is the lowest-seq `manager.started` row of `ID` whose `at` is later
+than the record's `finished_at` and which carries a readable `permission` and a string `sprint_id`
+(none: 75 `no_manager`). Its mode `bypassPermissions` is 0 `met`, any other 1 `not_met`, each with
+`sprint_id` and `text` (`Permission.text`).
 """
 import argparse
 import dataclasses
@@ -91,6 +108,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -761,6 +779,163 @@ def _github_main(args):
     return 0 if record["outcome"] == "passed" and all(
         entry["ok"] for entry in record["teardown"]) else 1
 
+# --------------------------------------------------------------------------
+# Verify checks: the proof record and the next manager's mode
+# --------------------------------------------------------------------------
+
+NOT_YET = 75
+LOG_NAME = "events.sqlite3"
+
+
+def _objects(value):
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
+def _names_problems(entries, key, expected, label):
+    """Missing, duplicated and unexpected names, and the names seen once in order of appearance."""
+    names = [entry.get(key) for entry in entries]
+    problems = [f"{label} {name} missing" for name in expected if name not in names]
+    problems += [f"{label} {name} duplicated" for name in expected if names.count(name) > 1]
+    problems += [f"{label} {name} unexpected" for name in dict.fromkeys(names)
+                 if name not in expected]
+    return names, problems
+
+
+def _attempt_problems(attempt, name, fragments):
+    problems = []
+    if attempt.get("permission_mode") != BYPASS:
+        problems.append(f"attempt {name} not in bypass")
+    verdict = attempt.get("verdict")
+    if name in FORBIDDEN_NAMES:
+        if verdict != "refused":
+            problems.append(f"attempt {name} {verdict}")
+        elif fragments is not None:
+            sentence = attempt.get("sentence")
+            if (not isinstance(sentence, str) or not sentence.startswith(GUARD_PREFIX)
+                    or fragments[name] not in sentence):
+                problems.append(f"attempt {name} sentence")
+    elif verdict != "allowed":
+        problems.append(f"attempt {name} {verdict}")
+    return problems
+
+
+def record_problems(record):
+    """Every reason `record` does not show a complete passing proof; empty when it does."""
+    if not isinstance(record, dict):
+        return ["record unreadable"]
+    problems = []
+    if record.get("outcome") != "passed":
+        problems.append(f"outcome {record.get('outcome')}")
+    repository = record.get("repository")
+    fragments = None
+    if isinstance(repository, str) and repository:
+        fragments = expected_fragments(repository, CHANGE_ID, REQUIRED_CHECK)
+    else:
+        problems.append("repository missing")
+    attempts = record.get("attempts")
+    if not _objects(attempts):
+        problems.append("attempts unreadable")
+    else:
+        names, named = _names_problems(attempts, "attempt", ATTEMPT_NAMES, "attempt")
+        problems += named
+        if not named and names != list(ATTEMPT_NAMES):
+            problems.append("attempts out of order")
+        for attempt in attempts:
+            name = attempt.get("attempt")
+            if name in ATTEMPT_NAMES and names.count(name) == 1:
+                problems += _attempt_problems(attempt, name, fragments)
+    teardown = record.get("teardown")
+    if not _objects(teardown):
+        problems.append("teardown unreadable")
+    else:
+        _, named = _names_problems(teardown, "step", TEARDOWN_STEPS, "teardown")
+        problems += named
+        problems += [f"teardown {entry.get('step')} failed" for entry in teardown
+                     if entry.get("ok") is not True]
+    return problems
+
+
+def _read_record(path):
+    """The record at `path` when it is a github-mode JSON object, else None."""
+    try:
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) and record.get("mode") == "github" else None
+
+
+def record_verdict(path):
+    record = _read_record(path)
+    if record is None:
+        return NOT_YET, {"status": "not_yet", "reason": "no_record"}
+    problems = record_problems(record)
+    repository = record.get("repository")
+    if problems:
+        return 1, {"status": "not_met", "repository": repository, "problems": problems}
+    return 0, {"status": "met", "repository": repository, "finished_at": record.get("finished_at")}
+
+
+def _manager_rows(log, project):
+    """`(at, payload)` of each `manager.started` row of `project` in seq order, None when unreadable."""
+    try:
+        connection = sqlite3.connect(f"{Path(log).resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT at, payload FROM events WHERE kind = 'manager.started' AND project = ? "
+            "ORDER BY seq", (project,)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    started = []
+    for at, text in rows:
+        try:
+            payload = json.loads(text)
+            moment = datetime.fromisoformat(at)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            started.append((moment, payload))
+    return started
+
+
+def managers_verdict(project, record, log):
+    judged = _read_record(record)
+    if judged is None or record_problems(judged):
+        return NOT_YET, {"status": "not_yet", "reason": "no_proof"}
+    try:
+        finished = datetime.fromisoformat(judged["finished_at"])
+    except (KeyError, TypeError, ValueError):
+        return NOT_YET, {"status": "not_yet", "reason": "no_proof"}
+    rows = _manager_rows(log, project)
+    if rows is None:
+        return NOT_YET, {"status": "not_yet", "reason": "no_log"}
+    for moment, payload in rows:
+        try:
+            later = moment > finished
+        except TypeError:  # one timestamp has a zone and the other does not
+            continue
+        mode = permissions.from_payload(payload.get("permission"))
+        sprint_id = payload.get("sprint_id")
+        if later and mode is not None and isinstance(sprint_id, str):
+            met = mode.mode == BYPASS
+            return (0 if met else 1), {"status": "met" if met else "not_met",
+                                       "sprint_id": sprint_id, "text": mode.text}
+    return NOT_YET, {"status": "not_yet", "reason": "no_manager"}
+
+
+def _check_main(args):
+    if args.mode == "record-check":
+        code, output = record_verdict(args.record or record_path())
+    else:
+        log = args.log or agent_platform.state_root() / "console" / LOG_NAME
+        code, output = managers_verdict(args.project, args.record or record_path(), log)
+    print(json.dumps(output, sort_keys=True))
+    return code
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="bypass-proof")
@@ -774,7 +949,15 @@ def main(argv=None):
     github.add_argument("--owner", required=True)
     github.add_argument("--template", type=Path, required=True)
     github.add_argument("--claude", default="claude")
+    record_check = modes.add_parser("record-check", help="verify the proof record")
+    record_check.add_argument("--record", type=Path)
+    managers_check = modes.add_parser("managers-check", help="verify the next manager's mode")
+    managers_check.add_argument("--project", required=True)
+    managers_check.add_argument("--record", type=Path)
+    managers_check.add_argument("--log", type=Path)
     args = parser.parse_args(argv)
+    if args.mode in ("record-check", "managers-check"):
+        return _check_main(args)
     if args.mode == "github":
         return _github_main(args)
     workdir = None
