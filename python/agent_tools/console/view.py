@@ -643,12 +643,13 @@ their number. A thread is `{"id", "questions", "follow_up"}`: `id` is its first 
 A question entry is `{"id", "question", "asked_at",
 "state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
 null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
-"production_text"}`. `state_text` is `ASK_WORKING_TEXT`, `ASK_ANSWERED_TEXT`, or for a timed-out or
-failed question `ASK_TIMED_OUT_TEXT` or `ASK_FAILED_TEXT` and `": "` and the reason when the reason
-is a non-empty string, else the bare text. The last six members are null unless the question is
+"back_choices", "production_text"}`. `state_text` is `ASK_WORKING_TEXT`, `ASK_ANSWERED_TEXT`, or
+for a timed-out or failed question `ASK_TIMED_OUT_TEXT` or `ASK_FAILED_TEXT` and `": "` and the
+reason when the reason is a non-empty string, else the bare text. The last seven members are null unless the question is
 answered: `answer` is the parsed answer part, `read_text`, `ran_text`, `unknown_text` and
 `back_text` are `ASK_READ_TEXT`, `ASK_RAN_TEXT`, `ASK_UNKNOWN_TEXT` and `ASK_BACK_TEXT` over their
-part and each null when the part is, and `production_text` is the parsed production line as is.
+part and each null when the part is, `back_choices` is the back part's choices as a list (empty
+when it has none), and `production_text` is the parsed production line as is.
 A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
 order (#1177, #1178, ADR-console-059 D3, D4).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -1714,6 +1715,7 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> di
             "ran_text": None if parts is None else said(ASK_RAN_TEXT, parts.ran),
             "unknown_text": None if parts is None else said(ASK_UNKNOWN_TEXT, parts.unknown),
             "back_text": None if parts is None else said(ASK_BACK_TEXT, parts.back),
+            "back_choices": None if parts is None else list(parts.choices),
             "production_text": None if parts is None else parts.production,
         }
 

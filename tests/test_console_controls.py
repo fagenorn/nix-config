@@ -11,7 +11,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASK_ANSWERED, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASK_ANSWERED, ASK_CHOOSE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
@@ -25,7 +25,7 @@ SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
 TREES = ("inbox", "statement", "projects", "unmanaged", "digest", "goal", "capacity", "account_add",
-         "register", "accounts", "accounts_body", "promoted", "viewer")
+         "register", "accounts", "accounts_body", "promoted", "viewer", "reading")
 BUTTON_FOLDS = ("sprint-more", "item-detail")
 QUIET_ONLY = frozenset({"btn-quiet"})
 PRIMARY_OR_QUIET = frozenset({"btn-primary", "btn-quiet"})
@@ -54,7 +54,7 @@ DESK_CONTROLS: dict = {
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
         "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
-        "follow-cancel", "reply-send", "undo", *ANS_PLAIN, "goal-project",
+        "follow-cancel", "thread-open", "reading-close", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "kept-words-dismiss", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
@@ -67,7 +67,7 @@ DESK_CONTROLS: dict = {
     **_roles(CODE_ONLY, "signin-code", "account-code"),
 }
 SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
-BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick"})
+BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick", "thread-open"})
 BARE_FIELDS = frozenset({"goal-text"})
 BARE_ROLES = BARE_BUTTONS | BARE_FIELDS
 
@@ -181,8 +181,8 @@ def desk_scenarios() -> list:
         [begin, {"frame": view([asking(project(0, []), ASK_ANSWERED)])}, {"click": "ask-open"},
          {"type": {"class": "ask-text", "text": "what runs?"}}, snapshot],
         # a thread's follow-up box under its last answer (#1178)
-        [begin, {"frame": view([asking(project(0, []), thread(ASK_ANSWERED))])},
-         {"open": "questions:owner/p00"}, {"open": "thread:owner/p00:q4"}, snapshot, {"click": "follow-open"},
+        [begin, {"frame": view([asking(project(0, []), thread(ASK_CHOOSE))])},
+         {"open": "questions:owner/p00"}, {"click": "thread-open"}, snapshot, {"click": "follow-open"},
          {"type": {"class": "follow-text", "text": "and then?"}}, snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
@@ -1031,6 +1031,7 @@ BARE_SPECIMENS = (
     '<button class="pic-thumb btn-quiet btn-bare">t</button>',
     '<button class="sprint-check btn-quiet btn-bare">s</button>',
     '<div class="register"><button class="draft-pick btn-quiet btn-bare">k</button></div>',
+    '<ul class="thread-list"><li class="thread"><button class="thread-open btn-quiet btn-bare">t</button></li></ul>',
     '<div class="goal-bar open"><div class="goal-in">'
     '<textarea class="goal-text field-line field-bare"></textarea></div></div>')
 

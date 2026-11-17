@@ -27,8 +27,8 @@ body {
   font: 400 .9375rem/1.5 var(--ui); font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
-h1, h2, p, ul { margin: 0; padding: 0; }
-ul { list-style: none; }
+h1, h2, p, ul, ol { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
 :focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 6px; }
 kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; font: 600 .71875rem/1 var(--ui); color: var(--sub0); border: 1px solid var(--s2); border-radius: 5px; }
 .ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; align-self: center; }
@@ -340,21 +340,47 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .follow-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
 .follow-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
 .ask-list { margin-top: 8px; }
-.ask > .ask-goal { margin-top: 4px; }
 .line.questions > details > summary { display: revert; list-style: revert; }
 .line.questions > details > summary::-webkit-details-marker { display: revert; }
 .questions-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
 .thread-list { margin-top: 4px; }
 .thread + .thread { margin-top: 4px; }
-.thread > details > summary { display: flex; align-items: baseline; gap: 2px 10px; cursor: pointer; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; }
+.thread-open { display: flex; align-items: baseline; gap: 2px 10px; width: calc(100% + 24px); min-height: 32px; margin: 0 -12px; padding: 4px 12px; text-align: left; }
+.thread-open[aria-expanded="true"] { background: var(--hover); }
 .thread-first { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--lav); }
 .thread-age, .thread-more { flex: none; color: var(--ov2); white-space: nowrap; }
 .ask + .ask { margin-top: 12px; }
 .ask > p { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.ask > p + p { margin-top: 2px; }
+.ask > * + * { margin-top: 6px; }
 .ask-question { color: var(--lav); white-space: pre-line; overflow-wrap: anywhere; }
 .ask-age { margin-left: 8px; color: var(--ov2); white-space: nowrap; }
-.ask-answer { color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
+.ask-answer { min-width: 0; max-width: 46rem; font-size: 1.0625rem; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; }
+.ask-answer p { white-space: pre-line; }
+.ask-answer > * + * { margin-top: 10px; }
+.ask-answer .md-list { padding-left: 1.5rem; }
+.ask-answer ul.md-list { list-style: disc; }
+.ask-answer ol.md-list { list-style: decimal; }
+.ask-answer li + li { margin-top: 4px; }
+.md-pre { max-width: 100%; overflow-x: auto; padding: 10px 14px; background: var(--mantle); border-radius: 8px; font-size: .8125rem; line-height: 1.5; }
+.md-pre code, code.md-code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); border-radius: 4px; }
+#reading { margin-top: 40px; max-width: 46rem; }
+.reading-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: .8125rem; color: var(--ov2); }
+.reading-project { min-width: 0; overflow-wrap: anywhere; font-weight: 600; color: var(--sub0); }
+.reading-head .reading-close { margin-left: auto; }
+.reading-question { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: pretty; overflow-wrap: anywhere; white-space: pre-line; }
+#reading .ask-list { margin-top: 20px; }
+#reading .ask + .ask { margin-top: 28px; }
+.ask-sources { font-size: .8125rem; color: var(--ov2); }
+.ask-sources summary { cursor: pointer; }
+.ask-sources > p { margin-top: 2px; }
+.ask > .ask-goal { margin-top: 10px; }
+.ask > .ask-callout { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding: 14px 16px; border: 1px solid var(--s1); border-radius: 12px; }
+.ask-callout > p { flex-basis: 100%; margin: 0; }
+.ask-callout .ask-back { font-weight: 600; color: var(--text); }
+.ask-callout .ask-choice { max-width: 100%; }
+.ask-callout .callout-reason { font-size: .8125rem; color: var(--sub0); }
+.ask-callout .callout-reason:empty { display: none; }
 .ask-back, .ask-state, .ask-reason, .follow-reason { color: var(--sub0); }
 .ask-read, .ask-ran, .ask-unknown, .ask-production { color: var(--ov2); }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
@@ -427,7 +453,7 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
 .pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
 .pic-missing { margin: 8px 0 0; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
-.reading { margin: 10px 0 0; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+p.reading { margin: 10px 0 0; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
 .pic-label { display: block; margin-bottom: 4px; font-size: .8125rem; color: var(--ov2); }
 html:has(#viewer:not([hidden])) { overflow: hidden; }
 .viewer { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--crust); }
@@ -484,6 +510,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 <main>
 <div class="statement" id="statement"></div>
 <section id="promoted" aria-label="Capacity"></section>
+<section class="reading" id="reading" aria-label="Question" hidden></section>
 <section id="inbox" aria-label="Inbox"></section>
 <section id="digest" aria-label="Since you last looked"></section>
 </main>
@@ -772,6 +799,9 @@ const followPosts = new Map();
 const followSent = new Map();
 const followLatest = new Map();
 const askReveal = new Set();
+// The thread open in the reading panel ({ project, thread }) and the one a sent question asks it to open once its row arrives (#1226, D4).
+let reading = null;
+let readingReveal = null;
 let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
@@ -2099,9 +2129,10 @@ function askReconcile(projectId, entry) {
     if (sent.list.includes(submission)) sent.base.add(taken.get(submission));
     if (submission.revealed === true) continue;
     submission.revealed = true;
-    // The view now carries the question: its fold and its thread are drawn open, once (D8).
+    // The view now carries the question: its fold is drawn open and its thread opens in the reading panel, once (D8).
     askReveal.add("questions:" + projectId);
-    askReveal.add("thread:" + projectId + ":" + taken.get(submission));
+    const carried = askThreads(entry).find((thread) => thread.questions.some((question) => question.id === taken.get(submission)));
+    if (carried !== undefined) readingReveal = { project: projectId, thread: carried.id };
   }
   sent.list = sent.list.filter((submission) => !taken.has(submission));
 }
@@ -2173,22 +2204,140 @@ function askBox(projectId, entry) {
   box.appendChild(reason);
   return box;
 }
-function askRow(projectId, question) {
+// An answer's text as block nodes (#1226, D6): fenced code, bullet and numbered lists and paragraphs, built with el() only. A fence runs to the closing fence or the end; every other markup stays text.
+function answerBlocks(text) {
+  const lines = String(text).split("\n").map((line) => line.replace(/\r$/, ""));
+  const blocks = [];
+  let para = [];
+  let list = null;
+  const endPara = () => {
+    if (para.length > 0) {
+      const p = el("p", "");
+      for (const node of inlineNodes(para.join("\n"))) p.appendChild(node);
+      blocks.push(p);
+    }
+    para = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trimStart().startsWith("```")) {
+      endPara();
+      list = null;
+      const code = [];
+      for (i++; i < lines.length && !lines[i].trimStart().startsWith("```"); i++) code.push(lines[i]);
+      const pre = el("pre", "md-pre");
+      pre.appendChild(el("code", "", code.join("\n")));
+      blocks.push(pre);
+      continue;
+    }
+    const bullet = /^\s{0,3}[-*+]\s+(.*)$/.exec(line);
+    const numbered = bullet === null ? /^\s{0,3}\d{1,3}[.)]\s+(.*)$/.exec(line) : null;
+    const item = bullet !== null ? bullet : numbered;
+    if (item !== null) {
+      endPara();
+      const tag = bullet !== null ? "ul" : "ol";
+      if (list === null || list.tagName.toLowerCase() !== tag) {
+        list = el(tag, "md-list");
+        blocks.push(list);
+      }
+      const li = el("li", "");
+      for (const node of inlineNodes(item[1])) li.appendChild(node);
+      list.appendChild(li);
+      continue;
+    }
+    list = null;
+    if (line.trim() === "") endPara();
+    else para.push(line);
+  }
+  endPara();
+  return blocks;
+}
+// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong, and its text may span inline code; the rest is span text, an unmatched marker included.
+function inlineNodes(text) {
+  const value = String(text);
+  const spans = [];
+  let masked = "";
+  for (let i = 0; i < value.length; i++) {
+    const end = value[i] === "`" ? value.indexOf("`", i + 1) : -1;
+    if (end === -1) {
+      masked += value[i];
+      continue;
+    }
+    spans.push([i, end]);
+    masked += "x".repeat(end - i + 1);
+    i = end;
+  }
+  const emit = (into, from, to) => {
+    let at = from;
+    for (const [start, end] of spans) {
+      if (start < from || end >= to) continue;
+      if (start > at) into(el("span", "", value.slice(at, start)));
+      into(el("code", "md-code", value.slice(start + 1, end)));
+      at = end + 1;
+    }
+    if (at < to) into(el("span", "", value.slice(at, to)));
+  };
+  const nodes = [];
+  const push = (node) => nodes.push(node);
+  let at = 0;
+  for (const m of masked.matchAll(/\*\*([\s\S]+?)\*\*/g)) {
+    emit(push, at, m.index);
+    const strong = el("strong", "");
+    emit((node) => strong.appendChild(node), m.index + 2, m.index + m[0].length - 2);
+    nodes.push(strong);
+    at = m.index + m[0].length;
+  }
+  emit(push, at, value.length);
+  return nodes;
+}
+// One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, the closed sources fold, Make it a goal, then the call-out, which is last.
+function askRow(projectId, question, first, last, thread) {
   const row = el("li", "ask");
-  row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
+  if (!first) row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
   if (question.state !== "answered") {
     row.appendChild(el("p", "ask-state", question.state_text));
     return row;
   }
-  if (typeof question.back_text === "string") row.appendChild(el("p", "ask-back", question.back_text));
-  if (typeof question.answer === "string" && question.answer !== "") row.appendChild(el("p", "ask-answer", question.answer));
-  for (const [key, cls] of [["read_text", "ask-read"], ["ran_text", "ask-ran"], ["unknown_text", "ask-unknown"], ["production_text", "ask-production"]]) {
+  const answered = typeof question.answer === "string" && question.answer !== "";
+  if (answered) {
+    const answer = el("div", "ask-answer");
+    for (const block of answerBlocks(question.answer)) answer.appendChild(block);
+    row.appendChild(answer);
+  }
+  for (const [key, cls] of [["unknown_text", "ask-unknown"], ["production_text", "ask-production"]]) {
     if (typeof question[key] === "string") row.appendChild(el("p", cls, question[key]));
   }
-  if (typeof question.answer === "string" && question.answer !== "") {
-    row.appendChild(actionButton("ask-goal btn-quiet", "Make it a goal", () => goalFromAnswer(projectId, question)));
+  const sources = [["read_text", "ask-read"], ["ran_text", "ask-ran"]].filter(([key]) => typeof question[key] === "string");
+  if (sources.length > 0) {
+    const fold = el("details", "ask-sources");
+    fold.dataset.key = "sources:" + projectId + ":" + question.id;
+    fold.appendChild(el("summary", "", "What it read and ran"));
+    for (const [key, cls] of sources) fold.appendChild(el("p", cls, question[key]));
+    row.appendChild(fold);
   }
+  if (answered) row.appendChild(actionButton("ask-goal btn-quiet", "Make it a goal", () => goalFromAnswer(projectId, question)));
+  if (typeof question.back_text === "string") row.appendChild(askCallout(projectId, question, last, thread));
   return row;
+}
+// The question back to the owner: its text, then its choices as buttons only on the thread's last question while answered and with no follow-up outstanding, then the reason a refused choice gives.
+function askCallout(projectId, question, last, thread) {
+  const callout = el("div", "ask-callout");
+  callout.setAttribute("role", "group");
+  callout.setAttribute("aria-label", "Question for you");
+  const back = el("p", "ask-back");
+  const lead = "Question for you: ";
+  const said = question.back_text.startsWith(lead);
+  if (said) back.appendChild(el("span", "", lead));
+  for (const node of inlineNodes(said ? question.back_text.slice(lead.length) : question.back_text)) back.appendChild(node);
+  callout.appendChild(back);
+  const key = followKey(projectId, thread.id);
+  const choices = Array.isArray(question.back_choices) ? question.back_choices : [];
+  if (last && thread.follow_up === true && followOutstanding(key, thread).length === 0 && choices.length > 0) {
+    for (const choice of choices) callout.appendChild(actionButton("ask-choice btn-quiet", choice, () => postFollowUp(projectId, thread, choice)));
+    const refused = followPosts.get(key);
+    callout.appendChild(el("p", "callout-reason", refused !== undefined && refused.choice === true && refused.phase === "failed" ? refused.reason : ""));
+  }
+  return callout;
 }
 function pendingRow(post) {
   const row = el("li", "ask");
@@ -2256,14 +2405,16 @@ function followReconcile(key, thread) {
   }
   sent.list = sent.list.filter((submission) => !taken.has(submission));
 }
-async function postFollowUp(projectId, thread) {
+// `chosen` is a choice of a question back: its text is sent and the follow-up draft and box are left as they are.
+async function postFollowUp(projectId, thread, chosen) {
   const key = followKey(projectId, thread.id);
   const current = followPosts.get(key);
   if (current !== undefined && current.phase === "sending") return;
+  const choice = typeof chosen === "string";
   const draft = followDrafts.get(key);
-  const text = draft === undefined ? "" : draft.value;
+  const text = choice ? chosen : draft === undefined ? "" : draft.value;
   if (text.trim() === "") return;
-  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString() };
+  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString(), choice };
   const sent = followSent.get(key);
   if (sent === undefined || sent.list.length === 0) followSent.set(key, { base: new Set(thread.questions.map((question) => question.id)), list: [] });
   followPosts.set(key, state);
@@ -2281,7 +2432,7 @@ async function postFollowUp(projectId, thread) {
   if (reason === null) {
     // Text typed while the send was in flight is a new draft: the editor stays open on it, as the Ask box does.
     const typed = followDrafts.get(key);
-    if (typed === undefined || typed.value === text) {
+    if (!choice && (typed === undefined || typed.value === text)) {
       followOpen.delete(key);
       followDrafts.delete(key);
     }
@@ -2306,7 +2457,7 @@ function followBox(projectId, thread) {
   const draft = followDrafts.get(key);
   if (draft !== undefined) field.value = draft.value;
   const send = actionButton("follow-send btn-quiet", "Send", () => postFollowUp(projectId, thread));
-  const reason = el("span", "follow-reason", state !== undefined && state.phase === "failed" ? state.reason : "");
+  const reason = el("span", "follow-reason", state !== undefined && state.phase === "failed" && state.choice !== true ? state.reason : "");
   send.disabled = sending || field.value.trim() === "";
   markBusy(send, sending);
   field.addEventListener("input", () => {
@@ -2345,33 +2496,114 @@ function revealed(key) {
   askReveal.delete(key);
   return true;
 }
+// A thread's line in the Questions fold: a button opening it in the reading panel, or closing it when it is the open one (#1226, D4).
+function isReading(projectId, thread) {
+  return reading !== null && reading.project === projectId && reading.thread === thread.id;
+}
 function threadItem(projectId, thread) {
   const first = thread.questions[0];
   const last = thread.questions[thread.questions.length - 1];
   const item = el("li", "thread");
-  const fold = el("details");
-  fold.dataset.key = "thread:" + projectId + ":" + thread.id;
-  const key = followKey(projectId, thread.id);
-  if (revealed(fold.dataset.key) || followOpen.has(key)) fold.open = true;
-  const summary = el("summary");
+  const open = el("button", "thread-open btn-quiet btn-bare");
+  open.type = "button";
+  open.dataset.key = "thread:" + projectId + ":" + thread.id;
+  open.setAttribute("aria-expanded", isReading(projectId, thread) ? "true" : "false");
+  open.setAttribute("aria-controls", "reading");
   const head = el("span", "thread-first", first.question);
   head.setAttribute("title", first.question);
-  summary.appendChild(head);
-  summary.appendChild(timeEl("ago", last.asked_at, "thread-age"));
+  open.appendChild(head);
+  open.appendChild(timeEl("ago", last.asked_at, "thread-age"));
   if (thread.questions.length > 1) {
     const more = thread.questions.length - 1;
-    summary.appendChild(el("span", "thread-more", "and " + more + (more === 1 ? " follow-up" : " follow-ups")));
+    open.appendChild(el("span", "thread-more", "and " + more + (more === 1 ? " follow-up" : " follow-ups")));
   }
-  fold.appendChild(summary);
-  const list = el("ul", "ask-list");
-  for (const question of thread.questions) list.appendChild(askRow(projectId, question));
+  open.addEventListener("click", () => toggleReading(projectId, thread));
+  item.appendChild(open);
+  return item;
+}
+function toggleReading(projectId, thread) {
+  if (isReading(projectId, thread)) {
+    closeReading();
+    return;
+  }
+  reading = { project: projectId, thread: thread.id };
+  redrawNotices();
+  const heading = document.querySelector("h2.reading-question");
+  if (heading !== null) heading.focus();
+}
+function inReadingPanel(target) {
+  const panel = document.getElementById("reading");
+  for (let node = target; node; node = node.parentNode) if (node === panel) return true;
+  return false;
+}
+// The child-index path from the reading panel to a node inside it, with the node's tag and class, or null when the node is not in the panel.
+function panelPath(section, node) {
+  if (node === null || node === section) return null;
+  const path = [];
+  for (let at = node; at !== section; at = at.parentNode) {
+    if (!at || !at.parentNode) return null;
+    path.push(Array.prototype.indexOf.call(at.parentNode.children, at));
+  }
+  return { steps: path.reverse(), tag: node.tagName, cls: node.className };
+}
+function panelNode(section, path) {
+  let node = section;
+  for (const index of path.steps) {
+    node = node.children[index];
+    if (node === undefined) return null;
+  }
+  return node;
+}
+function closeReading() {
+  const was = reading;
+  reading = null;
+  redrawNotices();
+  const key = was === null ? "" : "thread:" + was.project + ":" + was.thread;
+  const opener = Array.from(document.querySelectorAll("button.thread-open")).find((button) => button.dataset.key === key);
+  if (opener !== undefined) opener.focus();
+}
+// The reading panel in the main column: the open thread's heading, rows, outstanding follow-ups and follow-up box, or hidden and empty when no thread is open or the open one has left the view (#1226, D4). A thread a sent question asked to open is opened once, without moving focus.
+function renderReading(view) {
+  const section = document.getElementById("reading");
+  if (readingReveal !== null) {
+    if (followLatest.has(followKey(readingReveal.project, readingReveal.thread))) {
+      reading = readingReveal;
+      readingReveal = null;
+    }
+  }
+  const thread = reading === null ? undefined : followLatest.get(followKey(reading.project, reading.thread));
+  if (thread === undefined) {
+    reading = null;
+    section.hidden = true;
+    section.replaceChildren();
+    return;
+  }
+  const projectId = reading.project;
+  const key = followKey(projectId, thread.id);
+  // Every frame rebuilds the panel, which detaches whatever control holds focus: focus returns to its twin in the new panel, or to the heading when that control is gone, so the inbox answer keys never see BODY.
+  const heldPath = panelPath(section, document.activeElement);
+  section.hidden = false;
+  const head = el("div", "reading-head");
+  head.appendChild(el("span", "reading-project", projectId));
+  head.appendChild(timeEl("ago", thread.questions[0].asked_at, "ask-age"));
+  head.appendChild(actionButton("reading-close btn-quiet", "Close", closeReading));
+  const heading = el("h2", "reading-question", thread.questions[0].question);
+  heading.setAttribute("tabindex", "-1");
+  const list = el("ol", "ask-list");
+  thread.questions.forEach((question, index) => {
+    list.appendChild(askRow(projectId, question, index === 0, index === thread.questions.length - 1, thread));
+  });
   const pending = followOutstanding(key, thread);
   for (const post of pending) list.appendChild(pendingRow(post));
-  fold.appendChild(list);
+  const nodes = [head, heading, list];
   const follow = followBlock(projectId, thread, pending.length);
-  if (follow !== null) fold.appendChild(follow);
-  item.appendChild(fold);
-  return item;
+  if (follow !== null) nodes.push(follow);
+  section.replaceChildren(...nodes);
+  if (heldPath !== null) {
+    const held = panelNode(section, heldPath);
+    const twin = held !== null && held.disabled !== true && held.tagName === heldPath.tag && held.className === heldPath.cls ? held : heading;
+    twin.focus({ preventScroll: true });
+  }
 }
 // One closed fold of a project's question threads, newest first, each a closed line opening to its questions and answers in order (#1178, ADR-console-059 D4); null when the project has none. It counts in nothing.
 function questionsFold(entry, afterLine) {
@@ -4526,6 +4758,7 @@ function drawProjects(view) {
     if (followLatest.has(key)) followReconcile(key, followLatest.get(key));
     else followSent.delete(key);
   }
+  renderReading(view);
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
     return;
@@ -4636,7 +4869,7 @@ function drawProjects(view) {
   if (heldFollow !== null) {
     const again = followField(heldFollow.id);
     if (again !== undefined) {
-      again.focus();
+      again.focus({ preventScroll: true });
       again.setSelectionRange(heldFollow.start, heldFollow.end);
     }
   }
@@ -5422,6 +5655,8 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
+  // The reading panel's heading takes focus when a thread opens: its keys are not the inbox's answer keys, so Enter there never approves an unrelated brief.
+  if (inReadingPanel(event.target)) return;
   const current = currentEntry(lastView.inbox.open);
   if (current === null) return;
   const { item, state } = current;
