@@ -14,7 +14,7 @@ from .test_console_page import (
     ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
-    SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, cards,
+    SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, asking, cards,
     check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
     style_rules, view, with_check, with_notices, with_run, with_sprints)
 
@@ -53,7 +53,7 @@ DESK_CONTROLS: dict = {
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
         "more-open", "acct-toggle", "acct-pin", "acct-signin", "acct-remove-cancel", "acct-close",
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
-        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "reply-send", "undo", *ANS_PLAIN, "goal-project",
+        "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "reply-send", "undo", *ANS_PLAIN, "goal-project",
         "detail-open", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
@@ -176,7 +176,7 @@ def desk_scenarios() -> list:
         begin, {"frame": view([own_notice])}, {"open": "notices:owner/p00"},
         {"click": "notice-open"}, snapshot]
     return [
-        [begin, {"frame": view([project(0, [])])}, {"click": "ask-open"},
+        [begin, {"frame": view([asking(project(0, []), ASK_ANSWERED)])}, {"click": "ask-open"},
          {"type": {"class": "ask-text", "text": "what runs?"}}, snapshot],
         # a sprint block with Tell open and End the sprint opened, then a stop question
         [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
