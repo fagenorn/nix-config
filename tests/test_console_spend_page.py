@@ -140,8 +140,8 @@ SHARES = {
                ("0123456789abcdef", .5, .5)],
     "phase": [("plan", .3, .3), ("implement", .3, .3), ("other", .4, .4)],
     "account": [("unattributed", .3, .3), ("work-main", .7, .7)],
-    "aspect": [("keepalive", .05, .05), ("outside_sprint", .15, .15), ("managers", .3, .3),
-               ("deliveries", .5, .5)],
+    "aspect": [("keepalive", .05, .05), ("questions", .07, .07), ("outside_sprint", .08, .08),
+               ("managers", .3, .3), ("deliveries", .5, .5)],
 }
 FIRST_DAY = date(2026, 10, 18)
 
@@ -332,7 +332,7 @@ class SpendRenderTest(unittest.TestCase):
         self.assertEqual(row_names(week, "By account"), ["work-main", "unattributed"])
         self.assertEqual(
             row_names(week, "By aspect"),
-            ["Deliveries", "Managers", "Outside-sprint sessions", "Keepalive pings"])
+            ["Deliveries", "Managers", "Outside-sprint sessions", "Questions", "Keepalive pings"])
         self.assertEqual(
             row_names(today, "By project"), ["owner/api", "owner/web", "unattributed"])
         for snap, span in ((week, 7), (today, 1)):
