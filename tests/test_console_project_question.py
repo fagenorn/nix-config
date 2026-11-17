@@ -427,6 +427,117 @@ def wait_until(predicate):
     assert predicate(), "the condition did not become true within 5 s"
 
 
+class AnswerPartsTest(unittest.TestCase):
+    def test_each_heading_of_the_prompt_shape_is_its_own_part(self):
+        text = ("Answer: It builds the hosts.\nRead: flake.nix, lib/helpers.nix\nRan: just build\n"
+                "Could not find out: none\nQuestion for you: None.")
+        self.assertEqual(
+            project_question.answer_parts(text),
+            project_question.AnswerParts("It builds the hosts.", "flake.nix, lib/helpers.nix",
+                                         "just build", None, None, None))
+
+    def test_a_part_runs_on_until_the_next_heading(self):
+        parts = project_question.answer_parts("Answer: first\nsecond line\nread: none")
+        self.assertEqual(parts.answer, "first\nsecond line")
+        self.assertIsNone(parts.read)
+
+    def test_the_production_line_is_its_own_part(self):
+        text = project_question.answer_text("Answer: from the code only\nRan: none", ())
+        parts = project_question.answer_parts(text)
+        self.assertEqual(parts.production, project_question.NO_PRODUCTION_LINE)
+        self.assertEqual(parts.answer, "from the code only")
+        self.assertIsNone(parts.ran)
+
+    def test_a_text_with_no_heading_is_the_answer(self):
+        self.assertEqual(project_question.answer_parts("It builds."),
+                         project_question.AnswerParts("It builds.", None, None, None, None, None))
+
+    def test_a_question_back_is_kept(self):
+        parts = project_question.answer_parts(
+            "Answer: I cannot read the bill.\nQuestion for you: May I run the paid billing export?")
+        self.assertEqual(parts.back, "May I run the paid billing export?")
+        self.assertEqual(parts.answer, "I cannot read the bill.")
+
+    def test_lead_names_every_heading(self):
+        for _, label in project_question.HEADINGS:
+            with self.subTest(label=label):
+                self.assertIn(label + ": <", project_question.LEAD)
+        self.assertEqual([key for key, _ in project_question.HEADINGS],
+                         ["answer", "read", "ran", "unknown", "back"])
+
+
+def _row(seq, kind, project, payload):
+    return event_log.Event(seq, f"2026-11-17T10:00:{seq:02d}Z", kind, project, payload)
+
+
+def _asked(seq, project, question_id, question="what?"):
+    return _row(seq, event_log.PROJECT_QUESTION_ASKED, project,
+                {"question_id": question_id, "question": question})
+
+
+def _answered(seq, project, question_id, **payload):
+    return _row(seq, event_log.PROJECT_QUESTION_ANSWERED, project,
+                {"question_id": question_id, **payload})
+
+
+class QuestionFoldTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def rows(self):
+        return [
+            _asked(2, self.P1, "q1"),
+            _answered(3, self.P1, "q1", outcome="answered", answer="Answer: ok"),
+            _asked(4, self.P1, "q2"),
+            _answered(5, self.P1, "q2", outcome="timed_out",
+                      reason="the session did not answer within 300 s"),
+            _asked(6, self.P1, "q3"),
+            _answered(7, self.P1, "q3", outcome="failed", reason="claude-account is not installed"),
+            _asked(8, self.P1, "q4"),
+        ]
+
+    def test_each_state_is_read_from_the_rows(self):
+        rows = self.rows()
+        result = project_question.asked_questions(rows)
+        q1, q2, q3, q4 = result[self.P1]
+        self.assertEqual([(q.question_id, q.state) for q in result[self.P1]],
+                         [("q1", "answered"), ("q2", "timed_out"), ("q3", "failed"),
+                          ("q4", "working")])
+        self.assertEqual(q1.answer, "Answer: ok")
+        self.assertEqual(q1.answered_at, rows[1].at)
+        self.assertEqual(q2.reason, "the session did not answer within 300 s")
+        self.assertIsNone(q4.answered_at)
+
+    def test_strays_and_repeats_are_ignored(self):
+        clean = [_asked(2, self.P1, "q1"),
+                 _answered(4, self.P1, "q1", outcome="answered", answer="Answer: ok")]
+        noisy = [clean[0],
+                 _answered(3, self.P1, "nope", outcome="answered", answer="x"),
+                 clean[1],
+                 _answered(5, self.P1, "q1", outcome="failed", reason="late"),
+                 _answered(6, "owner/p02", "q1", outcome="answered", answer="x"),
+                 _asked(7, None, "q9"),
+                 _asked(8, self.P1, "q8", question=7),
+                 _asked(9, self.P1, "q1", question="again")]
+        self.assertEqual(project_question.asked_questions(noisy),
+                         project_question.asked_questions(clean))
+        self.assertEqual(project_question.asked_questions(noisy)[self.P1][0].state, "answered")
+
+    def test_an_unreadable_or_unknown_outcome_is_failed(self):
+        rows = [_asked(2, self.P1, "q1"), _answered(3, self.P1, "q1", outcome="answered"),
+                _asked(4, self.P1, "q2"), _answered(5, self.P1, "q2", outcome="lost", reason=3)]
+        q1, q2 = project_question.asked_questions(rows)[self.P1]
+        self.assertEqual((q1.state, q1.reason), ("failed", project_question.UNREADABLE_TEXT))
+        self.assertEqual((q2.state, q2.reason), ("failed", None))
+
+    def test_folding_in_two_batches_equals_folding_once(self):
+        rows = self.rows()
+        first = project_question.asked_questions(rows[:4])
+        before = dict(first)
+        self.assertEqual(project_question.asked_questions(rows[4:], first),
+                         project_question.asked_questions(rows))
+        self.assertEqual(first, before)
+
+
 class QuestionCase(Case):
     """A service whose question session is a stub: the asker records each call and returns an outcome."""
 
