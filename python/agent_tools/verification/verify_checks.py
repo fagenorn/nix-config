@@ -1474,11 +1474,12 @@ def failed_start_state(view: object) -> tuple[int, dict]:
         if isinstance(opened, list) else []
     if not cards:
         return 75, {"verdict": "not_yet", "cards": 0}
-    running = {sprint.get("sprint_id"): sprint for sprint in _sprint_entries(view)
-               if sprint.get("ended_at") is None}
+    running = {sprint["sprint_id"]: sprint for sprint in _sprint_entries(view)
+               if sprint.get("ended_at") is None and isinstance(sprint.get("sprint_id"), str)}
     problems: set[str] = set()
     for card in cards:
-        sprint = running.get(card.get("sprint_id"))
+        card_sprint = card.get("sprint_id")
+        sprint = running.get(card_sprint) if isinstance(card_sprint, str) else None
         if sprint is None or sprint.get("now_text") != FAILED_START_NOW:
             problems.add("line")
         if sprint is not None:

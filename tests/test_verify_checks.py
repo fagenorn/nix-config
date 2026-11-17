@@ -1857,6 +1857,25 @@ class ConsoleFailedStartTest(unittest.TestCase):
                 self.assertEqual(verify_checks.failed_start_state(view),
                                  (1, {"verdict": "not_met", "cards": 1, "problems": [problem]}))
 
+    def test_a_card_and_sprint_without_a_string_sprint_id_are_not_met(self):
+        def strip(view):
+            del view["inbox"]["open"][0]["sprint_id"]
+            del verify_checks._sprint_entries(view)[0]["sprint_id"]
+
+        def as_list(view):
+            view["inbox"]["open"][0]["sprint_id"] = ["a"]
+            verify_checks._sprint_entries(view)[0]["sprint_id"] = ["a"]
+
+        def card_only(view):
+            view["inbox"]["open"][0]["sprint_id"] = 7
+
+        for name, mutate in (("both absent", strip), ("list valued", as_list), ("card not a string", card_only)):
+            with self.subTest(name):
+                view = self.real_view()
+                mutate(view)
+                self.assertEqual(verify_checks.failed_start_state(view),
+                                 (1, {"verdict": "not_met", "cards": 1, "problems": ["line"]}))
+
     def test_the_wire_names_match_the_console(self):
         self.assertEqual(verify_checks.FAILED_START_REASON, "failed_start")
         self.assertEqual(verify_checks.FAILED_START_NOW, console_sprints.NOW_FAILED_START_TEXT)
