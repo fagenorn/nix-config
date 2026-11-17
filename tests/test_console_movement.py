@@ -17,7 +17,8 @@ from unittest import mock
 from agent_tools.console import movement, view
 from agent_tools.console.movement import (
     LocalReading, ProcessStat, ProjectMovement, PullMovement, PullRequest, SessionMovement,
-    SessionReading, SessionTarget, descendant_cpu, process_table, read_sessions, session_output_ms)
+    SessionReading, SessionTarget, descendant_cpu, process_table, read_sessions, session_held,
+    session_output_ms)
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_view import (
@@ -424,6 +425,87 @@ class SessionOutputTest(unittest.TestCase):
             for bad in ("../s1", "a/b", "", "s\x001", ".", ".."):
                 self.assertIsNone(session_output_ms([a], bad), bad)
             self.assertIsNone(session_output_ms([Path(tmp) / "missing"], "s1"))
+
+
+HELD = {"type": "system", "subtype": "informational", "level": "warning",
+        "content": "Held peer message \u2014 from uds:/run/user/1000/cc-socks/9.sock [verified pid 9] "
+                   "(peer claims name: nix-config-f1); preview: \u00abhello\u00bb \u2026[1 line, 5 chars "
+                   "total] \u2014 not delivered to Claude (1 held). Review it below."}
+DELIVERED = {"type": "user", "isMeta": True, "origin": {"kind": "peer", "from": "uds:/x.sock"},
+             "message": {"role": "user", "content": "Another Claude session sent a message"}}
+QUEUED = {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "hi",
+                                              "origin": {"kind": "peer", "from": "uds:/x.sock"}}}
+OTHER = {"type": "assistant", "message": {"role": "assistant", "content": "ok"}}
+
+
+def transcript(root, *records, sid="s1", raw=""):
+    path = root / "-srv-p00" / (sid + ".jsonl")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records) + raw, encoding="utf-8")
+    return path
+
+
+class SessionHeldTest(unittest.TestCase):
+    """A manager transcript that ends in a held peer message, with none delivered after it (#1229)."""
+
+    def held(self, *records, **kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript(Path(tmp), *records, **kw)
+            return session_held([Path(tmp)], "s1")
+
+    def test_a_transcript_ending_in_a_held_message_is_held(self):
+        self.assertTrue(self.held(OTHER, HELD))
+        self.assertTrue(self.held(OTHER, HELD, OTHER, OTHER))
+        self.assertTrue(self.held(HELD, HELD))
+
+    def test_a_delivered_message_after_the_held_one_clears_it(self):
+        self.assertFalse(self.held(HELD, DELIVERED))
+        self.assertFalse(self.held(HELD, QUEUED, OTHER))
+        self.assertTrue(self.held(DELIVERED, HELD))
+
+    def test_a_transcript_with_neither_marker_or_none_is_not_held(self):
+        self.assertFalse(self.held(OTHER))
+        self.assertFalse(self.held())
+        self.assertTrue(self.held(HELD, raw="not json\n"))  # an unreadable line is skipped
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(session_held([Path(tmp)], "s1"))
+            self.assertFalse(session_held([Path(tmp) / "missing"], "s1"))
+            for bad in ("../s1", "a/b", "", ".", ".."):
+                self.assertFalse(session_held([Path(tmp)], bad), bad)
+
+    def test_a_held_line_that_says_it_was_delivered_or_is_another_kind_is_not_held(self):
+        other = dict(HELD, content="Held peer message but accepted")
+        self.assertFalse(self.held(other))
+        self.assertFalse(self.held(dict(HELD, type="user")))
+
+    def test_only_the_manager_transcript_is_read_not_its_subagents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            transcript(root, OTHER)
+            sub = root / "-srv-p00" / "s1" / "subagents" / "agent-x.jsonl"
+            sub.parent.mkdir(parents=True)
+            sub.write_text(json.dumps(HELD) + "\n", encoding="utf-8")
+            self.assertFalse(session_held([root], "s1"))
+
+    def test_the_marker_is_found_past_a_long_tail_of_other_lines(self):
+        filler = dict(OTHER, message={"role": "assistant", "content": "x" * 5000})
+        self.assertTrue(self.held(HELD, *([filler] * 60)))
+
+    def test_read_sessions_carries_the_held_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transcript(Path(tmp) / "projects", OTHER, HELD)
+            [one] = read_sessions([Path(tmp) / "projects"],
+                                  (SessionTarget("s1", None, frozenset({"a"})),),
+                                  proc=Path(tmp) / "empty")
+            self.assertTrue(one.held)
+
+    def test_the_fold_keeps_the_latest_reading_not_the_largest(self):
+        held = SessionReading("s1", frozenset({"a"}), 1000, None, (), True)
+        fresh = SessionReading("s1", frozenset({"a"}), 2000, None, (), False)
+        one = movement.merged(None, None, 5000, LocalReading((), False, (), (held,), 6000))
+        self.assertEqual([s.held for s in one.sessions], [True])
+        two = movement.merged(one, None, 7000, LocalReading((), False, (), (fresh,), 8000))
+        self.assertEqual([s.held for s in two.sessions], [False])
 
 
 class ProcessTableTest(unittest.TestCase):

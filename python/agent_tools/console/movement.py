@@ -88,6 +88,15 @@ first reading, or after a None) it moves nothing. Times are kept per association
 an association the reading does not carry is kept exactly, so a session that moved on to another
 sprint never refreshes the times of the one it left (ADR-console-050 D1). Sessions fold whether
 `pulls` is None or not.
+
+Held peer messages (#1229, ADR-console-042 D5). `session_held` reads the last `HELD_TAIL_BYTES` of a
+session's own transcript (`<projects>/<slug>/<session_id>.jsonl`, never its subagents') and is true
+when its last peer-message record is a held one: a `system` line whose content starts `Held peer
+message` and says `not delivered` (the client holds a message whose sender's permission mode class
+differs, until a person approves it at the terminal). A record whose `origin.kind` is `peer`, on the
+line or in its `attachment`, is a delivered message and clears it; a line that does not parse is
+skipped. `SessionReading.held` is that reading and the fold keeps the latest one in
+`SessionMovement.held`, never the largest. The flag moves no sprint and names no wait.
 """
 
 import json
@@ -139,6 +148,9 @@ RUNNING_CHECKS = frozenset({"QUEUED", "IN_PROGRESS", "PENDING"})
 RUNNING_STATUSES = frozenset({"PENDING"})
 HELD_FOR_A_PERSON = "attention_required"
 REFLOG_TAIL_BYTES = 4096
+HELD_TAIL_BYTES = 2 * 1024 * 1024
+HELD_PREFIX = "Held peer message"
+HELD_SUFFIX = "not delivered"
 CHECK_CPU_MS = 1000
 # A nudged idle manager answers the nudge; the answer is not the sprint moving. Equal to
 # `idle.IDLE_AFTER_MS`, defined here because `idle` imports `view`, which imports this module (#1185).
@@ -210,6 +222,7 @@ class SessionReading:
     output_ms: int | None
     cpu: Cpu | None
     replies: tuple[tuple[str, int], ...] = ()
+    held: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,6 +233,7 @@ class SessionMovement:
     check_ms: int | None
     cpu: Cpu | None
     read_ms: int | None = None
+    held: bool = False
 
 
 def pulls_argv(slug: str) -> list[str]:
@@ -456,6 +470,56 @@ def session_output_ms(projects_dirs: Iterable[Path], session_id: str) -> int | N
     return newest
 
 
+def _peer_origin(record: Mapping) -> bool:
+    for holder in (record, record.get("attachment")):
+        origin = holder.get("origin") if isinstance(holder, dict) else None
+        if isinstance(origin, dict) and origin.get("kind") == "peer":
+            return True
+    return False
+
+
+def session_held(projects_dirs: Iterable[Path], session_id: str) -> bool:
+    """True when the session's own transcript (never its subagents') shows a peer message the client
+    held and did not deliver, and no peer message was delivered after it (#1229). Only the last
+    `HELD_TAIL_BYTES` are read; a line that does not parse is skipped, and an absent or unreadable
+    file, or an id that names no path, is not held."""
+    if session_id in ("", ".", "..") or "/" in session_id or "\0" in session_id:
+        return False
+    held = False
+    for projects in projects_dirs:
+        try:
+            slugs = [entry.path for entry in os.scandir(projects) if entry.is_dir()]
+        except OSError:
+            continue
+        for slug in slugs:
+            try:
+                with open(os.path.join(slug, session_id + ".jsonl"), "rb") as handle:
+                    size = handle.seek(0, os.SEEK_END)
+                    handle.seek(max(0, size - HELD_TAIL_BYTES))
+                    data = handle.read()
+            except OSError:
+                continue
+            lines = data.split(b"\n")
+            if size > HELD_TAIL_BYTES:
+                lines = lines[1:]
+            for raw in lines:
+                if b"peer" not in raw and HELD_PREFIX.encode() not in raw:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                content = record.get("content")
+                if (record.get("type") == "system" and isinstance(content, str)
+                        and content.startswith(HELD_PREFIX) and HELD_SUFFIX in content):
+                    held = True
+                elif _peer_origin(record):
+                    held = False
+    return held
+
+
 def process_table(proc: Path = Path("/proc"), clock_ticks: int | None = None) -> dict[int, ProcessStat] | None:
     if not (proc / "self" / "stat").exists():
         return None
@@ -508,7 +572,7 @@ def read_sessions(projects_dirs: Iterable[Path], targets: Iterable[SessionTarget
         cpu = descendant_cpu(table, target.pid) if alive else None
         readings.append(SessionReading(target.session_id, target.sprints,
                                        session_output_ms(projects, target.session_id), cpu,
-                                       target.replies))
+                                       target.replies, session_held(projects, target.session_id)))
     return tuple(readings)
 
 
@@ -534,7 +598,7 @@ def _fold_sessions(previous: tuple[SessionMovement, ...], readings: tuple[Sessio
                     check = at
             fresh[(reading.session_id, sprint)] = SessionMovement(
                 reading.session_id, sprint, max(outputs) if outputs else None, check,
-                reading.cpu, at)
+                reading.cpu, at, reading.held)
     return tuple(sorted({**old, **fresh}.values(), key=lambda s: (s.session_id, s.sprint_id)))
 
 
