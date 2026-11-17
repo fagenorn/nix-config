@@ -179,7 +179,8 @@ what the poll saw, or is free, or when the pull request that held it, as the pol
 longer open (issue 1204: that is how the first in line notices a merge within `FAST_POLL` seconds
 instead of at its next whole poll; the holder's pull request is read once more in each short
 read, and a closed holder the poll cannot take over is polled for once, so it costs no more than
-the 120-second rate; issue 1018: a poll whose takeover of a closed lock lost to the
+the 120-second rate, and a holder whose read fails is not read again by the short reads, which then
+see only the lock ref until the poll that follows; issue 1018: a poll whose takeover of a closed lock lost to the
 holder's release ends having read the lock free, and a read that only compared would see no
 change until a waiter behind had taken the lock at its grace's end). After one failed poll
 (D8) a waiter that was first in line keeps reading the lock ref so until its next poll, and
@@ -643,9 +644,15 @@ def wait_acquire(args: Any, node: Callable[[], str],
                     if lock is None or lock != watch[0]:
                         break  # issue 1018: free is reason enough, also when the poll itself left it free
                     if (last is not None and last.pr is not None and last.lock_sha == lock
-                            and last.pr not in noticed and not fm.pull_open(args.repo, last.pr)):
-                        noticed.add(last.pr)  # issue 1204: a merge leaves the lock's oid as it was
-                        break
+                            and last.pr not in noticed):
+                        try:
+                            held = fm.pull_open(args.repo, last.pr)
+                        except forge_api.ForgeError:
+                            noticed.add(last.pr)  # issue 1204: a failed read is not asked again, and no poll
+                            continue
+                        if not held:
+                            noticed.add(last.pr)  # issue 1204: a merge leaves the lock's oid as it was
+                            break
                 except forge_api.ForgeError:
                     if failures:
                         continue  # after a failed poll the polls keep their 120-second rate (D8)
