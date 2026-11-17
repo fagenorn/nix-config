@@ -3355,6 +3355,18 @@ class PageQuestionTest(unittest.TestCase):
         self.assertEqual(field(later, "kept-words-text")["value"], "make the line shorter")
         self.assertEqual(count(dismissed, "kept-words"), 0)
 
+    def test_escape_after_the_question_left_during_the_undo_window_keeps_the_words(self) -> None:
+        kept, later = render([
+            START, {"frame": frame([QC])}, {"key": "3"},
+            {"type": {"class": "words-text", "text": "make the line shorter"}},
+            {"click": "send"}, {"frame": frame([])}, {"key": "Escape"}, {"snapshot": True},
+            {"clock": 5000}, {"frame": frame([])}, {"snapshot": True},
+        ])
+        self.assertEqual(round_posts(later), [])
+        self.assertEqual(field(kept, "kept-words-text")["value"], "make the line shorter")
+        self.assertIn("Could not send", full(kept["inbox"]))
+        self.assertEqual(field(later, "kept-words-text")["value"], "make the line shorter")
+
     def test_the_send_waits_for_an_option_or_words(self) -> None:
         first, second = render([
             START, {"frame": frame([Q0, Q1])}, {"click": "opt", "nth": 1}, {"snapshot": True},

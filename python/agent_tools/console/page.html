@@ -3468,7 +3468,7 @@ function answerState(item) {
     const first = picks.indexOf(null);
     state = {
       phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
-      project_id: item.project_id, key: item.key,
+      project_id: item.project_id, key: item.key, id,
     };
     answers.set(id, state);
   }
@@ -3623,31 +3623,31 @@ function startCheck(item, state, answer, extra) {
 function dropDrafts(id, names) {
   for (const name of names) drafts.delete(id + "\n" + name);
 }
+function openItem(id) {
+  return lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+}
+function withdrawn(id, state) {
+  if (!roundWords(state.pending)) return answers.delete(id);
+  state.phase = "failed";
+  state.again = false;
+  state.kept = state.reason = "the question was withdrawn before the answer was sent";
+}
 function undo(state) {
   if (state.phase !== "waiting") return;
   clearTimeout(state.timer);
   state.timer = null;
   state.phase = "choosing";
+  if (roundWords(state.pending) && openItem(state.id) === undefined) withdrawn(state.id, state);
 }
 function fireAnswer(id) {
   const state = answers.get(id);
   if (state === undefined || state.phase !== "waiting") return;
   state.timer = null;
-  const item = lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+  const item = openItem(id);
   if (item === undefined) {
-    // A question that left during the undo window sends nothing; its words stay as a failed answer.
-    if (roundWords(state.pending)) {
-      state.phase = "failed";
-      state.again = false;
-      state.reason = "the question was withdrawn before the answer was sent";
-      state.kept = state.reason;
-      redraw();
-    } else {
-      answers.delete(id);
-    }
-    return;
-  }
-  sendAnswer(id, state, item);
+    withdrawn(id, state);
+    redraw();
+  } else sendAnswer(id, state, item);
 }
 function postPlanAnswer(body) {
   return fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body: JSON.stringify(body) });
