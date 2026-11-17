@@ -89,13 +89,16 @@ an association the reading does not carry is kept exactly, so a session that mov
 sprint never refreshes the times of the one it left (ADR-console-050 D1). Sessions fold whether
 `pulls` is None or not.
 
-Held peer messages (#1229, ADR-console-042 D5). `session_held` reads the last `HELD_TAIL_BYTES` of a
+Held peer messages (#1229, ADR-console-042 D5). `session_held` reads a
 session's own transcript (`<projects>/<slug>/<session_id>.jsonl`, never its subagents') and is true
 when its last peer-message record is a held one: a `system` line whose content starts `Held peer
 message` and says `not delivered` (the client holds a message whose sender's permission mode class
 differs, until a person approves it at the terminal). A record whose `origin.kind` is `peer`, on the
 line or in its `attachment`, is a delivered message and clears it; a line that does not parse is
-skipped. `SessionReading.held` is that reading and the fold keeps the latest one in
+skipped. A transcript only grows, so each file is read once from its start and afterwards only from
+where the last reading stopped (`_HELD_SEEN`, per file identity, through its last complete line): a held
+marker stays in the reading however much follows it, and a poll costs what was appended. A file that
+shrank or was replaced is read again from its start. `SessionReading.held` is that reading and the fold keeps the latest one in
 `SessionMovement.held`, never the largest. The flag moves no sprint and names no wait.
 """
 
@@ -148,7 +151,6 @@ RUNNING_CHECKS = frozenset({"QUEUED", "IN_PROGRESS", "PENDING"})
 RUNNING_STATUSES = frozenset({"PENDING"})
 HELD_FOR_A_PERSON = "attention_required"
 REFLOG_TAIL_BYTES = 4096
-HELD_TAIL_BYTES = 2 * 1024 * 1024
 HELD_PREFIX = "Held peer message"
 HELD_SUFFIX = "not delivered"
 CHECK_CPU_MS = 1000
@@ -478,10 +480,52 @@ def _peer_origin(record: Mapping) -> bool:
     return False
 
 
+_HELD_SEEN: dict[str, tuple[int, int, int, bool]] = {}  # path -> (dev, inode, bytes through the last newline, held)
+
+
+def _held_after(held: bool, raws: Iterable[bytes]) -> bool:
+    for raw in raws:
+        if b"peer" not in raw and HELD_PREFIX.encode() not in raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        content = record.get("content")
+        if (record.get("type") == "system" and isinstance(content, str)
+                and content.startswith(HELD_PREFIX) and HELD_SUFFIX in content):
+            held = True
+        elif _peer_origin(record):
+            held = False
+    return held
+
+
+def _transcript_held(path: str) -> bool | None:
+    try:
+        with open(path, "rb") as handle:
+            stat = os.fstat(handle.fileno())
+            dev, ino, offset, held = _HELD_SEEN.get(path, (0, 0, 0, False))
+            if (dev, ino) != (stat.st_dev, stat.st_ino) or offset > stat.st_size:
+                offset, held = 0, False
+            handle.seek(offset)
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    return _held_after(held, [raw])  # still being written: read, not kept
+                offset += len(raw)
+                held = _held_after(held, [raw])
+                _HELD_SEEN[path] = (stat.st_dev, stat.st_ino, offset, held)
+    except OSError:
+        return None
+    _HELD_SEEN[path] = (stat.st_dev, stat.st_ino, offset, held)
+    return held
+
+
 def session_held(projects_dirs: Iterable[Path], session_id: str) -> bool:
     """True when the session's own transcript (never its subagents') shows a peer message the client
-    held and did not deliver, and no peer message was delivered after it (#1229). Only the last
-    `HELD_TAIL_BYTES` are read; a line that does not parse is skipped, and an absent or unreadable
+    held and did not deliver, and no peer message was delivered after it (#1229). The whole transcript
+    counts, read incrementally; a line that does not parse is skipped, and an absent or unreadable
     file, or an id that names no path, is not held."""
     if session_id in ("", ".", "..") or "/" in session_id or "\0" in session_id:
         return False
@@ -492,31 +536,8 @@ def session_held(projects_dirs: Iterable[Path], session_id: str) -> bool:
         except OSError:
             continue
         for slug in slugs:
-            try:
-                with open(os.path.join(slug, session_id + ".jsonl"), "rb") as handle:
-                    size = handle.seek(0, os.SEEK_END)
-                    handle.seek(max(0, size - HELD_TAIL_BYTES))
-                    data = handle.read()
-            except OSError:
-                continue
-            lines = data.split(b"\n")
-            if size > HELD_TAIL_BYTES:
-                lines = lines[1:]
-            for raw in lines:
-                if b"peer" not in raw and HELD_PREFIX.encode() not in raw:
-                    continue
-                try:
-                    record = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                content = record.get("content")
-                if (record.get("type") == "system" and isinstance(content, str)
-                        and content.startswith(HELD_PREFIX) and HELD_SUFFIX in content):
-                    held = True
-                elif _peer_origin(record):
-                    held = False
+            if _transcript_held(os.path.join(slug, session_id + ".jsonl")):
+                held = True
     return held
 
 

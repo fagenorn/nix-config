@@ -491,6 +491,28 @@ class SessionHeldTest(unittest.TestCase):
         filler = dict(OTHER, message={"role": "assistant", "content": "x" * 5000})
         self.assertTrue(self.held(HELD, *([filler] * 60)))
 
+    def test_the_marker_is_found_past_more_than_two_mebibytes_of_other_lines(self):
+        filler = dict(OTHER, message={"role": "assistant", "content": "x" * 5000})
+        self.assertTrue(self.held(HELD, *([filler] * 500)))  # about 2.5 MiB after the marker
+        self.assertFalse(self.held(HELD, DELIVERED, *([filler] * 500)))
+
+    def test_a_growing_transcript_is_read_from_where_the_last_reading_stopped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = transcript(root, OTHER, HELD)
+            self.assertTrue(session_held([root], "s1"))
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(OTHER) + "\n")
+            self.assertTrue(session_held([root], "s1"))
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(DELIVERED)[:20])  # a line still being written
+            self.assertTrue(session_held([root], "s1"))
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(DELIVERED)[20:] + "\n")
+            self.assertFalse(session_held([root], "s1"))
+            transcript(root, HELD)  # replaced by a shorter transcript: read again from its start
+            self.assertTrue(session_held([root], "s1"))
+
     def test_read_sessions_carries_the_held_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
             transcript(Path(tmp) / "projects", OTHER, HELD)
