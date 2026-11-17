@@ -82,7 +82,7 @@ the answered row's `at`. Folding two batches through `known` equals folding once
 never mutated. `answer_parts(text)` splits a stored answer by the `HEADINGS` of the shape `LEAD`
 asks for: a heading matches at line start after optional spaces, case-insensitively, followed by
 `:`, and is not recognised inside fenced code (a line whose left-trimmed text starts with three
-backticks toggles the fence and stays in the current part; an unclosed fence runs to the end, so
+backticks toggles the fence and stays in the current part, and so does a heading's text after its colon; an unclosed fence runs to the end, so
 every later line stays in the part the fence opened in); the lines after a heading up to the next one belong to it (joined with a newline, stripped);
 text before the first heading starts the answer part, and a text with no heading is wholly the
 answer; an empty part is None, and so is a part other than the answer that is `none` (any case, a
@@ -569,13 +569,13 @@ def answer_parts(text: str) -> AnswerParts:
     buckets: dict[str, list[str]] = {key: [] for key, _ in HEADINGS}
     current, in_fence = "answer", False
     for line in body.splitlines():
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
-        elif not in_fence:
+        if not in_fence:
             match = _HEADING.match(line)
             if match:
                 current = _KEY_OF[match.group(1).lower()]
                 line = match.group(2)
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
         buckets[current].append(line)
     answer, read, ran, unknown, back = (_part(buckets[key], key) for key, _ in HEADINGS)
     choices: tuple[str, ...] = ()

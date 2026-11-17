@@ -749,6 +749,16 @@ class AnswerPartsTest(unittest.TestCase):
         self.assertEqual(parts.ran, "just build")
         self.assertIsNone(parts.back)
 
+    def test_a_fence_opened_on_a_heading_line_is_closed_before_the_next_heading(self):
+        parts = project_question.answer_parts(
+            "Answer: ```\nnix build .#x\n```\nRead: flake.nix\nRan: just build\n"
+            "Question for you: Which export should I run?\n- The free summary\n- The paid export")
+        self.assertEqual(parts.answer, "```\nnix build .#x\n```")
+        self.assertEqual(parts.read, "flake.nix")
+        self.assertEqual(parts.ran, "just build")
+        self.assertEqual(parts.back, "Which export should I run?")
+        self.assertEqual(parts.choices, ("The free summary", "The paid export"))
+
     def test_an_unclosed_fence_keeps_the_rest_in_its_part(self):
         parts = project_question.answer_parts("Answer: See:\n```\nRead: x\nRan: y")
         self.assertEqual(parts.answer, "See:\n```\nRead: x\nRan: y")
