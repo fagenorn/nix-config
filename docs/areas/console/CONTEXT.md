@@ -62,7 +62,7 @@ A short bounded message a manager posts for its project with `sprint notice`, of
 _Avoid_: lock, reservation, announcement
 
 **Project question**:
-What the owner asks about one registered project, from the page, in its project's Ask box, where the answer shows under the question. A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker (ADR-console-058). Its session's spend shows on the Spend page under its project and the questions aspect (ADR-console-059).
+What the owner asks about one registered project, from the page, in its project's Ask box, where the answer opens in the main column, formatted, with what the session needs from the owner as buttons (ADR-console-067). A short read-only session the console starts in the project's folder answers it; the question and its one answer, failure or time-out are kept only in the console's log, never on the tracker (ADR-console-058). Its session's spend shows on the Spend page under its project and the questions aspect (ADR-console-059).
 _Avoid_: query, ask
 
 **Question thread**:
