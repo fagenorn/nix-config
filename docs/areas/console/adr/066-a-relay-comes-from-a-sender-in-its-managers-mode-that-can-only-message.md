@@ -17,8 +17,14 @@ Setting `crossSessionInbound: accept` on the manager would deliver every message
 
 **D3. The wake and the revive are unchanged.** They resume the manager's own session with the sentence as its prompt and send no peer message, so they ignore `sender_bypass`.
 
+**D4. The wake step runs locally and always tears down.** `bypass-proof wakes` runs on a local throwaway repository with the console's own launch and relay code, counts `sprint inbox` calls through a stub `sprint`, trusts and untrusts its checkout, and always tears down. It uses no GitHub, because the owner does not run `bypass-proof github` (#1152, 2026-11-17).
+
+**D5. Its verify check is paid, bounded and gates the owner's decision.** The check is `effects: paid` on anis-desktop. The step stops at `WAKE_LIMIT` (540 s, under the verify runner's 600 s kill) and keeps `TEARDOWN_RESERVE` of it for teardown, so the runner never kills it before its manager is stopped. A wake is sent only when the registry reads the manager idle after its last `sprint` call. The owner's decision on bypass (AC3) is not a hold on #1230: it is its own issue, blocked by #1230, whose sprint manager asks the owner on a console question card (`sprint ask`) once #1230 is closed as completed, which verify-pending does only when the wake check is verified; a check that expires or is rejected closes #1230 as not planned, and no card is raised. No verify `ask` carries it, because the verify runner would post that ask at activation, before the paid wake check has run.
+
 ## Consequences
 
 - Bypass stays off until the owner decides (ADR-console-060 as amended by #1228).
 - While every manager is `auto`, a relay differs from before only in its tool set.
 - A relay logs no `permission` member (ADR-console-060 D2), so it never changes the fold. A relay's mode follows the fold: a manager whose mode changed without a logged row would get a relay in the wrong class, which its receiver holds.
+- Bypass for managers stays off until the owner decides after the wake check passes (issue 1230 AC3).
+- The check spends one manager turn and two relay turns per run.

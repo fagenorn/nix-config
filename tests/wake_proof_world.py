@@ -63,6 +63,7 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, {source!r})  # the verify check sets a relative PYTHONPATH the fake's cwd cannot resolve
 from agent_tools.console import sessions
 
 LOG = Path(os.environ["FAKE_WAKE_LOG"])
@@ -263,7 +264,8 @@ class WakeProofWorld:
         _executable(self.bin / "systemd-run", FAKE_SYSTEMD_RUN.format(python=sys.executable))
         _executable(self.bin / "git", FAKE_GIT.format(python=sys.executable, real=real_git))
         _executable(self.bin / "claude-account", FAKE_CLIENT.format(
-            python=sys.executable, profile=PROFILE, session_id=SESSION_ID))
+            python=sys.executable, profile=PROFILE, session_id=SESSION_ID,
+            source=str(REPO_ROOT / "python")))
         self.env = {**os.environ, "HOME": str(self.home),
                     "CLAUDE_ACCOUNTS_DIR": str(self.accounts), "TMPDIR": str(self.scratch),
                     "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",

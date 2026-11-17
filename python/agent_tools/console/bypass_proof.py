@@ -133,9 +133,11 @@ and `remove_checkout` (the whole workdir). The record is `schema_version`, `mode
 `$HOME/.agents/state/console/bypass-proof-wakes.json`. Exit 0 when `passed` with every teardown step
 ok, 75 when `refused`, else 1.
 
-Verify checks (scripts `bypass-proof-record` and `bypass-proof-managers` under
-`home/common/verify-pending/checks/`). Both print one sorted-keys JSON line and exit 0 met, 1 not
-met, 75 not yet, 2 bad argument; both only read.
+Verify checks (three scripts, `bypass-proof-record`, `bypass-proof-managers` and
+`bypass-proof-wakes`, under `home/common/verify-pending/checks/`). The first two print one
+sorted-keys JSON line and exit 0 met, 1 not met, 75 not yet, 2 bad argument; both only read.
+`bypass-proof-wakes` runs `wakes` itself (it starts sessions on the owner's account, so its verify
+check is `effects: paid` and runs only after the owner ticks it) and exits as `wakes` does.
 
 `record-check [--record PATH]` reads the record (default `record_path()`). It trusts none of the
 record's summary fields: `record_problems` recomputes the verdict from the attempts (every name of

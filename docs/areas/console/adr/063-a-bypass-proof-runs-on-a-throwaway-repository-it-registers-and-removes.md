@@ -25,3 +25,4 @@ A manager started in `bypassPermissions` mode (ADR-console-060) relies on the gu
 - The owner's token needs the `delete_repo` scope; without it the deletion step fails and the record names `gh repo delete <slug> --yes`.
 - A manager the console would not run in bypass (production rules not in the guard's policy) makes the proof `refused` without starting a session.
 - The registry has a second writer; it touches only `bypass-proof/` entries.
+- A wake step, `bypass-proof wakes` (ADR-console-066), proves on a local throwaway repository that a bypass manager receives the console's relays; it needs no GitHub.
