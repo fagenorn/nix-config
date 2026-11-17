@@ -1,4 +1,4 @@
-# ADR-console-062 — A delivery run line of a sprint's issue reads its sprint's movement for that issue
+# ADR-console-063 — A delivery run line of a sprint's issue reads its sprint's movement for that issue
 
 - **Status:** accepted
 - **Decided in:** #1212

@@ -454,7 +454,7 @@ characters of its id.
 session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
 session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
 `quiet` and `moved_text` come from `moved_text(now_ms - latest)` where `latest` is the run's
-reading (#1212, ADR-console-062): the journal's `moved_ms` alone for a run outside a running
+reading (#1212, ADR-console-063): the journal's `moved_ms` alone for a run outside a running
 sprint. A run belongs to the first of the project's shown sprints (newest stated first) that has
 not ended and either names one of the run's issue numbers (`sprint_issue_numbers`) or lists the
 run's session (a session of its `sessions`, or its `manager_session`); it then also reads the
@@ -1388,7 +1388,7 @@ def run_reading(run: DeliveryState, now_ms: int | None,
     """A run's reading. Without `waits` it is the journal's alone. With them its base is the newest
     of the journal and the run's session output and running check, and its latest also takes the
     wait signals; the wait is named only with a clock when the base is `QUIET_AFTER_MS` old and a
-    wait is not (ADR-console-050 D3, ADR-console-062)."""
+    wait is not (ADR-console-050 D3, ADR-console-063)."""
     signals = [run.moved_ms]
     if waits is not None:
         signals += [ms for ms in (waits.output_ms, waits.check_ms) if ms is not None]
