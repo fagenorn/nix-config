@@ -394,19 +394,69 @@ class ViewCase(unittest.TestCase):
         self.write(self.run / "agent-a1.jsonl", m3, m3, assistant("M4", TODAY, input=200))
         self.write(self.run / "agent-a2.jsonl", assistant("M5", TODAY, input=1000))
 
-    def view(self, project_of=None, profiles=None):
+    def view(self, project_of=None, profiles=None, questions=None):
         reader = spend.SpendReader(repo_of=lambda cwd: cwd)
         reader.read([self.projects], SINCE, self.log if self.log.exists() else None)
+        extra = {} if questions is None else {"questions": questions}
         return spend.spend_view(
             reader.snapshot(), today=TODAY,
             project_of={"/srv/p00": "p00"}.get if project_of is None else project_of,
-            profiles={"s1": "p1"} if profiles is None else profiles)
+            profiles={"s1": "p1"} if profiles is None else profiles, **extra)
 
     def today(self, **kwargs):
         return self.view(**kwargs)["days"][-1]
 
 
+def question_transcript():
+    """The bytes of a question session's transcript: its prompt, a streamed repeat, one more message."""
+    prompt = {"type": "user", "sessionId": "q1", "cwd": "/srv/p00",
+              "timestamp": "2026-11-16T09:59:00.000Z",
+              "message": {"role": "user",
+                          "content": "You answer one question about this project for its owner, "
+                                     "started by the console. The question: why?"}}
+    q1 = assistant("Q1", TODAY, sid="q1", input=40)
+    return (json.dumps(prompt) + "\n").encode(), q1, q1, assistant("Q2", TODAY, sid="q1", output=5)
+
+
 class SpendViewTest(ViewCase):
+    def test_a_question_sessions_spend_is_its_projects_and_the_questions_aspect(self):
+        self.basic()
+        self.write(self.slug / "q1.jsonl", *question_transcript())
+        d = self.today(questions={"q1": "work"})
+        self.assertEqual({k: t["input"] for k, t in d["aspect"].items()},
+                         {"outside_sprint": 30, "deliveries": 1300, "questions": 40})
+        self.assertEqual(d["aspect"]["questions"]["output"], 5)
+        self.assertEqual(d["project"]["p00"]["input"], 1370)
+        self.assertEqual(d["session"]["q1"]["input"], 40)
+        self.assertEqual({k: t["input"] for k, t in d["account"].items()},
+                         {"p1": 1330, "work": 40})
+        self.assertNotIn("q1", d["sprint"])
+        self.assertEqual(d["total"]["input"], 1370)
+        for dimension in ("aspect", "project", "session", "account"):
+            self.assertEqual(sum(t["input"] for t in d[dimension].values()), 1370, dimension)
+
+    def test_without_its_question_row_a_question_session_is_outside_sprint(self):
+        self.basic()
+        self.write(self.slug / "q1.jsonl", *question_transcript())
+        d = self.today()
+        self.assertEqual({k: t["input"] for k, t in d["aspect"].items()},
+                         {"outside_sprint": 70, "deliveries": 1300})
+        self.assertEqual(d["account"]["unattributed"]["input"], 40)
+
+    def test_a_question_session_named_like_a_sprint_is_still_a_question(self):
+        self.write(self.slug / "q1.jsonl",
+                   b'{"type":"agent-name","agentName":"p00 sprint 0123456789abcdef",'
+                   b'"sessionId":"q1"}\n',
+                   assistant("Q1", TODAY, sid="q1", input=40))
+        d = self.today(questions={"q1": "work"})
+        self.assertEqual({k: t["input"] for k, t in d["aspect"].items()}, {"questions": 40})
+        self.assertEqual(d["sprint"]["0123456789abcdef"]["input"], 40)
+
+    def test_a_seen_profile_wins_over_the_question_rows_profile(self):
+        self.write(self.slug / "q1.jsonl", assistant("Q1", TODAY, sid="q1", input=40))
+        d = self.today(profiles={"q1": "p9"}, questions={"q1": "work"})
+        self.assertEqual(set(d["account"]), {"p9"})
+
     def test_session_run_and_phase_equal_unique_message_sums(self):
         self.basic()
         d = self.today()
@@ -591,6 +641,30 @@ class SessionProfilesTest(unittest.TestCase):
                    self.event(3, sessions.SEEN, session_id=7, profile="p3"),
                    self.event(4, sessions.HOOK, session_id="s1", profile="p4")]
         self.assertEqual(spend.session_profiles(ignored, known), {"s1": "p1"})
+
+
+class QuestionSessionsTest(unittest.TestCase):
+    @staticmethod
+    def event(seq, kind, **payload):
+        return Event(seq, "2026-11-16T10:00:00+00:00", kind, "owner/p00", payload)
+
+    def test_an_asked_row_maps_its_session_to_its_profile(self):
+        events = [self.event(1, "project_question.asked", question_id="a" * 16, question="why?",
+                             profile="work", session_id="q1")]
+        self.assertEqual(spend.question_sessions(events), {"q1": "work"})
+
+    def test_other_rows_are_ignored_and_the_fold_is_incremental(self):
+        known = {"q0": "p1"}
+        asked = "project_question.asked"
+        events = [self.event(1, asked, profile="work"),
+                  self.event(2, asked, profile="work", session_id=""),
+                  self.event(3, asked, profile="work", session_id=7),
+                  self.event(4, asked, session_id="q3"),
+                  self.event(5, sessions.SEEN, session_id="s1", profile="p2"),
+                  self.event(6, asked, session_id="q2", profile="work")]
+        got = spend.question_sessions(events, known)
+        self.assertEqual(got, {"q0": "p1", "q2": "work"})
+        self.assertEqual(known, {"q0": "p1"})
 
 
 SHARE_LABELS = {"setup": "setup", "plan": "plan", "plan review": "plan-review",

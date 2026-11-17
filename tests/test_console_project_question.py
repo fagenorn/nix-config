@@ -15,6 +15,8 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -31,6 +33,7 @@ from .test_console_writes import Case
 DECLARED = (("just", "build"),)
 ROUTES = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
 ENVIRON = {"HOME": "/home/u", "PATH": "/bin"}
+SESSION_ID = "0b5c8f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
 SUCCESS = (
     b'{"type":"result","subtype":"success","is_error":false,'
     b'"result":" Answer: it builds the hosts. "}'
@@ -219,7 +222,7 @@ class LaunchTest(unittest.TestCase):
     def make_ask(self, routes, root=None):
         return project_question.new_ask(
             "a" * 16, "owner/p01", str(root or self.root), "what does the build check?", "work",
-            routes, self.settings_dir)
+            routes, self.settings_dir, session_id=SESSION_ID)
 
     def fake(self, stdout=SUCCESS, code=0, error=None, stderr=b"", act=None):
         def run(argv, *, timeout, cancel=None, **kwargs):
@@ -249,8 +252,8 @@ class LaunchTest(unittest.TestCase):
 
         argv, timeout, _cancel, kwargs = self.calls[0]
         self.assertEqual(argv, [
-            "claude-account", "run", "-p", "--model", "sonnet", "--permission-mode", "dontAsk",
-            "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash",
+            "claude-account", "run", "-p", "--model", "sonnet", "--session-id", SESSION_ID,
+            "--permission-mode", "dontAsk", "--setting-sources", "", "--strict-mcp-config", "--tools", "Read,Grep,Glob,Bash",
             "--output-format", "json", "--settings", str(self.ask.settings),
             project_question.prompt(self.ask.question, self.routes)])
         self.assertEqual(timeout, 300)
@@ -259,6 +262,12 @@ class LaunchTest(unittest.TestCase):
         self.assertTrue(kwargs["env"]["PATH"].startswith("/home/u/.agents/bin"))
         self.assertIs(kwargs["start_new_session"], True)
         self.assertEqual(outcome, project_question.Outcome("answered", answer="Answer: it builds the hosts."))
+
+    def test_each_question_gets_its_own_uuid_session_id(self):
+        a, b = project_question.new_session_id(), project_question.new_session_id()
+        self.assertNotEqual(a, b)
+        self.assertEqual(uuid.UUID(a).version, 4)
+        self.assertEqual(str(uuid.UUID(a)), a)
 
     def test_the_settings_file_denies_writes_and_lifecycle_verbs_and_blocks_on_hook_failure(self):
         self.start(self.fake())
@@ -341,7 +350,8 @@ class NoProductionTest(unittest.TestCase):
             root = Path(directory) / "root"
             root.mkdir()
             ask = project_question.new_ask(
-                "b" * 16, "owner/p01", str(root), "why?", "work", (), Path(directory) / "settings")
+                "b" * 16, "owner/p01", str(root), "why?", "work", (), Path(directory) / "settings",
+                session_id=SESSION_ID)
             seen = {}
 
             def run(argv, *, timeout, cancel=None, **kwargs):
@@ -428,6 +438,10 @@ class QuestionCase(Case):
         self.queued = []
         self.calls = []
         self.profiles = self.store.parent.parent / "accounts" / "profiles"
+        patcher = mock.patch.object(
+            project_question, "new_session_id", create=True, return_value=SESSION_ID)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def asker(self, ask, cancel):
         self.asked.append((ask, cancel))
@@ -483,7 +497,8 @@ class QuestionServiceTest(QuestionCase):
                 before = len(self.question_rows())
                 qid = svc.ask_project_question(WHY, " why? ")
                 self.assertEqual(self.question_rows()[before:], [
-                    (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work"}),
+                    (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work",
+                                    "session_id": SESSION_ID}),
                     (ANSWERED_KIND, WHY, {"question_id": qid, **tail})])
                 self.assertEqual(svc._project_questions_open, 0)
 
@@ -495,6 +510,28 @@ class QuestionServiceTest(QuestionCase):
                          ("work", "/srv/p01", ROUTES, "why?"))
         self.assertEqual(ask.settings.parent, self.store.with_name("project-question-settings"))
         self.assertIs(cancel, svc._stop)
+        self.assertEqual(ask.session_id, SESSION_ID)
+        self.assertEqual(self.question_rows()[0][2]["session_id"], ask.session_id)
+
+    def test_a_questions_transcript_is_spent_under_its_project_and_the_questions_aspect(self):
+        now = 1_800_000_000.0
+        today = datetime.fromtimestamp(now, timezone.utc).date().isoformat()
+        sessions = self.store.parent.parent / "sessions"
+        svc = self.start(session_dirs=[sessions], clock=lambda: now)
+        svc.ask_project_question(WHY, "why?")
+        path = sessions.parent / "projects" / "-srv-p01" / f"{SESSION_ID}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = {"type": "assistant", "sessionId": SESSION_ID, "cwd": "/srv/p01",
+                "timestamp": f"{today}T10:00:00.000Z",
+                "message": {"id": "msg_q1", "model": "claude-sonnet-4-6",
+                            "usage": {"input_tokens": 40}}}
+        path.write_text(json.dumps(line) + "\n")
+        os.utime(path, (now, now))
+        svc.poll_spend()
+        day = json.loads(svc.view_bytes)["spend"]["days"][-1]
+        self.assertEqual({k: t["input"] for k, t in day["aspect"].items()}, {"questions": 40})
+        self.assertEqual(day["project"][WHY]["input"], 40)
+        self.assertEqual(set(day["account"]), {"work"})
 
     def test_nothing_reaches_the_tracker(self):
         def refuse(name):
@@ -603,7 +640,8 @@ class QuestionLifecycleTest(QuestionCase):
         self.assertTrue(entered.wait(10))
         svc.close()
         self.assertEqual(self.question_rows(), [
-            (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work"}),
+            (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work",
+                                    "session_id": SESSION_ID}),
             (ANSWERED_KIND, WHY, {"question_id": qid, "outcome": "failed",
                                   "reason": project_question.STOPPED_TEXT})])
         self.assertEqual(question_threads(), [])
@@ -623,7 +661,8 @@ class QuestionLifecycleTest(QuestionCase):
         self.assertFalse(closer.is_alive())
         self.assertEqual(self.asked, [])
         self.assertEqual(self.question_rows(), [
-            (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work"}),
+            (ASKED, WHY, {"question_id": qid, "question": "why?", "profile": "work",
+                                    "session_id": SESSION_ID}),
             (ANSWERED_KIND, WHY, {"question_id": qid, "outcome": "failed",
                                   "reason": project_question.STOPPED_TEXT})])
 

@@ -1,6 +1,6 @@
 # ADR-console-052 — The Spend page is a second, read-only page of the console
 
-- **Status:** accepted; amended by ADR-console-056
+- **Status:** accepted; amended by ADR-console-056, ADR-console-059
 - **Decided in:** #1135
 
 ## Context
@@ -17,7 +17,7 @@ ADR-console-049 keeps the host's spend in the console's view, but the owner has 
 
 **D4. Trend.** The trend has one point per day of the span, oldest first. In the 30-day span only the first and last labels show; each point's title names its day and figure.
 
-**D5. Breakdowns.** The page breaks the span down by project, sprint, phase, account and aspect, each sorted by estimated dollars. "unattributed" is its own row. A sprint is named by its title in the view, else "sprint" and the first eight characters of its id. The aspects read Managers, Deliveries, Outside-sprint sessions and Keepalive pings. A `#sprint=<id>` or `#run=<id>` fragment opens that item above the summary with its 30-day total and phase breakdown, adding no request (ADR-console-056).
+**D5. Breakdowns.** The page breaks the span down by project, sprint, phase, account and aspect, each sorted by estimated dollars. "unattributed" is its own row. A sprint is named by its title in the view, else "sprint" and the first eight characters of its id. The aspects read Managers, Deliveries, Outside-sprint sessions, Questions (ADR-console-059) and Keepalive pings. A `#sprint=<id>` or `#run=<id>` fragment opens that item above the summary with its 30-day total and phase breakdown, adding no request (ADR-console-056).
 
 **D6. Estimates.** Every dollar figure reads "~$" with the title "Estimated at API list prices", and the page says "Dollar figures (~) are estimates at API list prices." A figure that is priced approximately adds "approximate".
 

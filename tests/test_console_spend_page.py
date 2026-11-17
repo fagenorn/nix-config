@@ -140,8 +140,8 @@ SHARES = {
                ("0123456789abcdef", .5, .5)],
     "phase": [("plan", .3, .3), ("implement", .3, .3), ("other", .4, .4)],
     "account": [("unattributed", .3, .3), ("work-main", .7, .7)],
-    "aspect": [("keepalive", .05, .05), ("outside_sprint", .15, .15), ("managers", .3, .3),
-               ("deliveries", .5, .5)],
+    "aspect": [("keepalive", .05, .05), ("questions", .07, .07), ("outside_sprint", .08, .08),
+               ("managers", .3, .3), ("deliveries", .5, .5)],
 }
 FIRST_DAY = date(2026, 10, 18)
 
@@ -246,7 +246,7 @@ class SpendRenderTest(unittest.TestCase):
         self.assertEqual([b["attrs"]["data-span"] for b in buttons], ["1", "7", "30"])
         self.assertEqual({b["attrs"]["type"] for b in buttons}, {"button"})
         self.assertEqual({b["tag"] for b in buttons}, {"button"})
-        self.assertEqual({b["cls"] for b in buttons}, {"span"})
+        self.assertEqual({b["cls"] for b in buttons}, {"span btn-quiet"})
         figures = find(snap["summary"], "div", "figure")
         self.assertEqual(
             [find(f, "span", "figure-label")[0]["text"] for f in figures],
@@ -332,7 +332,7 @@ class SpendRenderTest(unittest.TestCase):
         self.assertEqual(row_names(week, "By account"), ["work-main", "unattributed"])
         self.assertEqual(
             row_names(week, "By aspect"),
-            ["Deliveries", "Managers", "Outside-sprint sessions", "Keepalive pings"])
+            ["Deliveries", "Managers", "Outside-sprint sessions", "Questions", "Keepalive pings"])
         self.assertEqual(
             row_names(today, "By project"), ["owner/api", "owner/web", "unattributed"])
         for snap, span in ((week, 7), (today, 1)):
@@ -603,7 +603,7 @@ class SpendStaticTest(unittest.TestCase):
                 rest = re.sub(r"var\(--([a-z0-9-]+)\)",
                               lambda m: "" if "--" + m.group(1) in mine else m.group(0), value)
                 rest = re.sub(r"-?\d*\.?\d+(?:px|rem|em|%)?", "", rest)
-                rest = re.sub(r"\b(?:none|transparent|currentColor|inherit|solid)\b", "", rest)
+                rest = re.sub(r"\b(?:none|transparent|currentColor|inherit|solid|dashed|dotted)\b", "", rest)
                 self.assertEqual(rest.strip(), "", f"{prop}: {value}")
         script = self.text[self.text.index("<script>"):]
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}", script), [])

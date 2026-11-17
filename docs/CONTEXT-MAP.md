@@ -95,6 +95,7 @@
 | Projection | Project contract |
 | Publication-free profile | Release |
 | Question round | Console |
+| Question thread | Console |
 | Quiet project | Console |
 | Raise label | Guard |
 | Read-only route | Guard |
