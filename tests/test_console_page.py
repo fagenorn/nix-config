@@ -668,7 +668,7 @@ RUN = {
     "quiet": False,
     "moved_text": "moved 3 min ago",
     "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago",
-    "moved_at": "2026-11-11T11:57:00+00:00",
+    "reading_at": "2026-11-11T11:57:00+00:00",
     "issues": [
         {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
         {"issue": 857, "stage": "plan review", "stage_text": "plan review"},
@@ -711,7 +711,7 @@ class PageRenderTest(unittest.TestCase):
 
     def test_a_quiet_run_says_quiet_and_never_stalled(self) -> None:
         quiet = dict(RUN, quiet=True, moved_text="quiet for 22 min",
-                     moved_at="2026-11-11T11:38:00+00:00")
+                     reading_at="2026-11-11T11:38:00+00:00")
         entry = project(0, [session("s1", "working", "working", deliveries=[quiet])])
         (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
                           {"frame": view([entry])}, {"open": "line:owner/p00"},
@@ -723,6 +723,37 @@ class PageRenderTest(unittest.TestCase):
         ]
         self.assertEqual(full(moved), "quiet for 22 min")
         self.assertNotIn("stalled", text(snap["projects"]).lower())
+
+    def test_a_run_waiting_on_its_sprint_names_the_wait_and_never_reads_quiet(self) -> None:
+        wait = "waiting its turn to merge"
+        summary = f"2 issues in delivery: 1 building, 1 plan review, {wait}"
+        waiting = {**RUN, "quiet": False, "moved_text": wait, "wait_text": wait,
+                   "summary": summary, "reading_at": "2026-11-11T11:15:00+00:00"}
+        entry = project(0, [session("s1", "working", "working", deliveries=[waiting])])
+        entry["outside_sprints"]["summary"] = "1 working"
+        before, after = render([
+            {"start": {"focused": False, "clock": NOW_MS}},
+            {"frame": view([entry])}, {"open": "line:owner/p00"}, {"snapshot": True},
+            {"clock": NOW_MS + 3 * 3600 * 1000}, {"snapshot": True}])
+        for snap in (before, after):
+            (summed,) = [n for n in nodes(snap["projects"]) if "run-sum" in n["cls"].split()]
+            self.assertEqual(full(summed), summary)
+            (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
+            (moved,) = [n for n in nodes(run) if "moved" in n["cls"].split()]
+            self.assertEqual(full(moved), wait)
+            self.assertNotIn("quiet", moved["cls"].split())
+            for holder in (summed, moved):
+                self.assertEqual([n for n in nodes(holder) if n.get("tag") == "time"], [])
+            self.assertNotIn("quiet", text(snap["projects"]).lower())
+        with self.subTest("null wait_text renders as today"):
+            entry = project(0, [session("s1", "working", "working",
+                                        deliveries=[{**RUN, "wait_text": None}])])
+            (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
+                              {"frame": view([entry])}, {"open": "line:owner/p00"},
+                              {"snapshot": True}])
+            (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
+            (moved,) = [n for n in nodes(run) if "moved" in n["cls"].split()]
+            self.assertEqual(full(moved), "moved 3 min ago")
 
     def test_a_session_without_deliveries_renders_no_runs(self) -> None:
         entry = project(0, [session("e1", "idle", "idle", deliveries=[]),
@@ -2541,10 +2572,10 @@ class PageTimeTest(unittest.TestCase):
             self.assertEqual(seen.get(words), title, words)
 
     def test_a_delivery_age_reads_from_its_movement_time_and_moves_with_the_clock(self) -> None:
-        moving = {**RUN, "moved_at": "2026-11-11T11:57:00+00:00"}
+        moving = {**RUN, "reading_at": "2026-11-11T11:57:00+00:00"}
         quiet = {**RUN, "run_id": "wf_q", "quiet": True, "moved_text": "quiet for 22 min",
                  "summary": "No issue in delivery yet, quiet for 22 min", "issues": [],
-                 "moved_at": "2026-11-11T11:38:00+00:00"}
+                 "reading_at": "2026-11-11T11:38:00+00:00"}
         entry = project(0, [session("s1", "working", "working", deliveries=[moving, quiet])])
         entry["outside_sprints"]["summary"] = "1 working"
         before, after = render([
@@ -10074,6 +10105,19 @@ CONFIRM_ITEM = {
     "values": ["register", "not_now"], "items": [], "answers": [], "answered": False,
     "waiting_since": "2026-11-15T08:00:00+00:00"}
 
+BEHIND_HEADLINE = "r is 1 commit behind its remote, which already has a project contract."
+BEHIND_WHY = "Choose Update it to bring the checkout up to its remote; the console then plans from it."
+BEHIND_ITEM = {
+    **CONFIRM_ITEM, "reason": "register_behind",
+    "key": "register-behind//srv/r/2026-11-15T08:00:00+00:00",
+    "headline": BEHIND_HEADLINE, "why": BEHIND_WHY,
+    "questions": [{"question": BEHIND_HEADLINE, "options": ["Update it", "Not now"],
+                   "chosen": None, "recommended": None, "recommended_index": None}],
+    "values": ["update", "not_now"]}
+BEHIND_SHOWN = {**WAITING_SHOWN, "result": "behind", "outcome": None, "headline": BEHIND_HEADLINE,
+                "note": None, "lines": [], "line": "Register r: needs you"}
+REMOTE_TEXT = "The remote could not be read, so the console used the checkout as it is."
+
 FAILED_HEADLINE = ("The adoption plan for r could not start: the agent platform's files are not "
                    "installed on this host.")
 FAILED_WHY = "Run just switch on this computer to install them, then choose Try again."
@@ -11003,6 +11047,42 @@ class RegisterConfirmPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/register-confirm")
         self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
         self.assertIn("Answered, not now", full(snap["inbox"]))
+
+
+class RegisterBehindPageTest(unittest.TestCase):
+    ANSWER = [{"respond": {"status": 204, "text": ""}}, {"clock": 5000}, {"snapshot": True}]
+
+    def test_the_behind_card_offers_update_it_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([BEHIND_ITEM], BEHIND_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Update it", "2Not now"])
+        self.assertEqual(full(lead).count(BEHIND_HEADLINE), 1)
+
+    def test_update_it_posts_the_root_and_update(self) -> None:
+        (snap,) = render([START, {"frame": cards([BEHIND_ITEM], BEHIND_SHOWN)},
+                          {"key": "1"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "update"})
+        self.assertIn("Answered, updating", full(snap["inbox"]))
+
+    def test_not_now_on_the_behind_card_posts_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([BEHIND_ITEM], BEHIND_SHOWN)},
+                          {"key": "2"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
+        self.assertIn("Answered, not now", full(snap["inbox"]))
+
+    def test_a_remote_that_could_not_be_read_is_one_line_under_the_result(self) -> None:
+        (snap,) = render([START, {"frame": cards([], {**REGISTERED, "remote": REMOTE_TEXT})},
+                          {"snapshot": True}])
+        (line,) = registered(snap, "register-remote")
+        self.assertEqual(full(line), REMOTE_TEXT)
+        (snap,) = render([START, {"frame": cards([], {**REGISTERED, "remote": None})},
+                          {"snapshot": True}])
+        self.assertEqual(registered(snap, "register-remote"), [])
 
 
 class RegisterFailurePageTest(unittest.TestCase):

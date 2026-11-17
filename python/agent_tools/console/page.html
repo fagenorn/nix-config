@@ -423,6 +423,7 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-remote { font-size: .84375rem; color: var(--sub0); }
 .register-withdraw-reason { color: var(--red); margin-left: 8px; }
 .apply-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
@@ -606,12 +607,14 @@ function quietIcon() {
   return icon("quiet-icon");
 }
 function movedWords(run, cls) {
-  if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
-  return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.moved_at, ""))
-                   : phrase("span", cls, "moved ", timeEl("ago", run.moved_at, ""));
+  if (typeof run.wait_text === "string" && run.wait_text !== "") return el("span", cls, run.wait_text);
+  if (!Number.isFinite(Date.parse(run.reading_at))) return el("span", cls, run.moved_text);
+  return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.reading_at, ""))
+                   : phrase("span", cls, "moved ", timeEl("ago", run.reading_at, ""));
 }
 function runSummary(run) {
-  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current.
+  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current,
+  // or leaves a named wait as the view wrote it.
   const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
   return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
 }
@@ -3410,9 +3413,9 @@ function isRetry(item) {
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-034): a question card whose first option grants its folder trust and registers it and whose second sets it aside.
+// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-070): a question card whose first option grants its folder trust and registers it, or updates the checkout, and whose second sets it aside; both post to /api/register-confirm.
 function isConfirm(item) {
-  return item.reason === "register_confirm";
+  return item.reason === "register_confirm" || item.reason === "register_behind";
 }
 // A profile whose folder trust could not be read back (ADR-console-034): a question card that shows the terminal command and whose one option checks again.
 function isTrust(item) {
@@ -3570,7 +3573,7 @@ function start(item, state) {
   if (isConfirm(item)) {
     const choice = item.values[state.picks[0]];
     const body = { root: item.root, choice };
-    return begin(item, state, { confirm: true, body, words: choice === "register" ? "Answered, registering" : "Answered, not now" });
+    return begin(item, state, { confirm: true, body, words: choice === "update" ? "Answered, updating" : choice === "register" ? "Answered, registering" : "Answered, not now" });
   }
   if (isFailure(item)) {
     const choice = item.values[state.picks[0]];
@@ -5401,6 +5404,7 @@ async function withdrawRegistration(registration) {
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
+  if (typeof registration.remote === "string" && registration.remote !== "") parts.push(el("p", "register-remote", registration.remote));
   if (registration.lines.length > 0) {
     const list = el("ul", "register-lines");
     for (const line of registration.lines) list.appendChild(pathWords(el("li"), line));

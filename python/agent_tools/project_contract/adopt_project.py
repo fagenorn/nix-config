@@ -76,7 +76,11 @@ worktree's `HEAD` tree (no ref moved, no hook run) also fails, it is refused
 `adopt.commit.signing_unavailable`; either way the worktree is retained and
 the commit is never retried unsigned. A contract that asks for no signature
 commits with `--no-gpg-sign`, so a host whose `commit.gpgsign` is on never
-reaches its signer for it.
+reaches its signer for it. A failed commit's error object and failure
+record carry `commit_output` `{hook, exit, lines}`: git's merged output (the
+last 40 non-blank lines of its last 16384 bytes) and the hook git's trace2
+events name as the one that ended non-zero (else null); the commit runs as
+before and never skips a hook.
 
 `plan --contract-draft FILE` plans the adoption of a checkout that has no
 project contract by carrying one drafted outside it (#1067). The file holds one
@@ -196,11 +200,14 @@ def emit_json(value: object) -> int:
     return 0
 
 
-def emit_error(code: str, repair_id: str, violations: list[dict]) -> int:
+def emit_error(code: str, repair_id: str, violations: list[dict],
+               commit_output: dict | None = None) -> int:
     """The one place an error object reaches stdout (D12)."""
     ordered = sorted(violations, key=lambda item: item["pointer"])
-    emit_json({"error": {"code": code, "repair_id": repair_id,
-                         "violations": ordered}})
+    error = {"code": code, "repair_id": repair_id, "violations": ordered}
+    if commit_output is not None:
+        error["commit_output"] = commit_output
+    emit_json({"error": error})
     return 2
 
 # --------------------------------------------------------------------------
@@ -828,8 +835,8 @@ def command_apply(args: argparse.Namespace) -> int:
         raise adopt_inspection.refuse(
             "verification_failed", "adopt.commit.unresolved_policy", "",
             "the worktree's commit signing policy could not be resolved")
-    code, _ = adopt_inspection.run_git(
-        worktree, "commit", "--quiet",
+    code, output = adopt_apply.run_commit(
+        worktree, worktree.parent, "--quiet",
         # An unsigned contract is explicit about it: a host that signs every
         # commit by default (`commit.gpgsign`) must not reach for its signer.
         "-S" if signed else "--no-gpg-sign",
@@ -842,12 +849,13 @@ def command_apply(args: argparse.Namespace) -> int:
         cause = (adopt_apply.SIGNING_UNAVAILABLE if unsigned
                  else "adopt.commit.failed")
         adopt_apply.retain_failure(digest, document, worktree, branch,
-                                   gates, cause)
+                                   gates, cause, commit_output=output)
         raise adopt_inspection.refuse(
             "verification_failed", cause, "",
             "the contract asks for a signed commit and this host could not "
             "sign one" if unsigned
-            else "the adoption commit could not be created")
+            else "the adoption commit could not be created",
+            commit_output=output)
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
@@ -1068,7 +1076,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return dispatch(args)
     except adopt_inspection.AdoptError as error:
-        return emit_error(error.code, error.repair_id, error.violations)
+        return emit_error(error.code, error.repair_id, error.violations,
+                          error.commit_output)
     except Exception:
         # One fixed sentence: refusal bytes stay deterministic and no internal
         # detail — no exception text, no traceback — reaches the caller.
