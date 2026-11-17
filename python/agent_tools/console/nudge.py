@@ -10,7 +10,8 @@ but that one sentence.
 
 Four routes, chosen by the caller (this module only runs the one it is given):
 
-    relay: claude-account run -p --allowedTools SendMessage --no-session-persistence "<prompt>"
+    relay: claude-account run -p [--permission-mode bypassPermissions] --tools SendMessage,ListAgents
+           --allowedTools SendMessage --strict-mcp-config --no-session-persistence "<prompt>"
 
 `relay_prompt(session_name)` is `Use the SendMessage tool exactly once, to the peer session named
 "<name>", with this message and nothing else: ` + `NUDGE_TEXT` + ` Then print SENT on its own
@@ -19,6 +20,12 @@ by session name (the tool's recipient accepts a peer session name) and is delive
 last non-empty stdout line is exactly `SENT`.
 
     continue: the relay command with `CONTINUE_TEXT` in place of `NUDGE_TEXT`
+
+`Nudge.sender_bypass` puts the relay's sender in `bypassPermissions`. The client delivers a peer
+message only when sender and receiver are in the same permission class, so the caller sets it
+exactly when the manager runs in bypass. Every relay can use only `SendMessage` and `ListAgents`
+and loads no MCP server. The wake and the revive ignore it, because they resume the session
+itself and send no peer message.
 
 `CONTINUE_TEXT` is `The console found you idle while your sprint has work. Run "sprint recap", then
 "sprint inbox", and go on with the next step.` The continue is sent to a listed idle manager the
@@ -90,6 +97,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_tools.console import manager
+from agent_tools.console.permission import BYPASS
 
 NUDGE_TEXT = ('The owner left you a message on the console. Run "sprint inbox" now and act on '
               "what it returns.")
@@ -101,6 +109,7 @@ RELAY = "relay"
 CONTINUE = "continue"
 WAKE = "wake"
 REVIVE = "revive"
+RELAY_TOOLS = "SendMessage,ListAgents"
 RELAY_TIMEOUT = 180
 WAKE_TIMEOUT = 60
 SENT_MARK = "SENT"
@@ -127,6 +136,7 @@ class Nudge:
     profile: str
     cwd: str
     settings: str | None = None
+    sender_bypass: bool = False
 
 
 def relay_prompt(session_name: str, text: str = NUDGE_TEXT) -> str:
@@ -136,13 +146,20 @@ def relay_prompt(session_name: str, text: str = NUDGE_TEXT) -> str:
               "accepted, otherwise print FAILED.")
 
 
+def relay_arguments(session_name: str, text: str, sender_bypass: bool) -> list[str]:
+    """The relay's argv after the client program: a sender that can only message, in the receiver's mode."""
+    return ["-p", *(["--permission-mode", BYPASS] if sender_bypass else []),
+            "--tools", RELAY_TOOLS, "--allowedTools", "SendMessage", "--strict-mcp-config",
+            "--no-session-persistence", relay_prompt(session_name, text)]
+
+
 def nudge_command(nudge: Nudge, platform: str) -> list[str] | None:
     if not manager.supported(platform):
         return None
     if nudge.route in (RELAY, CONTINUE):
         text = CONTINUE_TEXT if nudge.route == CONTINUE else NUDGE_TEXT
-        return ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
-                "--no-session-persistence", relay_prompt(nudge.session_name, text)]
+        return ["claude-account", "run",
+                *relay_arguments(nudge.session_name, text, nudge.sender_bypass)]
     text = RESTART_TEXT if nudge.route == REVIVE else NUDGE_TEXT
     flags = (["--name", nudge.session_name, "--settings", nudge.settings]
              if nudge.settings is not None else [])

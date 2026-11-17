@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check for issue 1230: two console wakes reach a bypass manager on a local throwaway repository.
+# Exit 0 met, 1 not met, 75 not yet, 2 bad argument. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.bypass_proof wakes "$@"
