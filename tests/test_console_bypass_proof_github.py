@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -123,6 +124,9 @@ class GithubProofTest(unittest.TestCase):
         return bypass_proof.github_proof(OWNER, TEMPLATE, steps=fakes.steps(),
                                          workdir_root=self.work)
 
+    def proof_with(self, steps):
+        return bypass_proof.github_proof(OWNER, TEMPLATE, steps=steps, workdir_root=self.work)
+
     def teardown_of(self, record):
         return [entry["step"] for entry in record["teardown"]]
 
@@ -214,6 +218,27 @@ class GithubProofTest(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             code = bypass_proof.main(["github", "--owner", OWNER, "--template", str(TEMPLATE)])
         self.assertEqual(code, 1)
+
+    @unittest.skipIf(os.geteuid() == 0, "root can remove a read-only tree")
+    def test_a_checkout_that_cannot_be_removed_fails_teardown(self):
+        fakes = Fakes()
+        steps = fakes.steps()
+        left = []
+
+        def prove(checkout, pr):
+            held = checkout / "held"
+            held.mkdir()
+            (held / "file").write_text("x", encoding="utf-8")
+            held.chmod(0o555)
+            left.append(held)
+            self.addCleanup(held.chmod, 0o755)
+            return steps.prove(checkout, pr)
+
+        record = self.proof_with(dataclasses.replace(steps, prove=prove))
+        entry = next(entry for entry in record["teardown"] if entry["step"] == "remove_checkout")
+        self.assertFalse(entry["ok"])
+        self.assertIn("finish by hand: rm -rf", entry["detail"])
+        self.assertTrue(left[0].exists())
 
     def test_registry_entries_are_added_and_removed(self):
         other = {"project_id": "fagenorn/nix-config", "root": "/somewhere"}

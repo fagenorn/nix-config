@@ -661,6 +661,15 @@ def _teardown_step(step, action, by_hand):
     return {"step": step, "ok": False, "detail": f"{problem}; finish by hand: {by_hand}"}
 
 
+def _remove_checkout(checkout):
+    """Remove the checkout; an absent one is done, a tree that cannot be removed raises."""
+    try:
+        shutil.rmtree(checkout)
+    except FileNotFoundError:
+        pass
+    return None
+
+
 def _write_record(record):
     path = record_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -716,7 +725,7 @@ def github_proof(owner, template, *, steps: Steps = DEFAULT_STEPS, workdir_root=
         teardown.append(_teardown_step("delete_repository",
                                        lambda: steps.delete_repository(slug),
                                        f"gh repo delete {slug} --yes"))
-    teardown.append(_teardown_step("remove_checkout", lambda: shutil.rmtree(checkout, ignore_errors=True),
+    teardown.append(_teardown_step("remove_checkout", lambda: _remove_checkout(checkout),
                                    f"rm -rf {checkout}"))
     outcome = report["outcome"] if report is not None else "refused"
     record = {**(report or {}), "schema_version": 1, "mode": "github", "repository": slug,
