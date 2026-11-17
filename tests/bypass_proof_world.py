@@ -11,7 +11,8 @@ The fake `gh` answers exactly the argv shapes the proof and the guard use and ex
 `fake gh: unsupported` on every other call; its state file's absolute path is written into its own
 text, because the guard runs `gh` children without the caller's environment.
 
-The fake `claude` records its argv and the settings document it was given, reads the prompt's
+The fake `claude` parses argv by the CLI's grammar (a variadic `--mcp-config`; an argument
+after it is a second config and the run fails with no init event), records its argv and the settings document it was given, reads the prompt's
 last line (`Tool call: <json>`), emits stream-json (init, `tool_use`, `tool_result`) and runs the
 call unless the guard or a mode denies it. Modes are `FAKE_CLAUDE_*` variables of the run's
 environment: `SKIP_GUARD`, `MODE=auto`, `NO_CALL`, `PLAIN_DENY`, `DENY_ROUTE`, `RUN_AND_REFUSE`,
@@ -120,7 +121,30 @@ settings_path = argv[argv.index("--settings") + 1]
 with open(settings_path, encoding="utf-8") as handle:
     settings = json.load(handle)
 append("settings.log", json.dumps(settings))
-with open(argv[argv.index("--mcp-config") + 1], encoding="utf-8") as handle:
+# The CLI's own option grammar: `--mcp-config` is variadic and takes every argument after it up
+# to the next flag, so a prompt placed there is read as a second configuration and the run fails.
+VALUE_FLAGS = ("--settings", "--output-format")
+BOOLEAN_FLAGS = ("-p", "--verbose", "--strict-mcp-config")
+configs, positional, index = [], [], 0
+while index < len(argv):
+    item = argv[index]
+    if item in VALUE_FLAGS:
+        index += 2
+    elif item == "--mcp-config":
+        index += 1
+        while index < len(argv) and not argv[index].startswith("-"):
+            configs.append(argv[index])
+            index += 1
+    elif item in BOOLEAN_FLAGS:
+        index += 1
+    else:
+        positional.append(item)
+        index += 1
+if len(configs) != 1 or len(positional) != 1:
+    sys.stderr.write("error: invalid MCP configuration or no prompt\\n")
+    sys.exit(1)
+PROMPT = positional[0]
+with open(configs[0], encoding="utf-8") as handle:
     append("mcp.log", json.dumps(json.load(handle)))
 if os.environ.get("FAKE_CLAUDE_HANG"):
     grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
@@ -132,7 +156,7 @@ mode = "auto" if os.environ.get("FAKE_CLAUDE_MODE") == "auto" else settings["per
 emit({{"type": "system", "subtype": "init", "permissionMode": mode}})
 if os.environ.get("FAKE_CLAUDE_NO_CALL"):
     sys.exit(0)
-call = json.loads(argv[-1].splitlines()[-1][len(PREFIX):])
+call = json.loads(PROMPT.splitlines()[-1][len(PREFIX):])
 tool, tool_input = call["tool"], call["input"]
 emit({{"type": "assistant", "message": {{"content": [
     {{"type": "tool_use", "id": "t1", "name": tool, "input": tool_input}}]}}}})

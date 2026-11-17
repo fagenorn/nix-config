@@ -209,6 +209,28 @@ class BypassProofChecksTest(unittest.TestCase):
         code, output = self.check_managers()
         self.assertEqual((code, output["status"], output["sprint_id"]), (1, "not_met", "after"))
 
+    def test_a_later_manager_never_stands_in_for_a_first_one_without_evidence(self):
+        for label, first in (("no permission", started("first", AUTO, permission=False)),
+                             ("no sprint", ("manager.started", PROJECT, {
+                                 "permission": {"mode": BYPASS, "reason": "r"}})),
+                             ("bad permission", ("manager.started", PROJECT, {
+                                 "sprint_id": "first", "permission": {"mode": 3}}))):
+            with self.subTest(label):
+                self.write(passing_record())
+                self.log.unlink(missing_ok=True)
+                self.append_at(T + timedelta(hours=1), first)
+                self.append_at(T + timedelta(hours=2), started("second", BYPASS))
+                code, output = self.check_managers()
+                self.assertEqual((code, output["status"], output["reason"]),
+                                 (1, "not_met", "no_permission"))
+
+    def test_an_unrelated_push_refusal_in_a_record_is_not_met(self):
+        record = passing_record()
+        push = next(a for a in record["attempts"] if a["attempt"] == "push")
+        push["sentence"] = GUARD_PREFIX + "unsafe push: push URL lookup timed out"
+        code, output = self.check_record(record)
+        self.assertEqual((code, output["problems"]), (1, ["attempt push sentence"]))
+
     def test_no_manager_after_the_proof_is_not_yet(self):
         self.write(passing_record())
         self.append_at(T - timedelta(hours=1), started("before", BYPASS))

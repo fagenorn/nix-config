@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -239,6 +240,34 @@ class GithubProofTest(unittest.TestCase):
         self.assertFalse(entry["ok"])
         self.assertIn("finish by hand: rm -rf", entry["detail"])
         self.assertTrue(left[0].exists())
+
+    def test_a_checkout_directory_that_already_exists_is_never_removed(self):
+        moment = datetime(2026, 11, 16, 12, 0, 0, tzinfo=timezone.utc)
+        other = self.work / "bypass-proof-20261116120000"
+        other.mkdir()
+        (other / "sentinel").write_text("another run's checkout", encoding="utf-8")
+        fakes = Fakes()
+        record = bypass_proof.github_proof(OWNER, TEMPLATE, steps=fakes.steps(),
+                                           workdir_root=self.work, now=lambda: moment)
+        self.assertEqual(record["outcome"], "refused")
+        self.assertEqual(fakes.calls, [])
+        self.assertEqual(self.teardown_of(record), [])
+        self.assertEqual((other / "sentinel").read_text(encoding="utf-8"),
+                         "another run's checkout")
+
+    def test_an_interrupt_tears_down_writes_the_record_and_is_raised_again(self):
+        for stage in ("prove", "push_checkout"):
+            with self.subTest(stage):
+                fakes = Fakes(fail={stage: KeyboardInterrupt()})
+                with self.assertRaises(KeyboardInterrupt):
+                    self.proof(fakes)
+                self.assertEqual(len(fakes.deleted), 1)
+                self.assertEqual(fakes.registered, {})
+                self.assertEqual(os.listdir(self.work), [])
+                record = json.loads(self.record_file.read_text(encoding="utf-8"))
+                self.assertEqual((record["outcome"], record["reason"]), ("refused", "interrupted"))
+                self.assertEqual(self.teardown_of(record)[-2:],
+                                 ["delete_repository", "remove_checkout"])
 
     def test_registry_entries_are_added_and_removed(self):
         other = {"project_id": "fagenorn/nix-config", "root": "/somewhere"}

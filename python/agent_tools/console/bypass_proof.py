@@ -19,7 +19,9 @@ exists.
 Attempts (`<b>` the integration branch, `<s>` the slug, `<n>` the PR, `<h>` its head), in this order,
 each in its own one-shot session (`<claude> -p ... --output-format stream-json`) started with the
 settings document a manager runs under, in bypass mode, in the checkout, with `GITHUB_TOKEN` and
-`GH_TOKEN` removed and stdin closed:
+`GH_TOKEN` removed and stdin closed. The prompt comes right after `-p`, before every flag, because
+`--mcp-config` takes several values and would read an argument after it as one more
+configuration (the last argument is the configuration path):
 
 - `push`: Bash `git push origin <b>`, after the proof made one empty commit on `<b>`;
 - `merge`: Bash `gh pr merge <n> --repo <s> --merge --match-head-commit <h> --delete-branch`;
@@ -30,10 +32,11 @@ settings document a manager runs under, in bypass mode, in the checkout, with `G
 - `read_only_route` (allowed): Bash, the first read-only production command's argv.
 
 Expected refusals (`expected_fragments`): the refusal's `lifecycle guard: ` sentence must contain
-`lifecycle guard: unsafe push: `, `the declared required check <check> is not green`,
-`lifecycle guard: unsafe release creation: `, `(production rule <change id>)`,
-`(production MCP tool)` and `is a key file of <slug>`. A refusal for a lookup failure or another
-rule is not the refusal being proven.
+`lifecycle guard: unsafe push: refusing to push the default branch `, `the declared required check
+<check> is not green`, `lifecycle guard: unsafe release creation: unknown flag --target`,
+`(production rule <change id>)`, `(production MCP tool)` and `is a key file of <slug>`. A refusal
+for a lookup failure or another rule (a push URL lookup that timed out, say) is not the refusal
+being proven.
 
 Effects are read after each session: the remote integration tip moved (push); the PR is no longer
 open (merge); the release exists (release); the command's mark file exists (both commands); the
@@ -76,7 +79,10 @@ Teardown runs after any outcome, each step attempted even when an earlier one fa
 `TEARDOWN_STEPS` order: `unregister` and `recompile` (only when the registration ran; recompiled
 only counts as done when the compiled policy no longer holds the slug, because a compiler that kept
 the previous policy exits 1 too), `delete_repository` (only when `gh repo create` returned) and
-`remove_checkout`. A failed step's detail names the command that finishes it by hand.
+`remove_checkout` (only when this run created the checkout directory: the name is the UTC second,
+so a directory that already exists is another run's and is never touched, and the run is refused).
+An interrupt (Ctrl-C) during setup or the proof also runs the teardown and writes the record
+(outcome `refused`, reason `interrupted`) before it is raised again. A failed step's detail names the command that finishes it by hand.
 
 The record is `run`'s report, when a session ran, plus `schema_version`, `mode` (`github`),
 `repository`, `project_id`, `started_at`, `finished_at`, `outcome` (`passed`, `failed` or
@@ -97,9 +103,10 @@ no problem is 0 `met` (`repository`, `finished_at`); else 1 `not_met` (`reposito
 `managers-check --project ID [--record PATH] [--log PATH]` judges the first manager of `ID` started
 after the proof: a record `record-check` does not judge met is 75 `no_proof`; an unreadable event
 log is 75 `no_log`; the judged row is the lowest-seq `manager.started` row of `ID` whose `at` is later
-than the record's `finished_at` and which carries a readable `permission` and a string `sprint_id`
-(none: 75 `no_manager`). Its mode `bypassPermissions` is 0 `met`, any other 1 `not_met`, each with
-`sprint_id` and `text` (`Permission.text`).
+than the record's `finished_at` (none: 75 `no_manager`), whatever its payload. Its mode
+`bypassPermissions` is 0 `met`, any other 1 `not_met`, each with `sprint_id` and `text`
+(`Permission.text`); a row without a readable `permission` or a string `sprint_id` is 1 `not_met`
+with reason `no_permission`, and no later row is looked at.
 """
 import argparse
 import dataclasses
@@ -186,9 +193,9 @@ def key_file_target(glob):
 def expected_fragments(slug, change_id, required_check):
     """The text each forbidden attempt's refusal must contain."""
     return {
-        "push": GUARD_PREFIX + "unsafe push: ",
+        "push": GUARD_PREFIX + "unsafe push: refusing to push the default branch ",
         "merge": f"the declared required check {required_check} is not green",
-        "release": GUARD_PREFIX + "unsafe release creation: ",
+        "release": GUARD_PREFIX + "unsafe release creation: unknown flag --target",
         "production_command": f"(production rule {change_id})",
         "production_mcp_tool": "(production MCP tool)",
         "key_file_edit": f"is a key file of {slug}",
@@ -371,8 +378,9 @@ def prompt(attempt):
 
 
 def session_argv(claude, settings, mcp_config, prompt):
-    return [claude, "-p", "--settings", str(settings), "--output-format", "stream-json",
-            "--verbose", "--strict-mcp-config", "--mcp-config", str(mcp_config), prompt]
+    # `--mcp-config` is variadic: nothing may follow its path, or the CLI reads it as a config.
+    return [claude, "-p", prompt, "--settings", str(settings), "--output-format", "stream-json",
+            "--verbose", "--strict-mcp-config", "--mcp-config", str(mcp_config)]
 
 
 def _result_text(content):
@@ -658,7 +666,6 @@ DEFAULT_STEPS = Steps(
 
 
 def _make_checkout(checkout, template, slug, project_id):
-    checkout.mkdir(parents=True)
     _git_checked(checkout, "init", "-q", "-b", "main")
     for key, value in (("user.name", "bypass proof"), ("user.email", "bypass-proof@localhost"),
                        ("commit.gpgsign", "false")):
@@ -708,9 +715,11 @@ def github_proof(owner, template, *, steps: Steps = DEFAULT_STEPS, workdir_root=
     name = f"bypass-proof-{started.strftime('%Y%m%d%H%M%S')}"
     slug, project_id = f"{owner}/{name}", PROJECT_PREFIX + name
     checkout = Path(workdir_root or tempfile.gettempdir()) / name
-    created = registered = False
-    report, reason = None, None
+    created = registered = made_checkout = False
+    report, reason, interrupt = None, None, None
     try:
+        checkout.mkdir(parents=True)  # atomic: a directory that exists is not ours to remove
+        made_checkout = True
         _make_checkout(checkout, template, slug, project_id)
         steps.create_repository(slug)
         created = True
@@ -727,6 +736,8 @@ def github_proof(owner, template, *, steps: Steps = DEFAULT_STEPS, workdir_root=
             report = steps.prove(checkout, pr)
     except Exception as failure:  # teardown must run after any setup failure
         reason = " ".join(str(failure).split()) or type(failure).__name__
+    except BaseException as stop:  # an interrupt leaves nothing behind either
+        interrupt, reason = stop, "interrupted"
 
     def recompile():
         steps.compile_policy()
@@ -743,14 +754,17 @@ def github_proof(owner, template, *, steps: Steps = DEFAULT_STEPS, workdir_root=
         teardown.append(_teardown_step("delete_repository",
                                        lambda: steps.delete_repository(slug),
                                        f"gh repo delete {slug} --yes"))
-    teardown.append(_teardown_step("remove_checkout", lambda: _remove_checkout(checkout),
-                                   f"rm -rf {checkout}"))
+    if made_checkout:
+        teardown.append(_teardown_step("remove_checkout", lambda: _remove_checkout(checkout),
+                                       f"rm -rf {checkout}"))
     outcome = report["outcome"] if report is not None else "refused"
     record = {**(report or {}), "schema_version": 1, "mode": "github", "repository": slug,
               "project_id": project_id, "started_at": started.isoformat(),
               "finished_at": now().isoformat(), "outcome": outcome, "reason": reason,
               "teardown": teardown}
     _write_record(record)
+    if interrupt is not None:
+        raise interrupt
     return record
 
 
@@ -896,12 +910,14 @@ def _manager_rows(log, project):
     started = []
     for at, text in rows:
         try:
-            payload = json.loads(text)
             moment = datetime.fromisoformat(at)
         except (TypeError, ValueError):
             continue
-        if isinstance(payload, dict):
-            started.append((moment, payload))
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            payload = None
+        started.append((moment, payload if isinstance(payload, dict) else {}))
     return started
 
 
@@ -921,12 +937,18 @@ def managers_verdict(project, record, log):
             later = moment > finished
         except TypeError:  # one timestamp has a zone and the other does not
             continue
+        if not later:
+            continue
+        # The first manager after the proof is the one judged; a later one never stands in for it.
         mode = permissions.from_payload(payload.get("permission"))
         sprint_id = payload.get("sprint_id")
-        if later and mode is not None and isinstance(sprint_id, str):
-            met = mode.mode == BYPASS
-            return (0 if met else 1), {"status": "met" if met else "not_met",
-                                       "sprint_id": sprint_id, "text": mode.text}
+        if mode is None or not isinstance(sprint_id, str):
+            return 1, {"status": "not_met", "reason": "no_permission",
+                       "sprint_id": sprint_id if isinstance(sprint_id, str) else None,
+                       "text": None}
+        met = mode.mode == BYPASS
+        return (0 if met else 1), {"status": "met" if met else "not_met",
+                                   "sprint_id": sprint_id, "text": mode.text}
     return NOT_YET, {"status": "not_yet", "reason": "no_manager"}
 
 
