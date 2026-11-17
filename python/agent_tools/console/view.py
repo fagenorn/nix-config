@@ -366,6 +366,7 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
 "sprints": [<sprint entry>, ...]}, "outside_sprints": <line>,
 "notices": [<notice entry>, ...], "notice_post": <bool>, "waits": [<wait entry>, ...],
+"questions": [<question entry>, ...],
 "tracker_read": {"ok": <bool>, "read_at": "<ISO time>" | null,
 "began_at": "<ISO time>" | null} | null}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
@@ -416,7 +417,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "movement": {"sessions": [{"session_id", "manager": <bool>,
                                                  "read_at": "<ISO time>" | null}, ...],
                                    "nudged_at": "<time>" | null, "base_at": "<ISO time>",
-                                   "waits": {"ci_at", "commit_at", "release_at": "<ISO time>" | null}}}
+                                   "issues": [<int>],
+                                   "waits": {"ci_at", "commit_at", "release_at", "lock_at":
+                                             "<ISO time>" | null}}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
@@ -604,6 +607,19 @@ sprints' ones: an owner entry is `{"id", "sprint_id": null, "poster": NOTICE_YOU
 "at", "owner": true}` (#1120). Every project entry also carries `notice_post`: true when one of its
 open (not finished) sprints `takes_notices`, so the page offers the owner's post, and false for a
 quiet project, one whose only sprints are finished or stopping, and every entry in a quiet group.
+Every project entry, quiet ones and those inside a quiet group too, carries `questions`
+(`project_questions`, a map from project id to its folded `AskedQuestion`s, default none), newest
+first by descending `seq`, `[]` when none. A question entry is `{"id", "question", "asked_at",
+"state": "working" | "answered" | "timed_out" | "failed", "state_text", "answered_at": <time> |
+null, "answer": <str> | null, "read_text", "ran_text", "unknown_text", "back_text",
+"production_text"}`. `state_text` is `ASK_WORKING_TEXT`, `ASK_ANSWERED_TEXT`, or for a timed-out or
+failed question `ASK_TIMED_OUT_TEXT` or `ASK_FAILED_TEXT` and `": "` and the reason when the reason
+is a non-empty string, else the bare text. The last six members are null unless the question is
+answered: `answer` is the parsed answer part, `read_text`, `ran_text`, `unknown_text` and
+`back_text` are `ASK_READ_TEXT`, `ASK_RAN_TEXT`, `ASK_UNKNOWN_TEXT` and `ASK_BACK_TEXT` over their
+part and each null when the part is, and `production_text` is the parsed production line as is.
+A question is never an inbox item; it changes no count, headline, sentence, `stale`, `quiet` or
+order (#1177, ADR-console-059 D3).
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -615,7 +631,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
-from agent_tools.console import contract_draft, inbox
+from agent_tools.console import contract_draft, inbox, project_question
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
@@ -762,6 +778,18 @@ NOTICE_OWNER_TEXT = "for you"
 NOTICE_FOR_TEXT = "for {title}"
 NOTICE_OTHER_TEXT = "for another sprint"
 NOTICE_YOU_TEXT = "You"
+ASK_WORKING_TEXT = "Working on it"
+ASK_ANSWERED_TEXT = "Answered"
+ASK_TIMED_OUT_TEXT = "Timed out"
+ASK_FAILED_TEXT = "Could not answer"
+ASK_READ_TEXT = "Read: {text}"
+ASK_RAN_TEXT = "Ran: {text}"
+ASK_UNKNOWN_TEXT = "Could not find out: {text}"
+ASK_BACK_TEXT = "Question for you: {text}"
+_ASK_STATE_TEXT = {project_question.WORKING: ASK_WORKING_TEXT,
+                   project_question.ANSWERED: ASK_ANSWERED_TEXT,
+                   project_question.TIMED_OUT: ASK_TIMED_OUT_TEXT,
+                   project_question.FAILED: ASK_FAILED_TEXT}
 
 _RANK = {state: rank for rank, state in enumerate(
     (WAITING_ANSWER, WAITING_PERMISSION, WORKING, LIMIT, IDLE))}
@@ -1182,6 +1210,14 @@ def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
     return {sid: tuple(sorted(pairs)) for sid, pairs in found.items()}
 
 
+def sprint_issue_numbers(state: SprintState) -> set[int]:
+    """The sprint's issues as the movement reads them: the report's issue numbers united with its
+    `inbox` numbers (none without a report)."""
+    report = state.report
+    return (set() if report is None
+            else {issue for issue, _ in report.issues} | set(report.inbox))
+
+
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
                  manager_ids: Collection[str] = ()) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
@@ -1192,9 +1228,7 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out."""
     if movement is None:
         return NO_WAITS
-    report = state.report
-    issues = (set() if report is None
-              else {issue for issue, _ in report.issues} | set(report.inbox))
+    issues = sprint_issue_numbers(state)
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
@@ -1557,9 +1591,11 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                           "read_at": None if m.read_ms is None else _utc(m.read_ms)}
                          for m in own],
             "nudged_at": state.idle_nudged_at,
+            "issues": sorted(sprint_issue_numbers(state)),
             "waits": {"ci_at": None if waits.ci_ms is None else _utc(waits.ci_ms),
                       "commit_at": None if waits.commit_ms is None else _utc(waits.commit_ms),
-                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms)},
+                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms),
+                      "lock_at": None if waits.lock_ms is None else _utc(waits.lock_ms)},
             "base_at": _utc(_base_ms(state)),
         },
     }
@@ -1579,7 +1615,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    notices: Sequence[Mapping] = (), notice_post: bool = False,
                    sprint_waits: Mapping[str, Sequence[Mapping]] | None = None,
                    waits: Sequence[Mapping] = (),
-                   read: ReadState | None = None) -> dict:
+                   read: ReadState | None = None,
+                   questions: Sequence[Mapping] = ()) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
                               deliveries, records, capacity, nudges, looked, movement,
@@ -1601,8 +1638,40 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "notices": [dict(n) for n in notices],
         "notice_post": notice_post,
         "waits": [dict(w) for w in waits],
+        "questions": [dict(q) for q in questions],
         "tracker_read": None if read is None else {"ok": read.ok, "read_at": read.read_at, "began_at": read.began_at},
     }
+
+
+def _question_entries(questions: Sequence[project_question.AskedQuestion]) -> list[dict]:
+    def one(question: project_question.AskedQuestion) -> dict:
+        reason = question.reason
+        state_text = _ASK_STATE_TEXT[question.state]
+        if question.state in (project_question.TIMED_OUT, project_question.FAILED) and reason:
+            state_text = f"{state_text}: {reason}"
+        parts = (project_question.answer_parts(question.answer)
+                 if question.state == project_question.ANSWERED and question.answer is not None
+                 else None)
+
+        def said(template: str, text: str | None) -> str | None:
+            return None if text is None else template.format(text=text)
+
+        return {
+            "id": question.question_id,
+            "question": question.question,
+            "asked_at": question.asked_at,
+            "state": question.state,
+            "state_text": state_text,
+            "answered_at": question.answered_at,
+            "answer": None if parts is None else parts.answer,
+            "read_text": None if parts is None else said(ASK_READ_TEXT, parts.read),
+            "ran_text": None if parts is None else said(ASK_RAN_TEXT, parts.ran),
+            "unknown_text": None if parts is None else said(ASK_UNKNOWN_TEXT, parts.unknown),
+            "back_text": None if parts is None else said(ASK_BACK_TEXT, parts.back),
+            "production_text": None if parts is None else parts.production,
+        }
+
+    return [one(q) for q in sorted(questions, key=lambda q: -q.seq)]
 
 
 def _notice_to_text(to: str | None, titles: Mapping[str, str]) -> str:
@@ -1820,6 +1889,7 @@ def derive_view(
     activation_run: LastRun | None = None,
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
+    project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1939,6 +2009,7 @@ def derive_view(
                                     open_owner_notices(owner_notices or {}, pid))
                for pid in registered}
     notice_post = {pid: any(takes_notices(s) for s in drafted.get(pid, ())) for pid in registered}
+    asks = {pid: _question_entries((project_questions or {}).get(pid, ())) for pid in registered}
 
     sprint_waits: dict[str, list[dict]] = {}
     project_waits: dict[str, list[dict]] = {}
@@ -1966,14 +2037,14 @@ def derive_view(
                               notices=notices[s.project_id],
                               notice_post=notice_post[s.project_id],
                               sprint_waits=sprint_waits, waits=project_waits.get(s.project_id, ()),
-                              read=health.get(s.project_id))
+                              read=health.get(s.project_id), questions=asks[s.project_id])
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
                                     nudges=nudges, looked=looked,
                                     notices=notices[s.project_id],
                                     notice_post=notice_post[s.project_id],
-                                    read=health.get(s.project_id))
+                                    read=health.get(s.project_id), questions=asks[s.project_id])
                      for s in quiet]
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],

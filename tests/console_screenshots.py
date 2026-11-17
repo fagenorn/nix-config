@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the nineteen screens the sprint block, the finished list, the message life, the
+- `STATES` names the twenty screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -20,9 +20,12 @@ Contract:
   so the spend figures show; `goal-open` is the sprint block of `tell-box-open` with the top
   bar's goal field focused so its box is open; `inbox-card` is `owner/web`'s question card with
   two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
-  two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading);
+  two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
+  `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
+  lines) and one question still working, and shot against a page with no Ask box it is the desk
+  without it, which is the before picture);
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 38 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 40 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -42,7 +45,9 @@ Contract:
   "stated" before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a
   `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
   pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
-  the sprint block's content, `OPEN_TELL`); or when any shot is not taken from the top of the
+  the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the Ask
+  box does not show `owner/web`'s open field, its working question and its answered question's
+  Read line (`OPEN_ASK`); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
   tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
@@ -61,7 +66,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import capacity, manager, sessions, signin
+from agent_tools.console import capacity, event_log, manager, sessions, signin
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
@@ -72,7 +77,8 @@ from .console_test_support import hook_body, write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "goal-open", "inbox-card", "accounts-panel")
+          "notice-post-open", "desk-spend", "goal-open", "inbox-card", "accounts-panel",
+          "ask-box")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -86,6 +92,11 @@ MILESTONES = {"Add resumable uploads": "the upload form",
               "Retire the old exporter": "the last export path",
               "Try a new cache": "the cache layer"}
 OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
+ASK_ANSWERED_QUESTION = "What does the build check?"
+ASK_WORKING_QUESTION = "Is the importer deployed on this host?"
+ASK_READ_LINE = "Read: flake.nix, lib/helpers.nix"
+ASK_OPEN = 'li.asks[data-project="owner/web"] button.ask-open'
+OPEN_ASK = (True, "Working on it", ASK_READ_LINE)
 DESK_OUTSIDE = "outside-1136"
 
 
@@ -119,6 +130,7 @@ class Shot:
     tell: tuple[bool, str | None, str | None, bool] | None = None
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
+    ask: tuple[bool, str | None, str | None] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -281,6 +293,18 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
             "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
+    elif state == "ask-box":
+        seed.put(3 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": "1177a1", "question": ASK_ANSWERED_QUESTION,
+            "profile": "work-main", "session_id": "5b1f0c2e-7a4d-4e8b-9c3a-1d2e3f4a5b6c"})
+        seed.put(2 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
+            "question_id": "1177a1", "outcome": "answered",
+            "answer": "Answer: It evaluates the three hosts and builds the console's checks.\n"
+                      f"{ASK_READ_LINE}\nRan: just build\nCould not find out: none\n"
+                      "Question for you: none"})
+        seed.put(20, event_log.PROJECT_QUESTION_ASKED, web, {
+            "question_id": "1177a2", "question": ASK_WORKING_QUESTION,
+            "profile": "work-main", "session_id": "8d3e9a40-2c6b-4f17-a5d8-0e9f8a7b6c5d"})
     elif state == "spend-page":
         return (seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
                             report=2 * MINUTE)[0],)
@@ -513,6 +537,31 @@ TELL_READING = """(() => {
           text('button.tell-send'), text('p.tell-hint'), laidOut];
 })()"""
 
+ASK_READING = f"""(() => {{
+  const block = document.querySelector('li.asks');
+  if (!block) return null;
+  const mine = document.querySelector('li.asks[data-project="owner/web"]');
+  if (!mine) return [false, null, null];
+  const field = mine.querySelector('textarea.ask-text');
+  let shown = false;
+  if (field) {{
+    const rect = field.getBoundingClientRect();
+    shown = field.getClientRects().length > 0 && rect.width > 0 && rect.height > 0
+      && getComputedStyle(field).visibility !== 'hidden';
+  }}
+  const visible = (node) => node.getClientRects().length > 0;
+  const read = (start, selector) => {{
+    const row = Array.from(mine.querySelectorAll('li.ask')).find((item) => {{
+      const question = item.querySelector('p.ask-question');
+      return visible(item) && question && question.textContent.trim().startsWith(start);
+    }});
+    const node = row ? row.querySelector(selector) : null;
+    return node ? node.textContent.trim() : null;
+  }};
+  return [shown, read({json.dumps(ASK_WORKING_QUESTION)}, 'p.ask-state'),
+          read({json.dumps(ASK_ANSWERED_QUESTION)}, 'p.ask-read')];
+}})()"""
+
 SQUEEZED_COUNT = """Array.from(document.querySelectorAll('li.sprint')).filter((sprint) => {
   const now = sprint.querySelector('.sp-now');
   if (!now) return false;
@@ -578,6 +627,11 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
+        ask = None
+        if state == "ask-box" and page.query_selector("li.asks"):
+            page.click(ASK_OPEN)
+            page.wait_for_selector('li.asks[data-project="owner/web"] textarea.ask-text')
+            ask = tuple(page.evaluate(ASK_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
@@ -588,7 +642,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
-    return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y, short=short)
+    return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
+                short=short, ask=ask)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -627,6 +682,10 @@ def main(argv: list[str] | None = None) -> int:
     closed = [shot for shot in taken if shot.state == "tell-box-open" and shot.tell != OPEN_TELL]
     for shot in closed:
         print(f"console-screenshots: {shot.path.name} does not show the open Tell box")
+    unasked = [shot for shot in taken
+               if shot.state == "ask-box" and shot.ask not in (None, OPEN_ASK)]
+    for shot in unasked:
+        print(f"console-screenshots: {shot.path.name} does not show the open Ask box")
     scrolled = [shot for shot in taken if shot.scroll_y != 0]
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
@@ -635,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
     for shot in short:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
-    return 1 if wide or squeezed or jargon or closed or scrolled or short else 0
+    return 1 if wide or squeezed or jargon or closed or unasked or scrolled or short else 0
 
 
 if __name__ == "__main__":

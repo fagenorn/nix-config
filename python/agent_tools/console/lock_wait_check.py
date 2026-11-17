@@ -19,7 +19,8 @@ is judged only with two or more queued and at least one long waiter among them; 
 The running sprints are those (`ended_at` null) of the project entry whose `project_id` is
 `--project` in `/api/state` (an entry or a `quiet_group`'s `projects`).
 
-The waiters' sprints are the running sprints whose `issues[].issue` meets the union of `issues` of
+The waiters' sprints are the running sprints whose issues (`issues[].issue` united with
+`movement.issues`, which also carries the report's inbox issues) meet the union of `issues` of
 the long waiters' pull requests (the holders' issues do not count here). The check judges only a
 wait it has observed on this console: when no long waiter has a running sprint here (its run is on
 another host, since `poll_deliveries` scans only this host's sessions, or its issues match no
@@ -111,8 +112,13 @@ def _running_sprints(state: dict, project: str) -> list[dict]:
 
 
 def _issues(sprint: dict) -> set[int]:
-    return {i["issue"] for i in sprint.get("issues") or [] if isinstance(i, dict)
-            and isinstance(i.get("issue"), int)}
+    """The sprint's issues as the console associates them: the displayed `issues[]` united with
+    `movement.issues`, which also carries the report's inbox issues."""
+    moved = sprint.get("movement")
+    listed = moved.get("issues") if isinstance(moved, dict) else None
+    found = {i["issue"] for i in sprint.get("issues") or [] if isinstance(i, dict)
+             and isinstance(i.get("issue"), int)}
+    return found | {n for n in listed or [] if isinstance(n, int)}
 
 
 def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read_waiters,

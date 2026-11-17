@@ -21,7 +21,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints)
+    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints,
+    view)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -427,6 +428,215 @@ def wait_until(predicate):
     assert predicate(), "the condition did not become true within 5 s"
 
 
+class AnswerPartsTest(unittest.TestCase):
+    def test_each_heading_of_the_prompt_shape_is_its_own_part(self):
+        text = ("Answer: It builds the hosts.\nRead: flake.nix, lib/helpers.nix\nRan: just build\n"
+                "Could not find out: none\nQuestion for you: None.")
+        self.assertEqual(
+            project_question.answer_parts(text),
+            project_question.AnswerParts("It builds the hosts.", "flake.nix, lib/helpers.nix",
+                                         "just build", None, None, None))
+
+    def test_an_answer_of_none_keeps_its_text_while_other_parts_of_none_are_empty(self):
+        parts = project_question.answer_parts("Answer: None.\nRead: None.\nQuestion for you: none")
+        self.assertEqual(parts.answer, "None.")
+        self.assertIsNone(parts.read)
+        self.assertIsNone(parts.back)
+        self.assertEqual(project_question.answer_parts("None.").answer, "None.")
+
+    def test_a_heading_only_unicode_case_folding_matches_is_not_a_heading(self):
+        parts = project_question.answer_parts("An\u017fwer: ok\nRead: flake.nix")
+        self.assertEqual(parts.answer, "An\u017fwer: ok")
+        self.assertEqual(parts.read, "flake.nix")
+
+    def test_a_part_runs_on_until_the_next_heading(self):
+        parts = project_question.answer_parts("Answer: first\nsecond line\nread: none")
+        self.assertEqual(parts.answer, "first\nsecond line")
+        self.assertIsNone(parts.read)
+
+    def test_the_production_line_is_its_own_part(self):
+        text = project_question.answer_text("Answer: from the code only\nRan: none", ())
+        parts = project_question.answer_parts(text)
+        self.assertEqual(parts.production, project_question.NO_PRODUCTION_LINE)
+        self.assertEqual(parts.answer, "from the code only")
+        self.assertIsNone(parts.ran)
+
+    def test_a_text_with_no_heading_is_the_answer(self):
+        self.assertEqual(project_question.answer_parts("It builds."),
+                         project_question.AnswerParts("It builds.", None, None, None, None, None))
+
+    def test_a_question_back_is_kept(self):
+        parts = project_question.answer_parts(
+            "Answer: I cannot read the bill.\nQuestion for you: May I run the paid billing export?")
+        self.assertEqual(parts.back, "May I run the paid billing export?")
+        self.assertEqual(parts.answer, "I cannot read the bill.")
+
+    def test_lead_names_every_heading(self):
+        for _, label in project_question.HEADINGS:
+            with self.subTest(label=label):
+                self.assertIn(label + ": <", project_question.LEAD)
+        self.assertEqual([key for key, _ in project_question.HEADINGS],
+                         ["answer", "read", "ran", "unknown", "back"])
+
+
+def _row(seq, kind, project, payload):
+    return event_log.Event(seq, f"2026-11-17T10:00:{seq:02d}Z", kind, project, payload)
+
+
+def _asked(seq, project, question_id, question="what?"):
+    return _row(seq, event_log.PROJECT_QUESTION_ASKED, project,
+                {"question_id": question_id, "question": question})
+
+
+def _answered(seq, project, question_id, **payload):
+    return _row(seq, event_log.PROJECT_QUESTION_ANSWERED, project,
+                {"question_id": question_id, **payload})
+
+
+class QuestionFoldTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def rows(self):
+        return [
+            _asked(2, self.P1, "q1"),
+            _answered(3, self.P1, "q1", outcome="answered", answer="Answer: ok"),
+            _asked(4, self.P1, "q2"),
+            _answered(5, self.P1, "q2", outcome="timed_out",
+                      reason="the session did not answer within 300 s"),
+            _asked(6, self.P1, "q3"),
+            _answered(7, self.P1, "q3", outcome="failed", reason="claude-account is not installed"),
+            _asked(8, self.P1, "q4"),
+        ]
+
+    def test_each_state_is_read_from_the_rows(self):
+        rows = self.rows()
+        result = project_question.asked_questions(rows)
+        q1, q2, q3, q4 = result[self.P1]
+        self.assertEqual([(q.question_id, q.state) for q in result[self.P1]],
+                         [("q1", "answered"), ("q2", "timed_out"), ("q3", "failed"),
+                          ("q4", "working")])
+        self.assertEqual(q1.answer, "Answer: ok")
+        self.assertEqual(q1.answered_at, rows[1].at)
+        self.assertEqual(q2.reason, "the session did not answer within 300 s")
+        self.assertIsNone(q4.answered_at)
+
+    def test_strays_and_repeats_are_ignored(self):
+        clean = [_asked(2, self.P1, "q1"),
+                 _answered(4, self.P1, "q1", outcome="answered", answer="Answer: ok")]
+        noisy = [clean[0],
+                 _answered(3, self.P1, "nope", outcome="answered", answer="x"),
+                 clean[1],
+                 _answered(5, self.P1, "q1", outcome="failed", reason="late"),
+                 _answered(6, "owner/p02", "q1", outcome="answered", answer="x"),
+                 _asked(7, None, "q9"),
+                 _asked(8, self.P1, "q8", question=7),
+                 _asked(9, self.P1, "q1", question="again")]
+        self.assertEqual(project_question.asked_questions(noisy),
+                         project_question.asked_questions(clean))
+        self.assertEqual(project_question.asked_questions(noisy)[self.P1][0].state, "answered")
+
+    def test_an_unreadable_or_unknown_outcome_is_failed(self):
+        rows = [_asked(2, self.P1, "q1"), _answered(3, self.P1, "q1", outcome="answered"),
+                _asked(4, self.P1, "q2"), _answered(5, self.P1, "q2", outcome="lost", reason=3)]
+        q1, q2 = project_question.asked_questions(rows)[self.P1]
+        self.assertEqual((q1.state, q1.reason), ("failed", project_question.UNREADABLE_TEXT))
+        self.assertEqual((q2.state, q2.reason), ("failed", None))
+
+    def test_folding_in_two_batches_equals_folding_once(self):
+        rows = self.rows()
+        first = project_question.asked_questions(rows[:4])
+        before = dict(first)
+        self.assertEqual(project_question.asked_questions(rows[4:], first),
+                         project_question.asked_questions(rows))
+        self.assertEqual(first, before)
+
+
+def _registered(seq, project):
+    return _row(seq, "project.registered", project, {"root": "/srv/" + project.split("/")[1]})
+
+
+def _project_entries(shown):
+    return [project for entry in shown["entries"]
+            for project in (entry["projects"] if entry["type"] == "quiet_group" else [entry])]
+
+
+QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
+                 "read_text", "ran_text", "unknown_text", "back_text", "production_text"}
+
+
+class QuestionViewTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def test_a_projects_view_carries_each_question_state_and_adds_nothing_to_the_count(self):
+        events = [
+            _registered(1, self.P1),
+            _asked(2, self.P1, "q1", "what does the build check?"),
+            _answered(3, self.P1, "q1", outcome="answered", answer=(
+                "Answer: It builds the hosts.\nRead: flake.nix\nRan: just build\n"
+                "Could not find out: which host is deployed\nQuestion for you: none")),
+            _asked(4, self.P1, "q2"),
+            _answered(5, self.P1, "q2", outcome="timed_out",
+                      reason="the session did not answer within 300 s"),
+            _asked(6, self.P1, "q3"),
+            _answered(7, self.P1, "q3", outcome="failed", reason="claude-account is not installed"),
+            _asked(8, self.P1, "q4", "where is the retry decided?"),
+        ]
+        states = view.project_states(events).values()
+        shown = view.derive_view(states, project_questions=project_question.asked_questions(events))
+        bare = view.derive_view(view.project_states(events).values())
+        self.assertEqual(shown["statement"], bare["statement"])
+        self.assertEqual(shown["inbox"], bare["inbox"])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        entry = shown["entries"][0]
+        questions = entry["questions"]
+        self.assertEqual([q["id"] for q in questions], ["q4", "q3", "q2", "q1"])
+        self.assertEqual([q["state"] for q in questions],
+                         ["working", "failed", "timed_out", "answered"])
+        q4, q3, q2, q1 = questions
+        self.assertEqual(q1["answer"], "It builds the hosts.")
+        self.assertEqual(q1["read_text"], "Read: flake.nix")
+        self.assertEqual(q1["ran_text"], "Ran: just build")
+        self.assertEqual(q1["unknown_text"], "Could not find out: which host is deployed")
+        self.assertIsNone(q1["back_text"])
+        self.assertIsNone(q1["production_text"])
+        self.assertEqual(q1["state_text"], "Answered")
+        self.assertEqual(q1["answered_at"], events[2].at)
+        self.assertEqual(q2["state_text"], "Timed out: the session did not answer within 300 s")
+        self.assertIsNone(q2["answer"])
+        self.assertEqual(q3["state_text"], "Could not answer: claude-account is not installed")
+        self.assertEqual(q4["state_text"], "Working on it")
+        self.assertIsNone(q4["answered_at"])
+        self.assertEqual(q4["question"], "where is the retry decided?")
+        self.assertEqual(q4["asked_at"], events[7].at)
+        for question in questions:
+            self.assertEqual(set(question), QUESTION_KEYS)
+        self.assertIs(entry["quiet"], True)
+        self.assertEqual(bare["entries"][0]["questions"], [])
+
+    def test_a_question_back_and_the_production_line_read_as_their_own_lines(self):
+        answer = project_question.answer_text(
+            "Answer: I cannot read the bill.\nQuestion for you: May I run the paid billing export?", ())
+        events = [_registered(1, self.P1), _asked(2, self.P1, "q1"),
+                  _answered(3, self.P1, "q1", outcome="answered", answer=answer)]
+        shown = view.derive_view(view.project_states(events).values(),
+                                 project_questions=project_question.asked_questions(events))
+        question = shown["entries"][0]["questions"][0]
+        self.assertEqual(question["back_text"],
+                         "Question for you: May I run the paid billing export?")
+        self.assertEqual(question["production_text"], project_question.NO_PRODUCTION_LINE)
+        self.assertEqual(question["answer"], "I cannot read the bill.")
+
+    def test_a_project_in_a_quiet_group_carries_its_questions(self):
+        events = [_registered(n, f"owner/p0{n}") for n in range(1, 6)]
+        events.append(_asked(6, "owner/p03", "q1"))
+        shown = view.derive_view(view.project_states(events).values(),
+                                 project_questions=project_question.asked_questions(events))
+        self.assertEqual([e["type"] for e in shown["entries"]], ["quiet_group"])
+        by_id = {p["project_id"]: p["questions"] for p in _project_entries(shown)}
+        self.assertEqual([q["state"] for q in by_id.pop("owner/p03")], ["working"])
+        self.assertEqual(list(by_id.values()), [[]] * 4)
+
+
 class QuestionCase(Case):
     """A service whose question session is a stub: the asker records each call and returns an outcome."""
 
@@ -614,6 +824,35 @@ class QuestionServiceTest(QuestionCase):
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
         self.assertEqual(event_log.SCHEMA_VERSION, 10)
+
+    def shown(self, svc):
+        return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
+
+    def test_the_published_view_shows_the_question_working_then_answered(self):
+        held = []
+        svc = self.start(project_question_dispatch=held.append)
+        try:
+            before = json.loads(svc.view_bytes)["statement"]
+            svc.ask_project_question(WHY, "what does the build check?")
+            (question,) = self.shown(svc)["questions"]
+            self.assertEqual((question["state"], question["question"]),
+                             ("working", "what does the build check?"))
+            self.assertEqual(json.loads(svc.view_bytes)["statement"], before)
+            held.pop()()
+            (question,) = self.shown(svc)["questions"]
+            self.assertEqual((question["state"], question["answer"]), ("answered", "it builds."))
+            self.assertEqual(json.loads(svc.view_bytes)["statement"], before)
+        finally:
+            while held:
+                held.pop()()
+
+    def test_questions_survive_a_restart(self):
+        svc = self.start()
+        svc.ask_project_question(WHY, "what does the build check?")
+        svc.close()
+        again = self.start()
+        (question,) = self.shown(again)["questions"]
+        self.assertEqual(question["state"], "answered")
 
 
 def question_threads():

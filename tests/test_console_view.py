@@ -2075,7 +2075,8 @@ class SessionSignalViewTest(unittest.TestCase):
                          {"session_id": "s1", "manager": True, "read_at": None}],
             "nudged_at": iso(now - 30 * MIN),
             "base_at": utc(R),
-            "waits": {"ci_at": None, "commit_at": None, "release_at": None}})
+            "issues": [1, 2, 3, 4, 5, 6, 7],
+            "waits": {"ci_at": None, "commit_at": None, "release_at": None, "lock_at": None}})
         self.assertEqual(self.shown(None, sprint_state=s)["movement"]["sessions"], [])
 
     def test_the_sprint_entry_publishes_its_wait_signal_times_whatever_it_says_now(self):
@@ -2091,7 +2092,24 @@ class SessionSignalViewTest(unittest.TestCase):
         self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
         self.assertEqual(shown["movement"]["waits"], {
             "ci_at": utc(now - 3 * MIN), "commit_at": utc(now - 5 * MIN),
-            "release_at": utc(now - 7 * MIN)})
+            "release_at": utc(now - 7 * MIN), "lock_at": None})
+
+    def test_the_sprint_entry_publishes_its_land_lock_wait_time_and_its_issues_with_the_inbox(self):
+        now = self.now
+
+        def utc(ms):
+            return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+
+        inbox_only = reported(with_manager(started(A)), R, issues=((4, "building"),), inbox=(9,))
+        shown = self.shown(moving(locks=((9, now - 2 * MIN), (99, now - MIN))),
+                           sprint_state=inbox_only)
+        self.assertEqual(shown["movement"]["waits"]["lock_at"], utc(now - 2 * MIN))
+        self.assertEqual(shown["movement"]["issues"], [4, 9])
+        self.assertEqual([i["issue"] for i in shown["issues"]], [4])
+        self.assertEqual(self.shown(None, sprint_state=inbox_only)["movement"]["waits"]["lock_at"],
+                         None)
+        bare = self.shown(None, sprint_state=started(A))
+        self.assertEqual(bare["movement"]["issues"], [])
 
     def test_sprint_sessions_of_names_the_manager_and_the_sessions_delivering_its_issues(self):
         sprint_a = dataclasses.replace(
@@ -2286,7 +2304,9 @@ class SprintViewTest(unittest.TestCase):
             "state_until": None, "pictures": [],
         "movement": {"sessions": [], "nudged_at": None,
                      "base_at": "2026-11-12T10:00:00+00:00",
-                     "waits": {"ci_at": None, "commit_at": None, "release_at": None}}}])
+                     "issues": [],
+                     "waits": {"ci_at": None, "commit_at": None, "release_at": None,
+                               "lock_at": None}}}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),

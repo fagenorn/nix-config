@@ -26,10 +26,14 @@ WAITER_41 = {"refs/agent-locks/land-wait/main/1794865617-41-1794866800": "41" * 
 
 
 def sprint(sprint_id="a" * 16, issue=5, state="on_track", ball="manager",
-           now_text="waiting its turn to merge", ended_at=None):
+           now_text="waiting its turn to merge", ended_at=None, inbox=None):
+    """A running sprint; with `inbox` its issue is only an inbox issue: absent from `issues[]`,
+    named by `movement.issues` as the console publishes it."""
+    shown = [] if inbox is not None else [
+        {"issue": issue, "stage": "landing", "stage_text": "landing"}]
     return {"sprint_id": sprint_id, "ended_at": ended_at, "state": state, "ball": ball,
-            "now_text": now_text,
-            "issues": [{"issue": issue, "stage": "landing", "stage_text": "landing"}]}
+            "now_text": now_text, "issues": shown,
+            "movement": {"issues": [issue] if inbox is None else [inbox]}}
 
 
 def state_of(*sprints, grouped=False):
@@ -110,6 +114,23 @@ class LockWaitCheckTest(unittest.TestCase):
             with self.subTest(name):
                 code, printed = self.run_check(state=state)
                 self.assertEqual((75, "no_sprint"), (code, printed["status"]))
+
+    def test_a_sprint_associated_only_through_its_inbox_is_part_of_the_queue(self):
+        with self.subTest("a quiet queued sprint beside another waiter's sprint that shows the wait"):
+            newer = PullRequest(42, frozenset({6}), False, None, False)
+            waiters = {**WAITER_41, "refs/agent-locks/land-wait/main/%d-42-%d" % (
+                NOW - 840, NOW - 17): "42" * 20}
+            quiet = sprint("b" * 16, state="quiet", ball="nobody", inbox=6)
+            code, printed = self.run_check(pulls=(P40, P41, newer), waiters=waiters,
+                                           state=state_of(sprint(), quiet))
+            self.assertEqual((1, "not_met", ["b" * 16]),
+                             (code, printed["status"], printed["stuck"]))
+        with self.subTest("the long waiter's own sprint"):
+            code, printed = self.run_check(state=state_of(sprint(inbox=5)))
+            self.assertEqual((0, "met"), (code, printed["status"]))
+            code, printed = self.run_check(
+                state=state_of(sprint(inbox=5, state="quiet", ball="nobody")))
+            self.assertEqual((1, "not_met"), (code, printed["status"]))
 
     def test_a_moving_holder_with_no_waiter_sprint_here_is_not_yet(self):
         holder = sprint(issue=4, now_text="waiting for CI on its pull request")
