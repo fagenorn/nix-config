@@ -52,6 +52,7 @@ stream `Content-Length`):
     GET /api/picture/<id> 200 image/png, the page reads a stored picture (below)
     GET /api/profile 200 application/json, the profile a new session should use (below)
     GET /api/excluded 200 application/json, the profiles the owner excluded (below)
+    GET /api/whoami 200 application/json, what the guest port received (guest port only; 404 on the owner's port)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
@@ -59,6 +60,31 @@ stream `Content-Length`):
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`,
                     `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
+
+Guest door (#1237, ADR-console-066). With `guest_port` (`console --guest-port`, default
+`DEFAULT_GUEST_PORT`, loopback only) the service binds a second server on `127.0.0.1`, served by
+`GuestHandler` on its own thread, for Tailscale Serve to proxy to; without it there is no second
+server, no `guest-token` file and `guest_address` is None. A guest request is admitted by
+`guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
+nothing appended or published: sharing off (no tailnet name), a `Host` that is not exactly the
+configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
+`GET /api/whoami` is answered to any request before admission: it reports the `Host` it saw, how
+many `Host` and login headers arrived, whether `X-Forwarded-For` did, and whether the login named
+by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
+owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
+`/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
+its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
+scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the page carrying the guest token, `GET
+/api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
+stream of it, which re-admits on every publish and ends when the colleague, the tailnet name or the
+sharing is gone, and a picture read needs the guest token, an `Origin` (when sent) of `https://<tailnet>`
+and an id on the colleague's own view, else `404` `this picture is not known`. Every guest response closes
+its connection, so a body or a second request sent on it is never parsed. `ROUTES` registers every
+route: a handler compares `route` only with registered names, and a method other than GET on a guest
+read is `405` `Allow: GET`. The owner's port refuses, on every route, a request carrying a
+`Tailscale-*` header or `X-Forwarded-For` with `403` `guest.OWNER_PORT_TEXT`, after the `Host` check.
+The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
+a different token, refused on every owner route, as the page token is on the guest picture read.
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -1388,7 +1414,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1415,6 +1441,7 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
+DEFAULT_GUEST_PORT = 27185
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
@@ -1539,6 +1566,14 @@ MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
 POST_LIMITS = {HOOK_PATH: MAX_HOOK_BYTES, READINGS_PATH: MAX_READING_BYTES}
+PAGE_PATH = "/"
+STATE_PATH = "/api/state"
+STREAM_PATH = "/api/stream"
+WHOAMI_PATH = "/api/whoami"
+OWNER_READS: frozenset[str] = frozenset({SPEND_PAGE_PATH, STATUS_PATH, PROFILE_PATH, EXCLUDED_PATH})
+GUEST_READS: frozenset[str] = frozenset({PAGE_PATH, STATE_PATH, STREAM_PATH, WHOAMI_PATH})
+OWNER_ONLY: frozenset[str] = (PAGE_WRITES | MANAGER_WRITES | frozenset(POST_LIMITS) | OWNER_READS)
+ROUTES: frozenset[str] = OWNER_ONLY | GUEST_READS | {PICTURE_PREFIX}
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
@@ -1624,17 +1659,6 @@ def _unreadable(reason: str) -> None:
     return None
 
 
-class ConsoleServer(socketserver.ThreadingTCPServer):
-    # Not http.server.HTTPServer, whose server_bind does a reverse lookup.
-    daemon_threads = True
-    allow_reuse_address = True
-    request_queue_size = BACKLOG
-
-    def __init__(self, port: int, console: "ConsoleService"):
-        self.console = console
-        super().__init__((HOST, port), ConsoleHandler)
-
-
 class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1655,11 +1679,15 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
     def _loopback(self) -> bool:
         port = self.server.server_address[1]
-        if self.headers.get("Host") in (f"{HOST}:{port}", f"localhost:{port}"):
-            return True
-        self.close_connection = True
-        self._send(403, "text/plain", b"loopback only\n", ("Connection", "close"))
-        return False
+        if self.headers.get("Host") not in (f"{HOST}:{port}", f"localhost:{port}"):
+            self.close_connection = True
+            self._send(403, "text/plain", b"loopback only\n", ("Connection", "close"))
+            return False
+        text = guest.owner_port_refusal(self.headers.keys())
+        if text is not None:
+            self._refuse(403, text)
+            return False
+        return True
 
     def _refuse(self, status: int, text: str):
         self.close_connection = True
@@ -2872,16 +2900,17 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         route = self.path.split("?", 1)[0]
-        if route == "/":
+        if route == PAGE_PATH:
             self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
                        ("Content-Security-Policy", CSP))
         elif route == SPEND_PAGE_PATH:
             self._send(200, "text/html; charset=utf-8", SPEND_PAGE,
                        ("Content-Security-Policy", CSP))
-        elif route == "/api/state":
+        elif route == STATE_PATH:
             self._send(200, "application/json", self.server.console.view_bytes)
-        elif route == "/api/stream":
-            self._stream()
+        elif route == STREAM_PATH:
+            console = self.server.console
+            self._stream(lambda seen: console.wait_for_change(seen, KEEPALIVE_SECONDS))
         elif route == STATUS_PATH:
             self._status_request()
         elif route == PROFILE_PATH:
@@ -2910,15 +2939,18 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         picture_id = route[len(PICTURE_PREFIX):]
         if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
             return self._refuse(400, "bad picture id")
+        self._send_picture(picture_id)
+
+    def _send_picture(self, picture_id: str):
         try:
-            data = pictures.read(console.pictures_dir, picture_id)
+            data = pictures.read(self.server.console.pictures_dir, picture_id)
         except OSError:
             data = None
         if data is None:
             return self._refuse(404, "this picture is not known")
         self._send(200, "image/png", data, cache="private")
 
-    def _stream(self):
+    def _stream(self, wait: Callable[[int], tuple[int, bytes | None] | None]):
         console = self.server.console
         self.close_connection = True
         self.send_response(200)
@@ -2930,13 +2962,15 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         seen = -1
         try:
             while not console.closing:
-                change = console.wait_for_change(seen, KEEPALIVE_SECONDS)
+                change = wait(seen)
                 if change is None:
                     if console.closing:
                         return
                     self.wfile.write(b": keepalive\n\n")
                     continue
                 seen, view = change
+                if view is None:
+                    return
                 self.wfile.write(b"event: view\ndata: " + view + b"\n\n")
         except OSError:
             return
@@ -2952,6 +2986,104 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                    ("Allow", allow), ("Connection", "close"))
 
     do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _refuse_method
+
+
+class GuestHandler(ConsoleHandler):
+    """The guest port's one handler (#1237); it never calls the owner's route methods."""
+
+    def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
+              cache: str = "no-store"):
+        self.close_connection = True
+        if not any(name.lower() == "connection" for name, _ in headers):
+            headers = (*headers, ("Connection", "close"))
+        super()._send(status, content_type, body, *headers, cache=cache)
+
+    def _guest_request(self):
+        console = self.server.console
+        route = self.path.split("?", 1)[0]
+        hosts = self.headers.get_all("Host") or []
+        logins = self.headers.get_all(guest.LOGIN_HEADER) or []
+        if self.command == "GET" and route == WHOAMI_PATH:
+            body = json.dumps(
+                guest.whoami(hosts, logins, self.headers.get_all("X-Forwarded-For") or [],
+                             self.headers.get_all(guest.PROBE_HEADER) or []),
+                sort_keys=True, separators=(",", ":"))
+            return self._send(200, "application/json", body.encode())
+        access = console.access
+        login, text = guest.admit(access, hosts, logins)
+        if text is not None:
+            return self._refuse(403, text)
+        if route in OWNER_ONLY:
+            return self._refuse(403, guest.OWNER_ONLY_TEXT)
+        if self.command != "GET":
+            if route in GUEST_READS or route.startswith(PICTURE_PREFIX):
+                return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "GET"))
+            return self._refuse(404, "not found")
+        if route == PAGE_PATH:
+            self._send(200, "text/html; charset=utf-8", console.guest_page_bytes,
+                       ("Content-Security-Policy", CSP))
+        elif route == STATE_PATH:
+            view = console.guest_view_bytes(login)
+            if view is None:
+                return self._refuse(403, guest.NOT_SHARED_TEXT)
+            self._send(200, "application/json", view)
+        elif route == STREAM_PATH:
+            self._stream(self._readmitting(login, hosts, logins))
+        elif route.startswith(PICTURE_PREFIX):
+            self._guest_picture(route, access, login)
+        else:
+            self._refuse(404, "not found")
+
+    def _readmitting(self, login: str, hosts: list[str], logins: list[str]):
+        console = self.server.console
+
+        def wait(seen: int):
+            change = console.wait_for_guest_change(login, seen, KEEPALIVE_SECONDS)
+            if change is None:
+                return None
+            version, access, view = change
+            if guest.admit(access, hosts, logins) != (login, None) or view is None:
+                return version, None
+            return version, view
+
+        return wait
+
+    def _guest_picture(self, route: str, access: "guest.Access", login: str):
+        console = self.server.console
+        refusal = write_guard.read_refusal(
+            access.tailnet, self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.FETCH_SITE_HEADER) or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
+            scheme="https")
+        if refusal is not None:
+            return self._refuse(*refusal)
+        picture_id = route[len(PICTURE_PREFIX):]
+        if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
+            return self._refuse(400, "bad picture id")
+        if picture_id not in console.guest_pictures(login):
+            return self._refuse(404, "this picture is not known")
+        self._send_picture(picture_id)
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
+
+
+class GuestPortError(OSError):
+    """The guest port could not be bound; `port` is the one that failed."""
+
+    def __init__(self, port: int, error: OSError):
+        super().__init__(error.errno, error.strerror)
+        self.port = port
+
+
+class ConsoleServer(socketserver.ThreadingTCPServer):
+    # Not http.server.HTTPServer, whose server_bind does a reverse lookup.
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = BACKLOG
+
+    def __init__(self, port: int, console: "ConsoleService", handler=ConsoleHandler):
+        self.console = console
+        super().__init__((HOST, port), handler)
 
 
 class _ProfileRemoving(Exception):
@@ -3035,7 +3167,9 @@ class ConsoleService:
                  project_question_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None,
-                 screenshot_dirs: Iterable[Path] = ()):
+                 screenshot_dirs: Iterable[Path] = (),
+                 guest_port: int | None = None,
+                 guest_token_path: Path | None = None):
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
@@ -3197,12 +3331,33 @@ class ConsoleService:
         self._version = 0
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._access = guest.NO_ACCESS
+        self._published_access = guest.NO_ACCESS
+        self._guest_views: dict[str, bytes] = {}
+        self._guest_pictures: dict[str, frozenset[str]] = {}
+        self._guest_token: str | None = None
+        self._guest_page: bytes | None = None
+        self._guest_server: ConsoleServer | None = None
+        self._guest_thread: threading.Thread | None = None
+        self._guest_port_number: int | None = None
         self._server = ConsoleServer(port, self)
         try:
+            if guest_port is not None:
+                try:
+                    self._guest_server = ConsoleServer(guest_port, self, GuestHandler)
+                except OSError as error:
+                    raise GuestPortError(guest_port, error) from error
+                self._guest_port_number = self._guest_server.server_address[1]
             self._token = write_guard.load_token(
                 Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
                 else token_path)
             self._page = PAGE.replace(write_guard.TOKEN_SLOT, self._token.encode("ascii"))
+            if self._guest_server is not None:
+                self._guest_token = write_guard.load_token(
+                    Path(store).with_name(write_guard.GUEST_TOKEN_FILE)
+                    if guest_token_path is None else guest_token_path)
+                self._guest_page = PAGE.replace(
+                    write_guard.TOKEN_SLOT, self._guest_token.encode("ascii"))
             self.log = EventLog(store, clock=log_clock)
             self.log.retain()
             events = self.log.events()
@@ -3234,6 +3389,7 @@ class ConsoleService:
             self._project_questions = project_question.asked_questions(events)
             self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
+            self._access = guest.access_list(events)
             self._settle_stops()
             self._publish()
             self._signature = signature(self.registry)
@@ -3244,6 +3400,8 @@ class ConsoleService:
             if self.log is not None:
                 self.log.close()
             self._server.server_close()
+            if self._guest_server is not None:
+                self._guest_server.server_close()
             raise
 
     @property
@@ -3254,6 +3412,32 @@ class ConsoleService:
     @property
     def address(self) -> tuple[str, int]:
         return self._server.server_address[:2]
+
+    @property
+    def guest_address(self) -> tuple[str, int] | None:
+        return None if self._guest_server is None else self._guest_server.server_address[:2]
+
+    @property
+    def guest_token(self) -> str | None:
+        return self._guest_token
+
+    @property
+    def access(self) -> "guest.Access":
+        return self._access
+
+    @property
+    def guest_page_bytes(self) -> bytes | None:
+        return self._guest_page
+
+    def guest_view_bytes(self, login: str) -> bytes | None:
+        """The login's guest view; None when the login is not listed or sharing is off."""
+        with self._published:
+            return self._guest_views.get(login)
+
+    def guest_pictures(self, login: str) -> frozenset[str]:
+        """The pictures on the login's guest view."""
+        with self._published:
+            return self._guest_pictures.get(login, frozenset())
 
     @property
     def view_bytes(self) -> bytes:
@@ -3288,6 +3472,15 @@ class ConsoleService:
             if self._closing or self._version <= seen:
                 return None
             return self._version, self._view
+
+    def wait_for_guest_change(self, login: str, seen: int, timeout: float
+                              ) -> tuple[int, "guest.Access", bytes | None] | None:
+        """Like `wait_for_change`, with the access list and the login's view of that publish."""
+        with self._published:
+            self._published.wait_for(lambda: self._version > seen or self._closing, timeout)
+            if self._closing or self._version <= seen:
+                return None
+            return self._version, self._published_access, self._guest_views.get(login)
 
     def _now(self) -> datetime:
         return datetime.fromtimestamp(self._clock(), timezone.utc)
@@ -3328,9 +3521,9 @@ class ConsoleService:
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
-        view = encode_view(derive_view(
-            self._states.values(), self._inbox, self._health,
-            sessions=self._sessions.values(), deliveries=self._deliveries,
+        inputs = dict(
+            states=list(self._states.values()), records=self._inbox, health=self._health,
+            sessions=list(self._sessions.values()), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             owner_notices=self._owner_notices,
             project_questions=self._project_questions,
@@ -3354,11 +3547,24 @@ class ConsoleService:
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked, movement=self._movement))
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
+        access = self._access
+        view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
+            access, guest.serve_state(None, access.tailnet, self._guest_port_number))))
+        views: dict[str, bytes] = {}
+        seen_pictures: dict[str, frozenset[str]] = {}
+        if self._guest_server is not None and access.tailnet is not None:
+            for login, projects in access.colleagues.items():
+                derived = guest.scrub(derive_view(**guest.scoped(inputs, projects)))
+                views[login] = encode_view(derived)
+                seen_pictures[login] = guest.picture_ids(derived)
         with self._published:
-            if view != self._view:
-                self._view = view
+            if view != self._view or views != self._guest_views:
                 self._version += 1
+            self._view = view
+            self._published_access = access
+            self._guest_views = views
+            self._guest_pictures = seen_pictures
             self._published.notify_all()
 
     def refresh(self) -> list[Event]:
@@ -6472,6 +6678,7 @@ class ConsoleService:
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
+        self._access = guest.access_list(appended, self._access)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
@@ -7081,6 +7288,10 @@ class ConsoleService:
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
+        if self._guest_server is not None:
+            self._guest_thread = threading.Thread(
+                target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
+            self._guest_thread.start()
 
     def close(self) -> None:
         if self._closed:
@@ -7135,6 +7346,10 @@ class ConsoleService:
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()
+        if self._guest_server is not None:
+            if self._guest_thread is not None:
+                self._guest_server.shutdown()
+            self._guest_server.server_close()
         with self._ingest:
             while self._grants_running:
                 self._grants_done.wait()
