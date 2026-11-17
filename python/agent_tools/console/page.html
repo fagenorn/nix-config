@@ -2492,6 +2492,24 @@ function inReadingPanel(target) {
   for (let node = target; node; node = node.parentNode) if (node === panel) return true;
   return false;
 }
+// The child-index path from the reading panel to a node inside it, with the node's tag and class, or null when the node is not in the panel.
+function panelPath(section, node) {
+  if (node === null || node === section) return null;
+  const path = [];
+  for (let at = node; at !== section; at = at.parentNode) {
+    if (!at || !at.parentNode) return null;
+    path.push(Array.prototype.indexOf.call(at.parentNode.children, at));
+  }
+  return { steps: path.reverse(), tag: node.tagName, cls: node.className };
+}
+function panelNode(section, path) {
+  let node = section;
+  for (const index of path.steps) {
+    node = node.children[index];
+    if (node === undefined) return null;
+  }
+  return node;
+}
 function closeReading() {
   const was = reading;
   reading = null;
@@ -2518,9 +2536,8 @@ function renderReading(view) {
   }
   const projectId = reading.project;
   const key = followKey(projectId, thread.id);
-  // Every frame rebuilds the panel, which detaches a focused heading: focus returns to the new one so the inbox answer keys never see BODY.
-  const held = document.activeElement;
-  const headingHeld = held !== null && held.parentNode === section && held.tagName === "H2";
+  // Every frame rebuilds the panel, which detaches whatever control holds focus: focus returns to its twin in the new panel, or to the heading when that control is gone, so the inbox answer keys never see BODY.
+  const heldPath = panelPath(section, document.activeElement);
   section.hidden = false;
   const head = el("div", "reading-head");
   head.appendChild(el("span", "reading-project", projectId));
@@ -2538,7 +2555,11 @@ function renderReading(view) {
   const follow = followBlock(projectId, thread, pending.length);
   if (follow !== null) nodes.push(follow);
   section.replaceChildren(...nodes);
-  if (headingHeld) heading.focus();
+  if (heldPath !== null) {
+    const held = panelNode(section, heldPath);
+    const twin = held !== null && held.disabled !== true && held.tagName === heldPath.tag && held.className === heldPath.cls ? held : heading;
+    twin.focus({ preventScroll: true });
+  }
 }
 // One closed fold of a project's question threads, newest first, each a closed line opening to its questions and answers in order (#1178, ADR-console-059 D4); null when the project has none. It counts in nothing.
 function questionsFold(entry, afterLine) {

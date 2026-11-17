@@ -2028,6 +2028,38 @@ class PageReadingTest(unittest.TestCase):
         self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
         self.assertEqual(answers(later), [])
 
+    def test_enter_on_a_focused_choice_after_a_later_frame_does_not_approve_an_outstanding_brief(self) -> None:
+        # A frame rebuilds the panel and detaches the focused choice button: focus must come back to its new twin, not
+        # fall to BODY, where Enter would reach the inbox answer keys (#1226).
+        both = {**view([asking(project(0, []), thread(ASK_FIRST, ASK_CHOOSE))]), "inbox": frame([ANSWERABLE])["inbox"]}
+        steps = [self.begin, {"frame": both}, {"open": "questions:owner/p00"}, {"click": "thread-open"},
+                 {"focus_on": "ask-choice", "nth": 1}, {"frame": both}]
+        (refocused, pressed, later) = render([*steps, {"snapshot": True}, {"key": "Enter", "follow": True},
+                                              {"snapshot": True}, {"clock": NOW_MS + 5000}, {"snapshot": True}])
+        self.assertEqual(role(refocused["active"]), "ask-choice")
+        self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
+        self.assertEqual(answers(later), [])
+
+    def test_a_focused_control_that_leaves_the_panel_hands_focus_to_the_heading(self) -> None:
+        # The choices go once a follow-up is pending; the focus must not fall to BODY (#1226).
+        both = {**view([asking(project(0, []), thread(ASK_FIRST, ASK_CHOOSE))]), "inbox": frame([ANSWERABLE])["inbox"]}
+        gone = {**view([asking(project(0, []), thread(ASK_FIRST, ASK_FIRST | {"id": "q10"}))]), "inbox": both["inbox"]}
+        steps = [self.begin, {"frame": both}, {"open": "questions:owner/p00"}, {"click": "thread-open"},
+                 {"focus_on": "ask-choice", "nth": 1}, {"frame": gone}]
+        (snap,) = render([*steps, {"snapshot": True}])
+        self.assertEqual(role(snap["active"]), "reading-question")
+
+    def test_a_later_frame_refocuses_without_scrolling_the_owner_back(self) -> None:
+        # Refocusing the heading after a streamed update must not scroll it into view and undo the owner's reading
+        # position (#1226).
+        both = view([asking(project(0, []), thread(ASK_FIRST))])
+        (opened, later) = render([self.begin, {"frame": both}, {"open": "questions:owner/p00"},
+                                  {"click": "thread-open"}, {"scroll": 640}, {"snapshot": True},
+                                  {"frame": both}, {"snapshot": True}])
+        self.assertGreater(later["focus_count"], opened["focus_count"])
+        self.assertEqual(later["scrolling_focus"], opened["scrolling_focus"])
+        self.assertEqual(role(later["active"]), "reading-question")
+
     def test_opening_a_thread_shows_it_in_the_main_column_and_close_hides_it(self) -> None:
         shown, closed = render([*self.opened(thread(ASK_FIRST)), {"snapshot": True},
                                 {"click": "reading-close"}, {"snapshot": True}])
