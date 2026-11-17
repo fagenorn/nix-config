@@ -568,6 +568,7 @@ class GoalRouteTest(Case):
             "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None, "pictures": [], "checks": [], "waits": [],
+            "permission_text": None,
             "movement": {"sessions": [], "nudged_at": None,
                          "base_at": stated.replace(microsecond=stated.microsecond // 1000 * 1000).isoformat(),
                          "waits": {"ci_at": None, "commit_at": None, "release_at": None}}}])

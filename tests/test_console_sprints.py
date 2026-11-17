@@ -11,12 +11,13 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
-from agent_tools.console import event_log, manager, sprints
+from agent_tools.console import event_log, manager, permission, sprints
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN, IssueStage
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED,
-                                           MANAGER_WAITING, NOTICE_POSTED, NOTICE_WITHDRAWN,
+                                           MANAGER_WAITING, NOTICE_NUDGED, NOTICE_POSTED,
+                                           NOTICE_WITHDRAWN,
                                            SPRINT_CLOSED, SPRINT_STOP_REQUESTED, SPRINT_REPORTED,
                                            Event)
 from agent_tools.console.sprints import (Closing, Notice, Observed, PendingStop, QuestionPicture,
@@ -605,6 +606,36 @@ class RevivalFoldTest(unittest.TestCase):
 
     def fold(self, *rows):
         return sprints.sprint_states([stated(1, "p00", SID, "one"), *rows])[SID]
+
+    def test_the_logged_mode_folds_onto_the_sprint(self):
+        def mode(chosen, reason):
+            return {"permission": {"mode": chosen, "reason": reason}}
+
+        def of(*rows):
+            return self.fold(*rows).permission
+
+        bypass = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
+        auto = permission.Permission(permission.AUTO, permission.NOT_DECLARED)
+        started = self.started(2, **mode(permission.BYPASS, permission.RULES_IN_PLACE))
+        woken = self.woken(3, **mode(permission.AUTO, permission.NOT_DECLARED))
+        nudged = managed(4, SID, event_log.SPRINT_NUDGED, through=1, ok=True,
+                         **mode(permission.BYPASS, permission.NO_PRODUCTION))
+        notice = managed(5, SID, NOTICE_NUDGED, notice=3, route="wake", ok=True,
+                         **mode(permission.AUTO, permission.NOT_ENFORCED))
+        bare_nudge = managed(6, SID, event_log.SPRINT_NUDGED, through=1, ok=True)
+        bare_notice = managed(7, SID, NOTICE_NUDGED, notice=3, route="relay", ok=True)
+        malformed = self.woken(8, permission={"mode": "plan", "reason": "x"})
+        self.assertEqual(of(started), bypass)
+        self.assertEqual(of(started, woken), auto)
+        self.assertEqual(of(started, woken, nudged), permission.Permission(
+            permission.BYPASS, permission.NO_PRODUCTION))
+        self.assertEqual(of(started, woken, nudged, notice), permission.Permission(
+            permission.AUTO, permission.NOT_ENFORCED))
+        last = permission.Permission(permission.AUTO, permission.NOT_ENFORCED)
+        for rows in ((bare_nudge,), (bare_nudge, bare_notice), (bare_nudge, bare_notice, malformed)):
+            with self.subTest(rows=len(rows)):
+                self.assertEqual(of(started, woken, nudged, notice, *rows), last)
+        self.assertIsNone(of(started, woken, nudged, notice, self.started(9)))
 
     def test_a_wake_row_is_one_revival_and_a_later_manager_sighting_marks_it_back(self):
         base = [self.started(2), self.listed(3)]

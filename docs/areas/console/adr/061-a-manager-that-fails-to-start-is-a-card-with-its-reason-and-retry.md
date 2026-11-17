@@ -1,4 +1,4 @@
-# ADR-console-060 — A manager that fails to start is a card with its reason and Retry
+# ADR-console-061 — A manager that fails to start is a card with its reason and Retry
 
 - **Status:** accepted
 - **Decided in:** #1182
