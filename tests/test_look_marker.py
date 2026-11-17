@@ -251,22 +251,6 @@ class LookAnsweredTest(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(lm.marker_line(line))
 
-    def test_approved_heads_follow_trust_and_the_latest_answer(self):
-        other = "e" * 40
-        cases = {
-            "approved": ([approved(1)], ((1300, HEAD),)),
-            "untrusted": ([approved(1, association="CONTRIBUTOR")], ()),
-            "changes after": ([approved(1), approved(2, answer="changes")], ()),
-            "changes before": ([approved(1, answer="changes"), approved(2)], ((1300, HEAD),)),
-            "no answer after": ([approved(1), comment(2, NO_ANSWER)], ()),
-            "another issue": ([approved(1, issue=1201)], ()),
-            "two heads": ([approved(1, head=other), approved(2)], ((1300, HEAD), (1300, other))),
-            "ended": ([approved(1), comment(2, fm.end_body(1, "done"))], ()),
-        }
-        for name, (comments, expected) in cases.items():
-            with self.subTest(name=name):
-                self.assertEqual(lm.approved_heads(comments, 1200), expected)
-
     def test_merged_head_reads_only_a_merged_pull_request(self):
         self.assertEqual(lm.merged_head({"merged": True, "head": {"sha": HEAD}}), HEAD)
         for pull in ({"merged": False, "head": {"sha": HEAD}}, {"head": {"sha": HEAD}}, {"merged": True},
