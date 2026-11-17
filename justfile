@@ -232,6 +232,7 @@ agent-workflow-tests *args:
     tests/test_console_bypass_proof_github.py \
     tests/test_console_bypass_proof.py \
     tests/test_console_bypass_proof_mcp.py \
+    tests/test_console_bypass_proof_wakes.py \
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
