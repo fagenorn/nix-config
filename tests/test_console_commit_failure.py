@@ -8,16 +8,22 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import subprocess
+import time
 from pathlib import Path
 
 from agent_tools.console import approve, register, register_check
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from . import console_test_support as support
 from . import test_console_approve_service as approve_tests
 from .test_console_approve_service import ApproveCase
-from .test_console_register_service import ROOT, git
+from .test_console_register_service import ROOT, CancelChecks, git
+from .test_console_stream import next_view, open_stream
 
 SLUG = "fixture/console-commit-failure"
 ERROR_LINE = "console: plan_approve_error "
@@ -129,4 +135,72 @@ class CommitFailureCardTest(CommitFailureCase):
                          {"hook": "pre-commit", "why": "it ended with exit status 1", "lines": []})
         for text in (card["headline"], card["why"], *card["lines"]):
             self.assertIsNone(approve.PAGE_PATTERN.search(text), text)
+        self.assertTrue(self.kept_worktree().is_dir())
+
+
+class CancelUntilShownTest(CancelChecks, CommitFailureCase):
+    """Cancel keeps the failed commit's copy until its card was sent to a page stream (#1236)."""
+
+    def setUp(self):
+        super().setUp()
+        self.hooked(CHATTY)
+        self.failed()
+        self.branch = approve.branch_of(self.shown["plan_id"])
+
+    def branch_exists(self) -> bool:
+        try:
+            git(self.repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{self.branch}")
+        except subprocess.CalledProcessError:
+            return False
+        return True
+
+    def shown_on_a_stream(self) -> None:
+        response = open_stream(self, self.svc)
+        for _ in range(20):
+            items = next_view(response)["inbox"]["open"]
+            if any(one["reason"] == "register_apply" and one["lines"] for one in items):
+                return
+        self.fail("the failure card never reached the stream")
+
+    def cancel_once_sent(self):
+        """The cancel's answer, retried while the stream's write is still being marked."""
+        end = time.monotonic() + 3
+        while True:
+            with contextlib.redirect_stderr(io.StringIO()):
+                status, _, body = self.cancel({"root": str(self.repo)})
+            if status != 409 or time.monotonic() > end:
+                return status, body
+            time.sleep(0.05)
+
+    def test_a_cancel_before_the_card_was_shown_keeps_the_worktree(self):
+        self.refused_cancel({"root": str(self.repo)}, register.CANCEL_UNSEEN)
+        self.assertTrue(self.kept_worktree().is_dir())
+        self.assertTrue(self.branch_exists())
+        self.assertEqual(self.rows("registration.cancelled"), [])
+        self.assertEqual(len(self.apply_cards()), 1)
+
+    def test_a_cancel_after_the_card_was_shown_removes_the_worktree(self):
+        worktree = self.kept_worktree()
+        self.shown_on_a_stream()
+        self.assertEqual(self.cancel_once_sent(), (204, b""))
+        self.assertFalse(worktree.exists())
+        self.assertFalse(self.branch_exists())
+        self.assertEqual(len(self.rows("registration.cancelled")), 1)
+
+    def test_reading_the_state_route_does_not_count_as_shown(self):
+        support.get_page(self.svc.address, "/api/state", self.own())
+        self.refused_cancel({"root": str(self.repo)}, register.CANCEL_UNSEEN)
+        self.assertTrue(self.kept_worktree().is_dir())
+
+    def test_not_now_lets_the_cancel_remove_the_worktree(self):
+        worktree = self.kept_worktree()
+        self.assertEqual(self.defer(self.shown["plan_id"])[0], 204)
+        self.assertEqual(self.cancel({"root": str(self.repo)})[::2], (204, b""))
+        self.assertFalse(worktree.exists())
+
+    def test_a_new_failure_needs_its_own_showing(self):
+        self.svc.delivered(self.svc.version)
+        self.write_hook("#!/bin/sh\necho \"second try\"\nexit 2\n")
+        self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        self.refused_cancel({"root": str(self.repo)}, register.CANCEL_UNSEEN)
         self.assertTrue(self.kept_worktree().is_dir())

@@ -1,6 +1,6 @@
 # ADR-console-037 — A registration's Work line is one sentence, a failure's way out is an option, and the owner can cancel a registration
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-069
 - **Decided in:** #1088
 
 ## Context
