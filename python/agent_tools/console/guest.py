@@ -42,7 +42,18 @@ registration members, the digest, the activation line, the spend view and the ca
 stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
 finds in that guest's scoped view.
 
-`sharing_entry(access, state)` is the owner's `sharing` view member. `state` is one of
+`reading(access, hosts, logins, forwarded, probes)` is what one guest-port request showed, for the
+owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if not, the
+`REASON_CODES` code (`sharing_off`, `host`, `not_shared`); how many `Host` and login headers arrived;
+the `Host` itself only when exactly one arrived and it is a hostname of letters, digits, dots and
+hyphens with an optional port (so an `@` or a long value is never kept), and its `host_form`
+(`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`, `other`, `none`); whether
+`X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
+`probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said). No member is
+ever a login or a probe value. It does not change admission, and `whoami` is unchanged.
+
+`sharing_entry(access, state, last_request)` is the owner's `sharing` view member; `last_request` is
+the latest `reading` or None. `state` is one of
 `SERVE_STATES`: `off` (no tailnet is configured), `unchecked` (the Serve status was not read),
 `not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest port) and
 `serving`. `serve_state(status, tailnet, guest_port)` reads the parsed `tailscale serve status
@@ -87,6 +98,7 @@ SERVE_STATES = ("off", "unchecked", "not_proxying", "serving")
 
 LOGIN_HEADER = "Tailscale-User-Login"
 PROBE_HEADER = "X-Console-Probe"
+PROBE_LOGIN = "forged-probe@example.invalid"
 
 SHARING_OFF_TEXT = "Sharing is off on this console."
 HOST_TEXT = "This console is shared only at its tailnet name."
@@ -95,6 +107,12 @@ OWNER_ONLY_TEXT = "Only the console's owner can do that."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest port.")
 
+HOST_FORMS = ("exact", "with_port", "other", "none")
+REASON_CODES: Mapping[str, str] = MappingProxyType({
+    SHARING_OFF_TEXT: "sharing_off", HOST_TEXT: "host", NOT_SHARED_TEXT: "not_shared"})
+READING_MEMBERS = ("admitted", "forwarded_for", "host", "host_form", "hosts", "login_headers",
+                   "probe", "probe_login_arrived", "reason")
+
 TAILNET_MAX = 253
 LOGIN_MAX = 254
 PROJECTS_MAX = 50
@@ -102,6 +120,7 @@ PROJECT_MAX = 200
 
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
+_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
 
 class Refused(Exception):
@@ -216,6 +235,30 @@ def admit(access: Access, hosts: Sequence[str],
     return login, None
 
 
+def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
+            forwarded: Sequence[str], probes: Sequence[str]) -> dict:
+    """What one guest-port request showed, for the owner's `sharing.last_request`; never a login."""
+    _, text = admit(access, hosts, logins)
+    one = hosts[0] if len(hosts) == 1 else None
+    if one is None:
+        form = "none"
+    elif access.tailnet is not None and one.lower() == access.tailnet:
+        form = "exact"
+    elif access.tailnet is not None and one.lower() == access.tailnet + ":443":
+        form = "with_port"
+    else:
+        form = "other"
+    return {"admitted": text is None,
+            "forwarded_for": bool(forwarded),
+            "host": one if one is not None and _HOST.fullmatch(one) else None,
+            "host_form": form,
+            "hosts": len(hosts),
+            "login_headers": len(logins),
+            "probe": len(probes) == 1 and normal_login(probes[0]) == PROBE_LOGIN,
+            "probe_login_arrived": any(normal_login(value) == PROBE_LOGIN for value in logins),
+            "reason": None if text is None else REASON_CODES[text]}
+
+
 def owner_port_refusal(names: Iterable[str]) -> str | None:
     for name in names:
         lowered = name.lower()
@@ -324,8 +367,9 @@ def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = su
     return read
 
 
-def sharing_entry(access: Access, state: str) -> dict:
+def sharing_entry(access: Access, state: str, last_request: Mapping | None = None) -> dict:
     return {"tailnet": access.tailnet,
             "colleagues": [{"login": login, "projects": sorted(access.colleagues[login])}
                            for login in sorted(access.colleagues)],
-            "state": state}
+            "state": state,
+            "last_request": last_request}

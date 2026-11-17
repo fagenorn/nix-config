@@ -65,11 +65,13 @@ Wire format, one object:
      "activation": <activation line> | null,
      "spend": <spend view> | null,
      "sharing": {"tailnet": <name> | null, "colleagues": [{"login", "projects"}, ...],
-                 "state": "off" | "unchecked" | "not_proxying" | "serving"}}
+                 "state": "off" | "unchecked" | "not_proxying" | "serving",
+                 "last_request": <guest-port reading> | null}}
 
 `sharing` is the owner's access list for the guest door and its Serve state (#1237,
 `guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
-(`guest.scrub`).
+(`guest.scrub`). `last_request` is the last guest-port request's `guest.reading` (counts and flags,
+never a login), null before the first one.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
@@ -865,7 +867,8 @@ ACTIVATED_TEXT = "Activated this host at {commit}."
 ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {next_step}"
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
-SHARING_OFF = MappingProxyType({"tailnet": None, "colleagues": [], "state": "off"})
+SHARING_OFF = MappingProxyType({
+    "tailnet": None, "colleagues": [], "state": "off", "last_request": None})
 
 
 @dataclass(frozen=True)
@@ -2149,7 +2152,9 @@ def derive_view(
 
 
 def _sharing_copy(sharing: Mapping) -> dict:
-    return {**sharing, "colleagues": list(sharing["colleagues"])}
+    last = sharing["last_request"]
+    return {**sharing, "colleagues": list(sharing["colleagues"]),
+            "last_request": None if last is None else dict(last)}
 
 
 def _activation_line(activation: Activation | None, run: LastRun | None, now_ms: int | None) -> dict | None:

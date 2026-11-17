@@ -25,6 +25,7 @@ OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 SECOND = "second@example.invalid"
 STRANGER = "stranger@example.invalid"
+FORGED = "forged-probe@example.invalid"
 
 NOW = "2026-11-11T00:00:00.000000+00:00"
 LONG_AGO = "2026-05-01T00:00:00.000000+00:00"
@@ -123,7 +124,7 @@ class OwnerPortTest(unittest.TestCase):
 
 class ProbeTest(unittest.TestCase):
     def test_whoami_counts_without_echoing_logins(self):
-        forged = "forged-probe@example.invalid"
+        forged = FORGED
         result = guest.whoami([TAILNET], [COLLEAGUE, forged], ["100.64.0.1"], [forged])
         self.assertEqual(result, {"host": TAILNET, "hosts": 1, "login_headers": 2,
                                   "forwarded_for": True, "probe_login_arrived": True})
@@ -134,6 +135,61 @@ class ProbeTest(unittest.TestCase):
         twice = guest.whoami([TAILNET], ["a@example.invalid"], [],
                              ["a@example.invalid", "a@example.invalid"])
         self.assertFalse(twice["probe_login_arrived"])
+
+
+class ReadingTest(unittest.TestCase):
+    def test_the_reading_table(self):
+        access = Access(TAILNET, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        other_probe = "other-probe@example.invalid"
+        rows = [
+            (access, [TAILNET], [COLLEAGUE], ["100.64.0.1"], [],
+             {"admitted": True, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
+              "hosts": 1, "login_headers": 1, "probe": False, "probe_login_arrived": False,
+              "reason": None}),
+            (access, [TAILNET + ":443"], [COLLEAGUE], [], [],
+             {"admitted": False, "reason": "host", "host_form": "with_port",
+              "host": TAILNET + ":443"}),
+            (access, [TAILNET.upper()], [COLLEAGUE], [], [],
+             {"admitted": True, "host_form": "exact", "host": TAILNET.upper()}),
+            (access, [OTHER_HOST], [COLLEAGUE], [], [],
+             {"host_form": "other", "reason": "host", "host": OTHER_HOST}),
+            (access, [], [COLLEAGUE], [], [],
+             {"hosts": 0, "host": None, "host_form": "none", "reason": "host"}),
+            (access, [TAILNET, TAILNET], [COLLEAGUE], [], [],
+             {"hosts": 2, "host": None, "host_form": "none", "reason": "host"}),
+            (access, [TAILNET], [STRANGER], [], [],
+             {"admitted": False, "reason": "not_shared", "login_headers": 1}),
+            (access, [TAILNET], [COLLEAGUE, COLLEAGUE], [], [],
+             {"login_headers": 2, "reason": "not_shared"}),
+            (access, [TAILNET], [], [], [], {"login_headers": 0, "reason": "not_shared"}),
+            (guest.NO_ACCESS, [TAILNET], [COLLEAGUE], [], [],
+             {"reason": "sharing_off", "host_form": "other"}),
+            (access, [STRANGER], [COLLEAGUE], [], [], {"host": None, "host_form": "other"}),
+            (access, ["a" * 300], [COLLEAGUE], [], [], {"host": None}),
+            (access, [TAILNET], [FORGED], [], [FORGED],
+             {"probe": True, "probe_login_arrived": True, "reason": "not_shared"}),
+            (access, [TAILNET], [COLLEAGUE], ["100.64.0.1"], [FORGED],
+             {"probe": True, "probe_login_arrived": False, "admitted": True}),
+            (access, [TAILNET], [FORGED], ["100.64.0.1"], [other_probe],
+             {"probe": False, "probe_login_arrived": True}),
+            (access, [TAILNET], [COLLEAGUE], [], [other_probe],
+             {"probe": False, "probe_login_arrived": False}),
+            (access, [TAILNET], [FORGED.upper()], [], [FORGED.upper()],
+             {"probe": True, "probe_login_arrived": True}),
+            (access, [TAILNET], [COLLEAGUE], [], [FORGED, FORGED], {"probe": False}),
+        ]
+        self.assertEqual(guest.PROBE_LOGIN, FORGED)
+        for a, hosts, logins, forwarded, probes, expected in rows:
+            with self.subTest(hosts=hosts, logins=logins, forwarded=forwarded, probes=probes):
+                result = guest.reading(a, hosts, logins, forwarded, probes)
+                self.assertEqual(set(result), set(guest.READING_MEMBERS))
+                if len(expected) == len(guest.READING_MEMBERS):
+                    self.assertEqual(result, expected)
+                for name, value in expected.items():
+                    self.assertEqual(result[name], value, name)
+                text = json.dumps(result).lower()
+                for secret in (COLLEAGUE, STRANGER, FORGED, "other-probe"):
+                    self.assertNotIn(secret, text)
 
 
 class ParseTest(unittest.TestCase):
@@ -317,8 +373,16 @@ class SharingTest(unittest.TestCase):
         entry = guest.sharing_entry(access, "serving")
         self.assertEqual(entry, {"tailnet": TAILNET, "colleagues": [
             {"login": COLLEAGUE, "projects": ["owner/p01"]},
-            {"login": SECOND, "projects": ["owner/p00", "owner/p01"]}], "state": "serving"})
+            {"login": SECOND, "projects": ["owner/p00", "owner/p01"]}], "state": "serving",
+            "last_request": None})
         self.assertEqual(derive_view([], sharing=entry)["sharing"], entry)
+        r = guest.reading(access, [TAILNET], [COLLEAGUE], [], [])
+        entry = guest.sharing_entry(access, "serving", r)
+        self.assertEqual(entry["last_request"], r)
+        self.assertEqual(derive_view([], sharing=entry)["sharing"]["last_request"], r)
+        derive_view([], sharing=entry)["sharing"]["last_request"]["host"] = "x"
+        self.assertEqual(r["host"], TAILNET)
+        self.assertIsNone(view.SHARING_OFF["last_request"])
         derive_view([])["sharing"]["colleagues"].append("x")
         self.assertEqual(view.SHARING_OFF["colleagues"], [])
 

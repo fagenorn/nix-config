@@ -66,8 +66,8 @@ Guest door (#1237, ADR-console-066). With `guest_port` (`console --guest-port`, 
 `GuestHandler` on its own thread, for Tailscale Serve to proxy to; without it there is no second
 server, no `guest-token` file and `guest_address` is None. A guest request is admitted by
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
-nothing appended or published: sharing off (no tailnet name), a `Host` that is not exactly the
-configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
+nothing appended (the one thing a guest-port request may publish is the reading below): sharing
+off (no tailnet name), a `Host` that is not exactly the configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
 `GET /api/whoami` is answered to any request before admission: it reports the `Host` it saw, how
 many `Host` and login headers arrived, whether `X-Forwarded-For` did, and whether the login named
 by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
@@ -92,6 +92,9 @@ serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); wi
 thread starts and the state stays `unchecked`.
 The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
 a different token, refused on every owner route, as the page token is on the guest picture read.
+The service keeps the last guest-port request's `guest.reading` (every request the port parses,
+whatever its method) in memory only (never logged, null after a restart) as the owner's
+`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -3102,15 +3105,24 @@ class GuestHandler(ConsoleHandler):
 
     def _readmitting(self, login: str, hosts: list[str], logins: list[str]):
         console = self.server.console
+        last: list[bytes | None] = [None]
 
         def wait(seen: int):
-            change = console.wait_for_guest_change(login, seen, KEEPALIVE_SECONDS)
-            if change is None:
-                return None
-            version, access, view = change
-            if guest.admit(access, hosts, logins) != (login, None) or view is None:
-                return version, None
-            return version, view
+            deadline = time.monotonic() + KEEPALIVE_SECONDS
+            while True:
+                remaining = deadline - time.monotonic()
+                change = None if remaining <= 0 else console.wait_for_guest_change(
+                    login, seen, remaining)
+                if change is None:
+                    return None
+                version, access, view = change
+                if guest.admit(access, hosts, logins) != (login, None) or view is None:
+                    return version, None
+                if view == last[0]:
+                    seen = version
+                    continue
+                last[0] = view
+                return version, view
 
         return wait
 
@@ -3129,6 +3141,19 @@ class GuestHandler(ConsoleHandler):
         if picture_id not in console.guest_pictures(login):
             return self._refuse(404, "this picture is not known")
         self._send_picture(picture_id)
+
+    def parse_request(self) -> bool:
+        """Read every request the guest port parses, whatever its method, for the owner's state."""
+        ok = super().parse_request()
+        if ok:
+            headers = self.headers
+            console = self.server.console
+            console.record_guest_request(guest.reading(
+                console.access, headers.get_all("Host") or [],
+                headers.get_all(guest.LOGIN_HEADER) or [],
+                headers.get_all("X-Forwarded-For") or [],
+                headers.get_all(guest.PROBE_HEADER) or []))
+        return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
 
@@ -3376,6 +3401,7 @@ class ConsoleService:
         self._serve_reader = serve_reader
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
+        self._guest_reading: dict | None = None
         self._serve_thread: threading.Thread | None = None
         self._ping_log = ping_log
         self._retention_thread: threading.Thread | None = None
@@ -3585,7 +3611,20 @@ class ConsoleService:
         return entry, action, approve.apply_items(
             latest, found, entry, action, deferred=self._deferred)
 
-    def _publish(self) -> None:
+    def record_guest_request(self, reading: Mapping) -> None:
+        """Keep the latest guest-port request's reading for the owner; see the module docstring."""
+        with self._ingest:
+            if reading == self._guest_reading:
+                return
+            self._guest_reading = dict(reading)
+            self._publish(guests=False)
+
+    def _publish(self, *, guests: bool = True) -> None:
+        """Derive and publish the views; `guests=False` publishes the owner's view alone.
+
+        A guest view is derived from the clock (a sprint's age text), so recomputing it for a
+        guest-port reading would change a guest's bytes: the cached guest views are kept.
+        """
         adoption, action, apply_items = self._approval_view()
         latest = self._registration
         cancel = (self._registering is None and latest is not None
@@ -3622,7 +3661,15 @@ class ConsoleService:
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
         access = self._access
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
-            access, guest.serve_state(self._serve_status, access.tailnet, self._guest_port_number))))
+            access, guest.serve_state(self._serve_status, access.tailnet, self._guest_port_number),
+            self._guest_reading)))
+        if not guests:
+            with self._published:
+                if view != self._view:
+                    self._version += 1
+                self._view = view
+                self._published.notify_all()
+            return
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.tailnet is not None:

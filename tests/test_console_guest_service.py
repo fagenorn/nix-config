@@ -9,10 +9,12 @@ import inspect
 import io
 import json
 import os
+import queue
 import signal
 import socket
 import subprocess
 import tempfile
+import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
@@ -168,12 +170,29 @@ class GuestCase(unittest.TestCase):
         return self.request(svc.address, method, path, f"{svc.address[0]}:{svc.address[1]}",
                             (), headers, length)
 
+    def without_reading(self, raw):
+        """The owner's view with the guest-port reading removed."""
+        state = json.loads(raw)
+        del state["sharing"]["last_request"]
+        return state
+
     def unchanged(self, svc, action):
-        rows, version = support.log_rows(self.store), svc.version
+        rows, view = support.log_rows(self.store), self.without_reading(svc.view_bytes)
         result = action()
         self.assertEqual(support.log_rows(self.store), rows)
-        self.assertEqual(svc.version, version)
+        self.assertEqual(self.without_reading(svc.view_bytes), view)
         return result
+
+    def open_stream(self, svc):
+        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
+        self.addCleanup(connection.close)
+        connection.putrequest("GET", "/api/stream", skip_host=True)
+        connection.putheader("Host", TAILNET)
+        connection.putheader("Tailscale-User-Login", COLLEAGUE)
+        connection.endheaders()
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        return response
 
     def owner_token(self):
         return (self.store.parent / "page-token").read_text().strip()
@@ -461,17 +480,6 @@ class AccessWriteTest(GuestCase):
     def guest_state(self, svc):
         return self.guest(svc, "GET", "/api/state")
 
-    def open_stream(self, svc):
-        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
-        self.addCleanup(connection.close)
-        connection.putrequest("GET", "/api/stream", skip_host=True)
-        connection.putheader("Host", TAILNET)
-        connection.putheader("Tailscale-User-Login", COLLEAGUE)
-        connection.endheaders()
-        response = connection.getresponse()
-        self.assertEqual(response.status, 200)
-        return response
-
     def test_add_replace_and_remove_a_colleague_then_their_next_request(self):
         svc = self.start()
         status, _, body = self.write(svc, "/api/share-tailnet", {"tailnet": TAILNET})
@@ -488,7 +496,10 @@ class AccessWriteTest(GuestCase):
         mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
         self.assertEqual(mine["sharing"], {
             "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
-            "state": "unchecked"})
+            "state": "unchecked", "last_request": {
+                "admitted": True, "forwarded_for": False, "host": TAILNET,
+                "host_form": "exact", "hosts": 1, "login_headers": 1, "probe": False,
+                "probe_login_arrived": False, "reason": None}})
         status, _, body = self.write(
             svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]})
         self.assertEqual((status, body), (204, b""))
@@ -591,6 +602,115 @@ class AccessWriteTest(GuestCase):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
         self.assertTrue(decided.endswith("#1193, #1237"))
+
+
+class ReadingServiceTest(GuestCase):
+    """The owner's `sharing.last_request`: the last guest-port request's reading (#1237)."""
+
+    def reading(self, svc):
+        return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["last_request"]
+
+    def test_the_owner_state_keeps_the_last_guest_request(self):
+        self.seed()
+        svc = self.start()
+        rows = support.log_rows(self.store)
+        self.assertIsNone(self.reading(svc))
+        status, _, body = self.guest(svc, "GET", "/api/state", logins=[STRANGER],
+                                     headers={"X-Forwarded-For": "100.64.0.1"})
+        self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
+        self.assertEqual(self.reading(svc), {
+            "admitted": False, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
+            "hosts": 1, "login_headers": 1, "probe": False, "probe_login_arrived": False,
+            "reason": "not_shared"})
+        self.assertNotIn(STRANGER.encode(), svc.view_bytes.lower())
+        status, _, _ = self.guest(svc, "GET", "/api/whoami", headers={"X-Console-Probe": FORGED})
+        self.assertEqual(status, 200)
+        got = self.reading(svc)
+        self.assertTrue(got["admitted"] and got["probe"])
+        self.assertIsNone(got["reason"])
+        self.assertFalse(got["probe_login_arrived"])
+        status, _, body = self.guest(svc, "GET", "/", host=TAILNET + ":443")
+        self.assertEqual((status, body), (403, guest.HOST_TEXT.encode() + b"\n"))
+        got = self.reading(svc)
+        self.assertEqual((got["host_form"], got["reason"], got["host"]),
+                         ("with_port", "host", TAILNET + ":443"))
+        version = svc.version
+        self.guest(svc, "GET", "/", host=TAILNET + ":443")
+        self.assertEqual(svc.version, version)
+        body = self.guest(svc, "GET", "/api/state")[2]
+        frame = next_frame(self.open_stream(svc))
+        for seen in (body, frame):
+            for member in (b"last_request", b"host_form", b'"sharing"'):
+                self.assertNotIn(member, seen)
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_a_new_reading_sends_no_guest_stream_frame(self):
+        self.seed()
+        svc = self.start()
+        returned = queue.Queue()
+        original = svc.wait_for_guest_change
+
+        def spy(*args):
+            result = original(*args)
+            returned.put(result)
+            return result
+
+        svc.wait_for_guest_change = spy
+        response = self.open_stream(svc)
+        next_frame(response)
+        self.assertIsNotNone(returned.get(timeout=5))
+        kept = svc.guest_view_bytes(COLLEAGUE)
+        version = svc.version
+        self.assertEqual(self.guest(svc, "GET", "/api/state", logins=[STRANGER])[0], 403)
+        woke = returned.get(timeout=5)
+        self.assertIsNotNone(woke)
+        self.assertGreater(woke[0], version)
+        self.assertEqual(woke[2], kept)
+        svc.set_colleague(COLLEAGUE, ("owner/p00",))
+        frame = next_frame(response)
+        self.assertIn(b"owner/p00", frame)
+        self.assertNotIn(b"owner/p01", frame)
+
+    def test_a_reading_keeps_the_guest_views(self):
+        now = [time.time()]
+        self.seed()
+        svc = self.start(clock=lambda: now[0])
+        svc.state_goal("owner/p01", "own-goal-zq8")
+        before = svc.guest_view_bytes(COLLEAGUE)
+        self.assertIn(b"own-goal-zq8", before)
+        now[0] += 3 * 86400
+        self.assertEqual(self.guest(svc, "GET", "/api/state", logins=[STRANGER])[0], 403)
+        self.assertEqual(self.reading(svc)["reason"], "not_shared")
+        self.assertEqual(svc.guest_view_bytes(COLLEAGUE), before)
+        svc.set_colleague(COLLEAGUE, ("owner/p01",))
+        self.assertNotEqual(svc.guest_view_bytes(COLLEAGUE), before)
+
+    def test_every_parsed_request_is_read(self):
+        self.seed()
+        svc = self.start()
+        rows = support.log_rows(self.store)
+        table = [
+            (("TRACE", "/api/state", {"logins": [STRANGER, STRANGER]}), 501, None,
+             {"login_headers": 2, "reason": "not_shared", "admitted": False}),
+            (("POST", "/api/looked", {"host": OTHER_HOST}), 403, guest.HOST_TEXT,
+             {"host_form": "other", "host": OTHER_HOST}),
+            (("GET", "/api/whoami", {"logins": []}), 200, None,
+             {"login_headers": 0, "reason": "not_shared"}),
+            (("DELETE", "/api/state", {}), 405, None, {"admitted": True, "reason": None}),
+            (("PROPFIND", "/api/state", {"logins": [STRANGER]}), 501, None,
+             {"login_headers": 1}),
+        ]
+        for (method, path, kwargs), status, text, expected in table:
+            with self.subTest(method=method, path=path):
+                got, headers, body = self.guest(svc, method, path, **kwargs)
+                self.assertEqual(got, status)
+                if text is not None:
+                    self.assertEqual(body, text.encode() + b"\n")
+                self.assertEqual(headers.get("Connection"), "close")
+                reading = self.reading(svc)
+                for name, value in expected.items():
+                    self.assertEqual(reading[name], value, name)
+                self.assertEqual(support.log_rows(self.store), rows)
 
 
 class ConnectionTest(GuestCase):
