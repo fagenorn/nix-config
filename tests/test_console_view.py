@@ -1439,6 +1439,41 @@ class HeadingCountsOwnerBallTest(unittest.TestCase):
                 self.assertEqual(shown["statement"]["inbox_items"], 2)
                 self.assertEqual(shown["statement"]["sentence"], expected)
 
+    def test_a_manager_that_cannot_hear_the_console_is_counted_with_its_own_sentence(self):
+        base = reported(with_manager(started(A)), R)
+        held = moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),))
+        answer = [session("s1", "waiting_answer", name=NAME)]
+        table = [
+            ("an idle manager", base, [session("s1", "idle", name=NAME)], view.DEAF_SENTENCE),
+            ("a working manager", base, [session("s1", "working", name=NAME)], view.DEAF_SENTENCE),
+            ("no registry session", dataclasses.replace(base, manager_session="s1"), [],
+             view.DEAF_SENTENCE),
+            ("a question at the terminal", base, answer, view.TERMINAL_SENTENCE),
+        ]
+        for label, sprint_state, sessions, sentence in table:
+            with self.subTest(label):
+                shown = derive_view([state("p00", 1)], None, sprints={A: sprint_state},
+                                    sessions=sessions, now_ms=R + 2 * MIN, managers=True,
+                                    movement=held)
+                self.assertEqual(entry(shown)["ball"], "owner")
+                self.assertEqual(shown["statement"]["inbox_items"], 1)
+                self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+                self.assertEqual(shown["statement"]["sentence"], sentence)
+
+    def test_a_deaf_manager_beside_a_terminal_question_reads_both(self):
+        B = "b" * 16
+        deaf = reported(with_manager(started(A)), R)
+        asking = reported(dataclasses.replace(
+            with_manager(started(B)), manager=Manager("started", T0, "work", session_name("p00", B))), R)
+        shown = derive_view(
+            [state("p00", 1)], None, sprints={A: deaf, B: asking},
+            sessions=[session("s1", "idle", name=NAME),
+                      session("s2", "waiting_answer", name=session_name("p00", B))],
+            now_ms=R + 2 * MIN, managers=True,
+            movement=moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),)))
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["sentence"], view.TERMINAL_DEAF_SENTENCE)
+
     def test_a_sprint_the_manager_holds_is_not_counted(self):
         shown = self.shown(with_manager(reported(started(A), R)),
                            [session("s1", "working", name=NAME)])
