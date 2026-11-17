@@ -4124,7 +4124,6 @@ function goalEdited() {
   showGoalReason();
 }
 function closeGoal() {
-  if (draft.phase !== "sending") draft.reason = "";
   draft.open = false;
   renderGoal();
   goalText.blur();
@@ -4713,7 +4712,7 @@ function buildGoalBox() {
   const act = el("div", "goal-act");
   act.appendChild(send);
   act.appendChild(actionButton("goal-cancel btn-quiet", "Cancel", closeGoal));
-  for (const part of [filter, list, status, act]) box.appendChild(part);
+  for (const part of [status, filter, list, act]) box.appendChild(part);
   goalPanel = box;
   goalUi = { filter, list, status, send };
   send.disabled = draft.phase === "sending";
