@@ -179,6 +179,8 @@ class HookTableTest(unittest.TestCase):
             "git stash", "git config user.name", "git branch topic",
             "git tag v9", "git tag -d v1", "git tag -l -d v1", "git tag -ld", "git tag -a v9 -m x",
             "git tag -f v1",
+            "git tag --format -l v9", "git tag --sort=refname --format -l v9",
+            "git tag --format --list v9 HEAD", "git tag -l --sort",
             "git log --output=/tmp/x", "git diff --output /tmp/x", "git log --outp=/tmp/x",
             "git diff --ext-diff",
             "git -C /other log", "git -c core.pager=x log", "git --git-dir=/x log",

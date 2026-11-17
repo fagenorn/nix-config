@@ -36,7 +36,9 @@ this order:
    `-C`, `-c`, `--git-dir` or `--no-pager`), and no later word starting with a prefix of
    `GIT_DENIED_PREFIXES` (`--output` and `--ext-diff` write a file or run a program; git abbreviates
    long options, so the prefixes cover every spelling). `git tag` is only a listing: bare, or with
-   `-l` or `--list` and options of `TAG_LIST_OPTIONS` or `-n<digits>` alone. A gh read (`_gh_read`)
+   `-l` or `--list` and options of `TAG_LIST_OPTIONS` or `-n<digits>` alone, with `--sort` and
+   `--format` only `=`-attached (git reads their value from the next word, even a dash word, so
+   `git tag --format -l v9` creates the tag `v9`). A gh read (`_gh_read`)
    needs a repository: exactly `gh`, then a group of `GH_READ_GROUPS` and a verb of
    `GH_READ_VERBS`, then the word right after the verb pins the project's repository, either
    `--repo=<repo>` or `--repo <repo>` or `-R <repo>`. The position matters because gh parses its
@@ -80,6 +82,7 @@ GIT_READS: tuple[str, ...] = ("log", "show", "diff", "status", "blame", "ls-file
 GH_READ_GROUPS: tuple[str, ...] = ("pr", "release", "issue", "run")
 GH_READ_VERBS: tuple[str, ...] = ("list", "view")
 GIT_DENIED_PREFIXES: tuple[str, ...] = ("--ou", "--ext")
+TAG_VALUE_OPTIONS: tuple[str, ...] = ("--sort", "--format")
 TAG_LIST_OPTIONS: tuple[str, ...] = (
     "-l", "--list", "-n", "--sort", "--format", "--contains", "--no-contains", "--merged",
     "--no-merged", "--points-at", "-i", "--ignore-case", "--column", "--no-column", "--color",
@@ -190,7 +193,7 @@ def _git_read(words: Sequence[str]) -> bool:
         return False
     return all(
         not word.startswith("-")
-        or word.split("=", 1)[0] in TAG_LIST_OPTIONS
+        or (word.split("=", 1)[0] in TAG_LIST_OPTIONS and word not in TAG_VALUE_OPTIONS)
         or re.fullmatch(r"-n[0-9]*", word)
         for word in rest
     )
