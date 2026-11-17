@@ -47,8 +47,8 @@ column. They are not in `KEPT_KINDS`: retention removes them like any other row,
 manager rows are gone reads as having none.
 
 Two kinds record a question about a project and its answer (#1176): `PROJECT_QUESTION_ASKED`
-(`project_question.asked`, payload `question_id`, `question`, `profile`, `session_id`, the project
-in its project column) and `PROJECT_QUESTION_ANSWERED` (`project_question.answered`, payload `question_id`,
+(`project_question.asked`, payload `question_id`, `question`, `profile`, `session_id`, and for a
+follow-up the `thread_id` it was given (#1178), the project in its project column) and `PROJECT_QUESTION_ANSWERED` (`project_question.answered`, payload `question_id`,
 `outcome` and either `answer` or `reason`). Neither is in `KEPT_KINDS`, retention removes them like
 any other row; the spend fold reads the asked row's `session_id` and `profile`
 (`spend.question_sessions`), and `project_question.asked_questions` folds both into the desk

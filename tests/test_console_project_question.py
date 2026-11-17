@@ -1139,6 +1139,128 @@ class QuestionLifecycleTest(QuestionCase):
                 svc.close()
 
 
+T0 = 1_767_225_600.0
+
+
+def _clocks(now):
+    """The service clock and the log clock, both reading the one-element list `now`."""
+    return {"clock": lambda: now[0],
+            "log_clock": lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat(
+                timespec="microseconds")}
+
+
+def _thread_ids(svc):
+    return [[q.question_id for q in thread]
+            for thread in project_question.threads(svc._project_questions[WHY])]
+
+
+class QuestionThreadServiceTest(QuestionCase):
+    def test_a_follow_up_is_recorded_under_its_thread_and_launched_with_its_context_and_the_same_settings(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "what does the build check?")
+        follow = svc.ask_project_question(WHY, " and which host is deployed? ", thread_id=first)
+        self.assertEqual(self.question_rows()[-2:], [
+            (ASKED, WHY, {"question_id": follow, "question": "and which host is deployed?",
+                          "profile": "work", "session_id": SESSION_ID, "thread_id": first}),
+            (ANSWERED_KIND, WHY, {"question_id": follow, "outcome": "answered",
+                                  "answer": "Answer: it builds."})])
+        self.assertNotIn("thread_id", self.question_rows()[0][2])
+        (first_ask, _), (follow_ask, cancel) = self.asked
+        self.assertEqual(follow_ask.thread,
+                         (project_question.Turn("what does the build check?", "Answer: it builds."),))
+        self.assertEqual(first_ask.thread, ())
+        self.assertIs(cancel, svc._stop)
+        self.assertEqual((follow_ask.profile, follow_ask.root, follow_ask.routes),
+                         ("work", "/srv/p01", ROUTES))
+        self.assertEqual(project_question.settings_document(follow_ask.routes),
+                         project_question.settings_document(first_ask.routes))
+
+        def strip(argv):
+            argv = list(argv[:-1])
+            for flag in ("--session-id", "--settings"):
+                argv[argv.index(flag) + 1] = None
+            return argv
+
+        follow_argv = project_question.launch_command(follow_ask, "linux")
+        self.assertEqual(strip(follow_argv),
+                         strip(project_question.launch_command(first_ask, "linux")))
+        for flag, value in (("--model", "sonnet"), ("--permission-mode", "dontAsk"),
+                            ("--setting-sources", "")):
+            self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
+        self.assertEqual(follow_argv[-1], project_question.prompt(
+            "and which host is deployed?", ROUTES, follow_ask.thread))
+        self.assertIn("Earlier question: what does the build check?\n"
+                      "Earlier answer: Answer: it builds.\n", follow_argv[-1])
+        self.assertEqual(_thread_ids(svc), [[first, follow]])
+
+    def test_a_follow_up_to_an_unknown_unanswered_or_too_long_thread_is_refused_and_appends_nothing(self):
+        held = []
+        svc = self.start(project_question_dispatch=held.append)
+        try:
+            working = svc.ask_project_question(WHY, "still going?")  # its job stays held
+            self.outcome = project_question.Outcome("failed", reason="boom")
+            failed = svc.ask_project_question(WHY, "will fail?")
+            held.pop()()
+            self.outcome = project_question.Outcome(
+                "answered", answer="Answer: " + "x" * project_question.MAX_THREAD_BYTES)
+            long = svc.ask_project_question(WHY, "will be long?")
+            held.pop()()
+            cases = (("nope", project_question.THREAD_UNKNOWN),
+                     (working, project_question.THREAD_UNANSWERED),
+                     (failed, project_question.THREAD_UNANSWERED),
+                     (long, project_question.THREAD_TOO_LONG))
+            for thread_id, reason in cases:
+                with self.subTest(thread_id=thread_id, reason=reason):
+                    rows, asked, open_ = (self.question_rows(), len(self.asked),
+                                          svc._project_questions_open)
+                    with self.assertRaises(project_question.Refused) as caught:
+                        svc.ask_project_question(WHY, "more?", thread_id=thread_id)
+                    self.assertEqual(str(caught.exception), reason)
+                    self.assertEqual((self.question_rows(), len(self.asked),
+                                      svc._project_questions_open), (rows, asked, open_))
+            with self.subTest(order="unregistered"):
+                rows = self.question_rows()
+                with self.assertRaises(project_question.Refused) as caught:
+                    svc.ask_project_question("owner/p99", "more?", thread_id=working)
+                self.assertEqual(str(caught.exception), project_question.UNREGISTERED)
+                self.assertEqual(self.question_rows(), rows)
+        finally:
+            while held:
+                held.pop()()
+
+    def test_a_follow_up_survives_a_restart_in_its_thread(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "what does the build check?")
+        follow = svc.ask_project_question(WHY, "and darwin?", thread_id=first)
+        svc.close()
+        again = self.start()
+        self.assertEqual(_thread_ids(again), [[first, follow]])
+
+    def test_after_retention_a_thread_is_admitted_and_grouped_as_a_restart_would(self):
+        now = [T0]
+        svc = self.start(**_clocks(now))
+        first = svc.ask_project_question(WHY, "what does the build check?")
+        now[0] = T0 + 45 * 86400
+        follow = svc.ask_project_question(WHY, "and darwin?", thread_id=first)
+        now[0] = T0 + 91 * 86400
+        removed = svc.retain()
+        self.assertGreaterEqual(removed, 2)
+        self.assertEqual(_thread_ids(svc), [[follow]])
+        rows, asked, open_ = self.question_rows(), len(self.asked), svc._project_questions_open
+        with self.assertRaises(project_question.Refused) as caught:
+            svc.ask_project_question(WHY, "more?", thread_id=first)
+        self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+        self.assertEqual((self.question_rows(), len(self.asked), svc._project_questions_open),
+                         (rows, asked, open_))
+        more = svc.ask_project_question(WHY, "more?", thread_id=follow)
+        svc.close()
+        again = self.start(**_clocks(now))
+        self.assertEqual(_thread_ids(again), [[follow, more]])
+        with self.assertRaises(project_question.Refused) as caught:
+            again.ask_project_question(WHY, "more?", thread_id=first)
+        self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+
+
 class QuestionRouteTest(QuestionCase):
     def post(self, svc, body, headers):
         payload = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -1181,6 +1303,28 @@ class QuestionRouteTest(QuestionCase):
         asked, answered = self.question_rows()[-2:]
         self.assertEqual((asked[0], asked[1], answered[0], answered[1]),
                          (ASKED, WHY, ANSWERED_KIND, WHY))
+
+    def test_a_follow_up_from_the_page_names_its_thread(self):
+        svc = self.start()
+        self.post(svc, {"project_id": WHY, "question": "what does the build check?"},
+                  self.own(svc, **JSON))
+        first = self.question_rows()[0][2]["question_id"]
+        status, _, body = self.post(
+            svc, {"project_id": WHY, "question": "and then?", "thread_id": first},
+            self.own(svc, **JSON))
+        self.assertEqual((status, body), (204, b""))
+        asked = [row for row in self.question_rows() if row[0] == ASKED][-1]
+        self.assertEqual(asked[2]["thread_id"], first)
+        cases = (
+            ({"project_id": WHY, "question": "x", "thread_id": ""}, 400, b"bad question\n"),
+            ({"project_id": WHY, "question": "x", "thread_id": 3}, 400, b"bad question\n"),
+            ({"project_id": WHY, "question": "x", "thread_id": "nope"}, 409,
+             (project_question.THREAD_UNKNOWN + "\n").encode()))
+        for body, status, text in cases:
+            with self.subTest(thread_id=body["thread_id"]):
+                got = self.assert_unchanged(
+                    svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
+                self.assertEqual((got[0], got[2]), (status, text))
 
     def test_the_route_is_a_page_write_that_takes_only_post(self):
         svc = self.start()

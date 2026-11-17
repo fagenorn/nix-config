@@ -946,6 +946,22 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("Questions (n)", thread)
         self.assertIn("| Question thread | Console |", self.doc("docs/CONTEXT-MAP.md"))
 
+    def test_the_follow_up_decision_is_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("060-*.md"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].name, "060-a-follow-up-carries-its-thread-in-its-prompt-and-"
+                                        "continues-only-an-answered-thread.md")
+        text = found[0].read_text()
+        self.assertEqual(text.splitlines()[0],
+                         "# ADR-console-060 \u2014 A follow-up carries its thread in its prompt "
+                         "and continues only an answered thread")
+        adr = " ".join(text.split())
+        for needle in ("- **Status:** accepted", "- **Decided in:** #1178", "thread_id",
+                       "MAX_THREAD_BYTES", "131072", "--resume", "retention",
+                       "ADR-console-058", "ADR-console-059"):
+            self.assertIn(needle, adr)
+
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
                 "029-the-owner-answers-the-adoptions-questions-on-the-page.md")
