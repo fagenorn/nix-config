@@ -5249,6 +5249,7 @@ function goalFromAnswer(projectId, question) {
   draft.text = text;
   goalText.value = text;
   openGoalFor(projectId);
+  showGoalCount();
 }
 function renderGoal() {
   const bar = document.getElementById("goal");

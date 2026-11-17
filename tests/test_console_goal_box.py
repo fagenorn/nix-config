@@ -7,8 +7,8 @@ import unittest
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_controls import CONSOLE_URL, PAGE_STUBS, SETTLE, served
 from .test_console_page import (
-    GOAL_FRAME, NOW_MS, PAGE, START, box_open, full, goal_fail, goal_named, goals, has_class,
-    nodes, render, style_rules)
+    FILLED, GOAL_ASK_FRAME, GOAL_FRAME, NOW_MS, PAGE, START, box_open, full, goal_fail, goal_named,
+    goals, has_class, nodes, render, style_rules)
 
 TOO_LONG_LINE = "Could not send: a goal is at most 2000 characters"
 MANY_FRAME = {**GOAL_FRAME, "recent_projects": [f"owner/project-{i:02d}" for i in range(25)]}
@@ -116,6 +116,15 @@ class GoalCountTest(unittest.TestCase):
                 (snap,) = render(typed(text) + [{"snapshot": True}])
                 shown = re.match(r"(\d+) / 2000", full(count_of(snap)))
                 self.assertEqual(int(shown[1]), len(text.strip()))
+
+    def test_make_it_a_goal_recounts_a_box_that_is_already_open(self):
+        (snap,) = render([
+            START, {"frame": GOAL_ASK_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-text", "value": "draft"}},
+            {"click": "ask-goal"}, {"snapshot": True}])
+        (text,) = goal_named(snap, "goal-text")
+        self.assertEqual(text["value"], FILLED)
+        self.assertEqual(full(count_of(snap)), f"{len(FILLED)} / 2000")
 
     def test_the_page_refuses_exactly_what_the_service_refuses(self):
         kept = "\x1f" + "x" * 2000 + "\x1f"
