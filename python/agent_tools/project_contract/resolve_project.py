@@ -21,14 +21,18 @@ rule member may stand beside it. `{"none": false, ...}` declares the rules:
 production, at least one in all), `read_only` (the command ids and MCP tool
 names that only read it) and `release_profile` (the one profile of
 `release.profiles` through which a change is allowed). `none` is always
-required, so neither form is implied. A command id must name a
+required, so neither form is implied. The rules form may also carry
+`console_activation`, the id of one `changes.commands` entry whose approved
+path is the console's Activate (issue 1193); it is refused beside `none: true`
+(`none_with_rules`) and when it names no changing command
+(`console_activation_not_a_change`). A command id must name a
 `bindings.commands` entry, an MCP tool is spelled `mcp__<server>__<tool>`, a
 key file follows the contract glob rule, and no command or tool may be both a
 changing and a read-only route. The snapshot always carries a derived
 `production` member: `{"status": "not_declared"}` when the section is absent,
 `{"status": "none"}` for the no-production form, and
-`{"status": "declared", "changes", "read_only", "release_profile"}` otherwise,
-with ids and globs returned as authored (they are not bindings, so no glob is
+`{"status": "declared", "changes", "read_only", "release_profile"}` otherwise
+(plus `console_activation` exactly when authored), with ids and globs returned as authored (they are not bindings, so no glob is
 made absolute). An absent section is not the same as declaring no production.
 
 `check-projections` judges each declared target against its source and
@@ -187,6 +191,8 @@ TOP_LEVEL_OPTIONAL_MEMBERS = ("production",)
 # The `production` section's members beside `none`, and the lists inside two of
 # them. `PRODUCTION_STATUSES` is the closed set of the snapshot member's status.
 PRODUCTION_RULE_MEMBERS = ("changes", "read_only", "release_profile")
+# A rule-form member that may be absent: the changing command the console's Activate runs.
+PRODUCTION_OPTIONAL_MEMBERS = ("console_activation",)
 PRODUCTION_CHANGE_MEMBERS = ("commands", "key_files", "mcp_tools")
 PRODUCTION_READ_ONLY_MEMBERS = ("commands", "mcp_tools")
 PRODUCTION_STATUSES = ("not_declared", "none", "declared")
@@ -1170,7 +1176,7 @@ def validate_production(source: dict, violations: list[dict]) -> None:
             none = None
     if none is True:
         for name in sorted(production):
-            if name in PRODUCTION_RULE_MEMBERS:
+            if name in PRODUCTION_RULE_MEMBERS + PRODUCTION_OPTIONAL_MEMBERS:
                 violations.append(violation(
                     f"/production/{name}",
                     "must be absent: the contract declares no production",
@@ -1184,14 +1190,15 @@ def validate_production(source: dict, violations: list[dict]) -> None:
         # An absent or malformed `none` is reported once; the rule forms are
         # not judged against a form the contract did not pick.
         for name in sorted(production):
-            if name != "none" and name not in PRODUCTION_RULE_MEMBERS:
+            if name != "none" and name not in (
+                    PRODUCTION_RULE_MEMBERS + PRODUCTION_OPTIONAL_MEMBERS):
                 violations.append(violation(
                     f"/production/{name}", "member is not part of this schema",
                     "contract.production.member_unexpected"))
         return
     check_exact_members(
         production, "/production", ("none",) + PRODUCTION_RULE_MEMBERS,
-        "production", violations)
+        "production", violations, optional=PRODUCTION_OPTIONAL_MEMBERS)
     commands = production_commands(source)
     changes = production.get("changes")
     if "changes" in production and check_object(
@@ -1210,6 +1217,15 @@ def validate_production(source: dict, violations: list[dict]) -> None:
                 "must name at least one command, key file or MCP tool that "
                 "changes production",
                 "contract.production.no_change_route"))
+    if "console_activation" in production and check_string(
+            production["console_activation"], "/production/console_activation",
+            "production", violations):
+        changing = changes.get("commands") if isinstance(changes, dict) else None
+        if isinstance(changing, list) and production["console_activation"] not in changing:
+            violations.append(violation(
+                "/production/console_activation",
+                "names no command of production.changes.commands",
+                "contract.production.console_activation_not_a_change"))
     read_only = production.get("read_only")
     if "read_only" in production and check_object(
             read_only, "/production/read_only", "production", violations):
@@ -1443,12 +1459,15 @@ def production_rules(source: dict) -> dict:
     production = source["production"]
     if production["none"]:
         return {"status": "none"}
-    return {
+    rules = {
         "status": "declared",
         "changes": copy.deepcopy(production["changes"]),
         "read_only": copy.deepcopy(production["read_only"]),
         "release_profile": production["release_profile"],
     }
+    if "console_activation" in production:
+        rules["console_activation"] = production["console_activation"]
+    return rules
 
 
 def build_snapshot(root: Path, source: dict, manifest: dict) -> dict:

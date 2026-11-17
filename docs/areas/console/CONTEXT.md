@@ -134,7 +134,7 @@ The one place that holds every account control and detail: opened from the capac
 _Avoid_: settings page, account menu
 
 **Activation line**:
-The one line at the head of the Work column when origin's integration branch carries a console change this host does not run, naming `just switch` and the checkout to run it in; it is not an inbox item and is not counted in the statement (ADR-console-043).
+The one line at the head of the Work column when origin's integration branch carries a console change this host does not run. It names the commit and carries Activate, which has the console run this host's activation for that commit; it then reads the run's outcome in plain words. It is not an inbox item and is not counted in the statement (ADR-console-043, ADR-system-004).
 _Avoid_: deploy banner, update notice
 
 **Sign-in state**:

@@ -20,6 +20,15 @@
 # owner's tools, so on Linux the unit also carries the user profile (`claude-account` and
 # the tools a terminal session has) and the system profile (coreutils, bash and `systemd-run`)
 # between gh and `/usr/bin:/bin`.
+#
+# On Linux `/run/wrappers/bin` comes first after gh, before the system profile, so the
+# `sudo` the page's activation runs (`just switch` runs `sudo nixos-rebuild switch` by name)
+# is the setuid wrapper. The `sudo` in `/run/current-system/sw/bin` is the plain binary and
+# fails with "must be owned by uid 0 and have the setuid bit set". The activation the console
+# starts runs in its own transient user scope (`systemd-run --user --scope`), so the unit's
+# restart during the switch (`KillMode=control-group`) does not end it, and the restarted
+# console resumes waiting for its recorded exit. `systemd-run` and `systemctl` are reached
+# through `/run/current-system/sw/bin`, already on the path.
 {
   config,
   lib,
@@ -39,6 +48,7 @@ let
   path = lib.concatStringsSep ":" (
     [ (lib.makeBinPath [ config.programs.gh.package ]) ]
     ++ lib.optionals pkgs.stdenv.isLinux [
+      "/run/wrappers/bin"
       "${config.home.profileDirectory}/bin"
       "/run/current-system/sw/bin"
     ]
@@ -63,7 +73,7 @@ in
     path = lib.mkOption {
       type = lib.types.str;
       readOnly = true;
-      description = "The PATH the console service runs with: gh's bin, on Linux the user and system profiles, then the system tools.";
+      description = "The PATH the console service runs with: gh's bin, on Linux the setuid wrappers (sudo), the user and system profiles, then the system tools.";
     };
   };
 

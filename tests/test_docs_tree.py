@@ -800,7 +800,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053, ADR-console-058"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056"),
@@ -835,7 +835,7 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037, ADR-console-053, "
-                                          "ADR-console-058"),
+                                          "ADR-console-058, ADR-system-004"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056")):
@@ -941,7 +941,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053, ADR-console-058"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
@@ -1587,6 +1587,38 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-053", notice)
 
+    def test_the_host_activation_decision_is_recorded(self):
+        path = ("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
+                "activate.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-system-004 \u2014 Host activation runs only through the "
+                                "console's Activate")
+        adr = self.doc(path)
+        for needle in ("#1193", "POST /api/activate", "bad activation", "nothing to activate",
+                       "an activation is already running",
+                       "that commit is no longer the tip of origin's integration branch",
+                       "the tip of origin's integration branch could not be read",
+                       "so it runs only through the console's Activate, on the line that says "
+                       "a console change is not active on this host."):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        for older in ("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-"
+                      "host-is-one-line-in-the-work-column.md",
+                      "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
+                      "origin.md",
+                      "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
+                      "outside-its-release-path.md",
+                      "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
+                      "rules-or-that-it-has-none.md"):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            with self.subTest(older):
+                self.assertIn("ADR-system-004", line)
+        for context in ("console", "guard", "project-contract"):
+            with self.subTest(context):
+                self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
+        self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
+
     def test_the_notices_fold_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
         self.assertIn('"Notices (n)"', adr)
@@ -1617,7 +1649,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("- **Status:** accepted; amended by ADR-guard-011, ADR-guard-012",
                       (REPO_ROOT / path).read_text().splitlines())
         eleven = "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-outside-its-release-path.md"
-        self.assertIn("- **Status:** accepted; amended by ADR-guard-012",
+        self.assertIn("- **Status:** accepted; amended by ADR-guard-012, ADR-system-004",
                       (REPO_ROOT / eleven).read_text().splitlines())
         twelve = ("docs/areas/guard/adr/012-the-guard-refuses-declared-production-mcp-tools-"
                   "and-key-file-writes.md")

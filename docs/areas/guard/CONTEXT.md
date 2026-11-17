@@ -21,7 +21,7 @@ A project's entry in the compiled policy, earned only when every derivation step
 _Avoid_: generated row
 
 **Approved release path**:
-The one declared way to change production: the release profile a project contract's production section names, run through the release command. A production refusal names it. See ADR-guard-009 and ADR-guard-011.
+The one declared way to change production: the release profile a project contract's production section names, run through the release command. A production refusal names it. For a production rule the contract names as its console activation, the approved path is the console's Activate instead, and the refusal names it (ADR-system-004). See ADR-guard-009 and ADR-guard-011.
 
 **Detaching word**:
 A word such as `nohup`, `setsid` or `disown` that the guard refuses in every repository, pointing at the Bash tool's background option instead.
