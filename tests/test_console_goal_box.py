@@ -140,7 +140,7 @@ class GoalCountTest(unittest.TestCase):
     def test_make_it_a_goal_recounts_a_box_that_is_already_open(self):
         text = "w" * 1900
         (snap,) = render([
-            START, {"frame": GOAL_ASK_FRAME}, {"key": "g"},
+            START, {"frame": GOAL_ASK_FRAME}, {"click": "thread-open"}, {"key": "g"},
             {"input": {"cls": "goal-text", "value": text}},
             {"click": "ask-goal"}, {"snapshot": True}])
         (field,) = goal_named(snap, "goal-text")
@@ -213,6 +213,19 @@ class GoalCountTest(unittest.TestCase):
         self.assertTrue(box_open(sent))
 
 
+class GoalRefusalStyleTest(unittest.TestCase):
+    def test_no_rule_hides_a_refusal_the_page_has_put_in_the_status_line(self):
+        page = PAGE.read_text()
+        style = page[page.index("<style>"):page.index("</style>")]
+        hiding = []
+        for selector, decls in style_rules(style):
+            if not re.search(r"\.goal-status\b|\.fail\b", selector):
+                continue
+            if decls.get("display") == "none" or decls.get("visibility") == "hidden":
+                hiding.append(selector)
+        self.assertEqual(hiding, [".goal-status:empty"])
+
+
 class GoalRefusalChromiumTest(unittest.TestCase):
     def chromium(self):
         """A launched Chromium; the test is skipped when playwright or Chromium is missing."""
@@ -228,6 +241,56 @@ class GoalRefusalChromiumTest(unittest.TestCase):
             self.skipTest(f"no Chromium to launch: {err}")
         self.addCleanup(browser.close)
         return browser
+
+    def test_a_refusal_is_on_screen_in_the_box_and_again_after_a_reopen(self):
+        browser = self.chromium()
+        measure = """() => {
+          const box = document.querySelector(".goal-box");
+          const fail = document.querySelector(".goal-box .goal-status .fail");
+          if (box === null || fail === null) return { box: box !== null, fail: false };
+          const b = box.getBoundingClientRect(), f = fail.getBoundingClientRect();
+          const hit = document.elementFromPoint(f.left + f.width / 2, f.top + f.height / 2);
+          return { box: true, fail: true, text: fail.textContent.trim(),
+                   shown: fail.getClientRects().length > 0 && f.width > 0 && f.height > 0
+                          && getComputedStyle(fail).visibility !== "hidden",
+                   inBox: f.top >= b.top && f.bottom <= b.bottom && f.left >= b.left && f.right <= b.right,
+                   inViewport: f.top >= 0 && f.bottom <= innerHeight && f.left >= 0 && f.right <= innerWidth,
+                   topmost: hit !== null && (hit === fail || fail.contains(hit)),
+                   value: document.querySelector("textarea.goal-text").value };
+        }"""
+        step = "(step) => window.__step(step)"
+        for width in (1440, 480):
+            with self.subTest(width=width):
+                page = browser.new_page(viewport={"width": width, "height": 900})
+                errors = []
+                page.on("pageerror", lambda err: errors.append(str(err)))
+                page.route(f"{CONSOLE_URL}/**", served)
+                page.add_init_script(PAGE_STUBS)
+                page.clock.set_fixed_time(NOW_MS)
+                page.goto(CONSOLE_URL + "/")
+                page.evaluate(SETTLE)
+                page.evaluate(step, {"frame": MANY_FRAME})
+                page.evaluate(SETTLE)
+                page.focus("textarea.goal-text")
+                page.evaluate(SETTLE)
+                for move in ({"input": {"cls": "goal-text", "value": "make it resumable"}},
+                             {"respond": REFUSED}, {"click": "goal-send"}):
+                    page.evaluate(step, move)
+                    page.evaluate(SETTLE)
+                refused = page.evaluate(measure)
+                page.evaluate(step, {"key": "Escape"})
+                page.evaluate(SETTLE)
+                page.evaluate(step, {"key": "g"})
+                page.evaluate(SETTLE)
+                reopened = page.evaluate(measure)
+                page.close()
+                for label, state in (("refused", refused), ("reopened", reopened)):
+                    with self.subTest(label):
+                        self.assertEqual(state["text"], REFUSED_LINE)
+                        for check in ("shown", "inBox", "inViewport", "topmost"):
+                            self.assertTrue(state[check], check)
+                        self.assertEqual(state["value"], "make it resumable")
+                self.assertEqual(errors, [])
 
     def test_over_the_limit_nothing_moves_and_the_hint_sits_beside_send(self):
         browser = self.chromium()
