@@ -27,6 +27,6 @@ ADR-console-058 gave the console a read-only question session and ADR-console-05
 
 - A thread's follow-ups run under the profile the console chooses for each, not necessarily the profile of the question they continue.
 - A follow-up costs a prompt as long as its thread, up to `MAX_THREAD_BYTES`.
-- A thread whose root retention removed cannot be continued; its remaining questions group among themselves.
+- A follow-up whose root retention removed becomes its own thread, and each such kept follow-up can be continued as one when answered; the remaining questions do not group among themselves.
 - The asked row's payload gains an optional `thread_id`; the schema stays 10 and the spend fold reads only `session_id` and `profile`.
 - Related: ADR-console-001, ADR-console-058, ADR-console-059.

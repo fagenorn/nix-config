@@ -779,6 +779,28 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(list(by_id.values()), [None] * 4)
 
 
+class QuestionActivityTest(unittest.TestCase):
+    OLD, NEW = "owner/p01", "owner/p02"
+
+    def test_a_question_or_follow_up_neither_reorders_projects_nor_resets_their_untouched_age(self):
+        events = [
+            _registered(1, self.OLD),
+            _asked(2, self.OLD, "q1"),
+            _answered(3, self.OLD, "q1", outcome="answered", answer="Answer: a"),
+            _registered(4, self.NEW),
+        ]
+        before = view.project_states(events)
+        follow_up = [
+            _asked(5, self.OLD, "q2", thread_id="q1"),
+            _answered(6, self.OLD, "q2", outcome="answered", answer="Answer: b"),
+        ]
+        after = view.project_states(follow_up, before)
+        self.assertEqual(after, view.project_states(events + follow_up))
+        self.assertEqual(after, before)
+        order = [e["project_id"] for e in _project_entries(view.derive_view(after.values()))]
+        self.assertEqual(order, [self.NEW, self.OLD])
+
+
 class QuestionThreadViewTest(unittest.TestCase):
     P1 = "owner/p01"
 
