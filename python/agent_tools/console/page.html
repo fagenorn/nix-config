@@ -2252,32 +2252,42 @@ function answerBlocks(text) {
   endPara();
   return blocks;
 }
-// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong; the rest is span text, an unmatched marker included.
+// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong, and its text may span inline code; the rest is span text, an unmatched marker included.
 function inlineNodes(text) {
-  const nodes = [];
-  const plain = (run) => {
-    let at = 0;
-    for (const m of run.matchAll(/\*\*([\s\S]+?)\*\*/g)) {
-      if (m.index > at) nodes.push(el("span", "", run.slice(at, m.index)));
-      nodes.push(el("strong", "", m[1]));
-      at = m.index + m[0].length;
-    }
-    if (at < run.length) nodes.push(el("span", "", run.slice(at)));
-  };
   const value = String(text);
-  let run = "";
+  const spans = [];
+  let masked = "";
   for (let i = 0; i < value.length; i++) {
     const end = value[i] === "`" ? value.indexOf("`", i + 1) : -1;
     if (end === -1) {
-      run += value[i];
+      masked += value[i];
       continue;
     }
-    plain(run);
-    run = "";
-    nodes.push(el("code", "md-code", value.slice(i + 1, end)));
+    spans.push([i, end]);
+    masked += "x".repeat(end - i + 1);
     i = end;
   }
-  plain(run);
+  const emit = (into, from, to) => {
+    let at = from;
+    for (const [start, end] of spans) {
+      if (start < from || end >= to) continue;
+      if (start > at) into(el("span", "", value.slice(at, start)));
+      into(el("code", "md-code", value.slice(start + 1, end)));
+      at = end + 1;
+    }
+    if (at < to) into(el("span", "", value.slice(at, to)));
+  };
+  const nodes = [];
+  const push = (node) => nodes.push(node);
+  let at = 0;
+  for (const m of masked.matchAll(/\*\*([\s\S]+?)\*\*/g)) {
+    emit(push, at, m.index);
+    const strong = el("strong", "");
+    emit((node) => strong.appendChild(node), m.index + 2, m.index + m[0].length - 2);
+    nodes.push(strong);
+    at = m.index + m[0].length;
+  }
+  emit(push, at, value.length);
   return nodes;
 }
 // One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, the closed sources fold, Make it a goal, then the call-out, which is last.
@@ -2512,10 +2522,12 @@ function threadItem(projectId, thread) {
   return item;
 }
 function toggleReading(projectId, thread) {
-  const closing = isReading(projectId, thread);
-  reading = closing ? null : { project: projectId, thread: thread.id };
+  if (isReading(projectId, thread)) {
+    closeReading();
+    return;
+  }
+  reading = { project: projectId, thread: thread.id };
   redrawNotices();
-  if (closing) return;
   const heading = document.querySelector("h2.reading-question");
   if (heading !== null) heading.focus();
 }

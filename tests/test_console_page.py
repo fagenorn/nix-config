@@ -2040,6 +2040,19 @@ class PageReadingTest(unittest.TestCase):
         self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
         self.assertEqual(answers(later), [])
 
+    def test_enter_after_closing_through_the_thread_opener_does_not_approve_an_outstanding_brief(self) -> None:
+        # Closing redraws the Work column and detaches the focused opener; focus must come back to its twin, not fall
+        # to BODY, where Enter would reach the inbox answer keys (#1226).
+        both = {**view([asking(project(0, []), thread(ASK_FIRST))]), "inbox": frame([ANSWERABLE])["inbox"]}
+        steps = [self.begin, {"frame": both}, {"open": "questions:owner/p00"}, {"focus_on": "thread-open"},
+                 {"click": "thread-open"}, {"focus_on": "thread-open"}, {"click": "thread-open"}]
+        (closed, pressed, later) = render([*steps, {"snapshot": True}, {"key": "Enter", "follow": True},
+                                           {"snapshot": True}, {"clock": NOW_MS + 5000}, {"snapshot": True}])
+        self.assertIs(closed["reading"]["hidden"], True)
+        self.assertEqual(role(closed["active"]), "thread-open")
+        self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
+        self.assertEqual(answers(later), [])
+
     def test_a_focused_control_that_leaves_the_panel_hands_focus_to_the_heading(self) -> None:
         # The choices go once a follow-up is pending; the focus must not fall to BODY (#1226).
         both = {**view([asking(project(0, []), thread(ASK_FIRST, ASK_CHOOSE))]), "inbox": frame([ANSWERABLE])["inbox"]}
@@ -2214,6 +2227,15 @@ class PageReadingFormatTest(unittest.TestCase):
         self.assertEqual(full(last), "See [the log](http://x), *this* and # not a heading")
         allowed = {"div", "p", "ul", "ol", "li", "pre", "code", "strong", "span"}
         self.assertEqual({n["tag"] for n in nodes(answer)} - allowed, set())
+
+    def test_bold_may_span_inline_code(self) -> None:
+        answer = self.answer_of("**Run `just build` now.** and `x` then **y**")
+        (para,) = answer["children"]
+        strong = [c for c in para["children"] if c["tag"] == "strong"]
+        self.assertEqual([full(n) for n in strong], ["Run just build now.", "y"])
+        self.assertEqual([n["tag"] for n in nodes(strong[0]) if n["tag"] == "code"], ["code"])
+        self.assertEqual(full(para), "Run just build now. and x then y")
+        self.assertNotIn("**", full(para))
 
     def test_an_unclosed_fence_runs_to_the_end_and_unmatched_markers_stay_text(self) -> None:
         answer = self.answer_of("a ** b `c\n```\nx\n**y**")
