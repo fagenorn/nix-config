@@ -1,6 +1,6 @@
 # ADR-console-043 — A merged console change not active on this host is one line in the Work column
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-system-004
 - **Decided in:** #1114
 
 ## Context

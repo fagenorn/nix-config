@@ -2021,6 +2021,27 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     f"lifecycle guard: `{shown}` changes the production of {PROD} "
                     f"(production rule {rule}){tail}", result.stderr)
 
+    def test_a_rule_the_console_activates_is_refused_naming_the_consoles_activate(self):
+        """Issue 1193: the rule named by `console_activation` is approved through the
+        console's Activate; every other rule keeps the release-profile sentence."""
+        console_row = {**PROD_ROW, "production": {**PRODUCTION, "console_activation": "deploy"}}
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: console_row})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        result = self.run_guard("just switch", cwd=prod, guard_args=guard_args)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertEqual(
+            "lifecycle guard: `just switch` changes the production of acme/deployer "
+            "(production rule deploy), so it runs only through the console's Activate, "
+            "on the line that says a console change is not active on this host.\n",
+            result.stderr)
+        other = self.run_guard("kubectl apply -f deploy.yaml", cwd=prod, guard_args=guard_args)
+        self.assertEqual(2, other.returncode, other.stderr)
+        self.assertEqual(
+            "lifecycle guard: `/usr/local/bin/kubectl` changes the production of "
+            "acme/deployer (production rule kube-apply), so it runs only through the "
+            "release profile forge-main with release transaction preview and release "
+            "transaction run.\n", other.stderr)
+
     def test_declared_read_only_routes_and_the_release_route_pass_the_production_rules(self):
         """AC2: a read-only route, the release route and a mere mention pass."""
         guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
@@ -2162,7 +2183,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     derivation={})),
                 ("a bad production", self.write_policy(
                     derived_repositories={PROD: {**PROD_ROW, "production": bad_argv}},
-                    derivation={}))):
+                    derivation={})),
+                *((f"console_activation {value!r}", self.write_policy(
+                    derived_repositories={PROD: {**PROD_ROW, "production": {
+                        **PRODUCTION, "console_activation": value}}},
+                    derivation={})) for value in ("", "check", 1))):
             for command in ("true", "just switch"):
                 with self.subTest(policy=name, command=command):
                     result = self.run_guard(
@@ -2187,7 +2212,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "none": False,
                 "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
                 "read_only": {"commands": ["nix-build"], "mcp_tools": []},
-                "release_profile": "github-release"}
+                "release_profile": "github-release",
+                "console_activation": "nix-activate"}
 
         world = GuardPolicyWorld(self)
         world.project("fixture/prodfix", "fagenorn/prodfix", mutate=declare)
@@ -2200,8 +2226,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         self.assertEqual(2, refused.returncode, refused.stderr)
         self.assertEqual(
             "lifecycle guard: `just switch` changes the production of fagenorn/prodfix "
-            "(production rule nix-activate), so it runs only through the release profile "
-            "github-release with release transaction preview and release transaction run.\n",
+            "(production rule nix-activate), so it runs only through the console's Activate, "
+            "on the line that says a console change is not active on this host.\n",
             refused.stderr)
         allowed = self.run_guard("just build", cwd=repo, guard_args=guard_args, timeout=60)
         self.assertEqual(0, allowed.returncode, allowed.stderr)

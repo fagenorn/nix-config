@@ -1,6 +1,8 @@
 import json
+import math
 import os
 import re
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -46,6 +48,38 @@ def land_queue_section(text: str, name: str) -> str:
             break
         out.append(line)
     return "".join(out)
+
+AWT_TIME_DOC = "docs/archive/agent-workflow-tests-time-2026-11-17.md"
+AWT_TIME_HEADER = (
+    "| Job | Run/attempt | Issue | Completed (UTC) | Test step (min) | Realization (min) |"
+    " Start-up (min) | Tests (min) | Other (min) | Members | Jobs | CPU busy (%) | Slots busy (%) |"
+    " Order saving (min) | Slots saving (min) | Cache saving (min) | Slots estimate (min) |"
+)
+AWT_TIME_SEPARATOR = "|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+AWT_SUMMARY_HEADER = "| Figure | Median | p90 | Max |"
+AWT_SUMMARY_SEPARATOR = "|---|---:|---:|---:|"
+AWT_MEMBERS_HEADER = (
+    "| Member | Runs | Median wall (s) | Median CPU (s) | Median start-up (s) | Median tests (s) |"
+)
+AWT_MEMBERS_SEPARATOR = "|---|---:|---:|---:|---:|---:|"
+
+
+def awt_tables(text: str) -> tuple[list[list[str]], dict[str, list[str]], list[list[str]]]:
+    """The run rows' cells, the summary as {figure: [median, p90, max]} and the member rows' cells."""
+    lines = land_queue_section(text, "Measurements").splitlines()
+
+    def rows_after(header):
+        at = lines.index(header)
+        rows = []
+        for line in lines[at + 2 :]:
+            if not line.startswith("|"):
+                break
+            rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+        return rows
+
+    summary = {row[0]: row[1:] for row in rows_after(AWT_SUMMARY_HEADER)}
+    return rows_after(AWT_TIME_HEADER), summary, rows_after(AWT_MEMBERS_HEADER)
+
 
 ADR_PATH_RE = re.compile(r"docs/areas/[a-z0-9-]+/adr/\d{3}-[a-z0-9-]+\.md")
 # The [E] and [l] classes match the same text as the letters; they keep this
@@ -800,7 +834,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053, ADR-console-058"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056"),
@@ -835,7 +869,7 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037, ADR-console-053, "
-                                          "ADR-console-058"),
+                                          "ADR-console-058, ADR-system-004"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056")):
@@ -941,7 +975,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053, ADR-console-058"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
@@ -1587,6 +1621,38 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-053", notice)
 
+    def test_the_host_activation_decision_is_recorded(self):
+        path = ("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
+                "activate.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-system-004 \u2014 Host activation runs only through the "
+                                "console's Activate")
+        adr = self.doc(path)
+        for needle in ("#1193", "POST /api/activate", "bad activation", "nothing to activate",
+                       "an activation is already running",
+                       "that commit is no longer the tip of origin's integration branch",
+                       "the tip of origin's integration branch could not be read",
+                       "so it runs only through the console's Activate, on the line that says "
+                       "a console change is not active on this host."):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        for older in ("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-"
+                      "host-is-one-line-in-the-work-column.md",
+                      "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-"
+                      "origin.md",
+                      "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-"
+                      "outside-its-release-path.md",
+                      "docs/areas/project-contract/adr/007-a-contract-declares-its-production-"
+                      "rules-or-that-it-has-none.md"):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            with self.subTest(older):
+                self.assertIn("ADR-system-004", line)
+        for context in ("console", "guard", "project-contract"):
+            with self.subTest(context):
+                self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
+        self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
+
     def test_the_notices_fold_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
         self.assertIn('"Notices (n)"', adr)
@@ -1617,7 +1683,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("- **Status:** accepted; amended by ADR-guard-011, ADR-guard-012",
                       (REPO_ROOT / path).read_text().splitlines())
         eleven = "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-outside-its-release-path.md"
-        self.assertIn("- **Status:** accepted; amended by ADR-guard-012",
+        self.assertIn("- **Status:** accepted; amended by ADR-guard-012, ADR-system-004",
                       (REPO_ROOT / eleven).read_text().splitlines())
         twelve = ("docs/areas/guard/adr/012-the-guard-refuses-declared-production-mcp-tools-"
                   "and-key-file-writes.md")
@@ -1922,6 +1988,398 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(f"its own hold is at most {m[1]} min shorter", proposal)
             self.assertIn("`forge-claim land` is unchanged", proposal)
         self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 3)
+
+
+    def _awt_fixture(self):
+        from datetime import datetime, timedelta
+
+        repo = "repos/fagenorn/nix-config"
+        job_log = (
+            "\ufeff2026-11-16T21:03:20.0000000Z ##[group]Run actions/checkout@v4\n"
+            "2026-11-16T21:03:30.2500000Z ##[group]Run WORKFLOW_POLICY_SURFACE=source nix shell"
+            " --inputs-from . nixpkgs#just nixpkgs#nodejs --command just agent-workflow-tests\n"
+            "2026-11-16T21:03:35.0000000Z copying path '/nix/store/x-just' from 'https://cache.nixos.org'...\n"
+            "2026-11-16T21:03:42.2500000Z suite-runner: start tests/a.py\n"
+            "2026-11-16T21:03:42.2600000Z suite-runner: start tests/b.py\n"
+            "2026-11-16T21:04:42.0000000Z suite-runner: begin tests/b.py\n"
+            "2026-11-16T21:04:42.0000000Z suite-runner:     5.0s wall     1.0s cpu passed tests/fake.py\n"
+            "2026-11-16T21:04:42.0000000Z suite-runner: summary members=1 passed=1 failed=0 jobs=1 wall=5.0s cpu=1.0s\n"
+            "2026-11-16T21:04:42.0000000Z Ran 1 test in 0.001s\n"
+            "2026-11-16T21:04:42.0000000Z Ran 3 tests in 30.000s\n"
+            "2026-11-16T21:04:42.0000000Z suite-runner: end tests/b.py passed exit=0 60.0s\n"
+            "2026-11-16T21:04:42.1000000Z suite-runner: start tests/c.sh\n"
+            "2026-11-16T21:05:22.0000000Z suite-runner: begin tests/a.py\n"
+            "2026-11-16T21:05:22.0000000Z Ran 10 tests in 80.000s\n"
+            "2026-11-16T21:05:22.0000000Z suite-runner: end tests/a.py passed exit=0 100.0s\n"
+            "2026-11-16T21:05:42.0000000Z suite-runner: begin tests/c.sh\n"
+            "2026-11-16T21:05:42.0000000Z ok\n"
+            "2026-11-16T21:05:42.0000000Z suite-runner: end tests/c.sh passed exit=0 60.0s\n"
+            "2026-11-16T21:06:12.0000000Z suite-runner: timings, slowest first\n"
+            "2026-11-16T21:06:12.0000000Z suite-runner:   100.0s wall    90.0s cpu passed tests/a.py\n"
+            "2026-11-16T21:06:12.0000000Z suite-runner:    60.0s wall    30.0s cpu passed tests/b.py\n"
+            "2026-11-16T21:06:12.0000000Z suite-runner:    60.0s wall    60.0s cpu passed tests/c.sh\n"
+            "2026-11-16T21:06:12.0000000Z suite-runner: summary members=3 passed=3 failed=0 jobs=2 wall=150.0s cpu=220.0s\n"
+        )
+
+        def shifted(seconds):
+            out = []
+            for index, line in enumerate(job_log.splitlines(keepends=True)):
+                if index >= 2:
+                    stamp, rest = line.split(" ", 1)
+                    when = datetime.strptime(stamp[:26], "%Y-%m-%dT%H:%M:%S.%f") + timedelta(seconds=seconds)
+                    line = when.strftime("%Y-%m-%dT%H:%M:%S.%f") + "0Z " + rest
+                out.append(line)
+            return "".join(out)
+
+        def stamp(base, delta):
+            return (datetime.strptime(base, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=delta)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        def job(job_id, conclusion, completed, realization=None, steps=True, name="Agent Workflow Tests"):
+            record = {
+                "id": job_id,
+                "name": name,
+                "status": "completed",
+                "conclusion": conclusion,
+                "started_at": stamp(completed, -1000),
+                "completed_at": completed,
+                "steps": [],
+            }
+            if steps:
+                record["steps"] = [
+                    {
+                        "name": "Run agent workflow tests",
+                        "started_at": stamp(completed, -8 - (realization + 150)),
+                        "completed_at": stamp(completed, -8),
+                    }
+                ]
+            return record
+
+        def run(run_id, branch, attempts=1):
+            return {"id": run_id, "run_attempt": attempts, "head_branch": branch}
+
+        listing = [run(601, "issue-77-x", 2)]
+        fixture = {}
+        fixture[f"api {repo}/actions/runs/601/attempts/1/jobs"] = {
+            "total_count": 2,
+            "jobs": [
+                {
+                    "id": 7001,
+                    "name": "Agent Workflow Tests",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-11-16T21:00:00Z",
+                    "completed_at": "2026-11-16T21:06:20Z",
+                    "steps": [
+                        {
+                            "name": "Run agent workflow tests",
+                            "started_at": "2026-11-16T21:03:30Z",
+                            "completed_at": "2026-11-16T21:06:12Z",
+                        }
+                    ],
+                },
+                {
+                    "id": 7101,
+                    "name": "Nix Eval",
+                    "status": "completed",
+                    "conclusion": "success",
+                    "started_at": "2026-11-16T21:00:00Z",
+                    "completed_at": "2026-11-16T21:02:00Z",
+                    "steps": [],
+                },
+            ],
+        }
+        fixture[f"api {repo}/actions/runs/601/attempts/2/jobs"] = {
+            "total_count": 1,
+            "jobs": [job(7002, "success", "2026-11-17T00:10:00Z", 12)],
+        }
+        fixture[f"api {repo}/actions/jobs/7001/logs"] = job_log
+        for run_id in range(602, 626):
+            j = run_id - 603
+            if run_id == 602:
+                r = 12
+            elif j < 20:
+                r = 12 * (j + 1)
+            else:
+                r = {623: 360, 624: 480, 625: 720}[run_id]
+            completed = stamp("2026-11-16T12:00:00Z", 20 * 60 * (run_id - 602))
+            listing.append(run(run_id, f"issue-{run_id}-x"))
+            fixture[f"api {repo}/actions/runs/{run_id}/attempts/1/jobs"] = {
+                "total_count": 1,
+                "jobs": [job(7000 + run_id, "success", completed, r)],
+            }
+            if run_id >= 603:
+                fixture[f"api {repo}/actions/jobs/{7000 + run_id}/logs"] = shifted(r - 12)
+        for run_id, job_id, conclusion, completed, name in (
+            (626, 7626, "cancelled", "2026-11-16T20:00:00Z", "Agent Workflow Tests"),
+            (627, 7627, "failure", "2026-11-16T20:10:00Z", "Agent Workflow Tests"),
+            (628, 7628, "success", "2026-11-17T00:00:01Z", "Agent Workflow Tests"),
+            (629, 7629, "success", "2026-11-16T20:20:00Z", "Nix Eval"),
+        ):
+            listing.append(run(run_id, f"issue-{run_id}-x"))
+            fixture[f"api {repo}/actions/runs/{run_id}/attempts/1/jobs"] = {
+                "total_count": 1,
+                "jobs": [job(job_id, conclusion, completed, 12, steps=name == "Agent Workflow Tests", name=name)],
+            }
+        fixture[
+            f"api {repo}/actions/workflows/ci.yaml/runs?event=pull_request&created=<2026-11-17T00:00:00Z&per_page=100"
+        ] = {"total_count": 29, "workflow_runs": listing}
+        return fixture
+
+    def _run_awt_fence(self, fixture):
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Reproduce"))
+        self.assertEqual(len(fences), 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "python3").symlink_to(sys.executable)
+            fixture_path = root / "fixture.json"
+            fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+            gh = bin_dir / "gh"
+            gh.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "key = ' '.join(sys.argv[1:])\n"
+                "data = json.load(open(os.environ['FAKE_GH_FIXTURE'], encoding='utf-8'))\n"
+                "if key not in data:\n"
+                "    sys.stderr.write('unexpected gh call: ' + key + '\\n')\n"
+                "    sys.exit(1)\n"
+                "value = data[key]\n"
+                "if isinstance(value, str):\n"
+                "    sys.stdout.write(value)\n"
+                "else:\n"
+                "    print(json.dumps(value))\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            return subprocess.run(
+                ["bash", "-c", fences[0]],
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "FAKE_GH_FIXTURE": str(fixture_path),
+                    "PYTHONIOENCODING": "utf-8",
+                },
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=60,
+            )
+
+    def test_the_test_job_program_splits_the_step_from_the_runner_log(self):
+        result = self._run_awt_fence(self._awt_fixture())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        for expected in (
+            "| 7001 | 601/1 | 77 | 2026-11-16 21:06:20 | 2.7 | 0.2 | 0.6 | 1.9 | 0.0 | 3 | 2 | 73 | 73 | 0.5 | 0.8 | 0.2 | 0.7 |",
+            "| 7625 | 625/1 | 625 | 2026-11-16 19:40:00 | 14.5 | 12.0 | 0.6 | 1.9 | 0.0 | 3 | 2 | 73 | 73 | 0.5 | 0.8 | 12.0 | 0.7 |",
+            "| Order saving (min) | 0.5 | 0.5 | 0.5 |",
+            "| Slots saving (min) | 0.8 | 0.8 | 0.8 |",
+            "| Test step (min) | 4.8 | 8.5 | 14.5 |",
+            "| Realization (min) | 2.3 | 6.0 | 12.0 |",
+            "| Cache saving (min) | 2.3 | 6.0 | 12.0 |",
+            "| Slots estimate (min) | 0.7 | 0.7 | 0.7 |",
+            "Jobs: 24, completed 2026-11-16 12:20:00 to 2026-11-16 21:06:20 (UTC).",
+        ):
+            self.assertIn(expected, out)
+        job_rows = [line for line in out if line.startswith("| 7")]
+        self.assertEqual(len(job_rows), 24)
+        self.assertTrue(job_rows[0].startswith("| 7603 | 603/1 | 603 | 2026-11-16 12:20:00 | 2.7 | 0.2 |"), job_rows[0])
+        for absent in ("7002", "7602", "7626", "7627", "7628", "7629", "7101"):
+            self.assertFalse(any(line.startswith(f"| {absent} ") for line in out), absent)
+        members = [
+            "| tests/a.py | 24 | 100.0 | 90.0 | 20.0 | 80.0 |",
+            "| tests/b.py | 24 | 60.0 | 30.0 | 30.0 | 30.0 |",
+            "| tests/c.sh | 24 | 60.0 | 60.0 | - | - |",
+        ]
+        at = [out.index(line) for line in members]
+        self.assertEqual(at, sorted(at))
+        self.assertFalse(any("tests/fake.py" in line for line in out))
+
+    def test_the_test_job_program_refuses_a_short_window(self):
+        fixture = self._awt_fixture()
+        key = "api repos/fagenorn/nix-config/actions/workflows/ci.yaml/runs?event=pull_request&created=<2026-11-17T00:00:00Z&per_page=100"
+        fixture[key]["workflow_runs"] = [r for r in fixture[key]["workflow_runs"] if r["id"] not in (602, 603)]
+        result = self._run_awt_fence(fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("23", result.stderr)
+
+    def test_the_test_job_program_refuses_a_log_without_a_summary(self):
+        fixture = self._awt_fixture()
+        log_key = "api repos/fagenorn/nix-config/actions/jobs/7001/logs"
+        fixture[log_key] = "".join(fixture[log_key].splitlines(keepends=True)[:-1])
+        result = self._run_awt_fence(fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("7001", result.stderr)
+
+    def test_the_test_job_program_refuses_a_python_member_without_a_ran_line(self):
+        fixture = self._awt_fixture()
+        log_key = "api repos/fagenorn/nix-config/actions/jobs/7001/logs"
+        fixture[log_key] = "".join(
+            line for line in fixture[log_key].splitlines(keepends=True) if "Ran 10 tests in 80.000s" not in line
+        )
+        result = self._run_awt_fence(fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("7001", result.stderr)
+        self.assertIn("tests/a.py", result.stderr)
+
+    def test_the_test_job_program_refuses_timing_rows_that_disagree_with_the_summary(self):
+        fixture = self._awt_fixture()
+        log_key = "api repos/fagenorn/nix-config/actions/jobs/7001/logs"
+        fixture[log_key] = "".join(
+            line
+            for line in fixture[log_key].splitlines(keepends=True)
+            if "60.0s wall    60.0s cpu passed tests/c.sh" not in line
+        )
+        result = self._run_awt_fence(fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("7001", result.stderr)
+        self.assertIn("members=3", result.stderr)
+
+    def test_the_test_job_measurement_holds_twenty_four_runs(self):
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        readme = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
+        self.assertIn("| A measurement or other retained evidence | `archive/` |", readme.splitlines())
+        section = land_queue_section(text, "Measurements")
+        lines = section.splitlines()
+        rows, summary, members = awt_tables(text)
+        for header, separator in (
+            (AWT_TIME_HEADER, AWT_TIME_SEPARATOR),
+            (AWT_SUMMARY_HEADER, AWT_SUMMARY_SEPARATOR),
+            (AWT_MEMBERS_HEADER, AWT_MEMBERS_SEPARATOR),
+        ):
+            self.assertEqual(lines[lines.index(header) + 1], separator)
+        self.assertEqual(len(rows), 24)
+        for row in rows:
+            self.assertEqual(len(row), 17, row)
+        self.assertEqual(len({row[0] for row in rows}), 24)
+        completed = [row[3] for row in rows]
+        self.assertEqual(completed, sorted(completed))
+        jobs_lines = re.findall(
+            r"(?m)^Jobs: (\d+), completed (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) to (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \(UTC\)\.$",
+            section,
+        )
+        self.assertEqual(len(jobs_lines), 1)
+        self.assertEqual(jobs_lines[0][0], str(len(rows)))
+        self.assertEqual(jobs_lines[0][0], "24")
+        self.assertEqual(jobs_lines[0][1], rows[0][3])
+        self.assertEqual(jobs_lines[0][2], rows[-1][3])
+        for row in rows:
+            parts = sum(float(row[i]) for i in (5, 6, 7, 8))
+            self.assertLessEqual(abs(parts - float(row[4])), 0.25, row)
+        headers = [c.strip() for c in AWT_TIME_HEADER.strip().strip("|").split("|")]
+        self.assertEqual(list(summary), headers[4:17])
+        for index, figure in enumerate(headers):
+            if index < 4:
+                continue
+            col = [float(row[index]) for row in rows]
+            self.assertEqual(
+                summary[figure],
+                [f"{statistics.median(col):.1f}", f"{sorted(col)[math.ceil(0.9 * len(col)) - 1]:.1f}", f"{max(col):.1f}"],
+                figure,
+            )
+        self.assertGreaterEqual(len(members), 10)
+        for row in members:
+            self.assertEqual(len(row), 6, row)
+        fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Reproduce"))
+        self.assertEqual(len(fences), 1)
+        for needle in ("python3 -I - <<'PY'", 'CUTOFF = "2026-11-17T00:00:00Z"', "ROWS = 24", "VCPUS = 4", "SLOTS = 6"):
+            self.assertIn(needle, fences[0])
+
+
+    def test_the_test_job_proposal_keeps_every_test_and_the_required_check(self):
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        rows, summary, _members = awt_tables(text)
+        protection = json.loads((REPO_ROOT / ".github/branch-protection.json").read_text(encoding="utf-8"))
+        contexts = [c["context"] for c in protection["required_status_checks"]["checks"]]
+        proposal = land_queue_section(text, "Proposal")
+        alternatives = land_queue_section(text, "Alternatives considered")
+        maxima = ("Slots saving (min)", "Cache saving (min)")
+        tie_order = ("Cache saving (min)", "Order saving (min)", "Slots saving (min)")
+        m = re.search(
+            r"(?m)^\*\*Expected saving per run \((an estimate, not a bound|a maximum, not an estimate)\):\*\* "
+            r"(at most )?(\d+\.\d) min, the median of `([^`]+)`\.",
+            proposal,
+        )
+        best = max(tie_order, key=lambda f: float(summary[f][0]))
+        saving = next((p for p in proposal.split("\n\n") if p.startswith("**Expected saving per run")), "")
+        opening = proposal.split("**What changes.**")[0]
+        self.assertIn("\n## Proposal\n", text)
+        self.assertIn("\n## Alternatives considered\n", text)
+        self.assertGreater(text.index("\n## Proposal\n"), text.index("\n## Reproduce\n"))
+        self.assertIsNotNone(m)
+        self.assertEqual(m[4], best)
+        self.assertEqual(m[3], summary[best][0])
+        estimate = re.search(
+            r"(?m)^\*\*Estimated saving at (\d+) jobs:\*\* (\d+\.\d) min, the median of `Slots estimate \(min\)`"
+            r" \(p90 (\d+\.\d), maximum (\d+\.\d)\), an estimate\.",
+            proposal,
+        )
+        self.assertIsNotNone(estimate)
+        self.assertEqual(estimate[1], "6")
+        self.assertEqual(list(estimate.groups()[1:]), summary["Slots estimate (min)"])
+        self.assertIn("SLOTS = 6", text)
+        self.assertIn("could be smaller, down to none", proposal)
+        self.assertIn(
+            "The pick compares two maxima, `Slots saving (min)` and `Cache saving (min)`, with one estimate,"
+            " `Order saving (min)`: a maximum is the most a change could save, not what it will save.",
+            opening,
+        )
+        if best in maxima:
+            self.assertEqual(m[1], "a maximum, not an estimate")
+            self.assertEqual(m[2], "at most ")
+            if best == "Slots saving (min)":
+                self.assertIn("longest member", saving)
+                self.assertIn("4 vCPUs", saving)
+            else:
+                self.assertIn("restoring the cache takes no time", saving)
+        else:
+            self.assertEqual(m[1], "an estimate, not a bound")
+            self.assertIsNone(m[2])
+            self.assertIn("so it bounds nothing", saving)
+        self.assertEqual(len(contexts), 3)
+        for context in contexts:
+            self.assertIn(context, proposal)
+        for needle in (
+            "`strict`",
+            "`.github/branch-protection.json`",
+            "`.agents/knowledge/rejections/ungated-agent-merges.md`",
+            "This document only proposes it; adopting it is a later issue.",
+            f"Every one of the {rows[-1][9]} suite members still runs",
+        ):
+            self.assertIn(needle, proposal)
+        required = {
+            "Order saving (min)": ("`python/agent_tools/delivery/suite_timings.json`",),
+            "Slots saving (min)": (
+                "`.github/workflows/ci.yaml`",
+                "`SUITE_RUNNER_JOBS`",
+                "`docs/areas/delivery/adr/006-suite-members-run-in-parallel.md`",
+            ),
+            "Cache saving (min)": ("`.github/workflows/ci.yaml`",),
+        }[best]
+        for needle in required:
+            self.assertIn(needle, proposal)
+        bullets = [line for line in alternatives.splitlines() if line.startswith("- **")]
+        for candidate in tie_order:
+            if candidate == best:
+                continue
+            named = [line for line in bullets if f"`{candidate}`" in line]
+            self.assertEqual(len(named), 1, candidate)
+            if candidate in maxima:
+                self.assertIn(f"at most {summary[candidate][0]} min", named[0])
+            else:
+                self.assertIn(f"{summary[candidate][0]} min", named[0])
+                self.assertIn("estimate", named[0])
+        for needle in ("`Start-up (min)`", "larger runner", "ungated-agent-merges.md"):
+            self.assertIn(needle, alternatives)
+        self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 5)
 
 
 if __name__ == "__main__":
