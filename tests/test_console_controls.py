@@ -35,7 +35,7 @@ OPTION_ONLY = frozenset({"btn-option"})
 LINE_ONLY = frozenset({"field-line"})
 AREA_ONLY = frozenset({"field-area"})
 CODE_ONLY = frozenset({"field-code"})
-ANS_PLAIN = ("ans-note", "ans-words", "ans-draft")
+ANS_PLAIN = ("ans-note", "ans-draft")
 ANS_ROLE = "ans-*"
 
 
@@ -572,7 +572,7 @@ BUSY_ROLES = frozenset({
     "register-withdraw", "send", "retry", "withdraw", "stop-confirm", "stop-cancel", "try-again",
     "stall-withdraw", "start-retry", "start-withdraw", "continue", "progress-withdraw",
     "signin-start", "signin-send",
-    "signin-cancel", "notice-withdraw", "ans-words", "ans-draft", "opt", "words-text", "draft-text"})
+    "signin-cancel", "notice-withdraw", "ans-draft", "opt", "words-text", "draft-text"})
 
 
 def refusal(text: str) -> dict:
@@ -700,8 +700,8 @@ BUSY_SCENARIOS = [
              {"signin-cancel"}),
     busy_row("notice-withdraw", NOTICE_STEPS, held("notice-withdraw"),
              refusal("this notice has ended")),
-    busy_row("ans-words", [START, {"frame": frame([Q0, Q1])}, TYPED_WORDS],
-             held("ans-words", {"clock": 5000}), NO_REPLY, {"ans-words", "words-text", "opt"}),
+    busy_row("question send", [START, {"frame": frame([Q0, Q1])}, TYPED_WORDS],
+             held("send", {"clock": 5000}), NO_REPLY, {"send", "words-text", "opt"}),
     busy_row("ans-draft", [START, {"frame": cards([T0])},
                            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}}],
              held("ans-draft", {"clock": 5000}), refusal("no"), {"ans-draft", "draft-text"}),

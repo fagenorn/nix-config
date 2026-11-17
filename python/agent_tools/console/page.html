@@ -3295,6 +3295,7 @@ function choose(state, qi, oi) {
   state.q = qi;
   state.phase = "choosing";
   state.reason = "";
+  state.notice = "";
 }
 function begin(item, state, pending) {
   state.phase = "waiting";
@@ -3316,9 +3317,33 @@ function planBusy(item, state) {
   }
   return false;
 }
+// The option indices a manager marked as needing the owner's words (an absent or malformed member marks none).
+function needsWords(question, index) {
+  return Array.isArray(question.needs_words_index) && question.needs_words_index.includes(index);
+}
+// One send for a manager question: the pick, the owner's words (verbatim) or both; an option that needs words is refused here without them.
+function startQuestion(item, state) {
+  const words = draftOf(wordsKey(item)).value;
+  const typed = words.trim() !== "";
+  const pick = state.picks[0];
+  const picked = typeof pick === "number";
+  if (!picked && !typed) return false;
+  if (picked && !typed && needsWords(item.questions[0], pick)) {
+    state.notice = WORDS_NEEDED_NOTICE;
+    return true;
+  }
+  const answer = {};
+  if (picked) answer.choice = pick;
+  if (typed) answer.text = words;
+  return begin(item, state, { round: true, body: roundBody(item, answer) });
+}
+// A question's send waits while its answer is pending, and for a pick or words.
+function questionSendOff(item, state) {
+  return !choosable(state) || (typeof state.picks[0] !== "number" && draftOf(wordsKey(item)).value.trim() === "");
+}
 function start(item, state) {
+  if (isQuestion(item)) return choosable(state) && startQuestion(item, state);
   if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
-  if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
   if (isRetry(item)) return begin(item, state, { retry: true, body: { plan_id: item.plan_id } });
   if (isApply(item)) {
     const body = { plan_id: item.plan_id };
@@ -3354,10 +3379,6 @@ function startDraft(item, state, text) {
   const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: text };
   return begin(item, state, { plan: true, body });
 }
-function startWords(item, state, text) {
-  if (!choosable(state) || !isQuestion(item)) return false;
-  return begin(item, state, { round: true, body: roundBody(item, { text }) });
-}
 function startCheck(item, state, answer, extra) {
   if (!choosable(state) || !check(item)) return false;
   return begin(item, state, { check: true, body: { project_id: state.project_id, key: state.key, answer, version: item.version, ...extra } });
@@ -3386,6 +3407,7 @@ function postPlanAnswer(body) {
   return fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body: JSON.stringify(body) });
 }
 const NO_REASON = "the console did not say why.";
+const WORDS_NEEDED_NOTICE = "Say what to change.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
     && !state.pending.round && !state.pending.retry && !state.pending.plan;
@@ -3727,13 +3749,17 @@ function statusLine(act, state, item) {
   }
   return true;
 }
-function actionLine(item, state, lead) {
+function actionLine(item, state, lead, card) {
   const act = el("div", "act");
-  if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
+  const idle = !statusLine(act, state, item);
+  // A question's one send stays beside its status, disabled while the answer is pending.
+  if ((idle || isQuestion(item)) && (item.questions.length > 0 || !textCard(item))) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send btn-primary" : "send btn-quiet", words, () => { if (start(item, state)) redraw(); });
-    if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
-    markBusy(send, planBusy(item, state));
+    const off = isQuestion(item) ? questionSendOff(item, state) : !picksComplete(item, state) || planBusy(item, state);
+    if (off) send.setAttribute("disabled", "");
+    if (isQuestion(item)) card.send = send;
+    markBusy(send, isQuestion(item) ? state.phase === "sending" : planBusy(item, state));
     send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
@@ -3781,21 +3807,15 @@ function noteBox(item, state, box) {
   send.disabled = area.value.trim() === "";
   return send;
 }
-function wordsBox(item, state, box) {
+function wordsBox(item, state, box, card) {
   const area = typedArea("words-text field-area", "Answer in your own words", "Answer in your own words");
-  const send = actionButton("ans-words btn-quiet", "Send my words", () => {
-    const text = area.value;
-    if (text.trim() === "") return;
-    if (startWords(item, state, text)) redraw();
-  });
+  // Typing re-evaluates the card's one send without a redraw; the card object holds it once the action line is built.
+  box.appendChild(draftField(area, wordsKey(item), () => {
+    if (card.send !== null) card.send.disabled = questionSendOff(item, state);
+  }));
   // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
-  const pending = !choosable(state);
-  box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
-  area.disabled = pending;
+  area.disabled = !choosable(state);
   markBusy(area, state.phase === "sending");
-  send.disabled = pending || area.value.trim() === "";
-  markBusy(send, state.phase === "sending");
-  box.appendChild(send);
 }
 function draftInput(cls, placeholder) {
   const input = el("input", cls);
@@ -3909,7 +3929,8 @@ function answerBox(item, state, lead) {
       if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
-        choose(state, qi, oi);
+        // Clicking a manager question's picked option takes the pick back, so the words can go alone.
+        choose(state, qi, isQuestion(item) && state.picks[qi] === oi ? null : oi);
         redraw();
       });
       const row = el("li");
@@ -3922,9 +3943,10 @@ function answerBox(item, state, lead) {
     const held = heldLine(item);
     if (held !== null) box.appendChild(held);
   }
-  if (isQuestion(item)) wordsBox(item, state, box);
+  const card = { send: null };
+  if (isQuestion(item)) wordsBox(item, state, box, card);
   if (textCard(item)) draftBox(item, state, box);
-  box.appendChild(actionLine(item, state, lead));
+  box.appendChild(actionLine(item, state, lead, card));
   return box;
 }
 function boxState(item) {
