@@ -283,18 +283,22 @@ NOTES = {
 class AdoptError(Exception):
     """One refusal: a closed code, a stable repair id, and ordered violations."""
 
-    def __init__(self, code: str, repair_id: str, violations: list[dict]) -> None:
+    def __init__(self, code: str, repair_id: str, violations: list[dict],
+                 commit_output: dict | None = None) -> None:
         super().__init__(f"{code}: {repair_id}")
         if code not in ADOPT_ERROR_CODES:
             raise ValueError(f"unknown adoption error code: {code!r}")
         self.code = code
         self.repair_id = repair_id
         self.violations = violations
+        self.commit_output = commit_output
 
 
-def refuse(code: str, repair_id: str, pointer: str, message: str) -> AdoptError:
+def refuse(code: str, repair_id: str, pointer: str, message: str, *,
+           commit_output: dict | None = None) -> AdoptError:
     return AdoptError(code, repair_id, [{"pointer": pointer,
-                                         "message": message}])
+                                         "message": message}],
+                      commit_output)
 
 # --------------------------------------------------------------------------
 # Exhaustive dispatch over the closed sets

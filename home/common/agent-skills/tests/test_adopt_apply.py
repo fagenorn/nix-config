@@ -1820,6 +1820,209 @@ class CommitGateTest(ApplyTestCase):
         self.assertFalse(self.worktree(plan_id).exists())
 
 
+def write_hooks(**hooks: str) -> Path:
+    """A fresh hooks directory holding each named executable hook."""
+    directory = Path(tempfile.mkdtemp())
+    for name, body in hooks.items():
+        hook = directory / name.replace("_", "-")
+        hook.write_text(body, "utf-8")
+        hook.chmod(0o755)
+    return directory
+
+
+WORKING_SIGNER = (
+    "#!/bin/sh\n"
+    "cat >/dev/null\n"
+    "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 X\\n' >&2\n"
+    "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n"
+    "-----END PGP SIGNATURE-----\\n'\n")
+
+
+class CommitOutputTest(ApplyTestCase):
+    """A failed commit keeps git's own output and names the failing hook."""
+
+    def failing_pre_commit(self, root: Path) -> tuple[str, str]:
+        git(root, "config", "core.hooksPath", str(write_hooks(
+            pre_commit="#!/bin/sh\necho out one\necho err two >&2\nexit 3\n")))
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        return plan_id, git(root, "rev-parse", "HEAD").strip()
+
+    def record(self, plan_id: str) -> dict:
+        return json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+
+    def test_a_failing_pre_commit_hook_names_itself_and_keeps_its_last_lines(
+            self):
+        root = apply_repo(self.home)
+        plan_id, base = self.failing_pre_commit(root)
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        expected = {"hook": "pre-commit", "exit": 3,
+                    "lines": ["out one", "err two"]}
+        self.assertEqual(payload["error"]["commit_output"], expected)
+        self.assertEqual(self.record(plan_id)["commit_output"], expected)
+
+    def test_a_failing_commit_msg_hook_after_a_passing_pre_commit_that_runs_git_is_named(
+            self):
+        root = apply_repo(self.home)
+        git(root, "config", "core.hooksPath", str(write_hooks(
+            pre_commit="#!/bin/sh\ngit rev-parse HEAD >/dev/null\nexit 0\n",
+            commit_msg="#!/bin/sh\necho message refused\nexit 1\n")))
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        output = payload["error"]["commit_output"]
+        self.assertEqual(output["hook"], "commit-msg")
+        self.assertEqual(output["exit"], 1)
+        self.assertEqual(output["lines"][-1], "message refused")
+
+    def test_long_hook_output_keeps_only_its_bounded_tail(self):
+        root = apply_repo(self.home)
+        git(root, "config", "core.hooksPath", str(write_hooks(
+            pre_commit="#!/bin/sh\ni=1\nwhile [ $i -le 3000 ]; do\n"
+                       "  echo \"line $i\"\n  i=$((i+1))\ndone\nexit 1\n")))
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        lines = payload["error"]["commit_output"]["lines"]
+        self.assertEqual(len(lines), adopt_apply.COMMIT_OUTPUT_LINES)
+        self.assertEqual(lines[-1], "line 3000")
+        self.assertEqual(lines[0], "line 2961")
+
+    def test_a_commit_failure_with_no_failing_hook_names_none(self):
+        root = apply_repo(self.home, signed=True)
+        tools = Path(tempfile.mkdtemp())
+        signer = tools / "signer"
+        signer.write_text(WORKING_SIGNER, "utf-8")
+        signer.chmod(0o755)
+        git(root, "config", "gpg.format", "openpgp")
+        git(root, "config", "gpg.program", str(signer))
+        git(root, "config", "user.signingkey", "DEADBEEF")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        git(root, "config", "--unset", "user.name")
+        git(root, "config", "--unset", "user.email")
+        git(root, "config", "user.useConfigOnly", "true")
+        environment = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+            and key != "EMAIL"}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_CONFIG_SYSTEM=os.devnull)
+        with mock.patch.dict(os.environ, environment, clear=True):
+            payload = self.assert_retained(root, plan_id, base,
+                                           "adopt.commit.failed")
+        output = payload["error"]["commit_output"]
+        self.assertIsNone(output["hook"])
+        self.assertIsNone(output["exit"])
+        self.assertTrue(output["lines"])
+
+    def test_the_commit_leaves_no_trace_file(self):
+        root = apply_repo(self.home)
+        plan_id, base = self.failing_pre_commit(root)
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        self.assertEqual(payload["error"]["commit_output"]["hook"],
+                         "pre-commit")
+        self.assertEqual(
+            [name for name in self.worktree_names()
+             if name.startswith("commit-trace-")], [])
+        fresh = apply_repo(self.home)
+        git(fresh, "config", "core.hooksPath", str(Path(tempfile.mkdtemp())))
+        fresh_plan = self.ready_plan(fresh)["plan"]["plan_id"]
+        self.succeed(fresh, fresh_plan)
+        self.assertEqual(
+            [name for name in self.worktree_names()
+             if name.startswith("commit-trace-")], [])
+
+    def test_only_a_failed_commit_carries_commit_output(self):
+        gate = apply_repo(self.home, verification=("false",))
+        gate_plan = self.ready_plan(gate)["plan"]["plan_id"]
+        gate_base = git(gate, "rev-parse", "HEAD").strip()
+        gate_payload = self.assert_retained(
+            gate, gate_plan, gate_base,
+            "adopt.gate.workflow-verification-commands")
+        self.assertEqual(sorted(gate_payload["error"]),
+                         ["code", "repair_id", "violations"])
+        self.assertNotIn("commit_output", self.record(gate_plan))
+        root = apply_repo(self.home)
+        plan_id, base = self.failing_pre_commit(root)
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        self.assertEqual(sorted(payload["error"]),
+                         ["code", "commit_output", "repair_id", "violations"])
+
+    def test_a_silent_failing_hook_with_a_signer_that_cannot_run_is_named(
+            self):
+        root = apply_repo(self.home, signed=True)
+        git(root, "config", "gpg.format", "openpgp")
+        git(root, "config", "gpg.program",
+            str(root / "no-such-signing-program"))
+        git(root, "config", "user.signingkey", "DEADBEEF")
+        git(root, "config", "core.hooksPath",
+            str(write_hooks(pre_commit="#!/bin/sh\nexit 1\n")))
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.signing_unavailable")
+        output = payload["error"]["commit_output"]
+        self.assertEqual(output["hook"], "pre-commit")
+        self.assertEqual(output["exit"], 1)
+        record = self.record(plan_id)
+        self.assertEqual(record["repair_id"],
+                         "adopt.commit.signing_unavailable")
+        self.assertEqual(record["commit_output"], output)
+
+
+def trace_lines(*events: dict) -> bytes:
+    return b"".join(json.dumps(event).encode("utf-8") + b"\n"
+                    for event in events)
+
+
+class CommitTraceTest(unittest.TestCase):
+    def own_and_nested(self, code: int) -> bytes:
+        return trace_lines(
+            {"event": "version", "sid": "S"},
+            {"event": "child_start", "sid": "S", "child_id": 0,
+             "child_class": "hook", "hook_name": "pre-commit"},
+            {"event": "version", "sid": "S/T"},
+            {"event": "child_start", "sid": "S/T", "child_id": 0,
+             "child_class": "hook", "hook_name": "pre-commit"},
+            {"event": "child_exit", "sid": "S/T", "child_id": 0, "code": 1},
+            {"event": "child_exit", "sid": "S", "child_id": 0, "code": code})
+
+    def test_failed_hook_reads_only_the_commits_own_events(self):
+        self.assertIsNone(adopt_apply.failed_hook(self.own_and_nested(0)))
+        self.assertEqual(adopt_apply.failed_hook(self.own_and_nested(4)),
+                         ("pre-commit", 4))
+
+    def test_failed_hook_skips_lines_that_are_not_json_objects(self):
+        trace = (b"not json\n[]\n" + trace_lines(
+            {"event": "version", "sid": "S"},
+            {"event": "child_start", "sid": "S", "child_id": 0,
+             "child_class": "hook", "hook_name": "pre-commit"},
+            {"event": "child_exit", "sid": "S", "child_id": 0, "code": 1}))
+        self.assertEqual(adopt_apply.failed_hook(trace), ("pre-commit", 1))
+
+    def test_failed_hook_ignores_a_child_that_is_not_a_hook(self):
+        trace = trace_lines(
+            {"event": "version", "sid": "S"},
+            {"event": "child_start", "sid": "S", "child_id": 0,
+             "child_class": "?"},
+            {"event": "child_exit", "sid": "S", "child_id": 0, "code": 1})
+        self.assertIsNone(adopt_apply.failed_hook(trace))
+
+    def test_commit_output_lines_drops_a_cut_first_line_and_blank_lines(self):
+        tail = b"tail of a\n\nb  \r\nc\n"
+        self.assertEqual(adopt_apply.commit_output_lines(tail, cut=True),
+                         ["b", "c"])
+        self.assertEqual(adopt_apply.commit_output_lines(tail, cut=False),
+                         ["tail of a", "b", "c"])
+
+
 # --------------------------------------------------------------------------
 # What the commit itself carries
 # --------------------------------------------------------------------------
