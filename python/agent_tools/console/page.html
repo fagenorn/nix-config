@@ -2518,6 +2518,9 @@ function renderReading(view) {
   }
   const projectId = reading.project;
   const key = followKey(projectId, thread.id);
+  // Every frame rebuilds the panel, which detaches a focused heading: focus returns to the new one so the inbox answer keys never see BODY.
+  const held = document.activeElement;
+  const headingHeld = held !== null && held.parentNode === section && held.tagName === "H2";
   section.hidden = false;
   const head = el("div", "reading-head");
   head.appendChild(el("span", "reading-project", projectId));
@@ -2535,6 +2538,7 @@ function renderReading(view) {
   const follow = followBlock(projectId, thread, pending.length);
   if (follow !== null) nodes.push(follow);
   section.replaceChildren(...nodes);
+  if (headingHeld) heading.focus();
 }
 // One closed fold of a project's question threads, newest first, each a closed line opening to its questions and answers in order (#1178, ADR-console-059 D4); null when the project has none. It counts in nothing.
 function questionsFold(entry, afterLine) {

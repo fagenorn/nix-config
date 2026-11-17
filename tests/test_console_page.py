@@ -2016,6 +2016,18 @@ class PageReadingTest(unittest.TestCase):
         self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
         self.assertEqual(answers(later), [])
 
+    def test_enter_after_a_later_frame_still_does_not_approve_an_outstanding_brief(self) -> None:
+        # Every frame rebuilds the reading panel and detaches the focused heading; focus must come back to it (#1226).
+        both = {**view([asking(project(0, []), thread(ASK_FIRST))]), "inbox": frame([ANSWERABLE])["inbox"]}
+        steps = [self.begin, {"frame": both}, {"open": "questions:owner/p00"}, {"click": "thread-open"},
+                 {"frame": both}]
+        (refocused, pressed, later) = render([*steps, {"snapshot": True}, {"key": "Enter", "follow": True},
+                                              {"snapshot": True}, {"clock": NOW_MS + 5000}, {"snapshot": True}])
+        self.assertEqual(role(refocused["active"]), "reading-question")
+        self.assertIs(refocused["reading"]["hidden"], False)
+        self.assertNotIn(WAIT_TEXT, full(pressed["inbox"]))
+        self.assertEqual(answers(later), [])
+
     def test_opening_a_thread_shows_it_in_the_main_column_and_close_hides_it(self) -> None:
         shown, closed = render([*self.opened(thread(ASK_FIRST)), {"snapshot": True},
                                 {"click": "reading-close"}, {"snapshot": True}])
