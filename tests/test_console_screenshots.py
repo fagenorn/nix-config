@@ -52,6 +52,14 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
+    def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
+        words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
+                 24: "twenty-four"}
+        files = len(shots.STATES) * len(shots.WIDTHS)
+        doc = " ".join(shots.__doc__.split())
+        self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
+        self.assertIn(f"a full run writes {files} files", doc)
+
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
             out = StringIO()
