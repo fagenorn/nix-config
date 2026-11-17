@@ -109,16 +109,18 @@ class PermissionReadTest(unittest.TestCase):
         return permission.read(
             "owner/p01", "/srv/p01", resolve=lambda root: snapshot, policy_path=policy_path)
 
-    def test_a_project_with_no_production_runs_in_bypass(self):
+    def test_a_project_with_no_production_runs_in_auto_until_a_bypass_manager_can_be_woken(self):
         result = self.read(snap("none"), self.tmp / "absent.json")
-        self.assertEqual(result, permission.Permission(BYPASS, "no production"))
-        self.assertEqual(result.text, "bypass: no production")
+        self.assertEqual(
+            result, permission.Permission("auto", "waking a bypass manager is not yet possible"))
+        self.assertEqual(result.text, "auto: waking a bypass manager is not yet possible")
 
-    def test_declared_rules_in_the_guards_policy_run_in_bypass(self):
+    def test_declared_rules_in_the_guards_policy_run_in_auto_until_a_bypass_manager_can_be_woken(self):
         path = write(self.tmp, document({"owner/p01": row("owner/p01")}))
         result = self.read(snap("declared"), path)
-        self.assertEqual(result, permission.Permission(BYPASS, "production rules in place"))
-        self.assertEqual(result.text, "bypass: production rules in place")
+        self.assertEqual(
+            result, permission.Permission("auto", "waking a bypass manager is not yet possible"))
+        self.assertEqual(result.text, "auto: waking a bypass manager is not yet possible")
 
     def test_a_row_older_than_the_declaration_runs_in_auto(self):
         def stale(**members):
@@ -152,7 +154,7 @@ class PermissionReadTest(unittest.TestCase):
                                  permission.Permission(AUTO, permission.NOT_ENFORCED))
         with self.subTest("a row that holds every declared rule"):
             self.assertEqual(self.read(declared, write(self.tmp, current)),
-                             permission.Permission(BYPASS, permission.RULES_IN_PLACE))
+                             permission.Permission(AUTO, permission.WAKE_BLOCKED))
         with self.subTest("a snapshot too thin to compare"):
             self.assertEqual(
                 self.read({"production": {"status": "declared"}}, write(self.tmp, current)),
@@ -207,7 +209,7 @@ class PermissionReadTest(unittest.TestCase):
     def test_only_a_declared_production_reads_the_policy(self):
         with mock.patch.object(permission, "policy_rows", side_effect=AssertionError):
             for snapshot, expected in (
-                (snap("none"), permission.Permission(BYPASS, permission.NO_PRODUCTION)),
+                (snap("none"), permission.Permission(AUTO, permission.WAKE_BLOCKED)),
                 (snap("not_declared"), permission.Permission(AUTO, permission.NOT_DECLARED)),
             ):
                 with self.subTest(snapshot["production"]["status"]):
