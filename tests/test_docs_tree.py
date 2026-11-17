@@ -715,6 +715,11 @@ class DocsTreeTest(unittest.TestCase):
         desk = adr_path + "002-the-desk-page-design-rules.md"
         self.assertTrue(head(desk, "- **Status:**").endswith("ADR-console-056, ADR-console-064"))
         self.assertTrue(head(desk, "- **Decided in:**").endswith("#1136, #1137, #1177, #1178, #1179, #1182"))
+        self.assertIn(
+            "A manager that failed to start is a card of its own like a stall card: its headline, "
+            "its reason in plain words, \"Retry\" as its primary and \"Drop the sprint\" "
+            "(ADR-console-064).",
+            (REPO_ROOT / desk).read_text())
         entry = next(line for line in (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
                      if line.startswith("One goal, later its issues"))
         self.assertIn("ADR-console-064", entry)
