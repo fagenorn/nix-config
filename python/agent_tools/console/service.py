@@ -1815,7 +1815,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question = project_question.parse_request(body)
+            project_id, question, _thread_id = project_question.parse_request(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False

@@ -386,12 +386,23 @@ class NoProductionTest(unittest.TestCase):
             self.assertEqual(str(caught.exception), reason)
         self.assertEqual(
             project_question.parse_request(b'{"project_id":"owner/p01","question":"why?"}'),
-            ("owner/p01", "why?"))
+            ("owner/p01", "why?", None))
         for body in (b'{"project_id":"owner/p01"}', b'{"project_id":"","question":"q"}',
                      b'{"project_id":"p","question":1}',
                      b'{"project_id":"p","project_id":"q","question":"q"}', b"[1]"):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 project_question.parse_request(body)
+
+    def test_a_request_may_name_its_thread(self):
+        parse = project_question.parse_request
+        self.assertEqual(parse(b'{"project_id":"p","question":"q"}'), ("p", "q", None))
+        self.assertEqual(parse(b'{"project_id":"p","question":"q","thread_id":"t1"}'),
+                         ("p", "q", "t1"))
+        for body in (b'{"project_id":"p","question":"q","thread_id":""}',
+                     b'{"project_id":"p","question":"q","thread_id":3}',
+                     b'{"project_id":"p","question":"q","x":1}'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                parse(body)
 
     def test_routes_compare_each_cwd_with_the_resolved_root_not_the_given_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -483,9 +494,9 @@ def _row(seq, kind, project, payload):
     return event_log.Event(seq, f"2026-11-17T10:00:{seq:02d}Z", kind, project, payload)
 
 
-def _asked(seq, project, question_id, question="what?"):
+def _asked(seq, project, question_id, question="what?", **extra):
     return _row(seq, event_log.PROJECT_QUESTION_ASKED, project,
-                {"question_id": question_id, "question": question})
+                {"question_id": question_id, "question": question, **extra})
 
 
 def _answered(seq, project, question_id, **payload):
@@ -544,11 +555,136 @@ class QuestionFoldTest(unittest.TestCase):
 
     def test_folding_in_two_batches_equals_folding_once(self):
         rows = self.rows()
+        rows.append(_asked(9, self.P1, "q5", thread_id="q1"))
         first = project_question.asked_questions(rows[:4])
         before = dict(first)
         self.assertEqual(project_question.asked_questions(rows[4:], first),
                          project_question.asked_questions(rows))
         self.assertEqual(first, before)
+
+
+def _ids(found):
+    return [[q.question_id for q in thread] for thread in found]
+
+
+class ThreadFoldTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def fold(self, rows):
+        return project_question.asked_questions(rows)[self.P1]
+
+    def test_a_follow_up_joins_the_thread_it_names(self):
+        rows = [_asked(2, self.P1, "q1"),
+                _answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"),
+                _asked(4, self.P1, "q2", thread_id="q1"),
+                _answered(5, self.P1, "q2", outcome="answered", answer="Answer: b"),
+                _asked(6, self.P1, "q3")]
+        folded = self.fold(rows)
+        self.assertEqual(_ids(project_question.threads(folded)), [["q3"], ["q1", "q2"]])
+        self.assertEqual([q.thread_id for q in folded], ["q1", "q1", "q3"])
+
+    def test_a_follow_up_naming_a_follow_up_joins_that_thread(self):
+        rows = [_asked(2, self.P1, "q1"), _asked(3, self.P1, "q2", thread_id="q1"),
+                _asked(4, self.P1, "q3", thread_id="q2")]
+        self.assertEqual(_ids(project_question.threads(self.fold(rows))), [["q1", "q2", "q3"]])
+
+    def test_a_thread_id_that_names_nothing_here_starts_its_own_thread(self):
+        rows = [_asked(2, "owner/p02", "q1"),
+                _asked(3, self.P1, "a", thread_id="gone"),
+                _asked(4, self.P1, "b", thread_id=7),
+                _asked(5, self.P1, "c", thread_id=""),
+                _asked(6, self.P1, "d", thread_id="q1")]
+        folded = self.fold(rows)
+        self.assertEqual([(q.question_id, q.thread_id) for q in folded],
+                         [("a", "a"), ("b", "b"), ("c", "c"), ("d", "d")])
+        self.assertEqual(_ids(project_question.threads(folded)), [["d"], ["c"], ["b"], ["a"]])
+
+    def test_threads_are_newest_first_by_their_last_question(self):
+        rows = [_asked(2, self.P1, "q1"), _asked(4, self.P1, "q2"),
+                _asked(6, self.P1, "q3", thread_id="q1")]
+        self.assertEqual(_ids(project_question.threads(self.fold(rows))), [["q1", "q3"], ["q2"]])
+
+
+class FollowUpTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def answered(self, answer="Answer: a", **extra):
+        rows = [_asked(2, self.P1, "q1"),
+                _answered(3, self.P1, "q1", outcome="answered", answer=answer), *extra.get("rows", [])]
+        return project_question.asked_questions(rows)[self.P1]
+
+    def test_follow_up_returns_the_threads_turns_in_order(self):
+        folded = project_question.asked_questions([
+            _asked(2, self.P1, "q1"),
+            _answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"),
+            _asked(4, self.P1, "q2", thread_id="q1"),
+            _answered(5, self.P1, "q2", outcome="answered", answer="Answer: b")])[self.P1]
+        Turn = project_question.Turn
+        self.assertEqual(project_question.follow_up(folded, "q1", "and then?"),
+                         (Turn("what?", "Answer: a"), Turn("what?", "Answer: b")))
+
+    def test_follow_up_refuses_an_unknown_an_unanswered_or_a_too_long_thread(self):
+        def thread(*rows):
+            return project_question.asked_questions(list(rows))[self.P1]
+
+        answered = [_asked(2, self.P1, "q1"),
+                    _answered(3, self.P1, "q1", outcome="answered", answer="Answer: a")]
+        cases = (
+            ("nope", thread(*answered), project_question.THREAD_UNKNOWN),
+            ("q2", thread(*answered, _asked(4, self.P1, "q2", thread_id="q1")),
+             project_question.THREAD_UNKNOWN),
+            ("q1", thread(_asked(2, self.P1, "q1")), project_question.THREAD_UNANSWERED),
+            ("q1", thread(_asked(2, self.P1, "q1"), _answered(3, self.P1, "q1", outcome="failed")),
+             project_question.THREAD_UNANSWERED),
+            ("q1", thread(_asked(2, self.P1, "q1"), _answered(3, self.P1, "q1", outcome="timed_out")),
+             project_question.THREAD_UNANSWERED),
+            ("q1", thread(*answered, _asked(4, self.P1, "q2", thread_id="q1")),
+             project_question.THREAD_UNANSWERED),
+            ("q1", self.answered("Answer: " + "x" * project_question.MAX_THREAD_BYTES),
+             project_question.THREAD_TOO_LONG),
+        )
+        for thread_id, folded, reason in cases:
+            with self.subTest(thread_id=thread_id, reason=reason):
+                with self.assertRaises(project_question.Refused) as caught:
+                    project_question.follow_up(folded, thread_id, "why?")
+                self.assertEqual(str(caught.exception), reason)
+
+    def test_the_bound_counts_utf8_bytes(self):
+        long = self.answered("\u00e9" * (project_question.MAX_THREAD_BYTES // 2))
+        with self.assertRaises(project_question.Refused) as caught:
+            project_question.follow_up(long, "q1", "why?")
+        self.assertEqual(str(caught.exception), project_question.THREAD_TOO_LONG)
+        short = self.answered("x" * 1000)
+        self.assertEqual(len(project_question.follow_up(short, "q1", "why?")), 1)
+
+
+class ThreadPromptTest(unittest.TestCase):
+    def test_a_follow_up_prompt_puts_its_thread_before_the_question(self):
+        turns = (project_question.Turn("what does the build check?", "Answer: it builds."),)
+        mark = project_question.QUESTION_MARK
+        self.assertEqual(
+            project_question.prompt("and darwin?", ROUTES, turns),
+            project_question.prompt("and darwin?", ROUTES).replace(
+                mark, project_question.THREAD_LEAD
+                + "Earlier question: what does the build check?\nEarlier answer: Answer: it builds.\n\n"
+                + mark))
+        self.assertEqual(project_question.prompt("x", ROUTES, ()), project_question.prompt("x", ROUTES))
+
+    def test_a_threads_launch_differs_only_in_its_prompt(self):
+        turns = (project_question.Turn("what does the build check?", "Answer: it builds."),)
+
+        def make(**extra):
+            return project_question.new_ask(
+                "a" * 16, "owner/p01", "/srv/p01", "and darwin?", "work", ROUTES, Path("/tmp/s"),
+                session_id=SESSION_ID, **extra)
+
+        with_, without = make(thread=turns), make()
+        a = project_question.launch_command(with_, "linux")
+        b = project_question.launch_command(without, "linux")
+        self.assertEqual(a[:-1], b[:-1])
+        self.assertNotEqual(a[-1], b[-1])
+        self.assertEqual(with_.thread, turns)
+        self.assertEqual(without.thread, ())
 
 
 def _registered(seq, project):
