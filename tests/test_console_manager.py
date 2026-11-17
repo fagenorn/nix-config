@@ -2,6 +2,7 @@
 
 Run: just agent-workflow-tests
 """
+import dataclasses
 import inspect
 import json
 import os
@@ -15,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import exclusion, manager, pin, revive_check, sessions
+from agent_tools.console import exclusion, manager, permission, pin, revive_check, sessions
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 from . import console_test_support as support
@@ -88,6 +89,15 @@ class CommandTest(Case):
         self.assertEqual(dict(launch.env),
                          {"CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"})
         self.assertNotIn("s3cret", repr(launch))
+
+    def test_new_launch_carries_the_permission_it_is_given(self):
+        given = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
+        launch = manager.new_launch(SID, "owner/p01", "g", "/srv/p01", "work", "s", self.dir,
+                                    permission=given)
+        self.assertEqual(launch.permission, given)
+        self.assertEqual(
+            manager.new_launch(SID, "owner/p01", "g", "/srv/p01", "work", "s",
+                               self.dir).permission, permission.FALLBACK)
 
     def test_the_linux_command_runs_the_manager_in_its_own_scope(self):
         command = manager.launch_command(self.launch(), "linux")
@@ -194,10 +204,25 @@ class RunTest(Case):
         self.assertFalse(self.settings.exists())
         manager.remove_settings(self.dir, SID)
 
+    def test_the_settings_carry_the_launchs_permission_mode(self):
+        bypass = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
+        auto = permission.Permission(permission.AUTO, permission.NOT_DECLARED)
+        cases = [(dataclasses.replace(self.launch(root=str(self.root)), permission=bypass),
+                  "bypassPermissions"),
+                 (dataclasses.replace(self.launch(root=str(self.root)), permission=auto), "auto"),
+                 (self.launch(root=str(self.root)), "auto")]
+        for launch, mode in cases:
+            with self.subTest(mode=mode, permission=launch.permission):
+                manager.run_launch(launch, platform="linux", run=self.fake(),
+                                   environ=self.ENVIRON)
+                self.assertEqual(json.loads(self.settings.read_text())["permissions"],
+                                 {"defaultMode": mode})
+                self.assertEqual(list(self.dir.iterdir()), [self.settings])
+
     def test_the_settings_turn_the_isolation_guard_off_and_refuse_every_permission_prompt(self):
         self.run_fake()
         settings = json.loads(self.settings.read_text())
-        self.assertEqual(set(settings), {"env", "worktree", "hooks"})
+        self.assertEqual(set(settings), {"env", "worktree", "hooks", "permissions"})
         self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
         self.assertEqual(set(settings["hooks"]), {"PermissionRequest"})
         [group] = settings["hooks"]["PermissionRequest"]

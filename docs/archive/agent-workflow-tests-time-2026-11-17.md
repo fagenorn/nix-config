@@ -336,3 +336,226 @@ Three speed-ups keep every member of the suite and change no branch protection, 
 - **Fewer processes, by merging members, `Start-up (min)`.** Its median is 0.1 min, the time members spend before unittest's own timer, so merging members saves at most that. It is less safe: it contradicts ADR-delivery-006's one process per member, which keeps one member's failure, state and timing from touching another's.
 - **A larger runner.** More vCPUs would shrink the CPU-bound members' wall and the CPU seconds bound that `Slots saving (min)` uses, but it is paid, from the owner's money, and the saving is not measured here.
 - **Dropping, moving or making optional any test or the check.** Refused by `.agents/knowledge/rejections/ungated-agent-merges.md`: the required check and every test in it are what make a merge safe, so a saving bought this way is not one.
+
+## Trial at 6 jobs
+
+On 17 Nov the owner chose to trial 6 members at once and to adopt it only if the saving holds without new flakiness (issue 1215). The runs are `workflow_dispatch` runs of `ci.yaml` made in rounds: each round is one run on the issue branch, whose `ci.yaml` sets `SUITE_RUNNER_JOBS` to 6, and one run on `main`, which sets 4, and the next round starts after both have completed. The runs counted are those listed in the table below, by run id and attempt, and the program under Trial reproduce reads exactly those (the `PINNED` list), never a listing of the workflow's runs, so a later dispatch of the workflow on either branch cannot change what it reproduces. A job counts only when it is named `Agent Workflow Tests`, completed with success or failure and has a step `Run agent workflow tests`; a cancelled job is not a row. Each row is one job: Jobs is the job count its branch runs, Created is its run's creation time, Test step is the step's `completed_at` minus its `started_at` in whole seconds from the API, Suite wall is the summary's `wall=` in minutes (`-` when the log has no summary), Members is the summary's `members=` and Failed members are the members the timing rows mark `failed` (`no summary` when the log has none). The saving is the median Test step at 4 jobs minus the median at 6, compared in unrounded seconds, never through the printed minutes. The rule: adopt 6 jobs when the saving is at least 90 seconds (1.5 minutes) and `Failed only at 6` is `none`, else keep 4. `Failed only at 6` lists the members that failed in some 6-job row and in no 4-job row, and every 6-job job whose log has no summary, since it cannot be attributed. The program under Trial reproduce prints the tables and the decision while GitHub keeps the job logs.
+
+| Job | Run/attempt | Jobs | Created (UTC) | Conclusion | Test step (s) | Test step (min) | Suite wall (min) | Members | Failed members |
+|---:|---|---:|---|---|---:|---:|---:|---:|---|
+| 133816634016 | 44016821091/1 | 6 | 2026-11-17 04:23:16 | failure | 479 | 8.0 | 7.8 | 175 | tests/test_console_approve_service.py |
+| 133816688882 | 44016838007/1 | 4 | 2026-11-17 04:23:24 | success | 519 | 8.7 | 8.6 | 175 | - |
+| 133820186676 | 44017913558/1 | 6 | 2026-11-17 04:32:43 | success | 618 | 10.3 | 10.1 | 175 | - |
+| 133820196641 | 44017917344/1 | 4 | 2026-11-17 04:32:45 | success | 576 | 9.6 | 9.4 | 177 | - |
+| 133824368061 | 44019201494/1 | 6 | 2026-11-17 04:44:04 | success | 409 | 6.8 | 6.7 | 175 | - |
+| 133824379800 | 44019205302/1 | 4 | 2026-11-17 04:44:06 | success | 516 | 8.6 | 8.5 | 177 | - |
+| 133827736726 | 44020237822/1 | 6 | 2026-11-17 04:53:19 | success | 562 | 9.4 | 9.2 | 175 | - |
+| 133827745026 | 44020241465/1 | 4 | 2026-11-17 04:53:21 | success | 629 | 10.5 | 10.3 | 177 | - |
+| 133831884418 | 44021522445/1 | 6 | 2026-11-17 05:04:43 | success | 431 | 7.2 | 7.1 | 175 | - |
+| 133831895424 | 44021526408/1 | 4 | 2026-11-17 05:04:45 | success | 615 | 10.2 | 10.1 | 177 | - |
+| 133836033793 | 44022829521/1 | 6 | 2026-11-17 05:15:32 | success | 558 | 9.3 | 9.1 | 175 | - |
+| 133836046115 | 44022833440/1 | 4 | 2026-11-17 05:15:33 | success | 518 | 8.6 | 8.5 | 178 | - |
+
+| Jobs | Runs | Failed runs | Median test step (s) | Median test step (min) | Median suite wall (min) |
+|---:|---:|---:|---:|---:|---:|
+| 4 | 6 | 0 | 547.5 | 9.1 | 9.0 |
+| 6 | 6 | 1 | 518.5 | 8.6 | 8.5 |
+
+Saving: 29.0 s (0.5 min), the median test step at 4 jobs minus the median at 6.
+Failed only at 6: tests/test_console_approve_service.py.
+Decision: 4 jobs.
+Runs: 6 at 6 jobs and 6 at 4 jobs, created 2026-11-17 04:23:16 to 2026-11-17 05:15:33 (UTC).
+
+The saving is 29.0 seconds (0.5 minutes): the median test step is 547.5 seconds at 4 jobs and 518.5 at 6, over six runs at each count, far under the 90 seconds the rule asks for, and the single steps overlap widely (409 to 618 seconds at 6 jobs, 516 to 629 at 4). The runs of `main` carry 177 or 178 members against the branch's 175 because `main` moved on while the trial ran, which does not favour 6. One of the six 6-job runs failed: `tests/test_console_approve_service.py` failed in job 133816634016 with `test_a_waiting_registration_survives_a_restart_and_registers_on_the_first_look` (`self.assertTrue(self.listed("o/r"))` was false) after running 83 seconds; no 4-job run failed. `Failed only at 6` therefore names that member, and the rule gives `Decision: 4 jobs.` on both counts: the saving is under 90 seconds and a member failed only at 6, so the job keeps 4.
+
+## Trial reproduce
+
+This needs an authenticated `gh` and `python3`; it reads only `gh api`, prints the trial's tables and its decision, and prints nothing to stdout when it refuses.
+
+```sh
+python3 -I - <<'PY'
+import json
+import re
+import statistics
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+REPO = "fagenorn/nix-config"
+R = "repos/" + REPO
+JOB = "Agent Workflow Tests"
+STEP = "Run agent workflow tests"
+PINNED = [  # (run id, attempt, jobs): the runs the table records, so a later dispatch cannot change it
+    (44016821091, 1, 6),
+    (44016838007, 1, 4),
+    (44017913558, 1, 6),
+    (44017917344, 1, 4),
+    (44019201494, 1, 6),
+    (44019205302, 1, 4),
+    (44020237822, 1, 6),
+    (44020241465, 1, 4),
+    (44021522445, 1, 6),
+    (44021526408, 1, 4),
+    (44022829521, 1, 6),
+    (44022833440, 1, 4),
+]
+MIN_RUNS = 5
+THRESHOLD = 90  # seconds (1.5 minutes), compared with the unrounded medians
+HEADERS = [
+    "Job", "Run/attempt", "Jobs", "Created (UTC)", "Conclusion", "Test step (s)", "Test step (min)",
+    "Suite wall (min)", "Members", "Failed members",
+]
+STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\.(\d+)Z(?: (.*))?$", re.S)
+BEGIN = re.compile(r"^suite-runner: begin (\S+)$")
+TIMING = re.compile(r"^suite-runner:\s+([0-9.]+)s wall\s+([0-9.]+)s cpu (passed|failed) (\S+)$")
+SUMMARY = re.compile(
+    r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) jobs=(\d+)"
+    r" wall=([0-9.]+)s cpu=([0-9.]+)s$"
+)
+
+
+def gh_text(path):
+    done = subprocess.run(
+        ["gh", "api", path], check=True, capture_output=True, text=True, encoding="utf-8"
+    )
+    return done.stdout
+
+
+def gh_json(path):
+    return json.loads(gh_text(path))
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def seconds(text):
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
+
+def fmt(value, digits=1):
+    text = f"{value:.{digits}f}"
+    return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+
+def parse_log(text):
+    """The summary outside member blocks and the timing rows outside them."""
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    summary = None
+    rows = {}
+    current = None
+    for line in text.split("\n"):
+        found = STAMP.match(line.rstrip("\r"))
+        if not found:
+            continue
+        body = found[3] or ""
+        if current is not None:
+            if body.startswith(f"suite-runner: end {current} "):
+                current = None
+            continue
+        begin = BEGIN.match(body)
+        if begin:
+            current = begin[1]
+        elif TIMING.match(body):
+            wall, cpu, state, member = TIMING.match(body).groups()
+            rows[member] = state
+        elif SUMMARY.match(body):
+            summary = SUMMARY.match(body).groups()
+    return summary, rows
+
+
+def step_seconds(job):
+    step = next(s for s in job["steps"] if s["name"] == STEP)
+    try:
+        return int(seconds(step["completed_at"]) - seconds(step["started_at"]))
+    except (TypeError, ValueError):
+        fail(f"job {job['id']}: the step times are not whole-second UTC stamps")
+
+
+def row(cells):
+    return "| " + " | ".join(cells) + " |"
+
+
+def main():
+    counted = []
+    for run_id, attempt, count in PINNED:
+        run = gh_json(f"{R}/actions/runs/{run_id}")
+        answer = gh_json(f"{R}/actions/runs/{run_id}/attempts/{attempt}/jobs")
+        for job in answer["jobs"]:
+            if (
+                job["name"] == JOB
+                and job["status"] == "completed"
+                and job["conclusion"] in ("success", "failure")
+                and any(s["name"] == STEP for s in job["steps"])
+            ):
+                counted.append((count, run, attempt, job))
+    counted.sort(key=lambda c: (c[1]["created_at"], c[3]["id"]))
+    table = []
+    for count, run, attempt, job in counted:
+        step = step_seconds(job)
+        summary, timing = parse_log(gh_text(f"{R}/actions/jobs/{job['id']}/logs"))
+        if summary is None:
+            if job["conclusion"] == "success":
+                fail(f"job {job['id']}: a successful job has no summary")
+            wall = members = None
+            failed = None
+        else:
+            if int(summary[3]) != count:
+                fail(f"job {job['id']}: the summary says jobs={summary[3]}, the branch runs {count}")
+            if len(timing) != int(summary[0]):
+                fail(f"job {job['id']}: {len(timing)} timing rows but the summary says members={summary[0]}")
+            wall, members = float(summary[4]), summary[0]
+            failed = sorted(m for m, state in timing.items() if state == "failed")
+        table.append({
+            "count": count, "id": job["id"], "run": f"{run['id']}/{attempt}",
+            "created": run["created_at"], "conclusion": job["conclusion"], "step": step,
+            "wall": wall, "members": members, "failed": failed,
+        })
+    for count in (6, 4):
+        n = sum(1 for t in table if t["count"] == count)
+        if n < MIN_RUNS:
+            fail(f"only {n} runs at {count} jobs, need {MIN_RUNS}")
+    print(row(HEADERS))
+    print("|---:|---|---:|---|---|---:|---:|---:|---:|---|")
+    for t in table:
+        print(row([
+            str(t["id"]), t["run"], str(t["count"]), t["created"].replace("T", " ").rstrip("Z"),
+            t["conclusion"], fmt(t["step"], 0), fmt(t["step"] / 60),
+            fmt(t["wall"] / 60) if t["wall"] is not None else "-",
+            t["members"] or "-",
+            "no summary" if t["failed"] is None else ", ".join(t["failed"]) or "-",
+        ]))
+    print()
+    print("| Jobs | Runs | Failed runs | Median test step (s) | Median test step (min) | Median suite wall (min) |")
+    print("|---:|---:|---:|---:|---:|---:|")
+    median = {}
+    for count in (4, 6):
+        rows = [t for t in table if t["count"] == count]
+        median[count] = statistics.median(t["step"] for t in rows)
+        walls = [t["wall"] for t in rows if t["wall"] is not None]
+        print(row([
+            str(count), str(len(rows)), str(sum(1 for t in rows if t["conclusion"] == "failure")),
+            fmt(median[count]), fmt(median[count] / 60),
+            fmt(statistics.median(walls) / 60) if walls else "-",
+        ]))
+    print()
+    saving = median[4] - median[6]
+    failed_four = {m for t in table if t["count"] == 4 for m in t["failed"] or []}
+    only_six = sorted({m for t in table if t["count"] == 6 for m in t["failed"] or []} - failed_four)
+    only_six += [f"no summary in job {t['id']}" for t in table if t["count"] == 6 and t["failed"] is None]
+    print(f"Saving: {fmt(saving)} s ({fmt(saving / 60)} min), the median test step at 4 jobs minus the median at 6.")
+    print(f"Failed only at 6: {', '.join(only_six) or 'none'}.")
+    print(f"Decision: {6 if saving >= THRESHOLD and not only_six else 4} jobs.")
+    print(
+        f"Runs: {sum(1 for t in table if t['count'] == 6)} at 6 jobs and"
+        f" {sum(1 for t in table if t['count'] == 4)} at 4 jobs, created"
+        f" {table[0]['created'].replace('T', ' ').rstrip('Z')} to"
+        f" {table[-1]['created'].replace('T', ' ').rstrip('Z')} (UTC)."
+    )
+
+
+main()
+PY
+```

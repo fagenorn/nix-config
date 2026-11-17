@@ -6,11 +6,12 @@ import contextlib
 import io
 import json
 import dataclasses
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
 
-from agent_tools.console import manager, nudge, sessions, sprints, write_guard
+from agent_tools.console import manager, nudge, permission, sessions, sprints, write_guard
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
@@ -256,6 +257,8 @@ class MessageRouteTest(Case):
 
 
 T0 = 1_800_000_000.0
+BYPASS_MODE = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
+AUTO_MODE = permission.Permission(permission.AUTO, permission.NOT_DECLARED)
 
 
 class NudgeServiceTest(MessageRouteTest):
@@ -516,7 +519,8 @@ class NudgeServiceTest(MessageRouteTest):
         secret = (svc._sprint_secrets / sid).read_text().removesuffix("\n")
         launch = manager.new_launch(
             sid, "owner/p01", "g", "/srv/p01", "work", secret, svc._sprint_secrets)
-        self.assertEqual(path.read_text(), json.dumps(manager.settings_document(launch.env)))
+        self.assertEqual(path.read_text(),
+                         json.dumps(manager.settings_document(launch.env, AUTO_MODE)))
 
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
         svc, sid = self.stopped_with_full_listing(frozenset({"s-1"}))
@@ -537,6 +541,7 @@ class NudgeServiceTest(MessageRouteTest):
         ((_, row),) = self.nudged()
         self.assertFalse(row["ok"])
         self.assertEqual(row["reason"], "the sprint's secret is missing")
+        self.assertNotIn("permission", row)
 
     def test_a_sprint_withdrawn_during_the_wake_leaves_no_settings_file_and_sends_no_wake(self):
         svc, sid = self.stopped_with_full_listing(frozenset())
@@ -554,9 +559,10 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertFalse(path.exists())
         self.assertFalse((svc._sprint_secrets / sid).exists())
 
-    def stopped_with_full_listing(self, outcome):
+    def stopped_with_full_listing(self, outcome, **overrides):
         """A restarted service whose manager is unlisted; `outcome` is what its full listing gives."""
-        first = self.begin()
+        overrides.setdefault("permission_reader", lambda project_id, root: AUTO_MODE)
+        first = self.begin(**overrides)
         sid = self.running(first)
         first.close()
         log = EventLog(self.store, clock=self.log_clock)
@@ -573,8 +579,91 @@ class NudgeServiceTest(MessageRouteTest):
                 raise outcome
             return outcome
 
-        svc = self.begin(full_listing=full)
+        svc = self.begin(full_listing=full, **overrides)
         return svc, sid
+
+    def lock_free_reader(self, modes, free):
+        """A reader of `modes[-1]` that records into `free` whether the ingest lock was free."""
+        def reader(project_id, root):
+            def probe_lock():
+                if self.svc._ingest.acquire(timeout=1):
+                    self.svc._ingest.release()
+                    free.append(True)
+                else:
+                    free.append(False)
+
+            if self.svc is not None:  # the first service's launch runs before there is one to probe
+                thread = threading.Thread(target=probe_lock)
+                thread.start()
+                thread.join()
+            return modes[-1]
+
+        return reader
+
+    def test_a_message_wake_rereads_the_projects_mode(self):
+        modes, free = [BYPASS_MODE], []
+        self.svc = None
+        svc, sid = self.stopped_with_full_listing(
+            frozenset(), permission_reader=self.lock_free_reader(modes, free))
+        self.svc = svc
+        modes.append(AUTO_MODE)
+        free.clear()
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(free, [True])
+        path = manager.settings_path(svc._sprint_secrets, sid)
+        self.assertEqual(json.loads(path.read_text())["permissions"], {"defaultMode": "auto"})
+        ((_, row),) = self.nudged()
+        self.assertEqual(row["route"], "wake")
+        self.assertEqual(row["permission"], {
+            "mode": "auto", "reason": "no production rules declared"})
+        self.assertEqual(self.sprint_state(svc, sid).permission, AUTO_MODE)
+
+    def test_a_notice_wake_rereads_and_logs_the_projects_mode(self):
+        modes = [BYPASS_MODE]
+        svc, sid = self.stopped_with_full_listing(
+            frozenset(), permission_reader=lambda project_id, root: modes[-1])
+        modes.append(AUTO_MODE)
+        svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        self.drain()
+        self.assertEqual([n.route for n in self.nudges], ["wake"])
+        path = manager.settings_path(svc._sprint_secrets, sid)
+        self.assertEqual(json.loads(path.read_text())["permissions"], {"defaultMode": "auto"})
+        self.assertEqual(self.notice_nudged()[-1]["route"], "wake")
+        self.assertEqual(self.notice_nudged()[-1]["permission"], {
+            "mode": "auto", "reason": "no production rules declared"})
+        self.assertEqual(self.sprint_state(svc, sid).permission, AUTO_MODE)
+        self.listed["s-1"] = sessions.Observation(
+            "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None)
+        modes.append(BYPASS_MODE)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.drain()
+        last = self.nudged()[-1][1]
+        self.assertEqual(last["route"], "relay")
+        self.assertNotIn("permission", last)
+        self.assertEqual(self.sprint_state(svc, sid).permission, AUTO_MODE)
+
+    def test_a_relay_logs_no_mode(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        ((_, row),) = self.nudged()
+        self.assertEqual(row["route"], "relay")
+        self.assertNotIn("permission", row)
+
+    def test_a_wake_whose_send_fails_logs_the_mode_it_wrote(self):
+        svc, sid = self.stopped_with_full_listing(
+            frozenset(), permission_reader=lambda project_id, root: permission.Permission(
+                permission.AUTO, permission.NOT_ENFORCED))
+        self.outcomes = ["boom"]
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        ((_, row),) = self.nudged()
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["permission"], {
+            "mode": "auto",
+            "reason": "production rules declared but not in the guard's policy"})
 
     def test_an_owners_message_wakes_a_session_absent_from_the_full_listing_with_its_name_and_settings(self):
         svc, sid = self.stopped_with_full_listing(frozenset())

@@ -32,7 +32,7 @@ open question.
 Two kinds record a manager's notices (#1117): `NOTICE_POSTED` (`notice.posted`) and
 `NOTICE_WITHDRAWN` (`notice.withdrawn`), both in `KEPT_KINDS`, so the retention pass never drops
 an open notice and a withdrawal is never lost (ADR-console-044). `NOTICE_NUDGED` (`notice.nudged`,
-#1120) records the one nudge an owner's notice cost a manager; it is not kept and nothing folds it.
+#1120) records the one nudge an owner's notice cost a manager; it is not kept; the sprint fold reads only its `permission` member (ADR-console-060).
 
 Three more kinds are kept (#892): `SPRINT_CLOSED` (`sprint.closed`), `SPRINT_STOP_REQUESTED`
 (`sprint.stop_requested`) and `MANAGER_STOPPED` (`manager.stopped`). `manager.stopped` is kept
@@ -47,11 +47,12 @@ column. They are not in `KEPT_KINDS`: retention removes them like any other row,
 manager rows are gone reads as having none.
 
 Two kinds record a question about a project and its answer (#1176): `PROJECT_QUESTION_ASKED`
-(`project_question.asked`, payload `question_id`, `question`, `profile`, `session_id`, the project
-in its project column) and `PROJECT_QUESTION_ANSWERED` (`project_question.answered`, payload `question_id`,
+(`project_question.asked`, payload `question_id`, `question`, `profile`, `session_id`, and for a
+follow-up the `thread_id` it was given (#1178), the project in its project column) and `PROJECT_QUESTION_ANSWERED` (`project_question.answered`, payload `question_id`,
 `outcome` and either `answer` or `reason`). Neither is in `KEPT_KINDS`, retention removes them like
 any other row; the spend fold reads the asked row's `session_id` and `profile`
-(`spend.question_sessions`) and nothing else folds them; the schema version is unchanged.
+(`spend.question_sessions`), and `project_question.asked_questions` folds both into the desk
+view's questions (#1177); the schema version is unchanged.
 
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the

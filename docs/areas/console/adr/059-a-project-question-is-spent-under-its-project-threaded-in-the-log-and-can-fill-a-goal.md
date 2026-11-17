@@ -28,5 +28,5 @@ ADR-console-058 gave the console a read-only question session, but the Spend pag
 
 - A question asked before this change has no `session_id`, so its spend stays an outside-sprint session's.
 - The question sessions are folded into memory from the log's rows; retention removes a row after 90 days, past the 30-day spend window.
-- The Ask box (#1177), follow-ups (#1178) and Make it a goal (#1179) are built by their own issues; until they land no page asks or shows a question.
+- The Ask box landed with #1177; follow-ups (#1178) and Make it a goal (#1179) are built by their own issues.
 - Related: ADR-console-001, ADR-console-002, ADR-console-011, ADR-console-015, ADR-console-049, ADR-console-052, ADR-console-058.
