@@ -1998,6 +1998,12 @@ class PageReadingTest(unittest.TestCase):
     def found(tree: dict, cls: str) -> list:
         return [n for n in nodes(tree) if has_class(n, cls)]
 
+    def test_the_decision_readings_bold_rule_does_not_reach_the_reading_panel(self) -> None:
+        # `#reading` shares the class `reading` with a decision item's "Reading:" line (a `p`); a bare `.reading` rule
+        # would give the whole panel weight 600 (D11: only the call-out label is emphasised).
+        self.assertEqual(css_decls(".reading"), [])
+        self.assertEqual([d.get("font-weight") for d in css_decls("p.reading")], ["600"])
+
     def test_opening_a_thread_shows_it_in_the_main_column_and_close_hides_it(self) -> None:
         shown, closed = render([*self.opened(thread(ASK_FIRST)), {"snapshot": True},
                                 {"click": "reading-close"}, {"snapshot": True}])
