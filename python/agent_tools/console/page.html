@@ -306,9 +306,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .line summary::-webkit-details-marker { display: none; }
 .line summary:hover { background: rgba(202, 211, 245, .05); }
 .line summary > .sess-sum, .line summary > .run-sum { flex-basis: 100%; }
-.line.quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
-.line.quiet > details { flex: 1 1 auto; min-width: 0; }
-.give-goal { margin-left: auto; }
+.line.project { display: flex; flex-wrap: nowrap; align-items: baseline; gap: 4px 10px; }
+.line.project > details { flex: 1 1 0; min-width: 0; }
+.line-acts { flex: none; margin-left: auto; display: inline-flex; gap: 8px; }
 .run-sum { font-size: .8125rem; color: var(--sub0); }
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
@@ -337,6 +337,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .ask-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
 .ask-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
 .ask-list { margin-top: 8px; }
+.line.questions summary { display: revert; list-style: revert; }
+.line.questions summary::-webkit-details-marker { display: revert; }
+.questions-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
+.thread-list { margin-top: 4px; }
+.thread + .thread { margin-top: 4px; }
+.thread > details > summary { display: flex; align-items: baseline; gap: 2px 10px; cursor: pointer; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; }
+.thread-first { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--lav); }
+.thread-age, .thread-more { flex: none; color: var(--ov2); white-space: nowrap; }
 .ask + .ask { margin-top: 12px; }
 .ask > p { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .ask > p + p { margin-top: 2px; }
@@ -748,6 +756,7 @@ const askOpen = new Set();
 const askPosts = new Map();
 const askSent = new Map();
 const askLatest = new Map();
+const askReveal = new Set();
 let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
@@ -1708,7 +1717,8 @@ function signinCard(item) {
   return card;
 }
 function projectLine(entry) {
-  const line = el("li", entry.quiet ? "line quiet" : "line");
+  const line = el("li", entry.quiet ? "line project quiet" : "line project");
+  line.dataset.project = entry.project_id;
   const words = [];
   if (entry.quiet) {
     const quiet = el("span", "qw");
@@ -1724,9 +1734,18 @@ function projectLine(entry) {
   }
   line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
+  // The Ask button sits on the same row as Give it a goal (#1178, ADR-console-002); an open box takes its place.
+  const acts = el("span", "line-acts");
+  let buttons = 0;
   if (entry.quiet) {
-    line.appendChild(actionButton("give-goal btn-quiet", "Give it a goal", () => openGoalFor(entry.project_id)));
+    acts.appendChild(actionButton("give-goal btn-quiet", "Give it a goal", () => openGoalFor(entry.project_id)));
+    buttons += 1;
   }
+  if (!askOpen.has(entry.project_id)) {
+    acts.appendChild(actionButton("ask-open btn-quiet", "Ask a question", () => openAsk(entry.project_id)));
+    buttons += 1;
+  }
+  if (buttons > 0) line.appendChild(acts);
   return line;
 }
 // A not-due owner check (#1129, ADR-console-055): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
@@ -1985,17 +2004,27 @@ function cancelAsk(projectId) {
   if (post !== undefined && post.phase !== "sending") askPosts.delete(projectId);
   redrawNotices();
 }
-function askIds(entry) {
-  return (entry !== undefined && Array.isArray(entry.questions) ? entry.questions : []).map((question) => question.id);
+// The threads a project's view carries (#1178, ADR-console-059 D4), newest first, and every question of them.
+function askThreads(entry) {
+  const folded = entry !== undefined && entry.questions !== null && typeof entry.questions === "object" ? entry.questions : null;
+  return folded !== null && Array.isArray(folded.threads) ? folded.threads.filter((thread) => Array.isArray(thread.questions) && thread.questions.length > 0) : [];
 }
-// Every submission still outstanding for a project: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own row, one the project did not hold when the first of them was sent and that carries the same text (the console stores it stripped), the oldest submission taking the oldest such row, so one question's row never stands for another.
+function askRows(entry) {
+  const rows = [];
+  for (const thread of askThreads(entry)) rows.push(...thread.questions);
+  return rows;
+}
+function askIds(entry) {
+  return askRows(entry).map((question) => question.id);
+}
+// Every submission still outstanding for a project: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own thread, one the project did not hold when the first of them was sent and whose first question carries the same text (the console stores it stripped), the oldest submission taking the oldest such thread, so one question's row never stands for another.
 function askMatches(projectId, entry) {
   const sent = askSent.get(projectId);
   const post = askPosts.get(projectId);
   const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
   const taken = new Map();
-  if (sent !== undefined && entry !== undefined && Array.isArray(entry.questions)) {
-    const fresh = entry.questions.filter((question) => !sent.base.has(question.id)).reverse();
+  if (sent !== undefined && entry !== undefined) {
+    const fresh = askThreads(entry).map((thread) => thread.questions[0]).filter((question) => !sent.base.has(question.id)).reverse();
     const used = new Set();
     for (const submission of submissions) {
       const found = fresh.find((question) => !used.has(question.id) && question.question === submission.text.trim());
@@ -2017,7 +2046,11 @@ function askReconcile(projectId, entry) {
   if (sent === undefined) return;
   const { taken } = askMatches(projectId, entry);
   for (const submission of sent.list) {
-    if (taken.has(submission)) sent.base.add(taken.get(submission));
+    if (!taken.has(submission)) continue;
+    sent.base.add(taken.get(submission));
+    // The view now carries the question: its fold and its thread are drawn open, once (D8).
+    askReveal.add("questions:" + projectId);
+    askReveal.add("thread:" + projectId + ":" + taken.get(submission));
   }
   sent.list = sent.list.filter((submission) => !taken.has(submission));
 }
@@ -2103,26 +2136,73 @@ function askRow(question) {
   }
   return row;
 }
-// One block per registered project: the Ask control, then its questions, newest first as the view orders them, with the questions sent drawn first, newest first, until the view carries each.
-function askBlock(entry, afterLine) {
+// A project's Ask block: the open box and the submissions the view does not carry yet, newest first, never a row the view carries. A project whose line is drawn has its button there and draws no block while it has nothing to hold; one without a line keeps its named block holding the button.
+function askBlock(entry, afterLine, lined) {
   const id = entry.project_id;
+  const pending = askOutstanding(id, entry).reverse();
+  if (lined && !askOpen.has(id) && pending.length === 0) return null;
   const item = el("li", afterLine ? "line asks after-line" : "line asks");
   item.dataset.project = id;
   if (!afterLine) item.appendChild(el("span", "asks-project", id));
-  item.appendChild(askOpen.has(id) ? askBox(id, entry) : actionButton("ask-open btn-quiet", "Ask a question", () => openAsk(id)));
-  const rows = [];
-  for (const post of askOutstanding(id, entry).reverse()) {
-    const pending = el("li", "ask");
-    pending.appendChild(phrase("p", "ask-question", post.text, timeEl("ago", post.at, "ask-age")));
-    pending.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending…" : "Working on it"));
-    rows.push(pending);
-  }
-  for (const question of Array.isArray(entry.questions) ? entry.questions : []) rows.push(askRow(question));
-  if (rows.length > 0) {
+  if (askOpen.has(id)) item.appendChild(askBox(id, entry));
+  else if (!lined) item.appendChild(actionButton("ask-open btn-quiet", "Ask a question", () => openAsk(id)));
+  if (pending.length > 0) {
     const list = el("ul", "ask-list");
-    for (const row of rows) list.appendChild(row);
+    for (const post of pending) {
+      const row = el("li", "ask");
+      row.appendChild(phrase("p", "ask-question", post.text, timeEl("ago", post.at, "ask-age")));
+      row.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending\u2026" : "Working on it"));
+      list.appendChild(row);
+    }
     item.appendChild(list);
   }
+  return item;
+}
+// A fold drawn open once when its key was revealed by a sent question the view now carries, closed otherwise.
+function revealed(key) {
+  if (!askReveal.has(key)) return false;
+  askReveal.delete(key);
+  return true;
+}
+function threadItem(projectId, thread) {
+  const first = thread.questions[0];
+  const last = thread.questions[thread.questions.length - 1];
+  const item = el("li", "thread");
+  const fold = el("details");
+  fold.dataset.key = "thread:" + projectId + ":" + thread.id;
+  if (revealed(fold.dataset.key)) fold.open = true;
+  const summary = el("summary");
+  const head = el("span", "thread-first", first.question);
+  head.setAttribute("title", first.question);
+  summary.appendChild(head);
+  summary.appendChild(timeEl("ago", last.asked_at, "thread-age"));
+  if (thread.questions.length > 1) {
+    const more = thread.questions.length - 1;
+    summary.appendChild(el("span", "thread-more", "and " + more + (more === 1 ? " follow-up" : " follow-ups")));
+  }
+  fold.appendChild(summary);
+  const list = el("ul", "ask-list");
+  for (const question of thread.questions) list.appendChild(askRow(question));
+  fold.appendChild(list);
+  item.appendChild(fold);
+  return item;
+}
+// One closed fold of a project's question threads, newest first, each a closed line opening to its questions and answers in order (#1178, ADR-console-059 D4); null when the project has none. It counts in nothing.
+function questionsFold(entry, afterLine) {
+  const threads = askThreads(entry);
+  if (threads.length === 0) return null;
+  const item = el("li", afterLine ? "line questions after-line" : "line questions");
+  const fold = el("details");
+  fold.dataset.key = "questions:" + entry.project_id;
+  if (revealed(fold.dataset.key)) fold.open = true;
+  const summary = el("summary");
+  summary.appendChild(el("b", "", entry.questions.label + " (" + threads.length + ")"));
+  if (!afterLine) summary.appendChild(el("span", "questions-project", entry.project_id));
+  fold.appendChild(summary);
+  const list = el("ul", "thread-list");
+  for (const thread of threads) list.appendChild(threadItem(entry.project_id, thread));
+  fold.appendChild(list);
+  item.appendChild(fold);
   return item;
 }
 function renderStatement(view) {
@@ -4225,7 +4305,7 @@ function drawProjects(view) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
       fold.dataset.key = "quiet";
-      if (entry.projects.some((project) => (project.notice_post === true && noticeOpen.has(project.project_id)) || askOpen.has(project.project_id))) fold.open = true;
+      if (entry.projects.some((project) => (project.notice_post === true && noticeOpen.has(project.project_id)) || askOpen.has(project.project_id) || askReveal.has("questions:" + project.project_id))) fold.open = true;
       const summary = el("summary");
       summary.appendChild(quietIcon());
       summary.appendChild(el("b", "", entry.label));
@@ -4235,7 +4315,10 @@ function drawProjects(view) {
         inner.appendChild(projectLine(project));
         const notices = noticeFold(project, true);
         if (notices !== null) inner.appendChild(notices);
-        inner.appendChild(askBlock(project, true));
+        const asks = askBlock(project, true, true);
+        if (asks !== null) inner.appendChild(asks);
+        const questions = questionsFold(project, true);
+        if (questions !== null) inner.appendChild(questions);
       }
       fold.appendChild(inner);
       const item = el("li");
@@ -4248,7 +4331,11 @@ function drawProjects(view) {
       for (const wait of waits) list.appendChild(waitLine(wait, "li"));
       const notices = noticeFold(entry, drawn);
       if (notices !== null) list.appendChild(notices);
-      list.appendChild(askBlock(entry, drawn || notices !== null));
+      const above = drawn || notices !== null;
+      const asks = askBlock(entry, above, drawn);
+      if (asks !== null) list.appendChild(asks);
+      const questions = questionsFold(entry, above || asks !== null);
+      if (questions !== null) list.appendChild(questions);
     }
   }
   section.appendChild(list);

@@ -19,8 +19,9 @@ Contract:
   two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
-  lines) and one question still working, and shot against a page with no Ask box it is the desk
-  without it, which is the before picture);
+  lines) and one question still working, each its own thread, the Questions fold and both
+  threads opened when the page has them; a page with no `ASK_OPEN` button is the desk without
+  the control, which is the before picture);
   `WIDTHS` are the two viewport widths each is shot at. `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 38 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
@@ -42,8 +43,8 @@ Contract:
   "stated" before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a
   `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
   pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
-  the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the Ask
-  box does not show `owner/web`'s open field, its working question and its answered question's
+  the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the `ASK_OPEN`
+  button does not show `owner/web`'s open field, its working question and its answered question's
   Read line (`OPEN_ASK`); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
@@ -90,7 +91,10 @@ OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
 ASK_ANSWERED_QUESTION = "What does the build check?"
 ASK_WORKING_QUESTION = "Is the importer deployed on this host?"
 ASK_READ_LINE = "Read: flake.nix, lib/helpers.nix"
-ASK_OPEN = 'li.asks[data-project="owner/web"] button.ask-open'
+ASK_OPEN = 'li[data-project="owner/web"] button.ask-open'
+ASK_FOLD = 'details[data-key="questions:owner/web"] > summary'
+ASK_THREADS = tuple(f'details[data-key="thread:owner/web:{qid}"] > summary'
+                    for qid in ("1177a2", "1177a1"))
 OPEN_ASK = (True, "Working on it", ASK_READ_LINE)
 DESK_OUTSIDE = "outside-1136"
 
@@ -500,10 +504,10 @@ TELL_READING = """(() => {
 })()"""
 
 ASK_READING = f"""(() => {{
-  const block = document.querySelector('li.asks');
-  if (!block) return null;
   const mine = document.querySelector('li.asks[data-project="owner/web"]');
   if (!mine) return [false, null, null];
+  const homes = Array.from(document.querySelectorAll(
+    'li[data-project="owner/web"], details[data-key="questions:owner/web"]'));
   const field = mine.querySelector('textarea.ask-text');
   let shown = false;
   if (field) {{
@@ -513,7 +517,8 @@ ASK_READING = f"""(() => {{
   }}
   const visible = (node) => node.getClientRects().length > 0;
   const read = (start, selector) => {{
-    const row = Array.from(mine.querySelectorAll('li.ask')).find((item) => {{
+    const rows = homes.flatMap((home) => Array.from(home.querySelectorAll('li.ask')));
+    const row = rows.find((item) => {{
       const question = item.querySelector('p.ask-question');
       return visible(item) && question && question.textContent.trim().startsWith(start);
     }});
@@ -590,9 +595,12 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
         ask = None
-        if state == "ask-box" and page.query_selector("li.asks"):
+        if state == "ask-box" and page.query_selector(ASK_OPEN):
             page.click(ASK_OPEN)
             page.wait_for_selector('li.asks[data-project="owner/web"] textarea.ask-text')
+            if page.query_selector(ASK_FOLD):
+                for selector in (ASK_FOLD, *ASK_THREADS):
+                    page.click(selector)
             ask = tuple(page.evaluate(ASK_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")

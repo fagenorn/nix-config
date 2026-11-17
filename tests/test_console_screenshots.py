@@ -100,7 +100,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_ask_box_shot_opens_owner_webs_box_only_on_a_page_that_has_one(self) -> None:
         field = 'li.asks[data-project="owner/web"] textarea.ask-text'
 
-        def fake(has_ask):
+        def fake(present):
             class Page:
                 def __init__(self):
                     self.clicks = []
@@ -114,7 +114,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.waits.append(selector)
 
                 def query_selector(self, selector):
-                    return object() if has_ask and selector == "li.asks" else None
+                    return object() if selector in present else None
 
                 def click(self, selector):
                     self.clicks.append(selector)
@@ -145,12 +145,18 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
             return Browser(), page
 
-        cases = (("head", "ask-box", True, [shots.ASK_OPEN], shots.OPEN_ASK),
-                 ("base", "ask-box", False, [], None),
-                 ("other state", "live-several", True, [], None))
-        for name, state, has_ask, clicks, ask in cases:
+        head = {shots.ASK_OPEN, shots.ASK_FOLD}
+        opened = [shots.ASK_OPEN, shots.ASK_FOLD, *shots.ASK_THREADS]
+        cases = (("head", "ask-box", head | {"li.asks"}, opened, shots.OPEN_ASK),
+                 # The page of #1178: the line holds the button and no li.asks exists until the box opens.
+                 ("head, no Ask block before opening", "ask-box", head, opened, shots.OPEN_ASK),
+                 # The page of #1177: li.asks holds the button and there is no fold.
+                 ("base", "ask-box", {shots.ASK_OPEN, "li.asks"}, [shots.ASK_OPEN], shots.OPEN_ASK),
+                 ("no Ask control", "ask-box", set(), [], None),
+                 ("other state", "live-several", head, [], None))
+        for name, state, present, clicks, ask in cases:
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
-                browser, page = fake(has_ask)
+                browser, page = fake(present)
                 shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
                 self.assertEqual(page.clicks, clicks)
                 self.assertEqual(shot.ask, ask)
@@ -381,12 +387,14 @@ class ScreenshotFixtureTest(unittest.TestCase):
                           False)])
                 elif state == "ask-box":
                     web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
-                    self.assertEqual([q["state"] for q in web["questions"]],
-                                     ["working", "answered"])
-                    self.assertEqual([q["question"] for q in web["questions"]],
+                    threads = web["questions"]["threads"]
+                    asked = [q for t in threads for q in t["questions"]]
+                    self.assertEqual([len(t["questions"]) for t in threads], [1, 1])
+                    self.assertEqual([q["state"] for q in asked], ["working", "answered"])
+                    self.assertEqual([q["question"] for q in asked],
                                      [shots.ASK_WORKING_QUESTION, shots.ASK_ANSWERED_QUESTION])
-                    self.assertEqual(web["questions"][1]["read_text"], shots.ASK_READ_LINE)
-                    self.assertEqual(web["questions"][1]["ran_text"], "Ran: just build")
+                    self.assertEqual(asked[1]["read_text"], shots.ASK_READ_LINE)
+                    self.assertEqual(asked[1]["ran_text"], "Ran: just build")
                     self.assertEqual(view["statement"]["inbox_items"], 0)
                 days = (view["spend"] or {"days": []})["days"]
                 self.assertIsNotNone(view["spend"])

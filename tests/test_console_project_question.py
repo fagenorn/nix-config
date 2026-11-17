@@ -724,7 +724,12 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(shown["inbox"], bare["inbox"])
         self.assertEqual(shown["statement"]["inbox_items"], 0)
         entry = shown["entries"][0]
-        questions = entry["questions"]
+        threads = entry["questions"]["threads"]
+        self.assertEqual(entry["questions"]["count"], 4)
+        self.assertEqual([t["id"] for t in threads], ["q4", "q3", "q2", "q1"])
+        self.assertEqual([len(t["questions"]) for t in threads], [1, 1, 1, 1])
+        self.assertEqual([t["follow_up"] for t in threads], [False, False, False, True])
+        questions = [q for t in threads for q in t["questions"]]
         self.assertEqual([q["id"] for q in questions], ["q4", "q3", "q2", "q1"])
         self.assertEqual([q["state"] for q in questions],
                          ["working", "failed", "timed_out", "answered"])
@@ -747,7 +752,7 @@ class QuestionViewTest(unittest.TestCase):
         for question in questions:
             self.assertEqual(set(question), QUESTION_KEYS)
         self.assertIs(entry["quiet"], True)
-        self.assertEqual(bare["entries"][0]["questions"], [])
+        self.assertIsNone(bare["entries"][0]["questions"])
 
     def test_a_question_back_and_the_production_line_read_as_their_own_lines(self):
         answer = project_question.answer_text(
@@ -756,7 +761,7 @@ class QuestionViewTest(unittest.TestCase):
                   _answered(3, self.P1, "q1", outcome="answered", answer=answer)]
         shown = view.derive_view(view.project_states(events).values(),
                                  project_questions=project_question.asked_questions(events))
-        question = shown["entries"][0]["questions"][0]
+        question = shown["entries"][0]["questions"]["threads"][0]["questions"][0]
         self.assertEqual(question["back_text"],
                          "Question for you: May I run the paid billing export?")
         self.assertEqual(question["production_text"], project_question.NO_PRODUCTION_LINE)
@@ -769,8 +774,47 @@ class QuestionViewTest(unittest.TestCase):
                                  project_questions=project_question.asked_questions(events))
         self.assertEqual([e["type"] for e in shown["entries"]], ["quiet_group"])
         by_id = {p["project_id"]: p["questions"] for p in _project_entries(shown)}
-        self.assertEqual([q["state"] for q in by_id.pop("owner/p03")], ["working"])
-        self.assertEqual(list(by_id.values()), [[]] * 4)
+        self.assertEqual([q["state"] for t in by_id.pop("owner/p03")["threads"]
+                          for q in t["questions"]], ["working"])
+        self.assertEqual(list(by_id.values()), [None] * 4)
+
+
+class QuestionThreadViewTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def test_a_projects_threads_are_a_closed_fold_newest_first_that_adds_nothing_to_the_count(self):
+        events = [
+            _registered(1, self.P1),
+            _asked(2, self.P1, "q1"),
+            _answered(3, self.P1, "q1", outcome="answered", answer="Answer: a"),
+            _asked(4, self.P1, "q2"),
+            _answered(5, self.P1, "q2", outcome="answered", answer="Answer: b"),
+            _asked(6, self.P1, "q3", thread_id="q1"),
+            _answered(7, self.P1, "q3", outcome="answered", answer="Answer: c"),
+            _asked(8, self.P1, "q4", thread_id="q2"),
+        ]
+        shown = view.derive_view(view.project_states(events).values(),
+                                 project_questions=project_question.asked_questions(events))
+        bare = view.derive_view(view.project_states(events).values())
+        self.assertEqual(shown["statement"], bare["statement"])
+        self.assertEqual(shown["inbox"], bare["inbox"])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        self.assertEqual([e["project_id"] for e in shown["entries"]],
+                         [e["project_id"] for e in bare["entries"]])
+        entry = shown["entries"][0]
+        self.assertIs(entry["quiet"], True)
+        questions = entry["questions"]
+        self.assertEqual((questions["label"], questions["count"]), ("Questions", 2))
+        threads = questions["threads"]
+        self.assertEqual([t["id"] for t in threads], ["q2", "q1"])
+        self.assertEqual([[x["id"] for x in t["questions"]] for t in threads],
+                         [["q2", "q4"], ["q1", "q3"]])
+        self.assertEqual([t["follow_up"] for t in threads], [False, True])
+        for thread in threads:
+            self.assertEqual(set(thread), {"id", "questions", "follow_up"})
+            for question in thread["questions"]:
+                self.assertEqual(set(question), QUESTION_KEYS)
+        self.assertIsNone(bare["entries"][0]["questions"])
 
 
 class QuestionCase(Case):
@@ -970,12 +1014,12 @@ class QuestionServiceTest(QuestionCase):
         try:
             before = json.loads(svc.view_bytes)["statement"]
             svc.ask_project_question(WHY, "what does the build check?")
-            (question,) = self.shown(svc)["questions"]
+            (question,) = [q for t in self.shown(svc)["questions"]["threads"] for q in t["questions"]]
             self.assertEqual((question["state"], question["question"]),
                              ("working", "what does the build check?"))
             self.assertEqual(json.loads(svc.view_bytes)["statement"], before)
             held.pop()()
-            (question,) = self.shown(svc)["questions"]
+            (question,) = [q for t in self.shown(svc)["questions"]["threads"] for q in t["questions"]]
             self.assertEqual((question["state"], question["answer"]), ("answered", "it builds."))
             self.assertEqual(json.loads(svc.view_bytes)["statement"], before)
         finally:
@@ -987,7 +1031,7 @@ class QuestionServiceTest(QuestionCase):
         svc.ask_project_question(WHY, "what does the build check?")
         svc.close()
         again = self.start()
-        (question,) = self.shown(again)["questions"]
+        (question,) = [q for t in self.shown(again)["questions"]["threads"] for q in t["questions"]]
         self.assertEqual(question["state"], "answered")
 
 
