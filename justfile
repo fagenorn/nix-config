@@ -202,6 +202,7 @@ agent-workflow-tests *args:
     tests/test_suite_runner.py \
     tests/test_console_event_log.py \
     tests/test_console_view.py \
+    tests/test_console_failed_start.py \
     tests/test_console_activation.py \
     tests/test_console_activation_check.py \
     tests/test_console_capacity.py \
@@ -231,6 +232,7 @@ agent-workflow-tests *args:
     tests/test_console_bypass_proof_github.py \
     tests/test_console_bypass_proof.py \
     tests/test_console_bypass_proof_mcp.py \
+    tests/test_console_bypass_proof_wakes.py \
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
@@ -240,6 +242,7 @@ agent-workflow-tests *args:
     tests/test_console_look_kept_check.py \
     tests/test_console_page.py \
     tests/test_console_controls.py \
+    tests/test_console_goal_box.py \
     tests/test_console_service.py \
     tests/test_console_stream.py \
     tests/test_console_sessions.py \
@@ -298,7 +301,7 @@ agent-instruction-budget *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 28 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 56 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail

@@ -33,7 +33,9 @@ test seam only.
 
 Prompt. `LEAD` (the owner's framing, the `ANSWER_RULES` and the heading shape: a direct answer in two
 or three sentences in plain business terms, what is live first, no decision-record jargon, history
-and tracker before decision records, a failed command named in the answer), then a routes paragraph
+and tracker before decision records, every item in a question's time window counted from the dates
+read with list limits raised until the window is covered and the count's source named, a failed
+command named in the answer), then a routes paragraph
 (the declared commands, each exactly as written and alone; or that none is declared so production
 cannot be read), then the reads paragraph (the git reads with their examples, and either the gh
 reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
@@ -81,11 +83,19 @@ the same project (the first answer wins, strays are ignored): outcome `answered`
 the answered row's `at`. Folding two batches through `known` equals folding once, and `known` is
 never mutated. `answer_parts(text)` splits a stored answer by the `HEADINGS` of the shape `LEAD`
 asks for: a heading matches at line start after optional spaces, case-insensitively, followed by
-`:`; the lines after a heading up to the next one belong to it (joined with a newline, stripped);
+`:`, and is not recognised inside fenced code (a line whose left-trimmed text starts with three
+backticks toggles the fence and stays in the current part, and so does a heading's text after its colon; an unclosed fence runs to the end, so
+every later line stays in the part the fence opened in); the lines after a heading up to the next one belong to it (joined with a newline, stripped);
 text before the first heading starts the answer part, and a text with no heading is wholly the
 answer; an empty part is None, and so is a part other than the answer that is `none` (any case, a
 trailing `.` ignored): an answer of `None.` is an answer and keeps its text; a text
 ending with `NO_PRODUCTION_LINE` carries that line as `production` and in no other part.
+A back part with question text and two to `MAX_CHOICES` (5) list lines (`-`, `*`, `+`, or one or
+two digits then `.` or `)`, then a space) is split: `back` is the question text alone and `choices`
+the list lines' texts in order. One list line, more than `MAX_CHOICES`, or no question text leaves
+`back` the whole part and `choices` empty (`()`). The prompt (`ANSWER_RULES`, `LEAD`) names the
+formatting subset (bold, `- ` list lines, inline code, fenced code; no headings, tables, links or
+HTML) and asks for a choice as two to five answers on their own `- ` lines.
 
 Threads (#1178, ADR-console-062). A `Turn` is one earlier question with the answer the session
 gave. An `Ask` carries a `thread` of turns, oldest first, and a thread changes only the prompt:
@@ -185,6 +195,16 @@ ANSWER_RULES = (
     "production read, not from its decision records alone. "
     "If a command you run fails, say plainly in the answer which command failed and what it "
     "printed. "
+    "When the question covers a time window, count every release, pull request or deploy dated "
+    "inside it from the dates you read: raise the list limit (for example --limit) until a list "
+    "returns fewer items than the limit, so you have read every item, never stop at a first page "
+    "or an arbitrary limit and never stop at the first item older than the window, because gh "
+    "lists by creation date and a release published or a pull request merged inside the window "
+    "can have been created before it; when a list is too long to read whole, filter it by the "
+    "date that counts (for example --search merged:2026-01-01..2026-01-31), and say in the answer where "
+    "the count comes from. "
+    "Format only with **bold**, list lines starting with \"- \", `inline code` and fenced code "
+    "blocks; use no headings, tables, links or HTML. "
 )
 
 LEAD = (
@@ -197,7 +217,8 @@ LEAD = (
     "Read: <the files you read, or none>\n"
     "Ran: <the commands you ran, or none>\n"
     "Could not find out: <what you could not find out, or none>\n"
-    "Question for you: <a step that needs money or a credential, or none>\n\n"
+    "Question for you: <a step that needs money or a credential, or a choice only the owner can "
+    "make, then its two to five answers, each on its own line starting with \"- \", or none>\n\n"
 )
 
 THREAD_LEAD = (
@@ -216,6 +237,8 @@ _HEADING = re.compile(
     r"^\s*(" + "|".join(re.escape(label) for _, label in HEADINGS) + r")\s*:\s?(.*)$",
     re.IGNORECASE | re.ASCII)
 _KEY_OF = {label.lower(): key for key, label in HEADINGS}
+MAX_CHOICES = 5
+_LIST_LINE = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+(\S.*)$", re.ASCII)
 
 
 class Refused(Exception):
@@ -383,9 +406,11 @@ def reads_paragraph(repo: str | None) -> str:
         return text + (
             "For this project's GitHub repository: gh pr list, gh pr view, gh release list, "
             "gh release view, gh issue list, gh issue view, gh run list and gh run view, each "
-            f"with --repo {repo} right after list or view, before any other word, and no --. "
+            f"with --repo {repo} right after list or view, before any other word, and no --; a "
+            "view may instead name its one tag or number just before --repo, never both. "
             f"For merged work: gh pr list --repo {repo} --state merged --limit 30. "
-            f"For what was released: gh release list --repo {repo}.\n\n")
+            f"For what was released: gh release list --repo {repo} --limit 100. "
+            f"To read one release: gh release view v1.2.0 --repo {repo}.\n\n")
     return text + "gh cannot be used: this project's contract names no GitHub repository.\n\n"
 
 
@@ -526,6 +551,7 @@ class AnswerParts:
     unknown: str | None
     back: str | None
     production: str | None
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -553,14 +579,25 @@ def answer_parts(text: str) -> AnswerParts:
     if body.endswith(NO_PRODUCTION_LINE):
         body, production = body[:-len(NO_PRODUCTION_LINE)], NO_PRODUCTION_LINE
     buckets: dict[str, list[str]] = {key: [] for key, _ in HEADINGS}
-    current = "answer"
+    current, in_fence = "answer", False
     for line in body.splitlines():
-        match = _HEADING.match(line)
-        if match:
-            current = _KEY_OF[match.group(1).lower()]
-            line = match.group(2)
+        if not in_fence:
+            match = _HEADING.match(line)
+            if match:
+                current = _KEY_OF[match.group(1).lower()]
+                line = match.group(2)
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
         buckets[current].append(line)
-    return AnswerParts(*(_part(buckets[key], key) for key, _ in HEADINGS), production)
+    answer, read, ran, unknown, back = (_part(buckets[key], key) for key, _ in HEADINGS)
+    choices: tuple[str, ...] = ()
+    if back is not None:
+        lines = back.splitlines()
+        listed = [m.group(1).strip() for m in map(_LIST_LINE.match, lines) if m]
+        asked = "\n".join(l for l in lines if not _LIST_LINE.match(l)).strip()
+        if asked and 2 <= len(listed) <= MAX_CHOICES:
+            back, choices = asked, tuple(listed)
+    return AnswerParts(answer, read, ran, unknown, back, production, choices)
 
 
 def _answered(question: AskedQuestion, event: Event) -> AskedQuestion:

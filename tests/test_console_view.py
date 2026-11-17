@@ -1198,7 +1198,7 @@ class ManagerViewTest(unittest.TestCase):
     def test_a_failed_start_shows_its_reason_and_retry(self):
         entry = self.shown(Manager("failed", T0, reason="the directory is not trusted"))
         self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
-                         ("failed", "could not start a manager: the directory is not trusted",
+                         ("failed", "could not start a manager: this account does not trust the project's folder",
                           True))
 
     def test_waiting_on_quota_reads_until_the_earliest_reset(self):
@@ -1791,20 +1791,20 @@ class SprintMovementViewTest(unittest.TestCase):
                              ("quiet", "quiet for 20 min \u2014 may be stuck"))
             self.assertEqual(shown["ball"], "nobody")
             self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
-        with self.subTest("drafting, nothing but the goal"):
+        with self.subTest("drafting, a failed start is the owner's card"):
             fresh = failed_at(sprint(A), T0_MS)
             at = T0_MS + MIN
-            self.assertEqual(entry(line(fresh, at))["ball"], "nobody")
+            self.assertEqual(entry(line(fresh, at))["ball"], "owner")
             self.assertEqual(entry(line(fresh, at, sessions=[idle_session]))["ball"], "manager")
             self.assertEqual(entry(line(fresh, at, sessions=[working_session]))["ball"],
                              "manager")
 
-    def test_a_freshly_stated_goal_moves_until_its_launch_fails(self):
+    def test_a_freshly_stated_goal_moves_until_its_launch_fails_to_the_owner(self):
         fresh = with_manager(sprint(A))
         self.assertEqual(entry(line(fresh, T0_MS + MIN))["ball"], "manager")
         self.assertEqual(entry(line(fresh, T0_MS + 15 * MIN))["ball"], "nobody")
         failed = with_manager(sprint(A), state="failed")
-        self.assertEqual(entry(line(failed, T0_MS + MIN))["ball"], "nobody")
+        self.assertEqual(entry(line(failed, T0_MS + MIN))["ball"], "owner")
 
 
 def moving(**kw):
@@ -2004,6 +2004,54 @@ class SprintWaitViewTest(unittest.TestCase):
                 self.assertEqual((later["state"], later["state_text"]),
                                  ("quiet", "quiet for 20 min \u2014 may be stuck"))
                 self.assertEqual(later["ball"], "nobody")
+
+
+class DeafManagerViewTest(unittest.TestCase):
+    """A manager that holds the console's wake behind a prompt nobody at a terminal will answer (#1229)."""
+
+    base = reported(with_manager(started(A)), R)
+    now = R + 2 * MIN
+    DEAF = "the manager cannot hear the console"
+
+    def shown(self, held, session_state="idle", sid="s1", sessions=None):
+        sessions = [session(sid, session_state, name=NAME)] if sessions is None else sessions
+        return entry(line(self.base, self.now, sessions=sessions, movement=moving(
+            sessions=(SessionMovement(sid, A, None, None, None, self.now - MIN, held),))))
+
+    def test_a_held_undelivered_message_reads_the_manager_cannot_hear_the_console(self):
+        for state in ("idle", "working", "waiting_permission"):
+            with self.subTest(state):
+                shown = self.shown(True, state)
+                self.assertTrue(shown["now_text"].startswith(self.DEAF), shown["now_text"])
+                self.assertIn("drop the sprint", shown["now_text"])
+                self.assertNotIn("permission", shown["now_text"])
+                self.assertEqual((shown["ball"], shown["ball_text"]), ("owner", "waiting on you"))
+
+    def test_a_real_permission_prompt_and_an_idle_manager_read_as_before(self):
+        shown = self.shown(False, "waiting_permission")
+        self.assertEqual(shown["now_text"], "waiting for your permission in the manager's terminal")
+        self.assertEqual(shown["ball"], "owner")
+        shown = self.shown(False, "working")
+        self.assertEqual((shown["now_text"], shown["ball"]),
+                         ("building 1 of 7: Importer resumes", "manager"))
+
+    def test_a_question_at_the_terminal_still_reads_its_own_words(self):
+        shown = self.shown(True, "waiting_answer")
+        self.assertEqual(shown["now_text"], "waiting for your answer in the manager's terminal")
+
+    def test_only_the_managers_held_message_counts(self):
+        delivery = session("d1", "working", name="other-name")
+        shown = entry(line(self.base, self.now, sessions=[working_session, delivery],
+                           movement=moving(sessions=(
+                               SessionMovement("d1", A, None, None, None, self.now - MIN, True),))))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        other = entry(line(self.base, self.now, sessions=[working_session], movement=moving(
+            sessions=(SessionMovement("s1", "b" * 16, None, None, None, self.now - MIN, True),))))
+        self.assertEqual(other["now_text"], "building 1 of 7: Importer resumes")
+
+    def test_no_movement_reading_never_reads_deaf(self):
+        shown = entry(line(self.base, self.now, sessions=[working_session], movement=None))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
 
 
 class SessionSignalViewTest(unittest.TestCase):

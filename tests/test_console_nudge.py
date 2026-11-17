@@ -52,8 +52,9 @@ class NudgeCommandTest(unittest.TestCase):
                   + " Then print SENT on its own line if the tool reported the message sent "
                     "or accepted, otherwise print FAILED.")
         self.assertEqual(
-            ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
-             "--no-session-persistence", prompt], argv)
+            ["claude-account", "run", "-p", "--tools", "SendMessage,ListAgents",
+             "--allowedTools", "SendMessage", "--strict-mcp-config", "--no-session-persistence",
+             prompt], argv)
         self.assertIn(NUDGE_TEXT, argv[-1])
         self.assertIn('"owner/p01 sprint ' + SID + '"', argv[-1])
         self.assertEqual(
@@ -68,11 +69,47 @@ class NudgeCommandTest(unittest.TestCase):
                   + " Then print SENT on its own line if the tool reported the message sent "
                     "or accepted, otherwise print FAILED.")
         self.assertEqual(
-            ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
-             "--no-session-persistence", prompt], argv)
+            ["claude-account", "run", "-p", "--tools", "SendMessage,ListAgents",
+             "--allowedTools", "SendMessage", "--strict-mcp-config", "--no-session-persistence",
+             prompt], argv)
         self.assertIn(nudge_module.CONTINUE_TEXT, argv[-1])
         self.assertNotIn(NUDGE_TEXT, argv[-1])
         self.assertIn('"' + NAME + '"', argv[-1])
+
+    def test_a_relay_to_a_bypass_manager_runs_its_sender_in_bypass_with_only_the_messaging_tools(self):
+        for route, text in ((RELAY, NUDGE_TEXT), (nudge_module.CONTINUE, nudge_module.CONTINUE_TEXT)):
+            with self.subTest(route=route):
+                n = Nudge(SID, route, NAME, "s-1", "work", self.root, sender_bypass=True)
+                argv = nudge_command(n, "linux")
+                self.assertEqual(
+                    ["claude-account", "run", "-p", "--permission-mode", "bypassPermissions",
+                     "--tools", "SendMessage,ListAgents", "--allowedTools", "SendMessage",
+                     "--strict-mcp-config", "--no-session-persistence",
+                     nudge_module.relay_prompt(NAME, text)], argv)
+                self.assertNotIn("--mcp-config", argv)
+
+    def test_each_relay_tool_list_ends_at_a_flag_and_the_prompt_is_last(self):
+        for bypass in (False, True):
+            for route, text in ((RELAY, NUDGE_TEXT),
+                                (nudge_module.CONTINUE, nudge_module.CONTINUE_TEXT)):
+                with self.subTest(bypass=bypass, route=route):
+                    n = Nudge(SID, route, NAME, "s-1", "work", self.root, sender_bypass=bypass)
+                    argv = nudge_command(n, "linux")
+                    lists = [i for i, part in enumerate(argv) if part in ("--tools", "--allowedTools")]
+                    self.assertEqual(2, len(lists))
+                    for i in lists:
+                        self.assertTrue(argv[i + 2].startswith("--"))
+                    self.assertEqual(nudge_module.relay_prompt(NAME, text), argv[-1])
+
+    def test_the_wake_and_revive_ignore_the_sender_mode(self):
+        for route in (WAKE, REVIVE):
+            for settings in (None, "/s/x"):
+                with self.subTest(route=route, settings=settings):
+                    self.assertEqual(
+                        nudge_command(Nudge(SID, route, NAME, "s-1", "work", self.root, settings,
+                                            sender_bypass=False), "linux"),
+                        nudge_command(Nudge(SID, route, NAME, "s-1", "work", self.root, settings,
+                                            sender_bypass=True), "linux"))
 
     def test_the_idle_sentence_is_fixed_and_names_recap_then_inbox(self):
         text = nudge_module.CONTINUE_TEXT
@@ -205,7 +242,8 @@ class NudgeCommandTest(unittest.TestCase):
 
     def test_no_argv_element_or_environment_value_carries_anything_but_the_fixed_sentence(self):
         self.assertEqual(
-            {"sprint_id", "route", "session_name", "session_id", "profile", "cwd", "settings"},
+            {"sprint_id", "route", "session_name", "session_id", "profile", "cwd", "settings",
+             "sender_bypass"},
             {f.name for f in dataclasses.fields(Nudge)})
         environ = {"HOME": "/h", "PATH": "/bin", "CONSOLE_SPRINT_SECRET": "x",
                    "CONSOLE_SPRINT_ID": SID, "CLAUDE_CONFIG_DIR": "/c"}
@@ -220,6 +258,14 @@ class NudgeCommandTest(unittest.TestCase):
             for dropped in ("CONSOLE_SPRINT_SECRET", "CONSOLE_SPRINT_ID", "CLAUDE_CONFIG_DIR"):
                 self.assertNotIn(dropped, env)
             for value in env.values():
+                self.assertNotIn(NUDGE_TEXT, value)
+        with self.subTest(route="bypass relay"):
+            run = self.fake(stdout="SENT\n")
+            run_nudge(Nudge(SID, RELAY, NAME, "s-1", "work", self.root, sender_bypass=True),
+                      platform="linux", run=run, environ=environ)
+            argv, kwargs = run.calls[0]
+            self.assertEqual([argv[-1]], [part for part in argv if "sprint" in part])
+            for value in kwargs["env"].values():
                 self.assertNotIn(NUDGE_TEXT, value)
         with self.subTest(route=nudge_module.CONTINUE):
             run = self.fake(stdout="SENT\n")

@@ -163,7 +163,9 @@ continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(pro
 sprint_id)`. `idle` (which this module does not import) reads these fields.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
-`(manager_state, manager_text, retry)`; its docstring holds the rules.
+`(manager_state, manager_text, retry)`; its docstring holds the rules. `failed_start(state, listed,
+managers)` is true when that status is a `failed` one with retry on a first launch that has no brief
+(#1182): the owner's card, the line's `NOW_FAILED_START_TEXT` and the owner's ball read it.
 
 The view's `manager_state`, `manager_text` and `retry`, and the service's retry gate, are this
 function's three results.
@@ -595,7 +597,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
                                            SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
-from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
+from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT, plain_reason
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 from agent_tools.console.permission import Permission, from_payload
 from agent_tools.console.pictures import PICTURE_ID
@@ -679,11 +681,13 @@ BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
 NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
 NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
 NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
+NOW_DEAF_TEXT = "the manager cannot hear the console: bring it back or drop the sprint"
 NOW_DRAFTING_TEXT = "drafting the brief"
 NOW_BRIEF_TEXT = "waiting for your approval of the brief"
 NOW_QUESTION_TEXT = "waiting for your answer: {question}"
 NOW_DECISION_TEXT = "waiting for your decision on the tracker"
 NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
+NOW_FAILED_START_TEXT = "waiting for you: the manager failed to start"
 NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
 NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
 NOW_STARTING_TEXT = "starting the work"
@@ -2346,7 +2350,7 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
       manager and the stated time (`stated_at`) otherwise.
     - No manager row: `none`, with `NO_MANAGER_TEXT` and retry when overdue, else no text, no retry.
     - `started`: `missing`, `MISSING_TEXT` and retry when overdue, else `started`, no text, no retry.
-    - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
+    - `failed`: `failed` and `"<FAILED_TEXT>: <plain_reason(reason)>"`.
     - `waiting`: `waiting` and `manager.WAITING_TEXT`.
 
     A `failed` or `waiting` manager of a first launch offers retry only while the sprint has no
@@ -2375,8 +2379,21 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
         return (MISSING, MISSING_TEXT, not stopping) if overdue else (STARTED, None, False)
     free = not listed and (state.brief is None or manager.takeover) and not stopping
     if manager.state == FAILED:
-        return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
+        return FAILED, f"{FAILED_TEXT}: {plain_reason(manager.reason)}", free
     return WAITING, MANAGER_WAITING_TEXT, free
+
+
+def failed_start(state: SprintState, listed: bool, managers: bool) -> bool:
+    """Whether a sprint's manager failed to start and the owner's retry is the way on (#1182).
+
+    True exactly when `manager_status(state, listed, None, managers)` is `failed` with retry, the
+    manager row is not a takeover's and the sprint has no brief: a first launch that never reached
+    a brief. A stalled sprint is not one (its stall card speaks) and neither is a stopping one.
+    The inbox card, the block's Retry and the service's retry gate read the same `manager_status`,
+    so the three never disagree."""
+    manager_state, _, retry = manager_status(state, listed, None, managers)
+    return (manager_state == FAILED and retry and state.manager is not None
+            and not state.manager.takeover and state.brief is None)
 
 
 def new_sprint_id() -> str:
