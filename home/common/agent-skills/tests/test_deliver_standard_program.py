@@ -10726,6 +10726,11 @@ class LookResumeTest(unittest.TestCase):
         self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
         self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
 
+    def test_the_merge_check_of_an_approved_head_leaves_out_merges_the_integration_branch_holds(self):
+        # A hand-resolved merge reachable from origin/dev is not the head's own: only the merges past it are checked.
+        _, calls = self.approve(head=D, patch=LOOK_MERGED, replies={"look-verify": LOOK_OK})
+        self.assertIn("rev-list --merges " + SHA + ".." + D + " ^origin/dev (", prompt(calls, "look-verify"))
+
     def test_an_approve_whose_head_fails_verification_stops_with_both_heads(self):
         for reply in (dict(LOOK_OK, results=[{"id": "build", "status": "fail", "summary": "boom"}]), dict(LOOK_OK, clean=False)):
             with self.subTest(reply=reply):
