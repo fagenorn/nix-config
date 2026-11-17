@@ -1954,6 +1954,8 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
     STATUS = "`look-approval status --repo <slug> --issue <n> --pr <pr> --head <head>`"
     POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
             " --answer approved --message session-<id>`")
+    FIX_POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
+                " --answer fix --message session-<id> --words-file <file>`")
     PUSH = "`git -C <dir> push origin <branch>`"
     HEAD_READ = "`gh pr view <pr> --repo <slug> --json headRefOid`"
     MERGE = "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`"
@@ -2033,6 +2035,12 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         self.assertIn(self.POST, approve)
         self.assertLess(approve.index(self.HEAD_READ), approve.index(self.POST))
         self.assertIn("`posted`", approve)
+
+    def test_fix_posts_only_for_the_unchanged_head(self):
+        fix = self.bullet(self.section("Resume"), "fix")
+        self.assertIn(self.HEAD_READ, fix)
+        self.assertIn(self.FIX_POST, fix)
+        self.assertLess(fix.index(self.HEAD_READ), fix.index(self.FIX_POST))
 
     def test_changes_pushes_the_open_branch_and_opens_nothing(self):
         changes = self.bullet(self.section("Resume"), "changes")

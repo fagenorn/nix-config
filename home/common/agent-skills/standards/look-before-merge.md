@@ -8,9 +8,10 @@ On `needed`, take no land lock. If the branch is behind, merge `origin/<int>`, r
 
 ## Resume on the owner's answer
 
-A session told the owner's answer resumes at step 6 after step 1's `forge-claim acquire` (stop unless `acquired` or `already_held`), past step 1's open-PR refusal. It is one of two.
+A session told the owner's answer resumes at step 6 after step 1's `forge-claim acquire` (stop unless `acquired` or `already_held`), past step 1's open-PR refusal. It is one of three.
 
 - **approve**, with the head it was given for. Read `gh pr view <pr> --repo <slug> --json headRefOid`; only while it is that head, run `look-approval post --repo <slug> --issue <n> --pr <pr> --head <head> --answer approved --message session-<id>`, go on only on `posted` and land as below. Once the head has moved, post and merge nothing: stop at awaiting look again with the new head, which needs a new look.
+- **fix**, with the head it was given for and the owner's words. Read `gh pr view <pr> --repo <slug> --json headRefOid`; only while it is that head, write the words to a file and run `look-approval post --repo <slug> --issue <n> --pr <pr> --head <head> --answer fix --message session-<id> --words-file <file>`, and go on only on `posted`. Then fix once as for changes, push, and land as below, whose resync rule decides the new head: `look-approval status` answers `approved` for it while the fix is the only later commit that changed what the owner looked at.
 - **changes**, with the owner's words. Fix once on the same branch with those words as the findings: step 3's tests, step 4's review and verification, then `forge-claim renew` (step 1's flags) and `git -C <dir> push origin <branch>` to the open pull request. Open no other pull request, merge nothing, and stop at awaiting look again with the new head.
 
 ## Land a marked issue

@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -105,6 +106,44 @@ class PostTest(unittest.TestCase):
         code, out = self.post()
         self.assertEqual(code, 1)
         self.assertEqual(out["verdict"], "untrusted")
+
+
+class PostFixTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def words_file(self, text):
+        path = self.tmp / "words.txt"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def fix(self, *tail):
+        return run("post", *POST, "--answer", "fix", "--message", "msg-1", *tail)
+
+    def test_a_fix_approval_posts_the_words(self):
+        self.world.comment_store(SLUG, ISSUE, [], labels=[])
+        code, out = self.fix("--words-file", self.words_file("make the label bold\n"))
+        self.assertEqual((code, out["verdict"], out["answer"]), (0, "posted", "fix"))
+        lines = self.world.stored()[0]["body"].splitlines()
+        self.assertEqual(lines[0], f"<!-- agent:look v1 issue=7 pr=12 head={HEAD} answer=fix message=msg-1 -->")
+        self.assertEqual(lines[1], "The owner approved head 1a2b3c4 of pull request 12 with one fix.")
+        self.assertEqual(lines[2], "The fix: make the label bold")
+
+    def test_fix_word_errors_come_before_any_gh_call(self):
+        cases = {
+            "no words file": ["--answer", "fix", "--message", "m"],
+            "words with approved": ["--answer", "approved", "--message", "m",
+                                    "--words-file", self.words_file("x")],
+            "missing file": ["--answer", "fix", "--message", "m", "--words-file", str(self.tmp / "none.txt")],
+            "only spaces": ["--answer", "fix", "--message", "m", "--words-file", self.words_file("   \n ")],
+            "too long": ["--answer", "fix", "--message", "m", "--words-file", self.words_file("x" * 2001)],
+        }
+        for name, tail in cases.items():
+            with self.subTest(name):
+                code, out = run("post", *POST, *tail)
+                self.assertEqual((code, out["error"], out["verdict"]), (2, "usage", "error"))
+        self.assertEqual(self.world.argvs("gh"), [])
 
 
 class StatusTest(unittest.TestCase):

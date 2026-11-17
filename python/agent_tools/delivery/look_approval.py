@@ -6,6 +6,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
 `action`. Exit 0 success, 1 a refusal or a forge error, 2 usage.
 
     look-approval post --repo <owner/name> --issue <n> --pr <n> --head <sha> --answer <approved|changes> --message <id>
+    look-approval post ... --answer fix --message <id> --words-file <path|->
     look-approval status --repo <owner/name> --issue <n> --pr <n> --head <sha>
     look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha>
     look-approval marked --repo <owner/name> --issue <n>
@@ -14,7 +15,11 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
 1. `post` writes `look_marker.approval_body(...)` with `forge_markers.post`, then reads the issue's
    markers by trusted authors; `verdict` is `posted` (exit 0) when the new comment is among them,
    else `untrusted` (exit 1: the comment stays and never counts). Output keys: `repo`, `issue`,
-   `pr`, `head`, `answer`, `message`, `verdict`, `comment_id`.
+   `pr`, `head`, `answer`, `message`, `verdict`, `comment_id`. The answer `fix` approves the head
+   with one fix and takes `--words-file <path>` (the owner's words, UTF-8; `-` reads stdin), which
+   goes into the comment as `look_marker.approval_body` renders it; `--words-file` with another
+   answer, `fix` without it, an unreadable file and words `approval_body` rejects are usage errors
+   (exit 2) before any `gh` call. The output gains nothing.
 2. `status` reads the issue body and comments and prints `verdict`: `unmarked` (the body carries no
    look marker), `approved` (the latest trusted live `look` marker naming this issue, pull request
    and head has `answer=approved`) or `needed`; a matching marker with no `answer` field approves
@@ -128,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "post":
             sub.add_argument("--answer", required=True)
             sub.add_argument("--message", required=True)
+            sub.add_argument("--words-file", default=None)
     sub = verbs.add_parser("marked")
     sub.add_argument("--repo", required=True, type=_repo)
     sub.add_argument("--issue", required=True, type=_number)
@@ -150,8 +156,23 @@ def forge_out(args: argparse.Namespace, error: forge_api.ForgeError) -> int:
     return 1
 
 
+def _words(args: argparse.Namespace) -> str | None:
+    """The owner's fix words of `--words-file` (`-` is stdin); None without the option."""
+    if args.words_file is None:
+        return None
+    if args.answer != "fix":
+        raise UsageError("--words-file goes with the answer fix and no other")
+    try:
+        if args.words_file == "-":
+            return sys.stdin.read()
+        with open(args.words_file, encoding="utf-8") as handle:
+            return handle.read()
+    except (OSError, ValueError) as error:
+        raise UsageError(f"the words file {args.words_file!r} is unreadable: {error}") from None
+
+
 def post(args: argparse.Namespace) -> int:
-    body = lm.approval_body(args.issue, args.pr, args.head, args.answer, args.message)
+    body = lm.approval_body(args.issue, args.pr, args.head, args.answer, args.message, args.words)
     comment_id = forge_markers.post(args.repo, args.issue, body)
     seen = forge_markers.list_markers(args.repo, args.issue, lm.TRUSTED)
     trusted = any(m.comment_id == comment_id for m in seen)
@@ -340,7 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "judge":
             return judge(sys.stdin.read())
         if args.action == "post":
-            lm.approval_fields(args.issue, args.pr, args.head, args.answer, args.message)
+            args.words = _words(args)
+            lm.approval_body(args.issue, args.pr, args.head, args.answer, args.message, args.words)
         elif args.action in ("status", "tick") and not (isinstance(args.head, str) and lm.HEAD_PATTERN.fullmatch(args.head)):
             raise UsageError(f"head {args.head!r} is not 40 lowercase hex")
     except (UsageError, ValueError) as error:
