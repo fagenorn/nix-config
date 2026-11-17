@@ -336,3 +336,200 @@ Three speed-ups keep every member of the suite and change no branch protection, 
 - **Fewer processes, by merging members, `Start-up (min)`.** Its median is 0.1 min, the time members spend before unittest's own timer, so merging members saves at most that. It is less safe: it contradicts ADR-delivery-006's one process per member, which keeps one member's failure, state and timing from touching another's.
 - **A larger runner.** More vCPUs would shrink the CPU-bound members' wall and the CPU seconds bound that `Slots saving (min)` uses, but it is paid, from the owner's money, and the saving is not measured here.
 - **Dropping, moving or making optional any test or the check.** Refused by `.agents/knowledge/rejections/ungated-agent-merges.md`: the required check and every test in it are what make a merge safe, so a saving bought this way is not one.
+
+## Trial at 6 jobs
+
+On 17 Nov the owner chose to trial 6 members at once and to adopt it only if the saving holds without new flakiness (issue 1215). The runs are `workflow_dispatch` runs of `ci.yaml` made in rounds: each round is one run on the issue branch, whose `ci.yaml` sets `SUITE_RUNNER_JOBS` to 6, and one run on `main`, which sets 4, and the next round starts after both have completed. The window starts at the earliest creation of a run on the issue branch and ends at the latest completion of a job on it; a run on `main` counts only when it was created inside that window, so the runs of `main` outside it stay out of the comparison. A job counts only when it is named `Agent Workflow Tests`, completed with success or failure and has a step `Run agent workflow tests`; a cancelled job is not a row. Each row is one job: Jobs is the job count its branch runs, Created is its run's creation time, Test step is the step's `completed_at` minus its `started_at` in whole seconds from the API, Suite wall is the summary's `wall=` in minutes (`-` when the log has no summary), Members is the summary's `members=` and Failed members are the members the timing rows mark `failed` (`no summary` when the log has none). The saving is the median Test step at 4 jobs minus the median at 6, compared in unrounded seconds, never through the printed minutes. The rule: adopt 6 jobs when the saving is at least 90 seconds (1.5 minutes) and `Failed only at 6` is `none`, else keep 4. `Failed only at 6` lists the members that failed in some 6-job row and in no 4-job row, and every 6-job job whose log has no summary, since it cannot be attributed. The program under Trial reproduce prints the tables and the decision while GitHub keeps the job logs.
+
+## Trial reproduce
+
+This needs an authenticated `gh` and `python3`; it reads only `gh api`, prints the trial's tables and its decision, and prints nothing to stdout when it refuses.
+
+```sh
+python3 -I - <<'PY'
+import json
+import re
+import statistics
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+REPO = "fagenorn/nix-config"
+R = "repos/" + REPO
+JOB = "Agent Workflow Tests"
+STEP = "Run agent workflow tests"
+TRIAL = {"main": 4, "issue-1215-trial-running-test-suites-6-at": 6}
+MIN_RUNS = 5
+THRESHOLD = 90  # seconds (1.5 minutes), compared with the unrounded medians
+HEADERS = [
+    "Job", "Run/attempt", "Jobs", "Created (UTC)", "Conclusion", "Test step (s)", "Test step (min)",
+    "Suite wall (min)", "Members", "Failed members",
+]
+STAMP = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)\.(\d+)Z(?: (.*))?$", re.S)
+BEGIN = re.compile(r"^suite-runner: begin (\S+)$")
+TIMING = re.compile(r"^suite-runner:\s+([0-9.]+)s wall\s+([0-9.]+)s cpu (passed|failed) (\S+)$")
+SUMMARY = re.compile(
+    r"^suite-runner: summary members=(\d+) passed=(\d+) failed=(\d+) jobs=(\d+)"
+    r" wall=([0-9.]+)s cpu=([0-9.]+)s$"
+)
+
+
+def gh_text(path):
+    done = subprocess.run(
+        ["gh", "api", path], check=True, capture_output=True, text=True, encoding="utf-8"
+    )
+    return done.stdout
+
+
+def gh_json(path):
+    return json.loads(gh_text(path))
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def seconds(text):
+    return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+
+
+def fmt(value, digits=1):
+    text = f"{value:.{digits}f}"
+    return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+
+def parse_log(text):
+    """The summary outside member blocks and the timing rows outside them."""
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    summary = None
+    rows = {}
+    current = None
+    for line in text.split("\n"):
+        found = STAMP.match(line.rstrip("\r"))
+        if not found:
+            continue
+        body = found[3] or ""
+        if current is not None:
+            if body.startswith(f"suite-runner: end {current} "):
+                current = None
+            continue
+        begin = BEGIN.match(body)
+        if begin:
+            current = begin[1]
+        elif TIMING.match(body):
+            wall, cpu, state, member = TIMING.match(body).groups()
+            rows[member] = state
+        elif SUMMARY.match(body):
+            summary = SUMMARY.match(body).groups()
+    return summary, rows
+
+
+def step_seconds(job):
+    step = next(s for s in job["steps"] if s["name"] == STEP)
+    try:
+        return int(seconds(step["completed_at"]) - seconds(step["started_at"]))
+    except (TypeError, ValueError):
+        fail(f"job {job['id']}: the step times are not whole-second UTC stamps")
+
+
+def row(cells):
+    return "| " + " | ".join(cells) + " |"
+
+
+def main():
+    found = []
+    for branch, count in TRIAL.items():
+        listing = gh_json(
+            f"{R}/actions/workflows/ci.yaml/runs?event=workflow_dispatch&branch={branch}&per_page=100"
+        )
+        if listing["total_count"] > len(listing["workflow_runs"]):
+            fail(f"more than 100 dispatch runs on {branch}")
+        for run in listing["workflow_runs"]:
+            for attempt in range(1, run["run_attempt"] + 1):
+                answer = gh_json(f"{R}/actions/runs/{run['id']}/attempts/{attempt}/jobs")
+                for job in answer["jobs"]:
+                    if (
+                        job["name"] == JOB
+                        and job["status"] == "completed"
+                        and job["conclusion"] in ("success", "failure")
+                        and any(s["name"] == STEP for s in job["steps"])
+                    ):
+                        found.append((count, run, attempt, job))
+    six = [c for c in found if c[0] == 6]
+    if six:
+        start = min(c[1]["created_at"] for c in six)
+        end = max(c[3]["completed_at"] for c in six)
+    counted = [
+        c for c in found
+        if c[0] == 6 or (six and start <= c[1]["created_at"] <= end)
+    ]
+    counted.sort(key=lambda c: (c[1]["created_at"], c[3]["id"]))
+    table = []
+    for count, run, attempt, job in counted:
+        step = step_seconds(job)
+        summary, timing = parse_log(gh_text(f"{R}/actions/jobs/{job['id']}/logs"))
+        if summary is None:
+            if job["conclusion"] == "success":
+                fail(f"job {job['id']}: a successful job has no summary")
+            wall = members = None
+            failed = None
+        else:
+            if int(summary[3]) != count:
+                fail(f"job {job['id']}: the summary says jobs={summary[3]}, the branch runs {count}")
+            if len(timing) != int(summary[0]):
+                fail(f"job {job['id']}: {len(timing)} timing rows but the summary says members={summary[0]}")
+            wall, members = float(summary[4]), summary[0]
+            failed = sorted(m for m, state in timing.items() if state == "failed")
+        table.append({
+            "count": count, "id": job["id"], "run": f"{run['id']}/{attempt}",
+            "created": run["created_at"], "conclusion": job["conclusion"], "step": step,
+            "wall": wall, "members": members, "failed": failed,
+        })
+    for count in (6, 4):
+        n = sum(1 for t in table if t["count"] == count)
+        if n < MIN_RUNS:
+            fail(f"only {n} runs at {count} jobs, need {MIN_RUNS}")
+    print(row(HEADERS))
+    print("|---:|---|---:|---|---|---:|---:|---:|---:|---|")
+    for t in table:
+        print(row([
+            str(t["id"]), t["run"], str(t["count"]), t["created"].replace("T", " ").rstrip("Z"),
+            t["conclusion"], fmt(t["step"], 0), fmt(t["step"] / 60),
+            fmt(t["wall"] / 60) if t["wall"] is not None else "-",
+            t["members"] or "-",
+            "no summary" if t["failed"] is None else ", ".join(t["failed"]) or "-",
+        ]))
+    print()
+    print("| Jobs | Runs | Failed runs | Median test step (s) | Median test step (min) | Median suite wall (min) |")
+    print("|---:|---:|---:|---:|---:|---:|")
+    median = {}
+    for count in (4, 6):
+        rows = [t for t in table if t["count"] == count]
+        median[count] = statistics.median(t["step"] for t in rows)
+        walls = [t["wall"] for t in rows if t["wall"] is not None]
+        print(row([
+            str(count), str(len(rows)), str(sum(1 for t in rows if t["conclusion"] == "failure")),
+            fmt(median[count]), fmt(median[count] / 60),
+            fmt(statistics.median(walls) / 60) if walls else "-",
+        ]))
+    print()
+    saving = median[4] - median[6]
+    failed_four = {m for t in table if t["count"] == 4 for m in t["failed"] or []}
+    only_six = sorted({m for t in table if t["count"] == 6 for m in t["failed"] or []} - failed_four)
+    only_six += [f"no summary in job {t['id']}" for t in table if t["count"] == 6 and t["failed"] is None]
+    print(f"Saving: {fmt(saving)} s ({fmt(saving / 60)} min), the median test step at 4 jobs minus the median at 6.")
+    print(f"Failed only at 6: {', '.join(only_six) or 'none'}.")
+    print(f"Decision: {6 if saving >= THRESHOLD and not only_six else 4} jobs.")
+    print(
+        f"Runs: {sum(1 for t in table if t['count'] == 6)} at 6 jobs and"
+        f" {sum(1 for t in table if t['count'] == 4)} at 4 jobs, created"
+        f" {table[0]['created'].replace('T', ' ').rstrip('Z')} to"
+        f" {table[-1]['created'].replace('T', ' ').rstrip('Z')} (UTC)."
+    )
+
+
+main()
+PY
+```

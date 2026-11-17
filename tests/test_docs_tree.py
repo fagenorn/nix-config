@@ -2127,9 +2127,9 @@ class DocsTreeTest(unittest.TestCase):
         ] = {"total_count": 29, "workflow_runs": listing}
         return fixture
 
-    def _run_awt_fence(self, fixture):
+    def _run_awt_fence(self, fixture, section="Reproduce"):
         text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
-        fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Reproduce"))
+        fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, section))
         self.assertEqual(len(fences), 1)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2380,6 +2380,249 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("`Start-up (min)`", "larger runner", "ungated-agent-merges.md"):
             self.assertIn(needle, alternatives)
         self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 5)
+
+    def _trial_fixture(self, six, four):
+        """Each entry is (run_id, created, step_seconds, failed_members, summary_jobs)."""
+        from datetime import datetime, timedelta
+
+        repo = "repos/fagenorn/nix-config"
+        branch = "issue-1215-trial-running-test-suites-6-at"
+
+        def stamp(base, delta):
+            return (datetime.strptime(base, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=delta)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
+        def log(summary_jobs, failed, step, fake=""):
+            lines = [
+                "suite-runner: start tests/a.py",
+                "suite-runner: begin tests/a.py",
+                fake,
+                "Ran 1 test in 0.001s",
+                "suite-runner: end tests/a.py passed exit=0 1.0s",
+                "suite-runner: begin tests/b.py",
+                "Ran 1 test in 0.001s",
+                "suite-runner: end tests/b.py passed exit=0 1.0s",
+            ]
+            if summary_jobs is not None:
+                for member in ("tests/a.py", "tests/b.py"):
+                    state = "failed" if member in failed else "passed"
+                    lines.append(f"suite-runner:     2.0s wall     1.0s cpu {state} {member}")
+                lines.append(
+                    f"suite-runner: summary members=2 passed={2 - len(failed)} failed={len(failed)}"
+                    f" jobs={summary_jobs} wall={step - 30}.0s cpu=4.0s"
+                )
+            body = [line for line in lines if line]
+            return "﻿" + "".join(f"2026-11-17T05:00:30.0000000Z {line}\n" for line in body)
+
+        fixture = {}
+        for count, branch_name, entries in ((6, branch, six), (4, "main", four)):
+            runs = []
+            for run_id, created, step, failed, summary_jobs in entries:
+                runs.append({"id": run_id, "run_attempt": 1, "created_at": created})
+                job_id = 9000 + run_id
+                done = stamp(created, 20 + step)
+                conclusion = "failure" if failed or summary_jobs is None else "success"
+                fixture[f"api {repo}/actions/runs/{run_id}/attempts/1/jobs"] = {
+                    "total_count": 1,
+                    "jobs": [
+                        {
+                            "id": job_id,
+                            "name": "Agent Workflow Tests",
+                            "status": "completed",
+                            "conclusion": conclusion,
+                            "started_at": stamp(created, 10),
+                            "completed_at": stamp(done, 5),
+                            "steps": [
+                                {
+                                    "name": "Run agent workflow tests",
+                                    "started_at": stamp(created, 20),
+                                    "completed_at": done,
+                                }
+                            ],
+                        }
+                    ],
+                }
+                fixture[f"api {repo}/actions/jobs/{job_id}/logs"] = log(summary_jobs, failed, step)
+            fixture[
+                f"api {repo}/actions/workflows/ci.yaml/runs?event=workflow_dispatch&branch={branch_name}&per_page=100"
+            ] = {"total_count": len(runs), "workflow_runs": runs}
+        return fixture
+
+    def _trial_world(self, step6=360, step4=480):
+        from datetime import datetime, timedelta
+
+        def created(index, extra):
+            when = datetime(2026, 11, 17, 5, 0, 0) + timedelta(minutes=15 * index, seconds=extra)
+            return when.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        six = [(100 + i, created(i, 0), step6, [], 6) for i in range(5)]
+        four = [(200 + i, created(i, 1), step4, [], 4) for i in range(5)]
+        return six, four
+
+    def _trial(self, six, four):
+        return self._run_awt_fence(self._trial_fixture(six, four), "Trial reproduce")
+
+    def test_the_trial_program_adopts_six_when_the_saving_holds(self):
+        result = self._trial(*self._trial_world())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        for expected in (
+            "Saving: 120.0 s (2.0 min), the median test step at 4 jobs minus the median at 6.",
+            "Failed only at 6: none.",
+            "Decision: 6 jobs.",
+            "Runs: 5 at 6 jobs and 5 at 4 jobs, created 2026-11-17 05:00:00 to 2026-11-17 06:00:01 (UTC).",
+        ):
+            self.assertIn(expected, out)
+        self.assertTrue(any(line.startswith("| 4 | 5 | 0 | 480.0 | 8.0 |") for line in out), out)
+        self.assertTrue(any(line.startswith("| 6 | 5 | 0 | 360.0 | 6.0 |") for line in out), out)
+        job_rows = [line for line in out if re.match(r"\| 9\d+ \|", line)]
+        self.assertEqual(len(job_rows), 10)
+        self.assertEqual(
+            "| 9100 | 100/1 | 6 | 2026-11-17 05:00:00 | success | 360 | 6.0 | 5.5 | 2 | - |",
+            job_rows[0],
+        )
+        self.assertEqual(
+            "| 9200 | 200/1 | 4 | 2026-11-17 05:00:01 | success | 480 | 8.0 | 7.5 | 2 | - |",
+            job_rows[1],
+        )
+
+    def test_the_trial_program_keeps_four_when_a_member_fails_only_at_six(self):
+        six, four = self._trial_world()
+        six[2] = (102, six[2][1], 360, ["tests/b.py"], 6)
+        result = self._trial(six, four)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        self.assertIn("Failed only at 6: tests/b.py.", out)
+        self.assertIn("Decision: 4 jobs.", out)
+        row = next(line for line in out if line.startswith("| 9102 |"))
+        self.assertTrue(row.endswith("| failure | 360 | 6.0 | 5.5 | 2 | tests/b.py |"), row)
+
+    def test_the_trial_program_ignores_a_member_that_failed_at_four_too(self):
+        six, four = self._trial_world()
+        six[1] = (101, six[1][1], 360, ["tests/a.py"], 6)
+        four[3] = (203, four[3][1], 480, ["tests/a.py"], 4)
+        result = self._trial(six, four)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        self.assertIn("Failed only at 6: none.", out)
+        self.assertIn("Decision: 6 jobs.", out)
+
+    def test_the_trial_program_keeps_four_just_below_the_threshold(self):
+        for step6, saving in ((392, "88.0"), (391, "89.0")):
+            result = self._trial(*self._trial_world(step6=step6))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            out = result.stdout.splitlines()
+            self.assertIn(
+                f"Saving: {saving} s (1.5 min), the median test step at 4 jobs minus the median at 6.", out
+            )
+            self.assertIn("Decision: 4 jobs.", out)
+
+    def test_the_trial_program_adopts_six_exactly_at_the_threshold(self):
+        result = self._trial(*self._trial_world(step6=390))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        self.assertIn("Saving: 90.0 s (1.5 min), the median test step at 4 jobs minus the median at 6.", out)
+        self.assertIn("Decision: 6 jobs.", out)
+
+    def test_the_trial_program_counts_a_failed_six_job_run_without_a_summary(self):
+        six, four = self._trial_world()
+        six[4] = (104, six[4][1], 360, [], None)
+        result = self._trial(six, four)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        row = next(line for line in out if line.startswith("| 9104 |"))
+        self.assertTrue(row.endswith("| - | - | no summary |"), row)
+        self.assertIn("| failure |", row)
+        self.assertIn("Failed only at 6: no summary in job 9104.", out)
+        self.assertIn("Decision: 4 jobs.", out)
+
+    def test_the_trial_program_reads_four_job_runs_only_inside_the_window(self):
+        six, four = self._trial_world()
+        four.append((300, "2026-11-17T04:00:00Z", 60, [], 4))
+        result = self._trial(six, four)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        self.assertFalse(any(line.startswith("| 9300 ") for line in out))
+        self.assertTrue(any(line.startswith("| 4 | 5 | 0 | 480.0 | 8.0 |") for line in out), out)
+
+    def test_the_trial_program_refuses_step_times_that_are_not_whole_seconds(self):
+        fixture = self._trial_fixture(*self._trial_world())
+        key = "api repos/fagenorn/nix-config/actions/runs/103/attempts/1/jobs"
+        step = fixture[key]["jobs"][0]["steps"][0]
+        step["completed_at"] = step["completed_at"].replace("Z", ".500Z")
+        result = self._run_awt_fence(fixture, "Trial reproduce")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("9103", result.stderr)
+
+    def test_the_trial_program_refuses_fewer_than_five_runs_at_six(self):
+        six, four = self._trial_world()
+        result = self._trial(six[:4], four)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("only 4 runs at 6 jobs, need 5", result.stderr)
+
+    def test_the_trial_program_refuses_a_summary_at_another_job_count(self):
+        six, four = self._trial_world()
+        six[0] = (100, six[0][1], 360, [], 4)
+        result = self._trial(six, four)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("9100", result.stderr)
+
+    def test_the_trial_program_reads_no_timing_line_inside_a_member_block(self):
+        fixture = self._trial_fixture(*self._trial_world())
+        key = "api repos/fagenorn/nix-config/actions/jobs/9101/logs"
+        stamp = "2026-11-17T05:00:30.0000000Z "
+        fixture[key] = fixture[key].replace(
+            stamp + "Ran 1 test in 0.001s\n",
+            stamp + "suite-runner:     1.0s wall     1.0s cpu failed tests/fake.py\n"
+            + stamp
+            + "suite-runner: summary members=1 passed=0 failed=1 jobs=4 wall=1.0s cpu=1.0s\n"
+            + stamp
+            + "Ran 1 test in 0.001s\n",
+            1,
+        )
+        result = self._run_awt_fence(fixture, "Trial reproduce")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("tests/fake.py", result.stdout)
+        self.assertIn("Decision: 6 jobs.", result.stdout.splitlines())
+
+    def test_the_trial_program_skips_cancelled_jobs(self):
+        fixture = self._trial_fixture(*self._trial_world())
+        repo = "repos/fagenorn/nix-config"
+        listing = fixture[
+            f"api {repo}/actions/workflows/ci.yaml/runs?event=workflow_dispatch"
+            "&branch=issue-1215-trial-running-test-suites-6-at&per_page=100"
+        ]
+        listing["workflow_runs"].append({"id": 150, "run_attempt": 1, "created_at": "2026-11-17T05:07:00Z"})
+        listing["total_count"] += 1
+        fixture[f"api {repo}/actions/runs/150/attempts/1/jobs"] = {
+            "total_count": 1,
+            "jobs": [
+                {
+                    "id": 9150,
+                    "name": "Agent Workflow Tests",
+                    "status": "completed",
+                    "conclusion": "cancelled",
+                    "started_at": "2026-11-17T05:07:10Z",
+                    "completed_at": "2026-11-17T05:08:00Z",
+                    "steps": [
+                        {
+                            "name": "Run agent workflow tests",
+                            "started_at": "2026-11-17T05:07:20Z",
+                            "completed_at": "2026-11-17T05:08:00Z",
+                        }
+                    ],
+                }
+            ],
+        }
+        result = self._run_awt_fence(fixture, "Trial reproduce")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.splitlines()
+        self.assertFalse(any(line.startswith("| 9150 ") for line in out))
+        self.assertTrue(any(line.startswith("| 6 | 5 | 0 | 360.0 | 6.0 |") for line in out), out)
 
 
 if __name__ == "__main__":
