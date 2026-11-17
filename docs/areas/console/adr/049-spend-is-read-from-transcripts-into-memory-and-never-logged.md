@@ -1,6 +1,6 @@
 # ADR-console-049 — Spend is read from transcripts into memory and never logged
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-059
 - **Decided in:** #1134
 
 ## Context
@@ -13,7 +13,7 @@ The owner cannot see where the host's tokens and dollars go: which project, spri
 
 **D2. Incremental and counted once.** Reading is incremental per file, as ADR-console-005 reads run journals: a file whose size has not moved is not opened, and only appended bytes are read. Each message id counts once, across files and reads; a repeat of an id only raises the count to the larger of each usage field. Profiles that share one `projects` tree count once, because the directories are deduplicated by their real path and walked through it, so cursors survive a change of alias. Only a confirmed-absent directory forgets its files' cursors; any other listing error keeps them, so recovery reads only the bytes appended since.
 
-**D3. Attribution at view time.** Totals are kept per day, session, run, agent and source, and project, sprint, account, run and phase are resolved when the view is derived, not when a line is read, so a journal or name line read after a message still attributes it. The account comes from the log's `session.seen` and `session.profile` rows, kept past `session.gone`; a session without such a row carrying a profile reads `unattributed`, the key for anything unresolved.
+**D3. Attribution at view time.** Totals are kept per day, session, run, agent and source, and project, sprint, account, run and phase are resolved when the view is derived, not when a line is read, so a journal or name line read after a message still attributes it. The account comes from the log's `session.seen` and `session.profile` rows, kept past `session.gone`; a session without such a row carrying a profile reads `unattributed`, the key for anything unresolved. A question session's account is the profile of its `project_question.asked` row when no such row names one (ADR-console-059).
 
 **D4. Subagents.** A session-level subagent transcript, outside any workflow, counts as its session's spend. A workflow agent's transcript counts as its run's.
 

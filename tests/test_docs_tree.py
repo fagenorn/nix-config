@@ -373,7 +373,8 @@ class DocsTreeTest(unittest.TestCase):
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
                      "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief",
-                     "Message", "Nudge", "Question round", "Notice", "Spend page"):
+                     "Message", "Nudge", "Question round", "Notice", "Spend page",
+                     "Project question", "Question thread"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -824,6 +825,50 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-058", context)
         self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
+
+    def test_the_question_milestone_decisions_are_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("059-*.md"))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].name, "059-a-project-question-is-spent-under-its-project-"
+                                        "threaded-in-the-log-and-can-fill-a-goal.md")
+        self.assertEqual(found[0].read_text().splitlines()[0],
+                         "# ADR-console-059 \u2014 A project question is spent under its "
+                         "project, threaded in the log and can fill a goal")
+        adr = " ".join(found[0].read_text().split())
+        for needle in ("- **Decided in:** #1180", "--session-id", "session_id",
+                       "project_question.asked", "questions", "Questions (n)",
+                       "Make it a goal", "#1177", "#1178", "#1179", "ADR-console-001",
+                       "ADR-console-002", "ADR-console-011", "ADR-console-049",
+                       "ADR-console-052", "ADR-console-058"):
+            self.assertIn(needle, adr)
+        amended = (
+            ("058-a-question-about-a-project-is-answered-by-a-read-only-session.md",
+             "accepted; amended by ADR-console-059", "**D2.", "**D3.", ("--session-id",)),
+            ("049-spend-is-read-from-transcripts-into-memory-and-never-logged.md",
+             "accepted; amended by ADR-console-059", "**D3.", "**D4.",
+             ("project_question.asked",)),
+            ("052-the-spend-page-is-a-second-read-only-page-of-the-console.md",
+             "accepted; amended by ADR-console-056, ADR-console-059", "**D5.", "**D6.",
+             ("Questions",)),
+        )
+        for name, status, start, end, needles in amended:
+            raw = (adr_dir / name).read_text()
+            line = next(row for row in raw.splitlines() if row.startswith("- **Status:**"))
+            self.assertEqual(line, "- **Status:** " + status)
+            text = self.doc("docs/areas/console/adr/" + name)
+            decision = text[text.index(start):text.index(end)]
+            self.assertIn("ADR-console-059", decision)
+            for needle in needles:
+                self.assertIn(needle, decision)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        question = context[context.index("**Project question**:"):]
+        self.assertIn("ADR-console-059", question[:question.index("_Avoid_")])
+        thread = context[context.index("**Question thread**:"):]
+        thread = thread[:thread.index("_Avoid_")]
+        self.assertIn("ADR-console-059", thread)
+        self.assertIn("Questions (n)", thread)
+        self.assertIn("| Question thread | Console |", self.doc("docs/CONTEXT-MAP.md"))
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
