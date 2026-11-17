@@ -51,7 +51,10 @@ FILES = {
     "python/agent_tools/verification/__init__.py": "",
     "python/agent_tools/verification/other.py": "Y = 1\n",
     "docs/notes.md": "notes\n",
+    "home/common/agent-skills/skills/demo/SKILL.md": "demo v1\n",
+    "hosts/common/demo.nix": "{ }\n",
 }
+SKILL = "home/common/agent-skills/skills/demo/SKILL.md"
 
 
 def git(path, *arguments):
@@ -99,6 +102,7 @@ class Trees(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.checkout = repository(self.tmp, "checkout", FILES)
+        self.built = self.origin_commit()
         self.package_root = self.tmp / "pkg"
         shutil.copytree(self.checkout / "python", self.package_root)
         cache = self.package_root / "agent_tools/console/__pycache__"
@@ -124,6 +128,7 @@ class Trees(unittest.TestCase):
 
     def read(self, roots=None, **seams):
         seams.setdefault("branch_of", lambda root: "main")
+        seams.setdefault("revision", lambda: self.built)
         return reading([str(self.checkout)] if roots is None else roots, self.running, **seams)
 
 
@@ -178,9 +183,86 @@ class ActivationReadingTest(Trees):
         with mock.patch.object(activation, "integration_branch", lambda root: None):
             self.assertIsNone(activation.origin_tip(str(self.checkout)))
 
-    def test_a_change_outside_the_console_files_is_not_named(self):
+    def test_a_change_outside_the_console_files_is_another_change(self):
         self.advance({"docs/notes.md": "more\n", "python/agent_tools/verification/other.py": "Y = 2\n"})
-        self.assertEqual(self.read().changed, ())
+        self.assertEqual(self.read(), Activation(
+            str(self.checkout), (), self.origin_commit(), ("python/agent_tools/verification/other.py",)))
+
+    def test_pending_is_any_change(self):
+        self.assertIs(Activation("/r", (), C).pending, False)
+        self.assertIs(Activation("/r", ("x",), C).pending, True)
+        self.assertIs(Activation("/r", (), C, ("y",)).pending, True)
+
+    def test_only_documentation_paths_are_not_host_built(self):
+        for path in ("docs/notes.md", "tests/test_x.py", ".github/workflows/ci.yaml", ".agents/project.json",
+                     "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
+                     "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
+                     "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md"):
+            with self.subTest(path=path):
+                self.assertFalse(activation.host_built(path))
+        for path in (SKILL, "home/common/agent-skills/skills/grill-with-docs/ADR-FORMAT.md",
+                     "home/common/agent-skills/standards/README.md",
+                     "home/common/claude-code/skills/deliver-standard/SKILL.md",
+                     "patches/agent-plugins/codex-plugin-cc.patch", "hosts/common/common-packages.nix",
+                     "flake.lock", "flake.nix", "secrets/secrets.yaml", "data/zshrc/common/50-aliases",
+                     "python/README.md", "home/common/claude-code/README.md.orig", "newdir/README.md",
+                     "newdir/file"):
+            with self.subTest(path=path):
+                self.assertTrue(activation.host_built(path))
+
+    def test_a_skill_change_is_another_change(self):
+        self.advance({SKILL: "demo v2\n"})
+        self.assertEqual(self.read(), Activation(str(self.checkout), (), self.origin_commit(), (SKILL,)))
+
+    def test_a_documentation_only_change_names_nothing(self):
+        self.advance({"docs/notes.md": "more\n", "README.md": "r\n", "CLAUDE.md": "c\n", "AGENTS.md": "a\n",
+                      "justfile": "j\n", ".gitignore": "g\n", ".sops.yaml": "s\n", "tests/test_x.py": "T = 1\n",
+                      ".github/workflows/x.yaml": "x\n", ".agents/project.json": "{}\n"})
+        result = self.read()
+        self.assertEqual(result, Activation(str(self.checkout), (), self.origin_commit()))
+        self.assertIs(result.pending, False)
+
+    def test_a_module_readme_only_change_names_nothing(self):
+        self.advance({"home/common/claude-code/README.md": "r\n", "home/common/agent-skills/README.md": "r\n",
+                      "home/linux/claude-local/README.md": "r\n", "hosts/darwin/eleven-m5/README.md": "r\n"})
+        result = self.read()
+        self.assertEqual(result.other, ())
+        self.assertIs(result.pending, False)
+        self.advance({"home/common/agent-skills/standards/README.md": "s\n"})
+        self.assertEqual(self.read().other, ("home/common/agent-skills/standards/README.md",))
+
+    def test_a_console_change_is_not_also_another_change(self):
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n",
+                      "python/agent_tools/system/util.py": "X = 2\n"})
+        self.assertEqual(self.read().changed, (f"{CONSOLE}/view.py", "python/agent_tools/system/util.py"))
+        self.assertEqual(self.read().other, ())
+
+    def test_a_deleted_host_file_is_another_change(self):
+        self.advance({"hosts/common/demo.nix": None})
+        self.assertEqual(self.read().other, ("hosts/common/demo.nix",))
+
+    def test_the_comparison_starts_at_the_hosts_revision(self):
+        self.advance({SKILL: "demo v2\n"})
+        tip = self.origin_commit()
+        self.assertEqual(self.read(revision=lambda: tip).other, ())
+        self.assertEqual(self.read(revision=lambda: tip + "-dirty").other, ())
+        self.assertEqual(self.read(revision=lambda: self.built + "-dirty").other, (SKILL,))
+
+    def test_an_unreadable_revision_or_an_unknown_commit_is_a_failed_read(self):
+        with self.assertRaises(activation.ReadFailed):
+            self.read(revision=lambda: None)
+        with self.assertRaises(activation.ReadFailed):
+            self.read(revision=lambda: "f" * 40)
+        plain = repository(self.tmp, "a-plain", {"README.md": "x\n"})
+        self.assertIsNone(self.read([str(plain)], revision=lambda: None))
+
+    def test_reader_for_reads_the_host_revision_on_every_call(self):
+        self.advance({SKILL: "demo v2\n"})
+        revisions = iter([self.built, self.origin_commit()])
+        reader = reader_for(self.package_root, revision=lambda: next(revisions))
+        with mock.patch.object(activation, "integration_branch", lambda root: "main"):
+            self.assertEqual(reader([str(self.checkout)]).other, (SKILL,))
+            self.assertEqual(reader([str(self.checkout)]).other, ())
 
     def test_a_console_file_added_or_removed_on_origin_is_named(self):
         self.advance({f"{CONSOLE}/added.py": "Z = 1\n", f"{CONSOLE}/manager-contract.md": None})
@@ -237,7 +319,7 @@ class ActivationReadingTest(Trees):
                 activation.integration_branch(str(REPO_ROOT))
 
     def test_reader_for_reads_the_running_files_once(self):
-        reader = reader_for(self.package_root)
+        reader = reader_for(self.package_root, revision=lambda: self.built)
         (self.package_root / "agent_tools/console/view.py").write_text("VALUE = 9\n")
         with mock.patch.object(activation, "integration_branch", lambda root: "main"):
             self.assertEqual(reader([str(self.checkout)]).changed, ())
@@ -252,7 +334,8 @@ NEXT = "Its output is in /s/activation.log; press Activate again once the cause 
 
 class ActivationViewTest(Trees):
     def read(self):
-        return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main")
+        return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main",
+                       revision=lambda: self.built)
 
     def test_a_pending_change_offers_activate_for_its_commit(self):
         self.assertEqual(view.derive_view([], activation=READ)["activation"], {
@@ -413,6 +496,43 @@ class ActivationServiceTest(Trees):
             console.main(["--port", "0"])
         self.assertTrue(callable(recorded["activation_reader"]))
 
+    def test_a_failed_revision_read_keeps_the_line(self):
+        for patcher in (mock.patch.object(activation, "integration_branch", lambda root: "main"),
+                        mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        support.write_registry(self.registry, [{"project_id": "owner/cfg", "root": str(self.checkout)}])
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        revisions = iter([self.built, None])
+        svc = self.opened(reader_for(self.package_root, revision=lambda: next(revisions)))
+        svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], str(self.checkout))
+        version = svc.version
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], str(self.checkout))
+        self.assertEqual(svc.version, version)
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("console: activation_failed ReadFailed: "), lines[0])
+
+    def test_console_main_gives_the_reader_the_hosts_revision(self):
+        recorded = {}
+
+        def reader(*args, **kwargs):
+            recorded.update(kwargs)
+            return lambda roots: None
+
+        def stop(*args, **kwargs):
+            raise OSError("stop here")
+
+        with mock.patch.object(console.activation, "reader_for", reader), \
+                mock.patch.object(console.service, "ConsoleService", stop), \
+                contextlib.redirect_stderr(io.StringIO()):
+            console.main(["--port", "0"])
+        self.assertIs(recorded["revision"], activation_run.host_revision)
+
     def test_a_failed_production_read_keeps_the_line(self):
         for patcher in (mock.patch.object(activation, "integration_branch", lambda root: "main"),
                         mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)})):
@@ -420,7 +540,7 @@ class ActivationServiceTest(Trees):
             self.addCleanup(patcher.stop)
         support.write_registry(self.registry, [{"project_id": "owner/cfg", "root": str(self.checkout)}])
         self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        svc = self.opened(reader_for(self.package_root))
+        svc = self.opened(reader_for(self.package_root, revision=lambda: self.built))
         svc.poll_activation()
         self.assertEqual(shown(svc)["root"], str(self.checkout))
         version = svc.version
@@ -512,6 +632,14 @@ class ActivatePageWriteTest(Trees):
         while not path.exists():
             self.assertLess(time.monotonic(), deadline, f"{path} never appeared")
             time.sleep(0.05)
+
+    def test_an_activation_for_another_change_is_admitted(self):
+        svc = self.open(reader=Fake(Activation(str(self.checkout), (), self.commit, (SKILL,))))
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body), (204, b""))
+        self.release.touch()
+        self.await_finished()
+        self.assertEqual(self.ran.read_text().splitlines(), [self.commit])
 
     def test_an_approved_activation_runs_the_stand_in_once_for_the_shown_commit(self):
         svc = self.open()

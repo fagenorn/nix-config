@@ -859,8 +859,9 @@ The owner's Activate (#1193): `POST /api/activate`, a page write whose body is e
 object `{"commit": <40 lowercase hex>}` of at most `MAX_ACTIVATE_BYTES` (the `_json_body` 411, 415
 and 413 rules apply; any other body is 400 `bad activation`). It is answered 409 `text/plain`, one
 line, appending nothing, in this order: `nothing to activate` (no `activator`, no reading, or a
-reading with no changed file); `an activation is already running`; `that commit is no longer the
-tip of origin's integration branch` (the body's commit is not the shown reading's); then a fresh
+reading with nothing pending, `Activation.pending` false); `an activation is already running`;
+`that commit is no longer the tip of origin's integration branch` (the body's commit is not the
+shown reading's); then a fresh
 `activator.tip(root)`, read outside the ingest lock, that cannot be read (`the tip of origin's
 integration branch could not be read`) or is not the commit (the same text as before). The claim on
 the activation is one flag taken under the ingest lock together with the first three checks, so two
@@ -6729,7 +6730,7 @@ class ConsoleService:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
         with self._ingest:
             reading = self._activation
-            if self._activator is None or reading is None or not reading.changed:
+            if self._activator is None or reading is None or not reading.pending:
                 raise sprints.Refused(ACTIVATE_NOTHING)
             if self._activating:
                 raise sprints.Refused(ACTIVATE_RUNNING)
