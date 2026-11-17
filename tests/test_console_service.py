@@ -1749,8 +1749,11 @@ class DeliveryTest(Case):
         self.svc.poll_deliveries()
         self.assertEqual(self.runs(), [{
             "run_id": "wf_t1", "quiet": False, "moved_text": "moved just now",
+            "wait_text": None,
             "summary": "1 issue in delivery: 1 building, moved just now",
             "moved_at": "2027-01-15T08:00:00+00:00",
+            "journal_at": "2027-01-15T08:00:00+00:00",
+            "reading_at": "2027-01-15T08:00:00+00:00",
             "issues": [{"issue": 858, "stage": "building",
                         "stage_text": "building task 1 of 3"}]}])
         seen = self.rows("delivery.seen")

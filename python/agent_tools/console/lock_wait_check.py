@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _live_waiters(refs, open_numbers: set[int], now: int) -> dict[int, bool]:
+def live_waiters(refs, open_numbers: set[int], now: int) -> dict[int, bool]:
     """The open pull requests of the live registrations, each true when it has waited the quiet window."""
     waiting: dict[int, bool] = {}
     for ref in refs:
@@ -94,7 +94,7 @@ def _live_waiters(refs, open_numbers: set[int], now: int) -> dict[int, bool]:
     return waiting
 
 
-def _running_sprints(state: dict, project: str) -> list[dict]:
+def running_sprints(state: dict, project: str) -> list[dict]:
     found: list[dict] = []
 
     def visit(entries) -> None:
@@ -111,7 +111,7 @@ def _running_sprints(state: dict, project: str) -> list[dict]:
     return found
 
 
-def _issues(sprint: dict) -> set[int]:
+def sprint_issues(sprint: dict) -> set[int]:
     """The sprint's issues as the console associates them: the displayed `issues[]` united with
     `movement.issues`, which also carries the report's inbox issues."""
     moved = sprint.get("movement")
@@ -134,9 +134,9 @@ def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read
         manager_check._print({"reason": str(error), "status": "forge_unreadable"})
         return NOT_YET
     holders = {number for number, pull in pulls.items() if pull.holding}
-    live_waiters = _live_waiters(registrations, set(pulls), now)
-    long_waiters = {number for number, long in live_waiters.items() if long}
-    queued = sorted(holders | set(live_waiters))
+    waiters = live_waiters(registrations, set(pulls), now)
+    long_waiters = {number for number, long in waiters.items() if long}
+    queued = sorted(holders | set(waiters))
     if len(queued) < 2 or not long_waiters:
         manager_check._print({"queued": queued, "status": "no_queue"})
         return NOT_YET
@@ -145,16 +145,16 @@ def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read
     except (OSError, ValueError, http.client.HTTPException) as error:
         manager_check._print({"reason": str(error), "status": "no_console"})
         return NOT_YET
-    running = _running_sprints(state, args.project)
+    running = running_sprints(state, args.project)
     waiter_issues = set().union(*(pulls[n].issues for n in long_waiters))
     others = set(queued) - long_waiters
     other_issues = set().union(*(pulls[n].issues for n in others))
-    waiter_sprints = [s for s in running if _issues(s) & waiter_issues]
+    waiter_sprints = [s for s in running if sprint_issues(s) & waiter_issues]
     if not waiter_sprints:
         manager_check._print({"queued": queued, "status": "no_sprint"})
         return NOT_YET
     judged = waiter_sprints + [s for s in running
-                               if s not in waiter_sprints and _issues(s) & other_issues]
+                               if s not in waiter_sprints and sprint_issues(s) & other_issues]
     stuck = sorted(str(s.get("sprint_id")) for s in judged
                    if s.get("state") == "quiet" or s.get("ball") == "nobody")
     if stuck:
