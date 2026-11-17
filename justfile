@@ -231,6 +231,7 @@ agent-workflow-tests *args:
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
     tests/test_console_lock_wait_check.py \
+    tests/test_console_run_line_check.py \
     tests/test_console_look_check.py \
     tests/test_console_page.py \
     tests/test_console_controls.py \
