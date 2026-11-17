@@ -171,6 +171,26 @@ class BypassProofChecksTest(unittest.TestCase):
         self.assertIn("outcome failed", output["problems"])
         self.assertIn("attempt push took_effect", output["problems"])
 
+    def test_an_unhashable_entry_name_is_unexpected_not_a_crash(self):
+        def list_attempt(record):
+            record["attempts"].append({"attempt": ["x"]})
+
+        def dict_step(record):
+            record["teardown"].append({"step": {"a": 1}, "ok": True})
+
+        for change, problem in ((list_attempt, "attempt ['x'] unexpected"),
+                                (dict_step, "teardown {'a': 1} unexpected")):
+            with self.subTest(change.__name__):
+                record = passing_record()
+                change(record)
+                code, output = self.check_record(record)
+                self.assertEqual((code, output["status"]), (1, "not_met"))
+                self.assertIn(problem, output["problems"])
+                self.write(record)
+                self.append_at(T + timedelta(hours=1), started("after", BYPASS))
+                code, output = self.check_managers()
+                self.assertEqual((code, output["reason"]), (75, "no_proof"))
+
     def test_a_run_mode_record_does_not_count(self):
         record = passing_record()
         record["mode"] = "run"

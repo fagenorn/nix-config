@@ -796,8 +796,11 @@ def _names_problems(entries, key, expected, label):
     names = [entry.get(key) for entry in entries]
     problems = [f"{label} {name} missing" for name in expected if name not in names]
     problems += [f"{label} {name} duplicated" for name in expected if names.count(name) > 1]
-    problems += [f"{label} {name} unexpected" for name in dict.fromkeys(names)
-                 if name not in expected]
+    # A name that is not a string (a list, a dict) cannot be hashed: it is unexpected as it stands.
+    unhashable = [name for name in names if not isinstance(name, str)]
+    unexpected = [name for name in dict.fromkeys(n for n in names if isinstance(n, str))
+                  if name not in expected]
+    problems += [f"{label} {name} unexpected" for name in unexpected + unhashable]
     return names, problems
 
 
