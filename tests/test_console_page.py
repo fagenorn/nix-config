@@ -18,6 +18,7 @@ from agent_tools.console import capacity as console_capacity
 from agent_tools.console import digest as console_digest
 from agent_tools.console import signin as console_signin
 from agent_tools.console.event_log import Event
+from agent_tools.console.project_question import NO_PRODUCTION_LINE
 from agent_tools.console import event_log
 from agent_tools.console.sprints import MAX_REPORT_ISSUES, Question, sprint_states
 from agent_tools.console.sprints import NUDGE_ACTION_TEXT
@@ -310,7 +311,8 @@ class PageTest(unittest.TestCase):
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
-             "/api/owner-notice", "/api/owner-notice-withdraw", "/api/activate"},
+             "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
+             "/api/activate"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -319,7 +321,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 38)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 39)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -1631,6 +1633,237 @@ class PageOwnerNoticeTest(unittest.TestCase):
         (reason,) = self.found(refused, "notice-reason")
         self.assertEqual(full(reason), "this notice has ended")
         self.assertEqual(reason["tag"], "p")
+
+
+def ask(**fields) -> dict:
+    """One project question as the view carries it (twelve keys, the unset ones null)."""
+    base = {"id": "q4", "question": "what does production show?", "asked_at": utc(60000),
+            "state": "working", "state_text": "Working on it", "answered_at": None, "answer": None,
+            "read_text": None, "ran_text": None, "unknown_text": None, "back_text": None,
+            "production_text": None}
+    return {**base, **fields}
+
+
+ASK_WORKING = ask()
+ASK_ANSWERED = ask(state="answered", state_text="Answered", answered_at=utc(30000),
+                   answer="The importer is deployed.", read_text="Read: flake.nix",
+                   ran_text="Ran: just build")
+ASK_TIMED = ask(id="q2", state="timed_out",
+                state_text="Timed out: the session did not answer within 300 s")
+ASK_FAILED = ask(id="q3", state="failed",
+                 state_text="Could not answer: claude-account is not installed")
+ASK_BACK = ask(id="q5", state="answered", state_text="Answered", answered_at=utc(30000),
+               back_text="Question for you: May I run the paid billing export?",
+               answer="I cannot read the bill.", production_text=NO_PRODUCTION_LINE)
+
+
+def asking(entry: dict, *questions: dict) -> dict:
+    return {**entry, "questions": list(questions)}
+
+
+class PageAskTest(unittest.TestCase):
+    begin = {"start": {"focused": False, "clock": NOW_MS}}
+    question = "what does production show?"
+
+    @staticmethod
+    def found(snap: dict, cls: str) -> list:
+        return [n for n in nodes(snap["projects"]) if has_class(n, cls)]
+
+    def sent(self, *after: dict) -> list:
+        return [self.begin, {"frame": view([asking(project(0, []))])}, {"click": "ask-open"},
+                {"type": {"class": "ask-text", "text": self.question}}, *after]
+
+    def test_every_project_offers_one_ask_control(self) -> None:
+        (snap,) = render([self.begin, {"frame": view([project(0, []), project(1, [], quiet=True)])},
+                          {"snapshot": True}])
+        self.assertEqual([full(n) for n in self.found(snap, "ask-open")],
+                         ["Ask a question", "Ask a question"])
+        self.assertEqual(self.found(snap, "ask-text"), [])
+        self.assertEqual([full(n) for n in self.found(snap, "asks-project")], ["owner/p00"])
+
+    def test_ask_opens_a_labelled_field_that_escape_or_cancel_closes(self) -> None:
+        escape = {"key": "Escape", "on": "ask-text"}
+        opened, typed, kept, cancelled, again = render([
+            self.begin, {"frame": view([project(0, [])])}, {"click": "ask-open"}, {"snapshot": True},
+            {"type": {"class": "ask-text", "text": "routes"}}, {"snapshot": True},
+            escape, {"snapshot": True},
+            {"click": "ask-cancel"}, {"snapshot": True},
+            {"click": "ask-open"}, escape, {"snapshot": True}])
+        (field,) = self.found(opened, "ask-text")
+        self.assertEqual((field["tag"], field["label"]), ("textarea", "Question about owner/p00"))
+        self.assertEqual(field["placeholder"], "What do you want to know about this project?")
+        self.assertEqual(role(opened["active"]), "ask-text")
+        self.assertIs(self.found(opened, "ask-send")[0]["disabled"], True)
+        self.assertIs(self.found(typed, "ask-send")[0]["disabled"], False)
+        self.assertEqual(len(self.found(kept, "ask-text")), 1)
+        self.assertEqual(self.found(cancelled, "ask-text"), [])
+        self.assertEqual(self.found(again, "ask-text"), [])
+
+    def test_sending_posts_the_question_and_shows_it_working_before_the_answer(self) -> None:
+        working = view([asking(project(0, []), ASK_WORKING)])
+        answered = view([asking(project(0, []), ASK_ANSWERED)])
+        a, b, c, d, gone = render([
+            *self.sent({"hold": True}, {"click": "ask-send"}, {"snapshot": True},
+                       {"release": {"status": 204, "text": ""}}, {"snapshot": True},
+                       {"frame": working}, {"snapshot": True},
+                       {"frame": answered}, {"snapshot": True},
+                       {"frame": view([asking(project(0, []))])}, {"snapshot": True})])
+        (post,) = b["posts"]
+        self.assertEqual(post["url"], "/api/project-question")
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "question": self.question})
+        self.assertIn("X-Console-Token", post["headers"])
+        (row,) = self.found(a, "ask")
+        self.assertTrue(full(self.found(a, "ask-question")[0]).startswith(self.question))
+        self.assertEqual(full(self.found(a, "ask-state")[0]), "Sending\u2026")
+        self.assertIs(self.found(a, "ask-send")[0]["disabled"], True)
+        (row,) = self.found(b, "ask")
+        self.assertEqual(full(self.found(b, "ask-state")[0]), "Working on it")
+        self.assertEqual(self.found(b, "ask-text")[0]["value"], "")
+        (row,) = self.found(c, "ask")
+        self.assertEqual(full(self.found(c, "ask-state")[0]), "Working on it")
+        (row,) = self.found(d, "ask")
+        self.assertEqual(full(self.found(d, "ask-answer")[0]), "The importer is deployed.")
+        self.assertEqual(full(self.found(d, "ask-read")[0]), "Read: flake.nix")
+        self.assertEqual(full(self.found(d, "ask-ran")[0]), "Ran: just build")
+        self.assertEqual(self.found(d, "ask-state"), [])
+        self.assertEqual(self.found(gone, "ask"), [])
+
+    def test_closing_the_box_keeps_an_accepted_question_working_until_the_view_carries_it(self) -> None:
+        working = view([asking(project(0, []), ASK_WORKING)])
+        accepted, closed, after_frame = render([
+            *self.sent({"click": "ask-send"}, {"snapshot": True},
+                       {"click": "ask-cancel"}, {"snapshot": True},
+                       {"frame": working}, {"snapshot": True})])
+        self.assertEqual(len(self.found(accepted, "ask")), 1)
+        self.assertEqual(self.found(closed, "ask-text"), [])
+        (row,) = self.found(closed, "ask")
+        self.assertEqual(full(self.found(closed, "ask-state")[0]), "Working on it")
+        (row,) = self.found(after_frame, "ask")
+        self.assertEqual(full(self.found(after_frame, "ask-state")[0]), "Working on it")
+
+    def test_closing_the_box_before_the_console_answers_still_shows_the_question_working(self) -> None:
+        snap, = render([
+            *self.sent({"hold": True}, {"click": "ask-send"}, {"click": "ask-cancel"},
+                       {"release": {"status": 204, "text": ""}}, {"snapshot": True})])
+        self.assertEqual(self.found(snap, "ask-text"), [])
+        (row,) = self.found(snap, "ask")
+        self.assertEqual(full(self.found(snap, "ask-state")[0]), "Working on it")
+
+    def test_each_state_reads_as_one_plain_line_and_a_question_back_reads_as_a_question(self) -> None:
+        (snap,) = render([self.begin, {"frame": view([asking(
+            project(0, []), ASK_BACK, ASK_FAILED, ASK_TIMED, ASK_WORKING)])}, {"snapshot": True}])
+        rows = self.found(snap, "ask")
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([full(r["children"][0]).startswith(q["question"]) for r, q in
+                          zip(rows, [ASK_BACK, ASK_FAILED, ASK_TIMED, ASK_WORKING])], [True] * 4)
+        for row, done in ((rows[1], ASK_FAILED), (rows[2], ASK_TIMED)):
+            states = [n for n in nodes(row) if has_class(n, "ask-state")]
+            self.assertEqual([full(n) for n in states], [done["state_text"]])
+            self.assertEqual([n for n in nodes(row) if has_class(n, "ask-answer")], [])
+        back = [c for c in rows[0]["children"]]
+        self.assertEqual([c["cls"].split()[0] for c in back], ["ask-question", "ask-back", "ask-answer",
+                                                               "ask-production"])
+        self.assertEqual(full(back[1]), ASK_BACK["back_text"])
+        self.assertEqual(full(back[3]), NO_PRODUCTION_LINE)
+
+    def test_a_refused_question_shows_its_reason_and_keeps_the_draft(self) -> None:
+        cases = [
+            ({"respond": {"status": 409, "text": "this project is not registered\n"}},
+             "this project is not registered"),
+            ({"fail_fetch": True}, "the console did not answer"),
+        ]
+        for answer, reason in cases:
+            with self.subTest(reason=reason):
+                refused, cleared = render([
+                    *self.sent(answer, {"click": "ask-send"}, {"snapshot": True},
+                               {"append": {"class": "ask-text", "text": "?"}}, {"snapshot": True})])
+                self.assertEqual(full(self.found(refused, "ask-reason")[0]), reason)
+                self.assertEqual(self.found(refused, "ask-text")[0]["value"], self.question)
+                self.assertEqual(self.found(refused, "ask"), [])
+                self.assertEqual(full(self.found(cleared, "ask-reason")[0]), "")
+
+    def test_a_typed_question_its_selection_and_focus_survive_a_streamed_frame(self) -> None:
+        (snap,) = render([
+            self.begin, {"frame": view([project(0, [])])}, {"click": "ask-open"},
+            {"type": {"class": "ask-text", "text": "routes are frozen"}},
+            {"select": {"cls": "ask-text", "start": 2, "end": 6}},
+            {"frame": view([project(0, [])])}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "ask-text field-area", "value": "routes are frozen",
+                                         "start": 2, "end": 6})
+        self.assertEqual(snap["hidden_focus"], 0)
+
+    def test_a_quiet_group_stays_open_while_its_ask_box_is_open(self) -> None:
+        group = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
+                 "projects": [project(n, [], quiet=True) for n in range(2, 6)]}
+        frame = {"frame": view([group], count=4)}
+        (snap,) = render([
+            self.begin, frame, {"open": "quiet"}, {"click": "ask-open", "in": "quiet"},
+            {"type": {"class": "ask-text", "text": "x"}}, {"close": "quiet"}, frame,
+            {"snapshot": True}])
+        (quiet,) = [n for n in nodes(snap["projects"]) if n["key"] == "quiet"]
+        self.assertTrue(quiet["open"])
+        self.assertEqual(snap["hidden_focus"], 0)
+        self.assertEqual(len([n for n in nodes(quiet) if has_class(n, "ask-open")]), 3)
+
+    def test_a_project_that_leaves_the_view_loses_its_draft(self) -> None:
+        (snap,) = render([
+            *self.sent({"frame": view([])}, {"frame": view([project(0, [])])},
+                       {"click": "ask-open"}, {"snapshot": True})])
+        self.assertEqual(self.found(snap, "ask-text")[0]["value"], "")
+
+    def test_a_question_streamed_before_its_send_answers_is_shown_once(self) -> None:
+        for name, edit in (("unchanged", []),
+                           ("edited", [{"append": {"class": "ask-text", "text": " and staging"}}])):
+            with self.subTest(name):
+                a, b, c, d, gone = render([
+                    *self.sent({"hold": True}, {"click": "ask-send"}, {"snapshot": True},
+                               {"frame": view([asking(project(0, []), ASK_WORKING)])},
+                               {"snapshot": True},
+                               {"frame": view([asking(project(0, []), ASK_ANSWERED)])},
+                               {"snapshot": True}, *edit,
+                               {"release": {"status": 204, "text": ""}}, {"snapshot": True},
+                               {"frame": view([asking(project(0, []))])}, {"snapshot": True})])
+                (row,) = self.found(a, "ask")
+                self.assertEqual(full(self.found(a, "ask-state")[0]), "Sending\u2026")
+                (row,) = self.found(b, "ask")
+                self.assertEqual([full(n) for n in self.found(b, "ask-state")], ["Working on it"])
+                self.assertEqual(self.found(b, "ask-text")[0]["value"], self.question)
+                self.assertIs(self.found(b, "ask-send")[0]["disabled"], True)
+                (row,) = self.found(c, "ask")
+                self.assertEqual(full(self.found(c, "ask-answer")[0]), "The importer is deployed.")
+                self.assertEqual(self.found(c, "ask-state"), [])
+                (row,) = self.found(d, "ask")
+                self.assertEqual(len(self.found(d, "ask-text")), 1)
+                self.assertEqual(self.found(d, "ask-text")[0]["value"],
+                                 (self.question + " and staging") if edit else "")
+                self.assertEqual([full(n) for n in self.found(d, "ask-reason")], [""])
+                self.assertEqual(len(d["posts"]), 1)
+                self.assertEqual(d["posts"][0]["url"], "/api/project-question")
+                self.assertEqual(self.found(gone, "ask"), [])
+
+    def test_a_second_question_sent_before_the_first_is_shown_keeps_its_working_row(self) -> None:
+        second = "which credentials are required?"
+        first_row = ask(id="q1")
+        second_row = ask(id="q2", question=second)
+        one, two, three, four = render([
+            *self.sent({"click": "ask-send"}, {"snapshot": True},
+                       {"type": {"class": "ask-text", "text": second}}, {"click": "ask-send"},
+                       {"snapshot": True},
+                       {"frame": view([asking(project(0, []), first_row)])}, {"snapshot": True},
+                       {"frame": view([asking(project(0, []), second_row, first_row)])},
+                       {"snapshot": True})])
+
+        def lines(snap: dict) -> list:
+            return [(next((q for q in (self.question, second) if full(r["children"][0]).startswith(q)), None),
+                     full(r["children"][1])) for r in self.found(snap, "ask")]
+
+        working = "Working on it"
+        self.assertEqual(lines(one), [(self.question, working)])
+        self.assertEqual(lines(two), [(second, working), (self.question, working)])
+        self.assertEqual(lines(three), [(second, working), (self.question, working)])
+        self.assertEqual(lines(four), [(second, working), (self.question, working)])
+        self.assertEqual(len(four["posts"]), 2)
 
 
 class PageTimeTest(unittest.TestCase):

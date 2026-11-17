@@ -1304,7 +1304,9 @@ log. The account of a session is folded from the log's `session.seen` and `sessi
 (`spend.session_profiles`) and is kept after `session.gone`, for as long as those rows are retained.
 A question session's spend is the `questions` aspect, its sessions folded from the
 `project_question.asked` rows' `session_id` and `profile` (`spend.question_sessions`), on
-construction and on each append.
+construction and on each append. The asked and answered rows are folded by
+`project_question.asked_questions` into each project entry's `questions`, at construction and on
+each append; retention does not re-fold them.
 A failed iteration is one stderr line `console: spend_poll_failed <Type>: <message>` and the loop
 goes on.
 
@@ -3212,6 +3214,7 @@ class ConsoleService:
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
             self._owner_notices = sprints.owner_notices(events)
+            self._project_questions = project_question.asked_questions(events)
             self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
             self._settle_stops()
@@ -3313,6 +3316,7 @@ class ConsoleService:
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             owner_notices=self._owner_notices,
+            project_questions=self._project_questions,
             digest=digest.digest(self._moments, self._looked, self._now()),
             spend=self._spend_view,
             capacity=cap, activation=self._activation,
@@ -6407,6 +6411,7 @@ class ConsoleService:
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
+        self._project_questions = project_question.asked_questions(appended, self._project_questions)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
         self._moments = digest.keep([*self._moments, *new],
