@@ -4484,7 +4484,7 @@ PROGRESS = {
 FAILED_START = {
     "type": "inbox_item", "reason": "failed_start", "key": "failed-start/" + "a" * 16,
     "project_id": "owner/p00", "sprint_id": "a" * 16, "title": "make the importer resumable",
-    "headline": "the manager of make the importer resumable failed to start",
+    "headline": "The manager for make the importer resumable failed to start.",
     "last_reason": "this account does not trust the project's folder", "answered": False,
     "waiting_since": "2026-11-10T08:00:00+00:00",
 }

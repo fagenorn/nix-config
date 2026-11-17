@@ -114,13 +114,23 @@ class FailedStartCardTest(unittest.TestCase):
         self.assertEqual(shown["inbox"]["open"], [{
             "type": "inbox_item", "reason": "failed_start", "key": "failed-start/" + SID,
             "project_id": "p00", "sprint_id": SID, "title": GOAL,
-            "headline": "the manager of " + GOAL + " failed to start", "last_reason": PLAIN,
+            "headline": "The manager for " + GOAL + " failed to start.", "last_reason": PLAIN,
             "answered": False, "waiting_since": T0}])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
         self.assertEqual(shown["statement"]["sentence"], view.FAILED_START_SENTENCE)
         self.assertEqual(view.FAILED_START_SENTENCE,
                          "Retry to start the manager, or drop the sprint.")
+
+    def test_the_headline_is_one_sentence_whatever_stop_the_title_ends_in(self):
+        for goal in ("Add resumable uploads. Keep the old route.", "Add resumable uploads!",
+                     "Add resumable uploads? Soon.", "Add resumable uploads"):
+            with self.subTest(goal=goal):
+                shown = derive_view([state("p00", 1)],
+                                    sprints={SID: failed(sprint(SID, goal=goal))},
+                                    now_ms=T0_MS + 60_000)
+                self.assertEqual(shown["inbox"]["open"][0]["headline"],
+                                 "The manager for Add resumable uploads failed to start.")
 
     def test_its_line_reads_failed_to_start_and_waits_on_the_owner(self):
         shown = derive_view([state("p00", 1)], sprints={SID: failed(sprint(SID))},

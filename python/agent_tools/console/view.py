@@ -166,7 +166,7 @@ is one entry of `inbox.open`, after the stalls and before the progress entries, 
 `(waiting_since, sprint_id)`, and counts in `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "failed_start", "key": "failed-start/<sprint id>",
-     "project_id", "sprint_id", "title", "headline": "the manager of <title> failed to start",
+     "project_id", "sprint_id", "title", "headline": "The manager for <title> failed to start.",
      "last_reason": <manager.plain_reason of the failure>, "answered": false,
      "waiting_since": "<time the manager failed>"}
 
@@ -775,7 +775,8 @@ BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for 
 QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
 MANAGER_SENTENCE = "Try again to start a new manager, or drop the sprint."
 PROGRESS_SENTENCE = "Tell the manager to continue, or drop the sprint."
-FAILED_START_HEADLINE = "the manager of {title} failed to start"
+FAILED_START_HEADLINE = "The manager for {title} failed to start."
+SENTENCE_STOPS = " .!?"
 FAILED_START_SENTENCE = "Retry to start the manager, or drop the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
@@ -1599,7 +1600,7 @@ def _failed_start_entry(sprint: SprintState) -> dict:
     title = sprint_title(sprint)
     return {"type": "inbox_item", "reason": "failed_start", "key": f"failed-start/{sprint.sprint_id}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
-            "title": title, "headline": FAILED_START_HEADLINE.format(title=title),
+            "title": title, "headline": FAILED_START_HEADLINE.format(title=title.rstrip(SENTENCE_STOPS)),
             "last_reason": plain_reason(sprint.manager.reason),
             "answered": False, "waiting_since": sprint.manager.at}
 
