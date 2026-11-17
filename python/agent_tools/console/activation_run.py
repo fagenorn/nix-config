@@ -329,9 +329,15 @@ class Activator:
             if stop.is_set():
                 raise Stopped()
             child = _CHILDREN.get(run.tree)
-            if child is not None and child.poll() is not None:
-                _CHILDREN.pop(run.tree, None)
-            if not tree_alive(run.tree, run=self._run):
+            launching = False
+            if child is not None:
+                if child.poll() is None:
+                    # systemctl reads a scope that does not exist yet as inactive, so a child
+                    # this instance launched and has not reaped is alive whatever systemctl says.
+                    launching = True
+                else:
+                    _CHILDREN.pop(run.tree, None)
+            if not launching and not tree_alive(run.tree, run=self._run):
                 break
             now = time.monotonic()
             if terminated_at is None and now - began >= self._seconds:

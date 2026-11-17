@@ -476,10 +476,11 @@ class ActivationRunTest(Trees):
         git(self.checkout, "worktree", "add", "-q", "--detach", str(self.tmp / "gone"))
         shutil.rmtree(self.tmp / "gone")
         a = self.activator("pass")
-        self.act(a)
         self.advance({f"{CONSOLE}/view.py": "VALUE = 3\n"})
+        newer = git(self.checkout, "rev-parse", "origin/main").strip()
         before = self.snapshot_checkout()
-        self.act(a, git(self.checkout, "rev-parse", "origin/main").strip())
+        self.act(a)
+        self.act(a, newer)
         self.assertEqual(self.snapshot_checkout(), before)
         self.assertIn("gone", git(self.checkout, "worktree", "list", "--porcelain"))
 
@@ -601,6 +602,28 @@ class ActivationRunTest(Trees):
         self.assertIs(launched["kwargs"]["start_new_session"], True)
         self.assertIn("PYTHONPATH", launched["kwargs"]["env"])
         self.assertEqual(run.tree, "scope:" + argv[5][len("--unit="):] + ".scope")
+
+    def test_a_launched_child_not_yet_reaped_keeps_the_run_alive(self):
+        # Before systemd-run registers the scope, systemctl shows the unit as inactive (exit 0).
+        polls = []
+
+        class Process:
+            pid = 4242
+
+            def poll(self):
+                polls.append(None)
+                return None if len(polls) < 3 else 0
+
+        def inactive(argv, **kwargs):
+            if argv[0] != "systemctl":
+                return subprocess.run(argv, **kwargs)
+            return subprocess.CompletedProcess(argv, 0, stdout="inactive\n")
+
+        a = self.activator("pass", scoped=True, popen=lambda argv, **kwargs: Process(), run=inactive)
+        run = a.start(str(self.checkout), self.commit)
+        self.assertIsInstance(run, activation_run.Run, run)
+        a.wait(run, threading.Event())
+        self.assertGreaterEqual(len(polls), 3)
 
     def test_a_scope_tree_reads_its_state_from_systemctl(self):
         calls = []
