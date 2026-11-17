@@ -1,5 +1,9 @@
 """Tests for `agent_tools.delivery.look_marker` (issue 1138)."""
+import base64
+import json
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.delivery import look_marker as lm
@@ -8,6 +12,7 @@ LINE = ("- [ ] [human] before merge: the settings page at 390 px "
         "— measured: the owner, on the console")
 BODY = "## Acceptance criteria\n\n" + LINE + "\n"
 HEAD = "1a2b3c4" + "d" * 33
+H = HEAD
 NO_ANSWER = f"<!-- agent:look v1 issue=1200 pr=1300 head={HEAD} message=m2 -->\nx"
 
 
@@ -20,6 +25,69 @@ def comment(cid, body, association="OWNER"):
 
 def approved(cid, answer="approved", association="OWNER", issue=1200, pr=1300, head=HEAD):
     return comment(cid, lm.approval_body(issue, pr, head, answer, f"m{cid}"), association)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+B = "b" * 40
+A = "5" * 40
+T = "6" * 40
+X = "8" * 40
+F = "9" * 40
+F1 = "4" * 40
+FORK = "3" * 40
+MC = "2" * 40
+PAGE = "python/agent_tools/console/page.html"
+INBOX = "python/agent_tools/console/inbox.py"
+TESTF = "tests/test_console_page.py"
+DOC = "docs/x.md"
+
+
+def contents(text):
+    raw = base64.b64encode(text.encode()).decode()
+    return {"type": "file", "encoding": "base64",
+            "content": "\n".join(raw[i:i + 60] for i in range(0, len(raw), 60))}
+
+
+def edit(name, tag="e", at=1):
+    return {"filename": name, "status": "modified",
+            "patch": f"@@ -{at},2 +{at},2 @@\n {name} line 0\n-{name} old\n+{name} {tag}"}
+
+
+def cmp(files=(), status="ahead", commits=()):
+    listed = []
+    for entry in files:
+        if isinstance(entry, dict):
+            listed.append(entry)
+        elif isinstance(entry, tuple):
+            listed.append(edit(*entry))
+        else:
+            listed.append(edit(entry))
+    return {"status": status, "files": listed, "total_commits": len(commits),
+            "commits": [{"sha": sha, "parents": [{"sha": p} for p in parents]}
+                        for sha, parents in commits]}
+
+
+CONSOLE = contents('{"version": 1, "sets": {"console": ["python/agent_tools/console/**"]}}')
+
+
+def world(after, ah_files, extra=None):
+    reads = {
+        lm.contents_path(B): CONSOLE,
+        lm.compare_path(B, A): cmp([PAGE], commits=[(A, [FORK])]),
+        lm.compare_path(A, H): cmp(ah_files),
+        lm.compare_path(B, H): cmp(commits=[(A, [FORK])] + after),
+    }
+    for (a, b), files in (extra or {}).items():
+        reads[lm.compare_path(a, b)] = files if isinstance(files, dict) else cmp(files)
+    return reads
+
+
+def cand(answer="approved"):
+    return lm.Candidate(1200, A, answer, 10)
+
+
+def approval(cid, head, answer="approved", association="OWNER", words=None, pr=1300, issue=1200):
+    return comment(cid, lm.approval_body(issue, pr, head, answer, f"m{cid}", words=words), association)
 
 
 def judge(*comments):
@@ -105,6 +173,19 @@ class ApprovalBodyTest(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaises(ValueError):
                     lm.approval_body(*args)
+
+    def test_a_fix_approval_carries_the_words(self):
+        lines = lm.approval_body(1200, 1300, HEAD, "fix", "msg-1", words="  make the label bold ").split("\n")
+        self.assertEqual(lines, [
+            f"<!-- agent:look v1 issue=1200 pr=1300 head={HEAD} answer=fix message=msg-1 -->",
+            "The owner approved head 1a2b3c4 of pull request 1300 with one fix.",
+            "The fix: make the label bold"])
+
+    def test_bad_fix_words_raise(self):
+        for answer, words in (("fix", None), ("fix", "   "), ("fix", "x" * 2001), ("approved", "x")):
+            with self.subTest(answer=answer, words=words):
+                with self.assertRaises(ValueError):
+                    lm.approval_body(1200, 1300, HEAD, answer, "m", words=words)
 
 
 class JudgeTest(unittest.TestCase):
@@ -192,6 +273,390 @@ class LookAnsweredTest(unittest.TestCase):
                      {"merged": True, "head": {"sha": "abc"}}, None):
             with self.subTest(pull=pull):
                 self.assertIsNone(lm.merged_head(pull))
+
+
+class GlobTest(unittest.TestCase):
+    def test_glob_match_reads_segments(self):
+        for pattern, path in (("python/agent_tools/console/**", PAGE),
+                              ("python/agent_tools/console/**", "python/agent_tools/console/a/b.py"),
+                              ("tests/test_?.py", "tests/test_a.py"), ("a/*.py", "a/b.py"),
+                              ("a/[x].py", "a/[x].py")):
+            with self.subTest(pattern=pattern, path=path):
+                self.assertIs(lm.glob_match(pattern, path), True)
+        for pattern, path in (("python/agent_tools/console/**", "python/agent_tools/consoles/x.py"),
+                              ("*.py", "a/b.py"), ("tests/test_?.py", "tests/test_ab.py"),
+                              ("a/[x].py", "a/x.py")):
+            with self.subTest(pattern=pattern, path=path):
+                self.assertIs(lm.glob_match(pattern, path), False)
+
+
+class LookFilesTest(unittest.TestCase):
+    def test_the_set_file_decodes(self):
+        self.assertEqual(lm.read_look_files(CONSOLE), {"console": ("python/agent_tools/console/**",)})
+
+    def test_a_malformed_set_file_is_unreadable(self):
+        bad = [None, {**CONSOLE, "type": "dir"}, {**CONSOLE, "encoding": "none"}, contents("{"),
+               contents('{"version": 2, "sets": {"c": ["a/**"]}}'),
+               contents('{"version": true, "sets": {"c": ["a/**"]}}'),
+               contents('{"version": 1, "sets": {"c": ["a/**"]}, "owner": "x"}'),
+               contents('{"version": 1, "sets": {}}'),
+               contents('{"version": 1, "sets": {"c": []}}'),
+               contents('{"version": 1, "sets": {"c": ["/a/**"]}}'),
+               contents('{"version": 1, "sets": {"c": ["a//b"]}}'),
+               contents('{"version": 1, "sets": {"c": ["a/../b"]}}'),
+               contents('{"version": 1, "sets": {"Console!": ["a/**"]}}')]
+        for found in bad:
+            with self.subTest(found=found):
+                self.assertIsNone(lm.read_look_files(found))
+
+    def test_the_committed_set_file_declares_the_console_package(self):
+        text = (REPO_ROOT / ".github/look-files.json").read_text()
+        self.assertEqual(lm.read_look_files(contents(text)), {"console": ("python/agent_tools/console/**",)})
+
+
+class CompareReadTest(unittest.TestCase):
+    def test_compare_files_lists_names_and_previous_names(self):
+        renamed = {"filename": "docs/p.html", "previous_filename": PAGE, "status": "renamed"}
+        self.assertEqual(lm.compare_files(cmp([PAGE, renamed])), (PAGE, "docs/p.html", PAGE))
+
+    def test_patch_hunks_drop_the_at_lines(self):
+        first = lm.patch_hunks(edit(PAGE, "x", at=1)["patch"])
+        self.assertEqual(first, lm.patch_hunks(edit(PAGE, "x", at=9)["patch"]))
+        self.assertEqual(first, ((f" {PAGE} line 0", f"-{PAGE} old", f"+{PAGE} x"),))
+        self.assertEqual(lm.patch_hunks(""), ())
+        self.assertEqual(lm.patch_hunks("@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file\n@@ -9 +9 @@\n c"),
+                         (("-a", "+b", "\\ No newline at end of file"), (" c",)))
+        for patch in ("garbage", "@@ -1 +1 @@\n*x", " x\n@@ -1 +1 @@\n y"):
+            with self.subTest(patch=patch):
+                self.assertIsNone(lm.patch_hunks(patch))
+
+    def test_an_unreadable_compare_is_none(self):
+        many = {"files": [{"filename": f"f{n}", "status": "added"} for n in range(300)]}
+        file = {"filename": "a", "status": "added"}
+        for name, found in {"empty": {}, "files not a list": {"files": "x"}, "300 files": many,
+                            "weird status": {"files": [{**file, "status": "weird"}]},
+                            "numeric name": {"files": [{**file, "filename": 7}]},
+                            "previous None": {"files": [{**file, "previous_filename": None}]},
+                            "numeric patch": {"files": [{**file, "patch": 7}]},
+                            "garbage patch": {"files": [{**file, "patch": "garbage"}]}}.items():
+            with self.subTest(name=name):
+                self.assertIsNone(lm.compare_files(found))
+        good = cmp(commits=[(A, [FORK])])
+        for name, found in {"total": {**good, "total_commits": 2},
+                            "short sha": {**good, "commits": [{"sha": "ab", "parents": []}]},
+                            "no parents": {**good, "commits": [{"sha": A}]}}.items():
+            with self.subTest(name=name):
+                self.assertIsNone(lm.compare_commits(found))
+        self.assertEqual(lm.compare_commits(good), {A: (FORK,)})
+
+
+class CandidateTest(unittest.TestCase):
+    def test_the_latest_trusted_approval_of_another_head_is_the_candidate(self):
+        self.assertEqual(lm.carry_candidate([approval(10, A)], 1200, 1300, H), cand())
+
+    def test_no_candidate_for_these_shapes(self):
+        shapes = {
+            "changes after": [approval(10, A), approval(11, X, "changes")],
+            "untrusted": [approval(10, A, association="COLLABORATOR")],
+            "changes on this head": [approval(10, A), approval(11, H, "changes")],
+            "fix on this head": [approval(10, A), approval(11, H, "fix", words="w")],
+            "ended": [approval(10, A), comment(11, fm.end_body(10, "withdrawn"))],
+            "another pull request": [approval(10, A, pr=999)],
+        }
+        for name, comments in shapes.items():
+            with self.subTest(name=name):
+                self.assertIsNone(lm.carry_candidate(comments, 1200, 1300, H))
+
+    def test_a_fix_answer_is_a_fix_candidate(self):
+        found = lm.carry_candidate([approval(10, A, "fix", words="bold label")], 1200, 1300, H)
+        self.assertEqual(found.answer, "fix")
+
+    def test_look_prs_lists_the_pull_requests_an_approval_names(self):
+        comments = [approval(10, A), approval(11, A, pr=1301, answer="changes"),
+                    approval(12, X, pr=1299, answer="fix", words="w"),
+                    approval(13, A, pr=1302, association="CONTRIBUTOR")]
+        self.assertEqual(lm.look_prs(comments, 1200), (1299, 1300))
+
+
+TEST_ONLY = ([(H, [A])], [TESTF])
+
+
+def merge_world(ah, base_files=None):
+    """A clean merge of base X into the pull request: A...H is `ah`; X's own look files are `base_files`."""
+    extra = {(A, X): base_files or [DOC], (X, A): [PAGE], (X, H): [PAGE]}
+    return world([(H, [A, X])], ah, extra)
+
+
+class KeptTest(unittest.TestCase):
+    def kept(self, reads, answer="approved"):
+        return lm.kept(cand(answer), H, lm.Carry(B, reads))
+
+    def test_the_first_run_names_the_four_reads(self):
+        self.assertEqual(self.kept({}), lm.Kept(False, (lm.contents_path(B), lm.compare_path(B, A),
+                                                       lm.compare_path(A, H), lm.compare_path(B, H))))
+
+    def test_a_head_whose_look_files_did_not_change_keeps_the_approval(self):
+        self.assertEqual(self.kept(world(*TEST_ONLY)), lm.Kept(True, ()))
+        self.assertEqual(self.kept(world([(H, [A, X])], [DOC])),
+                         lm.Kept(False, (lm.compare_path(A, X), lm.compare_path(X, A), lm.compare_path(X, H))))
+        extra = {(A, X): [DOC], (X, A): [PAGE], (X, H): [PAGE]}
+        self.assertEqual(self.kept(world([(H, [A, X])], [DOC], extra)), lm.Kept(True, ()))
+
+    def test_a_clean_merge_of_two_edits_to_one_look_file_keeps_the_approval(self):
+        for at in (1, 9):
+            with self.subTest(at=at):
+                extra = {(A, X): [(PAGE, "x", at)], (X, A): [(PAGE, "a")], (X, H): [(PAGE, "a")]}
+                self.assertEqual(self.kept(world([(H, [A, X])], [(PAGE, "x")], extra)), lm.Kept(True, ()))
+
+    def test_a_clean_merge_that_brings_a_base_look_change_keeps_the_approval(self):
+        self.assertEqual(self.kept(world([(H, [A, X])], [INBOX])),
+                         lm.Kept(False, (lm.compare_path(A, X), lm.compare_path(X, A), lm.compare_path(X, H))))
+        extra = {(A, X): [INBOX], (X, A): [PAGE], (X, H): [PAGE]}
+        self.assertEqual(self.kept(world([(H, [A, X])], [INBOX], extra)), lm.Kept(True, ()))
+        extra = {(A, T): [TESTF], (T, X): [INBOX], (X, T): [PAGE], (T, H): [INBOX], (X, H): [PAGE, TESTF]}
+        self.assertEqual(self.kept(world([(T, [A]), (H, [T, X])], [INBOX, TESTF], extra)), lm.Kept(True, ()))
+
+    def test_a_merge_where_both_sides_made_the_same_look_edit_is_clean(self):
+        extra = {(A, X): [PAGE, INBOX], (X, A): [PAGE], (X, H): []}
+        self.assertEqual(self.kept(world([(H, [A, X])], [INBOX], extra)), lm.Kept(True, ()))
+
+    def test_these_later_heads_do_not_keep_the_approval(self):
+        renamed = {"filename": "python/agent_tools/console/inbox2.py", "previous_filename": INBOX,
+                   "status": "renamed", "patch": ""}
+        clean = {(A, X): [INBOX], (X, A): [PAGE], (X, H): [PAGE]}
+        edits = {(A, X): [(PAGE, "x")], (X, A): [(PAGE, "a")], (X, H): [(PAGE, "a")]}
+        omitted = {"filename": PAGE, "status": "modified"}
+        no_cover = world(*TEST_ONLY)
+        no_cover[lm.compare_path(B, A)] = cmp([DOC], commits=[(A, [FORK])])
+        no_h = world(*TEST_ONLY)
+        no_h[lm.compare_path(B, H)] = cmp(commits=[(A, [FORK]), (X, [A])])
+        diverged = world(*TEST_ONLY)
+        diverged[lm.compare_path(A, H)] = cmp([TESTF], status="diverged")
+        long_diverged = world([(T, [A]), (H, [T])], [TESTF], {(A, T): [TESTF], (T, H): [TESTF]})
+        long_diverged[lm.compare_path(A, H)] = cmp([TESTF], status="diverged")
+        outside = world([(F, [A]), (H, [A])], [TESTF])
+        earlier = cmp([PAGE], commits=[(F1, [FORK]), (A, [F1])])
+        side_of_a = world([(H, [A, F1])], [TESTF])
+        side_of_a[lm.compare_path(B, A)] = earlier
+        side_of_a[lm.compare_path(B, H)] = cmp(commits=[(F1, [FORK]), (A, [F1]), (H, [A, F1])])
+        eleven = [(f"{n:040x}", [A if n == 0 else f"{n - 1:040x}"]) for n in range(10)]
+        cases = {
+            "a look commit": world([(H, [A])], [PAGE]),
+            "an edit moved within a look file": world([(T, [A]), (H, [T])], [PAGE],
+                                                      {(A, T): [PAGE], (T, H): [PAGE]}),
+            "a conflict resolved inside a look file": world(
+                [(H, [A, X])], [(PAGE, "r")],
+                {(A, X): [(PAGE, "x")], (X, A): [(PAGE, "a")], (X, H): [(PAGE, "r")]}),
+            "an edit inside a merge": world([(H, [A, X])], [DOC, PAGE],
+                                            {(A, X): [DOC], (X, A): [PAGE], (X, H): [PAGE]}),
+            "an edit inside a merge to a file only the base changed": world(
+                [(H, [A, X])], [INBOX],
+                {(A, X): [INBOX], (X, A): [PAGE], (X, H): [PAGE, (INBOX, "extra")]}),
+            "a merge that drops the PR's look edit": world(
+                [(H, [A, X])], [DOC, (PAGE, "undo")], {(A, X): [DOC], (X, A): [PAGE], (X, H): []}),
+            "a merge that drops the base's look edit": world(
+                [(H, [A, X])], [DOC], {(A, X): [INBOX, DOC], (X, A): [PAGE], (X, H): [PAGE, INBOX]}),
+            "a look edit and its revert": world(
+                [(T, [A]), (H, [T])], [TESTF],
+                {(A, T): [PAGE], (T, H): [(PAGE, "revert"), TESTF]}),
+            "a renamed look file across a merge": world(
+                [(H, [A, X])], [renamed], {**clean, (A, X): [renamed]}),
+            "a look file whose patch is omitted": world([(H, [A, X])], [omitted], edits),
+            "a look file whose patch is omitted on both sides": world(
+                [(H, [A, X])], [omitted], {(A, X): [omitted], (X, A): [omitted], (X, H): [omitted]}),
+            "A...H diverged": diverged,
+            "A...H diverged over a longer chain": long_diverged,
+            "a commit outside the first-parent chain": outside,
+            "a merge whose second parent is a commit A already had": side_of_a,
+            "no covered set": no_cover,
+            "H missing from B...H commits": no_h,
+            "a merge whose second parent is a PR commit": world([(F1, [A]), (H, [A, F1])], [PAGE]),
+            "eleven commits after A": world(eleven + [(H, [eleven[-1][0]])], [TESTF]),
+        }
+        for name, reads in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.kept(reads), lm.Kept(False, ()))
+
+    def test_absent_reads_are_not_kept(self):
+        no_file = world(*TEST_ONLY)
+        no_file[lm.contents_path(B)] = None
+        vanished = world(*TEST_ONLY)
+        vanished[lm.compare_path(A, H)] = None
+        merge = merge_world([DOC])
+        merge[lm.compare_path(X, H)] = None
+        for name, reads in {"no set file": no_file, "vanished head": vanished, "absent merge read": merge}.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.kept(reads), lm.Kept(False, ()))
+
+    def test_unreadable_reads_raise(self):
+        def altered(path, value):
+            reads = world(*TEST_ONLY)
+            reads[path] = value
+            return reads
+
+        many = {"files": [{"filename": f"f{n}", "status": "added"} for n in range(300)]}
+        incomplete = cmp(commits=[(A, [FORK]), (H, [A])])
+        incomplete["total_commits"] = 3
+        no_commits = cmp([PAGE])
+        del no_commits["commits"]
+        garbage = merge_world([DOC])
+        garbage[lm.compare_path(X, H)] = cmp([{"filename": PAGE, "status": "modified", "patch": "garbage"}])
+        cases = {
+            "set file": altered(lm.contents_path(B), contents("{")),
+            "300 files": altered(lm.compare_path(A, H), many),
+            "A...H empty": altered(lm.compare_path(A, H), {}),
+            "A...H status": altered(lm.compare_path(A, H), {**cmp([TESTF]), "status": 7}),
+            "incomplete commits": altered(lm.compare_path(B, H), incomplete),
+            "B...A without commits": altered(lm.compare_path(B, A), no_commits),
+            "garbage patch": garbage,
+        }
+        for name, reads in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(lm.Unreadable):
+                    self.kept(reads)
+
+    def test_a_fix_keeps_the_approval_for_exactly_one_look_commit(self):
+        one = world([(F, [A]), (H, [F])], [PAGE, TESTF], {(A, F): [PAGE], (F, H): [TESTF]})
+        self.assertEqual(self.kept(one, "fix"), lm.Kept(True, ()))
+        none = world([(F, [A]), (H, [F])], [PAGE, TESTF], {(A, F): [TESTF], (F, H): [TESTF]})
+        two = world([(F1, [A]), (F, [F1]), (H, [F])], [PAGE], {(A, F1): [PAGE], (F1, F): [PAGE], (F, H): [TESTF]})
+        side = world([(F1, [A]), (F, [F1]), (H, [A, F])], [PAGE])
+        for name, reads in {"no look commit": none, "two look commits": two, "side branch": side,
+                            "test only": world(*TEST_ONLY)}.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.kept(reads, "fix"), lm.Kept(False, ()))
+
+    def test_judge_lists_candidates_and_needs(self):
+        comments = (approval(10, A),)
+        facts = [lm.IssueFacts(1200, BODY, comments)]
+        verdict = lm.judge(1300, H, facts)
+        self.assertEqual((verdict.admit, verdict.issue, verdict.candidates, verdict.need),
+                         (False, 1200, (cand(),), ()))
+        verdict = lm.judge(1300, H, facts, lm.Carry(B, {}))
+        self.assertEqual(verdict.need, tuple(sorted((lm.contents_path(B), lm.compare_path(B, A),
+                                                     lm.compare_path(A, H), lm.compare_path(B, H)))))
+        verdict = lm.judge(1300, H, [*facts, lm.IssueFacts(1201, BODY, ())], lm.Carry(B, {}))
+        self.assertEqual((verdict.issue, verdict.candidates, verdict.need), (1200, (), ()))
+        reads = world(*TEST_ONLY)
+        self.assertEqual(lm.judge(1300, H, facts, lm.Carry(B, reads)), lm.Verdict(True, marked=(1200,)))
+        reads[lm.compare_path(A, H)] = {}
+        verdict = lm.judge(1300, H, facts, lm.Carry(B, reads))
+        self.assertEqual((verdict.admit, verdict.issue, verdict.need), (False, 1200, ()))
+
+    def test_an_exact_approval_still_admits_without_a_carry(self):
+        self.assertIs(judge(approval(10, H)).admit, True)
+
+
+class SettleTest(unittest.TestCase):
+    def test_settle_reads_what_kept_names(self):
+        reads = merge_world([INBOX], [INBOX])
+        seen = []
+
+        def read(path):
+            seen.append(path)
+            return reads[path]
+
+        self.assertIs(lm.settle(cand(), H, B, read), True)
+        self.assertEqual(seen, [lm.contents_path(B), lm.compare_path(B, A), lm.compare_path(A, H),
+                                lm.compare_path(B, H), lm.compare_path(A, X), lm.compare_path(X, A),
+                                lm.compare_path(X, H)])
+
+        def boom(path):
+            raise RuntimeError(path)
+
+        with self.assertRaises(RuntimeError):
+            lm.settle(cand(), H, B, boom)
+        seen.clear()
+
+        def not_found(path):
+            seen.append(path)
+            return None if path == lm.contents_path(B) else reads[path]
+
+        self.assertIs(lm.settle(cand(), H, B, not_found), False)
+        self.assertEqual(len(seen), 4)
+        bad = {**reads, lm.compare_path(A, H): {}}
+        with self.assertRaises(lm.Unreadable):
+            lm.settle(cand(), H, B, bad.__getitem__)
+
+    def test_settle_stops_at_its_bounds(self):
+        count = iter(range(1000))
+        calls = []
+
+        def fresh(*_):
+            calls.append(1)
+            return lm.Kept(False, (f"compare/{B}...{next(count):040x}",))
+
+        read = mock.Mock(return_value={})
+        with mock.patch.object(lm, "kept", side_effect=fresh):
+            self.assertIs(lm.settle(cand(), H, B, read), False)
+        self.assertEqual((len(calls), read.call_count), (lm.CARRY_RUNS, lm.CARRY_RUNS - 1))
+        read = mock.Mock(return_value={})
+        many = lm.Kept(False, tuple(f"compare/{B}...{n:040x}" for n in range(49)))
+        with mock.patch.object(lm, "kept", return_value=many):
+            self.assertIs(lm.settle(cand(), H, B, read), False)
+        read.assert_not_called()
+
+
+def pull(head=H, sha=MC):
+    found = {"merged": True, "head": {"sha": head}}
+    if sha is not None:
+        found["merge_commit_sha"] = sha
+    return found
+
+
+class MergedUnderLookTest(unittest.TestCase):
+    def reader(self, reads):
+        self.seen = []
+
+        def read(path):
+            self.seen.append(path)
+            if path not in reads:
+                raise RuntimeError(path)
+            return reads[path]
+
+        return read
+
+    def world_at_b(self):
+        return {**world(*TEST_ONLY), f"commits/{MC}": {"sha": MC, "parents": [{"sha": B}, {"sha": H}]}}
+
+    def test_an_exact_approval_of_the_merged_head_needs_no_read(self):
+        read = self.reader({})
+        self.assertIs(lm.merged_under_look([approval(10, H)], 1200, 1300, pull(), read), True)
+        self.assertIs(lm.merged_under_look([approval(10, A), approval(11, H, "changes")],
+                                           1200, 1300, pull(), read), False)
+        self.assertEqual(self.seen, [])
+
+    def test_a_merged_head_that_keeps_an_earlier_approval_is_under_the_look(self):
+        read = self.reader(self.world_at_b())
+        self.assertIs(lm.merged_under_look([approval(10, A)], 1200, 1300, pull(), read), True)
+        self.assertEqual(self.seen[:5], [f"commits/{MC}", lm.contents_path(B), lm.compare_path(B, A),
+                                         lm.compare_path(A, H), lm.compare_path(B, H)])
+
+    def test_these_merges_are_not_under_the_look(self):
+        read = self.reader({})
+        unmerged = {"merged": False, "head": {"sha": H}}
+        self.assertIs(lm.merged_under_look([approval(10, A)], 1200, 1300, unmerged, read), False)
+        self.assertIs(lm.merged_under_look([approval(10, A, association="CONTRIBUTOR")],
+                                           1200, 1300, pull(), read), False)
+        self.assertEqual(self.seen, [])
+        reads = self.world_at_b()
+        reads[lm.compare_path(A, H)] = cmp([PAGE])
+        self.assertIs(lm.merged_under_look([approval(10, A)], 1200, 1300, pull(), self.reader(reads)), False)
+
+    def test_an_unreadable_merge_raises(self):
+        comments = [approval(10, A)]
+        with self.assertRaises(lm.Unreadable):
+            lm.merged_under_look(comments, 1200, 1300, pull(sha=None), self.reader({}))
+        reads = {**self.world_at_b(), f"commits/{MC}": {"parents": []}}
+        with self.assertRaises(lm.Unreadable):
+            lm.merged_under_look(comments, 1200, 1300, pull(), self.reader(reads))
+        reads = self.world_at_b()
+        del reads[lm.compare_path(A, H)]
+        with self.assertRaises(RuntimeError):
+            lm.merged_under_look(comments, 1200, 1300, pull(), self.reader(reads))
+        reads = {**self.world_at_b(), lm.compare_path(B, H): {"commits": "x"}}
+        with self.assertRaises(lm.Unreadable):
+            lm.merged_under_look(comments, 1200, 1300, pull(), self.reader(reads))
 
 
 class TickMarkersTest(unittest.TestCase):
