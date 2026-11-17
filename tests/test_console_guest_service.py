@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, guest, service, write_guard
+from agent_tools.console import console, guest, serve_probe_check, service, write_guard
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
     SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
@@ -850,6 +850,30 @@ class ServeStatusTest(GuestCase):
                     self.assertTrue(callable(kwargs["serve_reader"]))
                 else:
                     self.assertIsNone(kwargs["serve_reader"])
+
+
+class HeldCheckServiceTest(GuestCase):
+    def test_the_held_check_reads_the_running_service(self):
+        self.seed()
+        svc = self.start()
+
+        def check():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = serve_probe_check.main(["--port", str(svc.address[1])])
+            self.assertNotIn("@", out.getvalue())
+            return code, json.loads(out.getvalue())["status"]
+
+        self.assertEqual(check(), (75, "no_request"))
+        self.guest(svc, "GET", "/api/whoami",
+                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+        self.assertEqual(check(), (0, "met"))
+        svc.set_tailnet(OTHER_HOST)
+        self.assertEqual(check(), (75, "stale"))
+        self.guest(svc, "GET", "/api/whoami", host=OTHER_HOST, logins=[FORGED],
+                   headers={"X-Forwarded-For": "100.64.0.1",
+                            "X-Console-Probe": "other-probe@example.invalid"})
+        self.assertEqual(check(), (1, "not_met"))
 
 
 if __name__ == "__main__":

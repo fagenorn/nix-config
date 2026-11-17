@@ -1,56 +1,70 @@
-"""`serve_probe_check`: the probe that a client-sent login header does not pass Tailscale Serve as sent (#1237, AC6).
+"""`serve_probe_check`: the held check of the guest port's last request (#1237, AC8).
 
-`python -m agent_tools.console.serve_probe_check [--port N]` reads the owner's `GET /api/state` for
-`sharing.tailnet`, then sends `GET https://<tailnet>/api/whoami` through the real Serve with a forged
-`Tailscale-User-Login` (`FORGED`, an invented login) and reads what the guest port received, from
-`GET /api/whoami` (guest port only). It proves that Serve, which fronts the guest port, replaces a
-client-sent login header with its own instead of passing it on, and which `Host` the guest port sees.
-The guest door of ADR-console-066 D2 admits a request whose `Host` is the configured tailnet name and
-that carries exactly one login header of a listed colleague; the probe confirms that rule against the
-real Serve, and the rule is amended by its result when the two differ.
+`python -m agent_tools.console.serve_probe_check [--port N]` reads the owner's `GET /api/state` on
+loopback (`--port`, default `service.DEFAULT_PORT`) and judges `sharing.last_request`, the console's
+one diagnostics reading of the last request on the guest port (`guest.reading`, never a login value).
+It makes one loopback GET and no other network call, and it writes nothing.
 
-The forged value is also sent as `X-Console-Probe`, a header Serve does not touch: `/api/whoami`
-reports whether the login named by `X-Console-Probe` arrived as a login header
-(`probe_login_arrived`), so the answer says whether the forged login passed Serve as sent without the
-service ever repeating a login. `--port` (default `service.DEFAULT_PORT`) is the owner's port, read
-only for the tailnet name.
+What it shows: the guest door of ADR-console-066 D2 admits a request only when its `Host` is exactly
+the configured tailnet name, with no port form, and exactly one `Tailscale-User-Login` header names a
+listed colleague. Nobody could probe Serve before that slice merged, so this check settles the rule
+afterwards, from the first real request: Serve sent the tailnet name as `Host`, exactly one login
+header of its own, and a client-sent forged login did not arrive as sent.
 
-The host form is `exact` when the answer's `host`, lowercased, equals the tailnet name, `with_port`
-when it equals the tailnet name followed by `:443`, else `other` (the backend's own address, or no
-`Host` at all).
+The trigger: with the console's tailnet name set and Serve proxying it to the guest port (ADR-console-066
+D4), from another tailnet node send, as the last request on the guest port,
+`curl -sS -H 'Tailscale-User-Login: forged-probe@example.invalid' -H 'X-Console-Probe:
+forged-probe@example.invalid' https://<host>.<tailnet>.ts.net/api/whoami`. The probe value is the one
+fixed `guest.PROBE_LOGIN` (`FORGED`): the reading recognizes exactly that value in the probe header
+(`probe`) and among the login headers (`probe_login_arrived`), so the check compares no client value
+and keeps no probe or login value; a forged login that arrives under any other probe value cannot pass
+as met.
 
-Met (exit 0) exactly when the host form is `exact` or `with_port`, `login_headers` is 1 (Serve put
-exactly one login of its own; none means Serve adds no login and the door could admit nobody, which
-ADR-console-066 D1 does not expect) and `probe_login_arrived` is false. Otherwise not met (exit 1).
+The rules, read in this order, each printing one line:
 
-Exits: 0 met; 1 not met, or a bad answer (`{"status": "bad_answer"}` with `http_status` when a status
-was read: any status other than 200, a body that is not a JSON object, or a missing or mistyped
-member among `host`, `login_headers`, `probe_login_arrived`, `forwarded_for`; a 403 from the guest
-port is a bad answer, not an unreachable one); 75 (`NOT_YET`) when there is nothing to probe yet:
-the owner's console does not answer (`{"status": "not_running"}`), sharing is off (`{"status":
-"sharing_off"}`) or the tailnet name does not answer (`{"status": "unreachable"}`); 2 a usage error.
+1. the state is not a JSON object: `not_running`, exit 75;
+2. `sharing` is not an object or `sharing.tailnet` is not a string: `sharing_off`, 75;
+3. `sharing.last_request` is absent or null: `no_request`, 75;
+4. the reading is not well formed (exactly the members of `guest.READING_MEMBERS`; `admitted`,
+   `forwarded_for`, `probe`, `probe_login_arrived` booleans; `hosts` and `login_headers` integers;
+   `host` a string or null, a string when `host_form` is `exact` or `with_port`; `host_form` one of
+   `guest.HOST_FORMS`; `reason` null or one of `guest.REASON_CODES`): `bad_reading`, exit 1;
+5. `forwarded_for` is false, a local request and not one through Serve: `not_through_serve`, 75;
+6. `host_form` is `exact` or `with_port` and the kept `Host`, lowercased, is neither the current
+   tailnet name nor that name followed by `:443`: `stale`, 75. The reading's `host_form` was judged
+   against the name in force when the request arrived and the owner may have changed it since, so the
+   check compares the kept `Host` with the current name and waits for a request at it;
+7. `host_form` is not `exact`, or `hosts` or `login_headers` is not 1: `not_met`, exit 1;
+8. `probe_login_arrived` is true, the prescribed forged login reached the service as a login whatever
+   probe header came with it: `not_met`, 1;
+9. `probe` is false, the Host half is shown and the prescribed probe value is still awaited:
+   `no_probe`, 75;
+10. otherwise `met`, exit 0.
 
-Output: exactly one stdout line, `json.dumps(result, sort_keys=True)`. Once an answer was read it has
-`status` (`met` or `not_met`), `host_form`, `login_headers`, `probe_login_arrived` and
-`forwarded_for`. It never prints the tailnet name, the `Host` value or any login, because the output
-is recorded on the pull request and in ADR-console-066.
+A `with_port` or other result is not met: it shows the strict rule refuses what Serve sends, and the
+owner decides any change to the rule (ADR-console-066 D2), never this check.
 
-The lead runs it once before merge, against a scratch console started from the branch with Serve
-proxying the tailnet name to its guest port (ADR-console-066 D2 and D4), and records the result in
-ADR-console-066. It reads only and writes nothing. The seams of `main` are `read_state` and `fetch`.
+Output: exactly one stdout line, `json.dumps(result, sort_keys=True)`. From rule 5 on it has
+`admitted`, `forwarded_for`, `host_form`, `login_headers`, `probe`, `probe_login_arrived`, `reason`
+and `status`, and nothing else: it never prints the `Host` value, the tailnet name or any login,
+because the output is recorded on the pull request. A usage error exits 2.
+
+The seam of `main` is `read_state`, the loopback read. The module imports only the standard library
+and `agent_tools.console` (`guest`, `service`).
 """
 
 import argparse
+import http.client
 import json
-import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 
-from agent_tools.console import service
+from agent_tools.console import guest, service
 
-FORGED = "forged-probe@example.invalid"
+FORGED = guest.PROBE_LOGIN
 NOT_YET = 75
-HOST_FORMS = ("exact", "with_port", "other")
+_FLAGS = ("admitted", "forwarded_for", "probe", "probe_login_arrived")
+_COUNTS = ("hosts", "login_headers")
 
 
 def default_read_state(port: int) -> object | None:
@@ -58,20 +72,7 @@ def default_read_state(port: int) -> object | None:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=5) as response:
             return json.loads(response.read())
-    except (OSError, ValueError):
-        return None
-
-
-def default_fetch(url: str, headers: Mapping[str, str], *,
-                  timeout: float = 10.0) -> tuple[int, bytes] | None:
-    """`(status, body)` of a GET, a 4xx or 5xx answer included; None when nothing answered."""
-    request = urllib.request.Request(url, headers=dict(headers), method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
-    except OSError:
+    except (OSError, ValueError, http.client.HTTPException):
         return None
 
 
@@ -86,56 +87,55 @@ def _print(result: dict) -> None:
     print(json.dumps(result, sort_keys=True))
 
 
-def _well_formed(answer: object) -> bool:
-    if not isinstance(answer, dict):
+def _well_formed(reading: object) -> bool:
+    if not isinstance(reading, dict) or set(reading) != set(guest.READING_MEMBERS):
         return False
-    host = answer.get("host", 0)
-    return ((host is None or isinstance(host, str))
-            and type(answer.get("login_headers")) is int
-            and isinstance(answer.get("probe_login_arrived"), bool)
-            and isinstance(answer.get("forwarded_for"), bool))
-
-
-def _host_form(host: str | None, tailnet: str) -> str:
-    seen = (host or "").lower()
-    if seen == tailnet:
-        return "exact"
-    return "with_port" if seen == tailnet + ":443" else "other"
+    host, form, reason = reading["host"], reading["host_form"], reading["reason"]
+    return (all(isinstance(reading[name], bool) for name in _FLAGS)
+            and all(type(reading[name]) is int for name in _COUNTS)
+            and (host is None or isinstance(host, str))
+            and (isinstance(host, str) or form not in ("exact", "with_port"))
+            and form in guest.HOST_FORMS
+            and (reason is None or reason in guest.REASON_CODES.values()))
 
 
 def main(argv: list[str] | None = None, *,
-         read_state: Callable[[int], object | None] = default_read_state,
-         fetch: Callable[[str, Mapping[str, str]], tuple[int, bytes] | None] = default_fetch) -> int:
+         read_state: Callable[[int], object | None] = default_read_state) -> int:
     args = build_parser().parse_args(argv)
     state = read_state(args.port)
     if not isinstance(state, dict):
         _print({"status": "not_running"})
         return NOT_YET
     sharing = state.get("sharing")
-    tailnet = sharing.get("tailnet") if isinstance(sharing, dict) else None
-    if not isinstance(tailnet, str):
+    if not isinstance(sharing, dict) or not isinstance(sharing.get("tailnet"), str):
         _print({"status": "sharing_off"})
         return NOT_YET
-    read = fetch(f"https://{tailnet}/api/whoami",
-                 {"Tailscale-User-Login": FORGED, "X-Console-Probe": FORGED})
-    if read is None:
-        _print({"status": "unreachable"})
+    reading = sharing.get("last_request")
+    if reading is None:
+        _print({"status": "no_request"})
         return NOT_YET
-    status, body = read
-    try:
-        answer = json.loads(body) if status == 200 else None
-    except ValueError:
-        answer = None
-    if not _well_formed(answer):
-        _print({"http_status": status, "status": "bad_answer"})
+    if not _well_formed(reading):
+        _print({"status": "bad_reading"})
         return 1
-    form = _host_form(answer["host"], tailnet.lower())
-    met = form != "other" and answer["login_headers"] == 1 and answer["probe_login_arrived"] is False
-    _print({"forwarded_for": answer["forwarded_for"], "host_form": form,
-            "login_headers": answer["login_headers"],
-            "probe_login_arrived": answer["probe_login_arrived"],
-            "status": "met" if met else "not_met"})
-    return 0 if met else 1
+    shown = {name: reading[name] for name in
+             (*_FLAGS, "host_form", "login_headers", "reason")}
+    form = reading["host_form"]
+    tailnet = sharing["tailnet"].lower()
+    if not reading["forwarded_for"]:
+        status, code = "not_through_serve", NOT_YET
+    elif form in ("exact", "with_port") and reading["host"].lower() not in (
+            tailnet, tailnet + ":443"):
+        status, code = "stale", NOT_YET
+    elif form != "exact" or reading["hosts"] != 1 or reading["login_headers"] != 1:
+        status, code = "not_met", 1
+    elif reading["probe_login_arrived"]:
+        status, code = "not_met", 1
+    elif not reading["probe"]:
+        status, code = "no_probe", NOT_YET
+    else:
+        status, code = "met", 0
+    _print({**shown, "status": status})
+    return code
 
 
 if __name__ == "__main__":
