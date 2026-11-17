@@ -1667,6 +1667,26 @@ class WaitClockTest(Case):
         svc.close()
 
 
+class TrackerReadStampTest(Case):
+    def test_a_read_carries_the_time_it_began_before_it_fetched_and_the_time_it_ended(self):
+        inside = []
+
+        def tracker(project_id, slug, *, cancelled):
+            inside.append(datetime.now(timezone.utc))
+            return []
+
+        svc = self.start(support.entries(1), tracker=tracker, slug_of=lambda root: "octo/p00",
+                         activity=lambda root: time.time(), tracker_seconds=3600)
+        self.assertTrue(wait_until(lambda: json.loads(svc.view_bytes)["entries"][0]["tracker_read"]))
+        read = json.loads(svc.view_bytes)["entries"][0]["tracker_read"]
+        svc.close()
+        self.assertEqual(1, len(inside))
+        began, ended = (datetime.fromisoformat(read[k]) for k in ("began_at", "read_at"))
+        self.assertEqual(True, read["ok"])
+        self.assertLessEqual(began, inside[0])
+        self.assertLessEqual(inside[0], ended)
+
+
 class BindTest(Case):
     def test_a_taken_port_raises_before_the_log_opens(self):
         with socket.socket() as held:
@@ -2312,6 +2332,23 @@ class SpendServiceTest(Case):
                          repo_of=lambda cwd: "/srv/p00")
         svc.poll_spend()
         self.assertIn("p00", self.spend_of(svc)["days"][-1]["project"])
+
+    def test_a_question_row_in_the_log_marks_its_session_after_a_restart(self):
+        support.write_registry(self.registry, [{"project_id": "p00", "root": "/srv/p00"}])
+        self.write_transcript()
+        log = EventLog(self.store)
+        log.append([("project_question.asked", "p00", {
+            "question_id": "a" * 16, "question": "why?", "profile": "p1",
+            "session_id": self.SID})])
+        log.close()
+        svc = self.start(clock=lambda: self.NOW, session_poll_seconds=3600,
+                         repo_of=lambda cwd: "/srv/p00")
+        svc.poll_spend()
+        day = self.spend_of(svc)["days"][-1]
+        self.assertEqual(set(day["aspect"]), {"questions"})
+        self.assertEqual(day["aspect"]["questions"]["input"], 42)
+        self.assertEqual(set(day["account"]), {"p1"})
+        self.assertEqual(day["project"]["p00"]["input"], 42)
 
     def test_account_survives_gone_and_restart(self):
         log = EventLog(self.store)

@@ -241,8 +241,8 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
             "duplicates": [], "count": 0, "deferred_count": 0, "retained_count": 0}])
 
     def test_this_repository_declares_no_production_section(self):
-        """Issue 1191, interim: the host activation command is not declared as
-        production until the console can activate on the owner's approval."""
+        """Issue 1193 AC3: this repository's own contract is not changed here; its
+        production declaration is issue 1206's, so it stays not declared."""
         proc = subprocess.run(
             [sys.executable, "-m", "agent_tools.project_contract.resolve_project",
              "resolve", "--repo-root", str(REPO_ROOT)],

@@ -1,6 +1,6 @@
 # ADR-console-058 — A question about a project is answered by a read-only session
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-059
 - **Decided in:** #1176
 
 ## Context
@@ -11,7 +11,7 @@ The owner can state a goal and read the desk, but cannot ask the console a plain
 
 **D1. The route.** `POST /api/project-question` joins `PAGE_WRITES` (ADR-console-008), so it takes the page token and the console's own origin. The body is `{"project_id", "question"}`, the question at most 2000 characters. A question for an unregistered project, an empty or over-long question, a host that cannot run the session, a console that is stopping and a console with no chosen profile are 409 refusals that append nothing; once the asked row is written exactly one answered row follows.
 
-**D2. The session.** The console runs `claude-account run -p --model sonnet --permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools <Read,Grep,Glob[,Bash]> --output-format json --settings <file>` in the project's root, under the profile the console chose (ADR-console-015, ADR-console-023). It runs on Linux only, like a manager. A session that has not answered within 300 s is killed with its process group and recorded `timed_out`.
+**D2. The session.** The console runs `claude-account run -p --model sonnet --permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools <Read,Grep,Glob[,Bash]> --output-format json --settings <file>` in the project's root, under the profile the console chose (ADR-console-015, ADR-console-023). The argv also carries `--session-id <uuid>`, the id its asked row records (ADR-console-059). It runs on Linux only, like a manager. A session that has not answered within 300 s is killed with its process group and recorded `timed_out`.
 
 **D3. The model.** The question session names `sonnet`. The manager keeps its profile's default model and its launches are unchanged, so "smaller than the manager's" is the owner's choice: the comparison is not enforced by any test or check.
 

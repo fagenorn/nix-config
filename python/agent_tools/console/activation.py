@@ -16,16 +16,20 @@ with `/` separators; values are git blob ids (`blob_id`).
 (not under `__pycache__`, not `.pyc`) that `running` does not hold. The result is sorted, without
 duplicates.
 
-`Activation.local_behind` is True when the checkout's own `HEAD` does not hold, for some changed
-path, the blob origin holds (or its read failed): a `just switch` there would build the stale local
-tree and reinstall the same console, so the line asks for the checkout to be updated first. It is
-False when `HEAD` already carries every changed path as origin does.
+`Activation.commit` is the 40-hex object id of `refs/remotes/origin/<branch>` that the compared tree
+was read from: the id is read once and the tree is listed at that id, never re-resolved from the ref
+name. An activation builds that commit, not the checkout's own `HEAD` or working tree, so the
+checkout needs no update first and the reading carries no "checkout behind" flag.
 
 `reading(roots, running)` reads only `refs/remotes/origin/<branch>` of each checkout, where
 `<branch>` is the integration branch of the checkout's project contract, never the local branch or
-the working tree. It returns `Activation(root, changed)` for the first root in sorted order whose
-branch is a string and whose origin tree holds `ENTRY` (the file that marks a checkout as the
-console's source), even when an earlier root's read failed.
+the working tree. It returns `Activation(root, changed, commit)` for the first root in sorted order
+whose branch is a string and whose origin tree holds `ENTRY` (the file that marks a checkout as the
+console's source), even when an earlier root's read failed. Its `tree` seam is
+`origin_tree(root, branch)`, giving `(commit, files)`.
+
+`origin_tip(root)` is the commit of `refs/remotes/origin/<integration_branch(root)>`: None when the
+root has no contract or no such ref, `ReadFailed` when git or the resolver fails.
 
 A failed read is never a successful "no line". A root with no project contract, no remote-tracking
 ref, or an origin tree without `ENTRY` is not a candidate. A root whose read failed (git exited
@@ -63,7 +67,7 @@ class ReadFailed(Exception):
 class Activation:
     root: str
     changed: tuple[str, ...]
-    local_behind: bool = False
+    commit: str
 
 
 def blob_id(data: bytes) -> str:
@@ -158,16 +162,8 @@ def _tree_files(root: str, commit: str) -> dict[str, str]:
     return files
 
 
-def local_files(root: str) -> dict[str, str]:
-    """Repository path -> blob id of every blob under `python/agent_tools` at the checkout's `HEAD`."""
-    return _tree_files(root, "HEAD")
-
-
-def origin_files(root: str, branch: str) -> dict[str, str] | None:
-    """Repository path -> blob id of every blob under `python/agent_tools` on `refs/remotes/origin/<branch>`.
-
-    None only when that remote-tracking ref does not exist; `ReadFailed` when git fails.
-    """
+def _origin_commit(root: str, branch: str) -> str | None:
+    """The object id of `refs/remotes/origin/<branch>`; None only when that ref does not exist."""
     ref = f"refs/remotes/origin/{branch}"
     listing = _git(root, "for-each-ref", "--format=%(objectname) %(refname)", ref)
     commit = None
@@ -175,9 +171,27 @@ def origin_files(root: str, branch: str) -> dict[str, str] | None:
         object_id, _, name = line.partition(" ")
         if name == ref:
             commit = object_id
+    return commit
+
+
+def origin_tree(root: str, branch: str) -> tuple[str, dict[str, str]] | None:
+    """`(commit, files)` of `refs/remotes/origin/<branch>`: its commit id and the blobs under `python/agent_tools`.
+
+    None only when that remote-tracking ref does not exist; `ReadFailed` when git fails.
+    """
+    commit = _origin_commit(root, branch)
     if commit is None:
         return None
-    return _tree_files(root, commit)
+    return commit, _tree_files(root, commit)
+
+
+def origin_files(root: str, branch: str) -> dict[str, str] | None:
+    """Repository path -> blob id of every blob under `python/agent_tools` on `refs/remotes/origin/<branch>`.
+
+    None only when that remote-tracking ref does not exist; `ReadFailed` when git fails.
+    """
+    read = origin_tree(root, branch)
+    return None if read is None else read[1]
 
 
 def changed_paths(running: Mapping[str, str], origin: Mapping[str, str]) -> tuple[str, ...]:
@@ -207,19 +221,10 @@ def integration_branch(root: str) -> str | None:
     return branch
 
 
-def _local_behind(
-    root: str,
-    changed: tuple[str, ...],
-    origin: Mapping[str, str],
-    local: Callable[[str], Mapping[str, str]],
-) -> bool:
-    if not changed:
-        return False
-    try:
-        held = local(root)
-    except ReadFailed:
-        return True
-    return any(held.get(path) != origin.get(path) for path in changed)
+def origin_tip(root: str) -> str | None:
+    """The commit of the root's remote-tracking integration branch; None when it has no contract or no such ref."""
+    branch = integration_branch(root)
+    return None if branch is None else _origin_commit(root, branch)
 
 
 def reading(
@@ -227,21 +232,20 @@ def reading(
     running: Mapping[str, str],
     *,
     branch_of: Callable[[str], str | None] = integration_branch,
-    tree: Callable[[str, str], Mapping[str, str] | None] = origin_files,
-    local: Callable[[str], Mapping[str, str]] = local_files,
+    tree: Callable[[str, str], tuple[str, Mapping[str, str]] | None] = origin_tree,
 ) -> Activation | None:
     """The activation reading of the first root whose origin carries the console; see the module docstring."""
     failures: list[str] = []
     for root in sorted(roots):
         try:
             branch = branch_of(root)
-            origin = None if branch is None else tree(root, branch)
+            read = None if branch is None else tree(root, branch)
         except ReadFailed as error:
             failures.append(str(error))
             continue
-        if origin is not None and ENTRY in origin:
-            changed = changed_paths(running, origin)
-            return Activation(root, changed, _local_behind(root, changed, origin, local))
+        if read is not None and ENTRY in read[1]:
+            commit, origin = read
+            return Activation(root, changed_paths(running, origin), commit)
     if failures:
         raise ReadFailed("; ".join(failures))
     return None

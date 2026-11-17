@@ -203,6 +203,7 @@ agent-workflow-tests *args:
     tests/test_console_event_log.py \
     tests/test_console_view.py \
     tests/test_console_activation.py \
+    tests/test_console_activation_check.py \
     tests/test_console_capacity.py \
     tests/test_console_capacity_check.py \
     tests/test_console_probe.py \
@@ -228,7 +229,9 @@ agent-workflow-tests *args:
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
+    tests/test_console_look_check.py \
     tests/test_console_page.py \
+    tests/test_console_controls.py \
     tests/test_console_service.py \
     tests/test_console_stream.py \
     tests/test_console_sessions.py \
