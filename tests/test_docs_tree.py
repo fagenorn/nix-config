@@ -757,7 +757,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056"),
@@ -791,13 +791,39 @@ class DocsTreeTest(unittest.TestCase):
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
-                                          "ADR-console-036, ADR-console-037, ADR-console-053"),
+                                          "ADR-console-036, ADR-console-037, ADR-console-053, "
+                                          "ADR-console-058"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
+
+    def test_the_project_question_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "058-a-question-about-a-project-is-answered-by-a-read-only-session.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-058 \u2014 A question about a project is "
+                                "answered by a read-only session")
+        adr = self.doc(path)
+        for needle in ("#1176", "POST /api/project-question", "PAGE_WRITES",
+                       "project_question.asked", "project_question.answered", "timed_out",
+                       "--model sonnet", "not enforced", "onFailure", "dontAsk",
+                       "--setting-sources", "--tools", "300", "production.read_only.commands",
+                       "project_question_hook",
+                       "Production cannot be read for this project", "ADR-console-008",
+                       "ADR-console-011", "ADR-console-023", "ADR-guard-011"):
+            self.assertIn(needle, adr)
+        adr008 = self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        self.assertIn("POST /api/project-question", adr008)
+        self.assertIn("ADR-console-058", adr008)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Project question**:", context)
+        self.assertIn("ADR-console-058", context)
+        self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
 
     def test_the_plan_answer_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
@@ -828,7 +854,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
