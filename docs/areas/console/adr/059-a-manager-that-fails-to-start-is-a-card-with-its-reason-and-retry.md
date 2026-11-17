@@ -1,4 +1,4 @@
-# ADR-console-057 — A manager that fails to start is a card with its reason and Retry
+# ADR-console-059 — A manager that fails to start is a card with its reason and Retry
 
 - **Status:** accepted
 - **Decided in:** #1182

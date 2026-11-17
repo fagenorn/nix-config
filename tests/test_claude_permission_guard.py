@@ -2044,6 +2044,61 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(command, cwd=prod, guard_args=guard_args)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
 
+    def test_a_production_command_counts_only_where_it_runs_not_where_it_is_mentioned(self):
+        """Issue 1192, ADR-guard-011 D10: words inside one quoted argument, a comment or an
+        exactly-read heredoc body are a mention, wherever the rest of the command reads a
+        shell, while shell code, an executed substitution and unparseable text still count."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        mentions = (
+            "printf '%s\\n' 'run just switch later' > note.txt",
+            "cat > note.txt <<EOF\nrun just switch later\nEOF\n",
+            "cat > note.txt <<'EOF'\nrun just switch later\nEOF\n",
+            "true # run just switch later",
+            "printf '%s\\n' 'run kubectl later' > note.txt",
+            "printf '%s\\n' 'run just switch later' > note.txt; sh -c 'true'",
+            "bash -c true && git commit -m 'run just switch later'",
+            "eval true; echo 'just switch' # just switch",
+            "env -S 'true'; printf '%s\\n' 'run just switch later' > note.txt",
+            "echo 'run kubectl later' > note.txt; timeout 5 bash -c 'true'",
+            "devenv shell -- git commit -m 'run just switch later'",
+            "timeout 5 echo 'run just switch later'",
+            "xargs printf '%s\\n' 'run just switch later'",
+            "echo 'just switch <<'; sh -c true",
+            'echo "run just switch later <<"; sh -c true',
+        )
+        runs = (
+            "sh -c 'just switch'", "printf '%s\\n' 'a note' > note.txt; sh -c 'just switch'",
+            "echo 'a note'; eval 'just switch'", "echo 'a note' && env -S 'just switch'",
+            "echo 'a note'; echo $(just switch)", "echo 'a note'; echo `just switch`",
+            'echo "a note"; echo "$(just switch)"', "echo 'a note'; just switch 'unterminated",
+            "echo 'just switch' | sh", "echo 'just switch' | cat | bash",
+            "echo 'just switch' |& sh", "bash <<EOF\njust switch\nEOF\n",
+            "sh <<<'just switch'", "cat <<EOF\n$(just switch)\nEOF\n",
+            "cat <<EOF >/dev/null\nnote\nEOF\nsh -c 'just switch'",
+            "echo 'a note'; timeout 5 sh -c 'just switch'", "watch 'just switch'",
+            "echo 'a note'; nix-shell --run 'just switch'",
+            "printf '%s\\n' 'run kubectl later' > note.txt; sh -c 'kubectl apply -f x'",
+            "echo 'a note'; just switch",
+            "cmd='just switch'; eval \"$cmd\"", "c='just switch'\nsh -c \"$c\"",
+            "export C='kubectl apply -f x' && bash -c \"$C\"", "echo 'just switch' > f && bash < f",
+            "echo 'just switch' > f && bash f", "echo 'just switch' > f; sh -c 'bash f'",
+            "echo 'just switch' | { true; sh; }", "echo 'just switch' | (true; sh)",
+            "timeout 5 flock /tmp/deploy.lock -c 'just switch'",
+            "eval $(true; printf '%s' 'just switch')",
+            "devenv shell 'just switch'", "devenv shell -- 'just switch'",
+            "timeout 5 devenv shell 'just switch'",
+        )
+        for command in mentions:
+            with self.subTest(mention=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+        for command in runs:
+            with self.subTest(run=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn("changes the production of acme/deployer", result.stderr)
+
     def test_production_rules_hold_only_in_their_project_s_checkout(self):
         """AC3: a repository with no rule, an empty `changes`, or no cwd is never refused."""
         rows = {NODO: NODO_ROW, PROD: PROD_ROW, self.QUIET: self.QUIET_ROW}
