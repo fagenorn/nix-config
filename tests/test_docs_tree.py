@@ -53,9 +53,9 @@ AWT_TIME_DOC = "docs/archive/agent-workflow-tests-time-2026-11-17.md"
 AWT_TIME_HEADER = (
     "| Job | Run/attempt | Issue | Completed (UTC) | Test step (min) | Realization (min) |"
     " Start-up (min) | Tests (min) | Other (min) | Members | Jobs | CPU busy (%) | Slots busy (%) |"
-    " Order saving (min) | Slots saving (min) | Cache saving (min) |"
+    " Order saving (min) | Slots saving (min) | Cache saving (min) | Slots estimate (min) |"
 )
-AWT_TIME_SEPARATOR = "|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+AWT_TIME_SEPARATOR = "|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
 AWT_SUMMARY_HEADER = "| Figure | Median | p90 | Max |"
 AWT_SUMMARY_SEPARATOR = "|---|---:|---:|---:|"
 AWT_MEMBERS_HEADER = (
@@ -1928,7 +1928,7 @@ class DocsTreeTest(unittest.TestCase):
             "2026-11-16T21:06:12.0000000Z suite-runner:   100.0s wall    90.0s cpu passed tests/a.py\n"
             "2026-11-16T21:06:12.0000000Z suite-runner:    60.0s wall    30.0s cpu passed tests/b.py\n"
             "2026-11-16T21:06:12.0000000Z suite-runner:    60.0s wall    60.0s cpu passed tests/c.sh\n"
-            "2026-11-16T21:06:12.0000000Z suite-runner: summary members=3 passed=3 failed=0 jobs=2 wall=150.0s cpu=180.0s\n"
+            "2026-11-16T21:06:12.0000000Z suite-runner: summary members=3 passed=3 failed=0 jobs=2 wall=150.0s cpu=220.0s\n"
         )
 
         def shifted(seconds):
@@ -2084,13 +2084,14 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout.splitlines()
         for expected in (
-            "| 7001 | 601/1 | 77 | 2026-11-16 21:06:20 | 2.7 | 0.2 | 0.6 | 1.9 | 0.0 | 3 | 2 | 60 | 73 | 0.5 | 0.8 | 0.2 |",
-            "| 7625 | 625/1 | 625 | 2026-11-16 19:40:00 | 14.5 | 12.0 | 0.6 | 1.9 | 0.0 | 3 | 2 | 60 | 73 | 0.5 | 0.8 | 12.0 |",
+            "| 7001 | 601/1 | 77 | 2026-11-16 21:06:20 | 2.7 | 0.2 | 0.6 | 1.9 | 0.0 | 3 | 2 | 73 | 73 | 0.5 | 0.8 | 0.2 | 0.7 |",
+            "| 7625 | 625/1 | 625 | 2026-11-16 19:40:00 | 14.5 | 12.0 | 0.6 | 1.9 | 0.0 | 3 | 2 | 73 | 73 | 0.5 | 0.8 | 12.0 | 0.7 |",
             "| Order saving (min) | 0.5 | 0.5 | 0.5 |",
             "| Slots saving (min) | 0.8 | 0.8 | 0.8 |",
             "| Test step (min) | 4.8 | 8.5 | 14.5 |",
             "| Realization (min) | 2.3 | 6.0 | 12.0 |",
             "| Cache saving (min) | 2.3 | 6.0 | 12.0 |",
+            "| Slots estimate (min) | 0.7 | 0.7 | 0.7 |",
             "Jobs: 24, completed 2026-11-16 12:20:00 to 2026-11-16 21:06:20 (UTC).",
         ):
             self.assertIn(expected, out)
@@ -2126,6 +2127,32 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("7001", result.stderr)
 
+    def test_the_test_job_program_refuses_a_python_member_without_a_ran_line(self):
+        fixture = self._awt_fixture()
+        log_key = "api repos/fagenorn/nix-config/actions/jobs/7001/logs"
+        fixture[log_key] = "".join(
+            line for line in fixture[log_key].splitlines(keepends=True) if "Ran 10 tests in 80.000s" not in line
+        )
+        result = self._run_awt_fence(fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("7001", result.stderr)
+        self.assertIn("tests/a.py", result.stderr)
+
+    def test_the_test_job_program_refuses_timing_rows_that_disagree_with_the_summary(self):
+        fixture = self._awt_fixture()
+        log_key = "api repos/fagenorn/nix-config/actions/jobs/7001/logs"
+        fixture[log_key] = "".join(
+            line
+            for line in fixture[log_key].splitlines(keepends=True)
+            if "60.0s wall    60.0s cpu passed tests/c.sh" not in line
+        )
+        result = self._run_awt_fence(fixture)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("7001", result.stderr)
+        self.assertIn("members=3", result.stderr)
+
     def test_the_test_job_measurement_holds_twenty_four_runs(self):
         text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
         readme = (REPO_ROOT / "docs/README.md").read_text(encoding="utf-8")
@@ -2141,7 +2168,7 @@ class DocsTreeTest(unittest.TestCase):
             self.assertEqual(lines[lines.index(header) + 1], separator)
         self.assertEqual(len(rows), 24)
         for row in rows:
-            self.assertEqual(len(row), 16, row)
+            self.assertEqual(len(row), 17, row)
         self.assertEqual(len({row[0] for row in rows}), 24)
         completed = [row[3] for row in rows]
         self.assertEqual(completed, sorted(completed))
@@ -2158,7 +2185,7 @@ class DocsTreeTest(unittest.TestCase):
             parts = sum(float(row[i]) for i in (5, 6, 7, 8))
             self.assertLessEqual(abs(parts - float(row[4])), 0.25, row)
         headers = [c.strip() for c in AWT_TIME_HEADER.strip().strip("|").split("|")]
-        self.assertEqual(list(summary), headers[4:16])
+        self.assertEqual(list(summary), headers[4:17])
         for index, figure in enumerate(headers):
             if index < 4:
                 continue
@@ -2173,7 +2200,7 @@ class DocsTreeTest(unittest.TestCase):
             self.assertEqual(len(row), 6, row)
         fences = LAND_QUEUE_FENCE.findall(land_queue_section(text, "Reproduce"))
         self.assertEqual(len(fences), 1)
-        for needle in ("python3 -I - <<'PY'", 'CUTOFF = "2026-11-17T00:00:00Z"', "ROWS = 24", "VCPUS = 4"):
+        for needle in ("python3 -I - <<'PY'", 'CUTOFF = "2026-11-17T00:00:00Z"', "ROWS = 24", "VCPUS = 4", "SLOTS = 6"):
             self.assertIn(needle, fences[0])
 
 
@@ -2200,6 +2227,16 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertEqual(m[4], best)
         self.assertEqual(m[3], summary[best][0])
+        estimate = re.search(
+            r"(?m)^\*\*Estimated saving at (\d+) jobs:\*\* (\d+\.\d) min, the median of `Slots estimate \(min\)`"
+            r" \(p90 (\d+\.\d), maximum (\d+\.\d)\), an estimate\.",
+            proposal,
+        )
+        self.assertIsNotNone(estimate)
+        self.assertEqual(estimate[1], "6")
+        self.assertEqual(list(estimate.groups()[1:]), summary["Slots estimate (min)"])
+        self.assertIn("SLOTS = 6", text)
+        self.assertIn("could be smaller, down to none", proposal)
         self.assertIn(
             "The pick compares two maxima, `Slots saving (min)` and `Cache saving (min)`, with one estimate,"
             " `Order saving (min)`: a maximum is the most a change could save, not what it will save.",
