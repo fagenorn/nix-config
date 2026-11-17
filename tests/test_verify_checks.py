@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -271,10 +271,12 @@ class SuiteWorld:
     MERGE = "c" * 40
     STAMP = "2026-11-18T00:00:00Z"
     LISTING = "repos/fagenorn/nix-config/actions/workflows/ci.yaml/runs?branch=main&event=push"
+    PAGE = 100
 
-    def __init__(self, before=20, after=21):
+    def __init__(self, before=20, after=21, after_base=100):
+        self.after_base = after_base
         self.before_ids = list(range(1, before + 1))
-        self.after_ids = list(range(100, 100 + after))
+        self.after_ids = list(range(after_base, after_base + after))
         self.attempts = {}
         self.jobs = {}
         self.logs = {}
@@ -299,10 +301,11 @@ class SuiteWorld:
         return {"id": run_id, "created_at": created, "run_attempt": self.attempts.get(run_id, 1)}
 
     def before_created(self, run_id):
-        return f"2026-11-17T{run_id:02d}:00:00Z"
+        return (datetime(2026, 11, 1, tzinfo=timezone.utc) + timedelta(minutes=run_id)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def after_created(self, run_id):
-        return f"2026-11-18T00:{run_id - 100:02d}:00Z"
+        return (datetime(2026, 11, 18, tzinfo=timezone.utc)
+                + timedelta(minutes=run_id - self.after_base)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def set_job(self, run_id, status="completed", conclusion="success", attempt=1):
         self.jobs[(run_id, attempt)] = (status, conclusion)
@@ -314,8 +317,7 @@ class SuiteWorld:
     def gets(self):
         gets = {f"{self.LISTING}&head_sha={self.MERGE}&per_page=100":
                 {"workflow_runs": [self.run(100, self.STAMP)]},
-                f"{self.LISTING}&created=<{self.STAMP}&per_page=100":
-                {"workflow_runs": [self.run(i, self.before_created(i)) for i in reversed(self.before_ids)]}}
+                }
         for run_id in self.before_ids + self.after_ids:
             for attempt in range(1, self.attempts.get(run_id, 1) + 1):
                 status, conclusion = self.jobs.get((run_id, attempt), ("completed", "success"))
@@ -327,8 +329,12 @@ class SuiteWorld:
 
     def pages(self):
         runs = [self.run(i, self.after_created(i)) for i in reversed(self.after_ids)]
+        earlier = [self.run(i, self.before_created(i)) for i in reversed(self.before_ids)]
         return {f"{self.LISTING}&created=>={self.STAMP}&per_page=100":
-                [{"total_count": len(runs), "workflow_runs": runs}]}
+                [{"total_count": len(runs), "workflow_runs": runs}],
+                f"{self.LISTING}&created=<{self.STAMP}&per_page=100":
+                [{"total_count": len(earlier), "workflow_runs": earlier[at:at + self.PAGE]}
+                 for at in range(0, len(earlier), self.PAGE)]}
 
     def check(self, n=20):
         def run_gh(argv, allow=()):
@@ -444,6 +450,33 @@ class SuiteRegressionsTest(unittest.TestCase):
         world.fail(20, log=world.log(summary=(3, 1, 1)))
         with self.assertRaises(forge_api.ForgeError) as raised:
             world.check()
+        self.assertEqual(raised.exception.code, "payload_invalid")
+
+    def test_a_baseline_larger_than_a_page_is_read_across_pages(self):
+        world = SuiteWorld(before=101, after=101, after_base=1000)
+        code, report = world.check(n=101)
+        self.assertEqual((code, report["regressions"]), (0, {}))
+        self.assertEqual(report["before"], list(range(101, 0, -1)))
+        self.assertEqual(len(report["after"]), 101)
+
+    def test_a_baseline_that_skips_past_the_first_page_still_reaches_n(self):
+        world = SuiteWorld(before=120, after_base=1000)
+        for run_id in range(21, 121):
+            world.fail(run_id, log="no summary here\n")
+        code, report = world.check()
+        self.assertEqual(code, 0)
+        self.assertEqual(report["before"], list(range(20, 0, -1)))
+        self.assertEqual(report["before_skipped"], list(range(120, 20, -1)))
+
+    def test_a_truncated_before_listing_is_a_forge_error(self):
+        world = SuiteWorld()
+        pages = world.pages()
+        key = f"{world.LISTING}&created=<{world.STAMP}&per_page=100"
+        pages[key][0]["total_count"] += 1
+        get, patched = forge(world.gets(), pages)
+        with get, patched, self.assertRaises(forge_api.ForgeError) as raised:
+            verify_checks.suite_regressions(
+                world.REPO, world.WORKFLOW, world.JOB, world.BRANCH, world.MERGE, 20)
         self.assertEqual(raised.exception.code, "payload_invalid")
 
     def test_a_member_that_failed_in_a_before_attempt_is_not_a_regression(self):

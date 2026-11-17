@@ -339,7 +339,7 @@ Three speed-ups keep every member of the suite and change no branch protection, 
 
 ## Trial at 6 jobs
 
-On 17 Nov the owner chose to trial 6 members at once and to adopt it only if the saving holds without new flakiness (issue 1215). The runs are `workflow_dispatch` runs of `ci.yaml` made in rounds: each round is one run on the issue branch, whose `ci.yaml` sets `SUITE_RUNNER_JOBS` to 6, and one run on `main`, which sets 4, and the next round starts after both have completed. The window starts at the earliest creation of a run on the issue branch and ends at the latest completion of a job on it; a run on `main` counts only when it was created inside that window, so the runs of `main` outside it stay out of the comparison. A job counts only when it is named `Agent Workflow Tests`, completed with success or failure and has a step `Run agent workflow tests`; a cancelled job is not a row. Each row is one job: Jobs is the job count its branch runs, Created is its run's creation time, Test step is the step's `completed_at` minus its `started_at` in whole seconds from the API, Suite wall is the summary's `wall=` in minutes (`-` when the log has no summary), Members is the summary's `members=` and Failed members are the members the timing rows mark `failed` (`no summary` when the log has none). The saving is the median Test step at 4 jobs minus the median at 6, compared in unrounded seconds, never through the printed minutes. The rule: adopt 6 jobs when the saving is at least 90 seconds (1.5 minutes) and `Failed only at 6` is `none`, else keep 4. `Failed only at 6` lists the members that failed in some 6-job row and in no 4-job row, and every 6-job job whose log has no summary, since it cannot be attributed. The program under Trial reproduce prints the tables and the decision while GitHub keeps the job logs.
+On 17 Nov the owner chose to trial 6 members at once and to adopt it only if the saving holds without new flakiness (issue 1215). The runs are `workflow_dispatch` runs of `ci.yaml` made in rounds: each round is one run on the issue branch, whose `ci.yaml` sets `SUITE_RUNNER_JOBS` to 6, and one run on `main`, which sets 4, and the next round starts after both have completed. The runs counted are those listed in the table below, by run id and attempt, and the program under Trial reproduce reads exactly those (the `PINNED` list), never a listing of the workflow's runs, so a later dispatch of the workflow on either branch cannot change what it reproduces. A job counts only when it is named `Agent Workflow Tests`, completed with success or failure and has a step `Run agent workflow tests`; a cancelled job is not a row. Each row is one job: Jobs is the job count its branch runs, Created is its run's creation time, Test step is the step's `completed_at` minus its `started_at` in whole seconds from the API, Suite wall is the summary's `wall=` in minutes (`-` when the log has no summary), Members is the summary's `members=` and Failed members are the members the timing rows mark `failed` (`no summary` when the log has none). The saving is the median Test step at 4 jobs minus the median at 6, compared in unrounded seconds, never through the printed minutes. The rule: adopt 6 jobs when the saving is at least 90 seconds (1.5 minutes) and `Failed only at 6` is `none`, else keep 4. `Failed only at 6` lists the members that failed in some 6-job row and in no 4-job row, and every 6-job job whose log has no summary, since it cannot be attributed. The program under Trial reproduce prints the tables and the decision while GitHub keeps the job logs.
 
 | Job | Run/attempt | Jobs | Created (UTC) | Conclusion | Test step (s) | Test step (min) | Suite wall (min) | Members | Failed members |
 |---:|---|---:|---|---|---:|---:|---:|---:|---|
@@ -385,7 +385,20 @@ REPO = "fagenorn/nix-config"
 R = "repos/" + REPO
 JOB = "Agent Workflow Tests"
 STEP = "Run agent workflow tests"
-TRIAL = {"main": 4, "issue-1215-trial-running-test-suites-6-at": 6}
+PINNED = [  # (run id, attempt, jobs): the runs the table records, so a later dispatch cannot change it
+    (44016821091, 1, 6),
+    (44016838007, 1, 4),
+    (44017913558, 1, 6),
+    (44017917344, 1, 4),
+    (44019201494, 1, 6),
+    (44019205302, 1, 4),
+    (44020237822, 1, 6),
+    (44020241465, 1, 4),
+    (44021522445, 1, 6),
+    (44021526408, 1, 4),
+    (44022829521, 1, 6),
+    (44022833440, 1, 4),
+]
 MIN_RUNS = 5
 THRESHOLD = 90  # seconds (1.5 minutes), compared with the unrounded medians
 HEADERS = [
@@ -466,32 +479,18 @@ def row(cells):
 
 
 def main():
-    found = []
-    for branch, count in TRIAL.items():
-        listing = gh_json(
-            f"{R}/actions/workflows/ci.yaml/runs?event=workflow_dispatch&branch={branch}&per_page=100"
-        )
-        if listing["total_count"] > len(listing["workflow_runs"]):
-            fail(f"more than 100 dispatch runs on {branch}")
-        for run in listing["workflow_runs"]:
-            for attempt in range(1, run["run_attempt"] + 1):
-                answer = gh_json(f"{R}/actions/runs/{run['id']}/attempts/{attempt}/jobs")
-                for job in answer["jobs"]:
-                    if (
-                        job["name"] == JOB
-                        and job["status"] == "completed"
-                        and job["conclusion"] in ("success", "failure")
-                        and any(s["name"] == STEP for s in job["steps"])
-                    ):
-                        found.append((count, run, attempt, job))
-    six = [c for c in found if c[0] == 6]
-    if six:
-        start = min(c[1]["created_at"] for c in six)
-        end = max(c[3]["completed_at"] for c in six)
-    counted = [
-        c for c in found
-        if c[0] == 6 or (six and start <= c[1]["created_at"] <= end)
-    ]
+    counted = []
+    for run_id, attempt, count in PINNED:
+        run = gh_json(f"{R}/actions/runs/{run_id}")
+        answer = gh_json(f"{R}/actions/runs/{run_id}/attempts/{attempt}/jobs")
+        for job in answer["jobs"]:
+            if (
+                job["name"] == JOB
+                and job["status"] == "completed"
+                and job["conclusion"] in ("success", "failure")
+                and any(s["name"] == STEP for s in job["steps"])
+            ):
+                counted.append((count, run, attempt, job))
     counted.sort(key=lambda c: (c[1]["created_at"], c[3]["id"]))
     table = []
     for count, run, attempt, job in counted:

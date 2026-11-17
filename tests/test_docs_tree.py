@@ -2438,12 +2438,22 @@ class DocsTreeTest(unittest.TestCase):
             else:
                 self.assertIn(saving[1], reading)
 
+    def _pinned_trial_runs(self):
+        """The run ids the trial table records, by job count, read from the table's Run/attempt cells."""
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        rows, _summary = trial_tables(text)
+        pinned = {4: [], 6: []}
+        for cells in rows:
+            run_id, attempt = cells[1].split("/")
+            self.assertEqual("1", attempt)
+            pinned[int(cells[2])].append(int(run_id))
+        return pinned
+
     def _trial_fixture(self, six, four):
-        """Each entry is (run_id, created, step_seconds, failed_members, summary_jobs)."""
+        """Each entry is (run_id, created, step_seconds, failed_members, summary_jobs); a job's id is its run id plus 1."""
         from datetime import datetime, timedelta
 
         repo = "repos/fagenorn/nix-config"
-        branch = "issue-1215-trial-running-test-suites-6-at"
 
         def stamp(base, delta):
             return (datetime.strptime(base, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=delta)).strftime(
@@ -2473,13 +2483,16 @@ class DocsTreeTest(unittest.TestCase):
             return "﻿" + "".join(f"2026-11-17T05:00:30.0000000Z {line}\n" for line in body)
 
         fixture = {}
-        for count, branch_name, entries in ((6, branch, six), (4, "main", four)):
-            runs = []
+        for entries in (six, four):
             for run_id, created, step, failed, summary_jobs in entries:
-                runs.append({"id": run_id, "run_attempt": 1, "created_at": created})
-                job_id = 9000 + run_id
+                job_id = run_id + 1
                 done = stamp(created, 20 + step)
                 conclusion = "failure" if failed or summary_jobs is None else "success"
+                fixture[f"api {repo}/actions/runs/{run_id}"] = {
+                    "id": run_id,
+                    "run_attempt": 1,
+                    "created_at": created,
+                }
                 fixture[f"api {repo}/actions/runs/{run_id}/attempts/1/jobs"] = {
                     "total_count": 1,
                     "jobs": [
@@ -2501,9 +2514,6 @@ class DocsTreeTest(unittest.TestCase):
                     ],
                 }
                 fixture[f"api {repo}/actions/jobs/{job_id}/logs"] = log(summary_jobs, failed, step)
-            fixture[
-                f"api {repo}/actions/workflows/ci.yaml/runs?event=workflow_dispatch&branch={branch_name}&per_page=100"
-            ] = {"total_count": len(runs), "workflow_runs": runs}
         return fixture
 
     def _trial_world(self, step6=360, step4=480):
@@ -2513,52 +2523,56 @@ class DocsTreeTest(unittest.TestCase):
             when = datetime(2026, 11, 17, 5, 0, 0) + timedelta(minutes=15 * index, seconds=extra)
             return when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        six = [(100 + i, created(i, 0), step6, [], 6) for i in range(5)]
-        four = [(200 + i, created(i, 1), step4, [], 4) for i in range(5)]
+        pinned = self._pinned_trial_runs()
+        six = [(run_id, created(i, 0), step6, [], 6) for i, run_id in enumerate(pinned[6])]
+        four = [(run_id, created(i, 1), step4, [], 4) for i, run_id in enumerate(pinned[4])]
         return six, four
 
     def _trial(self, six, four):
         return self._run_awt_fence(self._trial_fixture(six, four), "Trial reproduce")
 
     def test_the_trial_program_adopts_six_when_the_saving_holds(self):
-        result = self._trial(*self._trial_world())
+        six, four = self._trial_world()
+        result = self._trial(six, four)
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout.splitlines()
+        n6, n4 = len(six), len(four)
+        last = four[-1][1].replace("T", " ").rstrip("Z")
         for expected in (
             "Saving: 120.0 s (2.0 min), the median test step at 4 jobs minus the median at 6.",
             "Failed only at 6: none.",
             "Decision: 6 jobs.",
-            "Runs: 5 at 6 jobs and 5 at 4 jobs, created 2026-11-17 05:00:00 to 2026-11-17 06:00:01 (UTC).",
+            f"Runs: {n6} at 6 jobs and {n4} at 4 jobs, created 2026-11-17 05:00:00 to {last} (UTC).",
         ):
             self.assertIn(expected, out)
-        self.assertTrue(any(line.startswith("| 4 | 5 | 0 | 480.0 | 8.0 |") for line in out), out)
-        self.assertTrue(any(line.startswith("| 6 | 5 | 0 | 360.0 | 6.0 |") for line in out), out)
-        job_rows = [line for line in out if re.match(r"\| 9\d+ \|", line)]
-        self.assertEqual(len(job_rows), 10)
+        self.assertTrue(any(line.startswith(f"| 4 | {n4} | 0 | 480.0 | 8.0 |") for line in out), out)
+        self.assertTrue(any(line.startswith(f"| 6 | {n6} | 0 | 360.0 | 6.0 |") for line in out), out)
+        job_rows = [line for line in out if re.match(r"\| \d+ \| \d+/1 \|", line)]
+        self.assertEqual(len(job_rows), n6 + n4)
         self.assertEqual(
-            "| 9100 | 100/1 | 6 | 2026-11-17 05:00:00 | success | 360 | 6.0 | 5.5 | 2 | - |",
+            f"| {six[0][0] + 1} | {six[0][0]}/1 | 6 | 2026-11-17 05:00:00 | success | 360 | 6.0 | 5.5 | 2 | - |",
             job_rows[0],
         )
         self.assertEqual(
-            "| 9200 | 200/1 | 4 | 2026-11-17 05:00:01 | success | 480 | 8.0 | 7.5 | 2 | - |",
+            f"| {four[0][0] + 1} | {four[0][0]}/1 | 4 | 2026-11-17 05:00:01 | success | 480 | 8.0 | 7.5 | 2 | - |",
             job_rows[1],
         )
 
     def test_the_trial_program_keeps_four_when_a_member_fails_only_at_six(self):
         six, four = self._trial_world()
-        six[2] = (102, six[2][1], 360, ["tests/b.py"], 6)
+        six[2] = (six[2][0], six[2][1], 360, ["tests/b.py"], 6)
         result = self._trial(six, four)
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout.splitlines()
         self.assertIn("Failed only at 6: tests/b.py.", out)
         self.assertIn("Decision: 4 jobs.", out)
-        row = next(line for line in out if line.startswith("| 9102 |"))
+        row = next(line for line in out if line.startswith(f"| {six[2][0] + 1} |"))
         self.assertTrue(row.endswith("| failure | 360 | 6.0 | 5.5 | 2 | tests/b.py |"), row)
 
     def test_the_trial_program_ignores_a_member_that_failed_at_four_too(self):
         six, four = self._trial_world()
-        six[1] = (101, six[1][1], 360, ["tests/a.py"], 6)
-        four[3] = (203, four[3][1], 480, ["tests/a.py"], 4)
+        six[1] = (six[1][0], six[1][1], 360, ["tests/a.py"], 6)
+        four[3] = (four[3][0], four[3][1], 480, ["tests/a.py"], 4)
         result = self._trial(six, four)
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout.splitlines()
@@ -2584,53 +2598,74 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_the_trial_program_counts_a_failed_six_job_run_without_a_summary(self):
         six, four = self._trial_world()
-        six[4] = (104, six[4][1], 360, [], None)
+        six[4] = (six[4][0], six[4][1], 360, [], None)
         result = self._trial(six, four)
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout.splitlines()
-        row = next(line for line in out if line.startswith("| 9104 |"))
+        row = next(line for line in out if line.startswith(f"| {six[4][0] + 1} |"))
         self.assertTrue(row.endswith("| - | - | no summary |"), row)
         self.assertIn("| failure |", row)
-        self.assertIn("Failed only at 6: no summary in job 9104.", out)
+        self.assertIn(f"Failed only at 6: no summary in job {six[4][0] + 1}.", out)
         self.assertIn("Decision: 4 jobs.", out)
 
-    def test_the_trial_program_reads_four_job_runs_only_inside_the_window(self):
+    def test_a_later_dispatch_cannot_change_what_the_trial_reproduces(self):
         six, four = self._trial_world()
-        four.append((300, "2026-11-17T04:00:00Z", 60, [], 4))
-        result = self._trial(six, four)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        out = result.stdout.splitlines()
-        self.assertFalse(any(line.startswith("| 9300 ") for line in out))
-        self.assertTrue(any(line.startswith("| 4 | 5 | 0 | 480.0 | 8.0 |") for line in out), out)
+        fixture = self._trial_fixture(six, four)
+        before = self._run_awt_fence(fixture, "Trial reproduce")
+        self.assertEqual(before.returncode, 0, before.stderr)
+        repo = "repos/fagenorn/nix-config"
+        extra = self._trial_fixture(
+            [(900, "2026-11-18T05:00:00Z", 360, [], 6)], [(901, "2026-11-18T05:00:01Z", 480, [], 4)]
+        )
+        for branch, count, run_id, runs in (
+            ("issue-1215-trial-running-test-suites-6-at", 6, 900, six),
+            ("main", 4, 901, four),
+        ):
+            listed = [{"id": r[0], "run_attempt": 1, "created_at": r[1]} for r in runs]
+            listed.append({"id": run_id, "run_attempt": 1, "created_at": "2026-11-18T05:00:00Z"})
+            fixture[
+                f"api {repo}/actions/workflows/ci.yaml/runs?event=workflow_dispatch&branch={branch}&per_page=100"
+            ] = {"total_count": 150, "workflow_runs": listed}
+        for key, value in extra.items():
+            fixture.setdefault(key, value)
+        after = self._run_awt_fence(fixture, "Trial reproduce")
+        self.assertEqual(after.returncode, 0, after.stderr)
+        self.assertEqual(before.stdout, after.stdout)
 
     def test_the_trial_program_refuses_step_times_that_are_not_whole_seconds(self):
-        fixture = self._trial_fixture(*self._trial_world())
-        key = "api repos/fagenorn/nix-config/actions/runs/103/attempts/1/jobs"
+        six, four = self._trial_world()
+        fixture = self._trial_fixture(six, four)
+        key = f"api repos/fagenorn/nix-config/actions/runs/{six[3][0]}/attempts/1/jobs"
         step = fixture[key]["jobs"][0]["steps"][0]
         step["completed_at"] = step["completed_at"].replace("Z", ".500Z")
         result = self._run_awt_fence(fixture, "Trial reproduce")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertIn("9103", result.stderr)
+        self.assertIn(str(six[3][0] + 1), result.stderr)
 
     def test_the_trial_program_refuses_fewer_than_five_runs_at_six(self):
         six, four = self._trial_world()
-        result = self._trial(six[:4], four)
+        fixture = self._trial_fixture(six, four)
+        for entry in six[:2]:
+            key = f"api repos/fagenorn/nix-config/actions/runs/{entry[0]}/attempts/1/jobs"
+            fixture[key]["jobs"][0]["conclusion"] = "cancelled"
+        result = self._run_awt_fence(fixture, "Trial reproduce")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertIn("only 4 runs at 6 jobs, need 5", result.stderr)
+        self.assertIn(f"only {len(six) - 2} runs at 6 jobs, need 5", result.stderr)
 
     def test_the_trial_program_refuses_a_summary_at_another_job_count(self):
         six, four = self._trial_world()
-        six[0] = (100, six[0][1], 360, [], 4)
+        six[0] = (six[0][0], six[0][1], 360, [], 4)
         result = self._trial(six, four)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertIn("9100", result.stderr)
+        self.assertIn(str(six[0][0] + 1), result.stderr)
 
     def test_the_trial_program_reads_no_timing_line_inside_a_member_block(self):
-        fixture = self._trial_fixture(*self._trial_world())
-        key = "api repos/fagenorn/nix-config/actions/jobs/9101/logs"
+        six, four = self._trial_world()
+        fixture = self._trial_fixture(six, four)
+        key = f"api repos/fagenorn/nix-config/actions/jobs/{six[1][0] + 1}/logs"
         stamp = "2026-11-17T05:00:30.0000000Z "
         fixture[key] = fixture[key].replace(
             stamp + "Ran 1 test in 0.001s\n",
@@ -2647,40 +2682,15 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("Decision: 6 jobs.", result.stdout.splitlines())
 
     def test_the_trial_program_skips_cancelled_jobs(self):
-        fixture = self._trial_fixture(*self._trial_world())
-        repo = "repos/fagenorn/nix-config"
-        listing = fixture[
-            f"api {repo}/actions/workflows/ci.yaml/runs?event=workflow_dispatch"
-            "&branch=issue-1215-trial-running-test-suites-6-at&per_page=100"
-        ]
-        listing["workflow_runs"].append({"id": 150, "run_attempt": 1, "created_at": "2026-11-17T05:07:00Z"})
-        listing["total_count"] += 1
-        fixture[f"api {repo}/actions/runs/150/attempts/1/jobs"] = {
-            "total_count": 1,
-            "jobs": [
-                {
-                    "id": 9150,
-                    "name": "Agent Workflow Tests",
-                    "status": "completed",
-                    "conclusion": "cancelled",
-                    "started_at": "2026-11-17T05:07:10Z",
-                    "completed_at": "2026-11-17T05:08:00Z",
-                    "steps": [
-                        {
-                            "name": "Run agent workflow tests",
-                            "started_at": "2026-11-17T05:07:20Z",
-                            "completed_at": "2026-11-17T05:08:00Z",
-                        }
-                    ],
-                }
-            ],
-        }
+        six, four = self._trial_world()
+        fixture = self._trial_fixture(six, four)
+        key = f"api repos/fagenorn/nix-config/actions/runs/{six[5][0]}/attempts/1/jobs"
+        fixture[key]["jobs"][0]["conclusion"] = "cancelled"
         result = self._run_awt_fence(fixture, "Trial reproduce")
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout.splitlines()
-        self.assertFalse(any(line.startswith("| 9150 ") for line in out))
-        self.assertTrue(any(line.startswith("| 6 | 5 | 0 | 360.0 | 6.0 |") for line in out), out)
-
+        self.assertFalse(any(line.startswith(f"| {six[5][0] + 1} ") for line in out))
+        self.assertTrue(any(line.startswith(f"| 6 | {len(six) - 1} | 0 | 360.0 | 6.0 |") for line in out), out)
 
     def test_the_trial_holds_five_runs_at_each_job_count(self):
         text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
@@ -2732,9 +2742,13 @@ class DocsTreeTest(unittest.TestCase):
             "python3 -I - <<'PY'",
             "MIN_RUNS = 5",
             "THRESHOLD = 90",
-            'TRIAL = {"main": 4, "issue-1215-trial-running-test-suites-6-at": 6}',
         ):
             self.assertIn(needle, fence[0])
+        pinned = re.findall(r"^    \((\d+), (\d+), (4|6)\),?$", fence[0], re.M)
+        self.assertEqual(
+            sorted((r[1].split("/")[0], r[1].split("/")[1], r[2]) for r in rows), sorted(pinned)
+        )
+        self.assertNotIn("workflows/ci.yaml/runs", fence[0])
 
 
 if __name__ == "__main__":

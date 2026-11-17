@@ -505,7 +505,8 @@ def suite_regressions(repo: str, workflow: str, job: str, branch: str, merge: st
     passed_before: set[str] = set()
     failed_before: set[str] = set()
     counted_before = 0
-    candidates = _suite_runs(forge_api.api_get(f"{listing}&created=<{start}&per_page=100"))
+    candidates = sorted(_suite_run(entry) for entry in _counted_pages(
+        forge_api.api_pages(f"{listing}&created=<{start}&per_page=100"), "workflow_runs", "run listing"))
     for run in reversed(candidates):
         if counted_before == n:
             break
