@@ -4000,7 +4000,9 @@ function keptWordsCard(id, state) {
   card.appendChild(el("p", "q", state.headline || "A question that is no longer open"));
   card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.reason));
   const area = typedArea("kept-words-text field-area", "Your words, not sent", "");
-  area.value = state.pending.body.text;
+  // The words are the box's current draft, so edits made after the failure survive; the submitted text stands when the draft is empty.
+  const edited = draftOf(id + "\nwords").value;
+  area.value = edited.trim() === "" ? state.pending.body.text : edited;
   area.readOnly = true;
   card.appendChild(area);
   const act = el("div", "act");

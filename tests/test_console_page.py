@@ -3313,6 +3313,18 @@ class PageQuestionTest(unittest.TestCase):
         self.assertIn("Could not send: this question is already answered", full(gone["inbox"]))
         self.assertEqual(count(dismissed, "kept-words"), 0)
 
+    def test_a_failed_send_edited_then_withdrawn_keeps_the_edited_words(self) -> None:
+        failed, gone = render([
+            START, {"frame": frame([QC])}, {"key": "3"},
+            {"type": {"class": "words-text", "text": "make the line shorter"}},
+            {"respond": {"status": 500, "text": "round answer failed"}},
+            {"click": "send"}, {"clock": 5000}, {"snapshot": True},
+            {"type": {"class": "words-text", "text": "make the line much shorter"}},
+            {"frame": frame([])}, {"snapshot": True},
+        ])
+        self.assertEqual(field(failed, "words-text")["value"], "make the line shorter")
+        self.assertEqual(field(gone, "kept-words-text")["value"], "make the line much shorter")
+
     def test_a_question_that_left_during_the_undo_window_keeps_the_words_reachable(self) -> None:
         waiting, kept, later, dismissed = render([
             START, {"frame": frame([QC])}, {"key": "3"},
