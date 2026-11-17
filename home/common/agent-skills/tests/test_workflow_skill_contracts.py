@@ -1954,6 +1954,8 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
     STATUS = "`look-approval status --repo <slug> --issue <n> --pr <pr> --head <head>`"
     POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
             " --answer approved --message session-<id>`")
+    FIX_POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
+                " --answer fix --message session-<id> --words-file <file>`")
     PUSH = "`git -C <dir> push origin <branch>`"
     HEAD_READ = "`gh pr view <pr> --repo <slug> --json headRefOid`"
     MERGE = "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`"
@@ -2007,6 +2009,15 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         self.assertIn("On `error`, merge nothing: run `forge-claim release` and report it", rules)
         self.assertIn("On `approved`, land as step 6 does", rules)
 
+    def test_a_resync_that_ends_approved_keeps_landing(self):
+        """#1211: after a resync only `needed` stops; `approved` goes on to the merge and the
+        release-and-report fallback is for every other verdict."""
+        land = self.section("Land")
+        resync = land[land.index("After every resync"):land.index("The merge is")]
+        self.assertIn("when it is `approved`, keep landing with the merge below", resync)
+        self.assertLess(resync.index("when it is `approved`"), resync.index("when it is `needed`"))
+        self.assertLess(resync.index("when it is `needed`"), resync.index("on any other verdict"))
+
     def test_the_look_rules_exist_once_and_are_in_no_hot_list(self):
         found = sorted((REPO_ROOT / "home").rglob("look-before-merge.md"))
         self.assertEqual(found, [LOOK_RULES])
@@ -2033,6 +2044,12 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         self.assertIn(self.POST, approve)
         self.assertLess(approve.index(self.HEAD_READ), approve.index(self.POST))
         self.assertIn("`posted`", approve)
+
+    def test_fix_posts_only_for_the_unchanged_head(self):
+        fix = self.bullet(self.section("Resume"), "fix")
+        self.assertIn(self.HEAD_READ, fix)
+        self.assertIn(self.FIX_POST, fix)
+        self.assertLess(fix.index(self.HEAD_READ), fix.index(self.FIX_POST))
 
     def test_changes_pushes_the_open_branch_and_opens_nothing(self):
         changes = self.bullet(self.section("Resume"), "changes")

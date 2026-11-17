@@ -7833,7 +7833,7 @@ EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post")),
+             "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-status")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-", "look-fix")),
@@ -7887,6 +7887,11 @@ SCENARIOS = (
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}), "patch": RESUME},
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "changes", "words": "make the label bold"}),
      "patch": dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})},
+    # #1211: a head that moved after the approval asks look-approval status whether the approval is kept.
+    {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}),
+     "patch": dict(RESUME, **{"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
+                              "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]},
+                              "look-status": {"verdict": "approved", "kept_from": SHA}})},
     WS_SCENARIO,
 )
 
@@ -10399,16 +10404,48 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], F)
 
+    MOVED = dict(RESUME, **{
+        "pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
+        "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]}})
+
     def test_a_head_that_moves_under_the_lock_after_the_approval_stops_at_awaiting_look(self):
-        result, calls = self.approve(patch=dict(RESUME, **{
-            "pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": D, "head": D},
-            "checks-2": {"state": "passed", "head": D, "required": ["ci"], "passed": ["ci"]}}))
+        result, calls = self.approve(patch=self.MOVED)
+        got = labels(calls)
+        self.assertIn("look-status", got)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertNotIn("merge", got)
+        self.assertIn("land-unlock", got)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
+
+    def test_a_moved_head_whose_approval_is_kept_lands(self):
+        result, calls = self.approve(patch=dict(self.MOVED, **{"look-status": {"verdict": "approved", "kept_from": SHA}}))
+        got = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertLess(got.index("look-status"), got.index("merge"))
+        self.assertIn("look-approval status --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "look-status"))
+        self.assertIn("--match-head-commit " + D, prompt(calls, "merge"))
+        self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + D, prompt(calls, "close-out"))
+
+    def test_a_moved_head_whose_status_is_needed_stops_at_awaiting_look(self):
+        result, calls = self.approve(patch=dict(self.MOVED, **{"look-status": {"verdict": "needed", "kept_from": None}}))
         got = labels(calls)
         self.assertEqual(result["stage"], "awaiting-look")
         self.assertEqual(result["head"], D)
         self.assertNotIn("merge", got)
         self.assertIn("land-unlock", got)
         self.assertEqual(result["cont"]["look"], {"pr": 42, "head": D})
+
+    def test_a_moved_head_whose_status_failed_stops_without_asking(self):
+        for name, kwargs in (("error", {"patch": dict(self.MOVED, **{"look-status": {"verdict": "error", "detail": "x"}})}),
+                             ("none", {"patch": self.MOVED, "replies": {"look-status": None}})):
+            with self.subTest(reply=name):
+                result, calls = self.approve(**kwargs)
+                got = labels(calls)
+                self.assertEqual(result["stage"], "look-status")
+                self.assertIn("cont", result)
+                self.assertNotIn("merge", got)
+                self.assertIn("land-unlock", got)
 
     def approved_cont(self):
         result, _ = self.approve(replies={"merge": None})
@@ -10421,6 +10458,7 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertNotIn("look-head", labels(calls))
         self.assertNotIn("look-post", labels(calls))
+        self.assertNotIn("look-status", labels(calls))
 
     def test_changes_run_one_fix_round_verify_again_and_stop_at_the_new_head(self):
         patch = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F}, "look-pr": {"head": F}})
@@ -10435,6 +10473,82 @@ class LookResumeTest(unittest.TestCase):
         self.assertEqual(fix["agentType"], "implementer")
         self.assertIn(json.dumps("make the label bold"), fix["prompt"])
         self.assertEqual([c["agentType"] for c in calls if c["label"] == "look-fix-review"], ["reviewer"])
+        self.assertNotIn("merge", got)
+
+    FIXED = dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F},
+                            "pr": {"head": F, "checks": {"state": "passed", "head": F, "required": ["ci"], "passed": ["ci"]}},
+                            "look-status": {"verdict": "approved", "kept_from": SHA}})
+
+    def fix(self, patch=None, head=SHA, cont=None, replies=None):
+        look = {"answer": "fix", "head": head, "words": "make the label bold"}
+        return run(args=dict(ARGS, cont=cont or self.look_cont(), look=look), patch=self.FIXED if patch is None else patch, replies=replies)
+
+    def test_fix_records_the_approval_fixes_once_and_lands(self):
+        result, calls = self.fix()
+        got = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        steps = ("look-head", "look-post", "look-fix", "look-fix-review", "verify", "look-status", "merge")
+        self.assertEqual([l for l in got if l in steps], list(steps))
+        self.assertEqual(got.count("look-fix"), 1)
+        self.assertIn("--answer fix --message session-s1 --words-file /r/.git/worktrees/w/deliver-standard/look-fix-words.txt",
+                      prompt(calls, "look-post"))
+        self.assertIn(json.dumps("make the label bold"), prompt(calls, "look-post"))
+        self.assertIn("/r/.git/worktrees/w/deliver-standard/look-fix-words.txt", prompt(calls, "look-post"))
+        self.assertIn("look-approval status --repo owner/repo --issue 9 --pr 42 --head " + F, prompt(calls, "look-status"))
+        self.assertIn("--match-head-commit " + F, prompt(calls, "merge"))
+
+    def test_fix_for_a_moved_head_posts_nothing(self):
+        result, calls = self.fix(head=B)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], SHA)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        for label in ("look-post", "look-fix", "merge"):
+            self.assertNotIn(label, got)
+        result, calls = self.fix(replies={"look-head": {"head": B, "state": "OPEN", "renew": {"verdict": "renewed"}}})
+        self.assertEqual((result["stage"], result["head"]), ("awaiting-look", B))
+        self.assertNotIn("look-post", labels(calls))
+
+    def test_a_fix_for_a_head_other_than_the_awaiting_look_head_posts_nothing(self):
+        # The pull request head is the head the owner named, but not the one the stop left for the owner.
+        result, calls = self.fix(head=B, replies={"look-head": {"head": B, "state": "OPEN", "renew": {"verdict": "renewed"}}})
+        self.assertEqual((result["stage"], result["head"]), ("awaiting-look", B))
+        for label in ("look-post", "look-fix"):
+            self.assertNotIn(label, labels(calls))
+
+    def test_a_fix_answer_whose_fix_makes_no_commit_leaves_no_approval_in_the_cont(self):
+        noop = dict(self.FIXED, **{"look-fix": {"start_head": SHA, "commit": SHA}})
+        stopped, _ = self.fix(patch=noop, cont=self.approved_cont())
+        self.assertEqual(stopped["stage"], "look-fix")
+        self.assertEqual(stopped["cont"]["look"], {"pr": 42, "head": SHA})
+
+    def test_a_fix_answer_stops_at_look_when_the_setup_could_not_read_the_marker(self):
+        cont = self.look_cont()
+        unread = dict(self.FIXED, setup={"look": {"verdict": "error", "detail": "x"}, "head": SHA})
+        result, calls = self.fix(patch=unread, cont=cont)
+        got = labels(calls)
+        self.assertEqual(result["stage"], "look")
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        for label in ("look-head", "look-post", "look-fix", "look-fix-review", "verify", "merge"):
+            self.assertNotIn(label, got)
+
+    def test_a_fix_for_a_closed_pull_request_posts_nothing(self):
+        result, calls = self.fix(replies={"look-head": {"head": SHA, "state": "CLOSED", "renew": {"verdict": "renewed"}}})
+        self.assertEqual(result["stage"], "look-approve")
+        for label in ("look-post", "look-fix"):
+            self.assertNotIn(label, labels(calls))
+
+    def test_a_fix_whose_post_is_not_posted_stops_before_the_fix(self):
+        result, calls = self.fix(replies={"look-post": {"verdict": "untrusted", "comment_id": 5}})
+        self.assertEqual(result["stage"], "look-approve")
+        self.assertNotIn("look-fix", labels(calls))
+
+    def test_a_fix_whose_status_is_not_kept_stops_at_awaiting_look(self):
+        result, calls = self.fix(patch=dict(self.FIXED, **{"look-status": {"verdict": "needed", "kept_from": None}}))
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], F)
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": F})
         self.assertNotIn("merge", got)
 
     def test_changes_on_an_approved_cont_takes_no_lock_and_stops_at_the_new_head(self):
@@ -10513,7 +10627,7 @@ class LookResumeTest(unittest.TestCase):
     def test_look_args_are_checked_before_any_agent(self):
         cont = self.look_cont()
         approve = {"answer": "approve", "head": SHA}
-        shape = "look must be {answer: approve, head, message?} or {answer: changes, words}"
+        shape = "look must be {answer: approve, head, message?}, {answer: fix, head, words, message?} or {answer: changes, words}"
         rows = (
             (dict(ARGS, look=approve), "look needs a cont: it answers an awaiting-look stop"),
             (dict(ARGS, cont=cont, mode="ready", look=approve), "look needs mode ship"),
@@ -10523,6 +10637,10 @@ class LookResumeTest(unittest.TestCase):
             (dict(ARGS, cont=cont, look={"answer": "changes", "words": "x" * 2001}), shape),
             (dict(ARGS, cont=cont, look={"answer": "approve", "head": SHA, "message": "a b"}), shape),
             (dict(ARGS, cont=cont, look={"answer": "later"}), shape),
+            (dict(ARGS, cont=cont, look={"answer": "fix", "head": SHA}), shape),
+            (dict(ARGS, cont=cont, look={"answer": "fix", "head": SHA, "words": "x" * 2001}), shape),
+            (dict(ARGS, cont=ship_cont(), look={"answer": "fix", "head": SHA, "words": "w"}),
+             "look fix needs a cont that stopped at awaiting-look"),
         )
         for n, (args, error) in enumerate(rows):
             with self.subTest(row=n, error=error):

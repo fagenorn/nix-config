@@ -68,6 +68,23 @@ text before the first heading starts the answer part, and a text with no heading
 answer; an empty part is None, and so is a part other than the answer that is `none` (any case, a
 trailing `.` ignored): an answer of `None.` is an answer and keeps its text; a text
 ending with `NO_PRODUCTION_LINE` carries that line as `production` and in no other part.
+
+Threads (#1178, ADR-console-062). A `Turn` is one earlier question with the answer the session
+gave. An `Ask` carries a `thread` of turns, oldest first, and a thread changes only the prompt:
+`thread_text(thread)` is `""` for none, else `THREAD_LEAD` and each turn as `EARLIER_QUESTION`,
+`EARLIER_ANSWER`; `prompt` puts it between the routes paragraph and `QUESTION_MARK`, so with no
+thread the prompt and the argv are byte-identical to before, and the settings never see it. The
+fold gives each `AskedQuestion` a `thread_id`: an asked row whose `thread_id` is a non-empty string
+naming a question already folded for the same project takes that question's `thread_id`, else the
+question's own id starts a thread (folding in two batches equals folding once). `threads(questions)`
+groups by `thread_id`, each thread ascending by `seq`, threads ordered by their last question,
+newest first. `follow_up(questions, thread_id, question)` returns the thread's `Turn`s in order
+after refusing, in this order, a `thread_id` that is not a thread's id (`THREAD_UNKNOWN`; a
+follow-up's own id is not one), a thread whose last question is not answered (`THREAD_UNANSWERED`)
+and a thread whose `thread_text` plus the question exceeds `MAX_THREAD_BYTES` UTF-8 bytes
+(`THREAD_TOO_LONG`): the prompt is one argv string and Linux refuses one past 131072 bytes.
+`parse_request` reads exactly `project_id` and `question`, or those with a non-empty string
+`thread_id`, and returns `(project_id, question, thread_id or None)`.
 """
 
 from __future__ import annotations
@@ -103,6 +120,9 @@ SETTINGS_SUFFIX = ".settings.json"
 HOOK_MODULE = "console.project_question_hook"
 HOOK_TIMEOUT = 10
 QUESTION_MARK = "The question: "
+EARLIER_QUESTION = "Earlier question: "
+EARLIER_ANSWER = "Earlier answer: "
+MAX_THREAD_BYTES = 98304
 ANSWERED = "answered"
 FAILED = "failed"
 TIMED_OUT = "timed_out"
@@ -142,6 +162,14 @@ LEAD = (
     "Question for you: <a step that needs money or a credential, or none>\n\n"
 )
 
+THREAD_LEAD = (
+    "This question follows up earlier questions of the same thread, oldest first, each with the "
+    "answer you gave. Use them as context: the rules above still apply.\n\n"
+)
+THREAD_UNKNOWN = "this thread is not one of the project's questions"
+THREAD_UNANSWERED = "a follow-up continues a thread whose last question was answered"
+THREAD_TOO_LONG = "this thread is too long to continue: ask a new question"
+
 HEADINGS: tuple[tuple[str, str], ...] = (
     ("answer", "Answer"), ("read", "Read"), ("ran", "Ran"),
     ("unknown", "Could not find out"), ("back", "Question for you"),
@@ -164,6 +192,12 @@ class Route:
 
 
 @dataclass(frozen=True)
+class Turn:
+    question: str
+    answer: str
+
+
+@dataclass(frozen=True)
 class Ask:
     question_id: str
     project_id: str
@@ -173,6 +207,7 @@ class Ask:
     routes: tuple[Route, ...]
     settings: Path
     session_id: str
+    thread: tuple[Turn, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -221,9 +256,10 @@ def new_session_id() -> str:
 
 
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
-            routes: Sequence[Route], settings_dir: Path, *, session_id: str) -> Ask:
+            routes: Sequence[Route], settings_dir: Path, *, session_id: str,
+            thread: Sequence[Turn] = ()) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
-               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id)
+               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread))
 
 
 def checked_question(text: str) -> str:
@@ -235,30 +271,43 @@ def checked_question(text: str) -> str:
     return text
 
 
-def parse_request(body: bytes) -> tuple[str, str]:
+def parse_request(body: bytes) -> tuple[str, str, str | None]:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the body is nested too deeply") from error
-    if not isinstance(value, dict) or set(value) != {"project_id", "question"}:
-        raise ValueError("the body must be an object of project_id, question")
+    if not isinstance(value, dict) or set(value) not in (
+            {"project_id", "question"}, {"project_id", "question", "thread_id"}):
+        raise ValueError(
+            "the body must be an object of project_id, question and an optional thread_id")
     project_id, question = value["project_id"], value["question"]
+    thread_id = value.get("thread_id")
+    if "thread_id" in value and (not isinstance(thread_id, str) or not thread_id):
+        raise ValueError("thread_id must be a non-empty string")
     if not isinstance(project_id, str) or not project_id:
         raise ValueError("project_id must be a non-empty string")
     if not isinstance(question, str):
         raise ValueError("question must be a string")
-    return project_id, question
+    return project_id, question, thread_id
 
 
-def prompt(question: str, routes: Sequence[Route]) -> str:
+def thread_text(thread: Sequence[Turn]) -> str:
+    if not thread:
+        return ""
+    return THREAD_LEAD + "".join(
+        EARLIER_QUESTION + turn.question + "\n" + EARLIER_ANSWER + turn.answer + "\n\n"
+        for turn in thread)
+
+
+def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = ()) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
     else:
         paragraph = ("This project declares no read-only command, so production cannot be read: "
                      "answer from the code and docs only.\n\n")
-    return LEAD + paragraph + QUESTION_MARK + question
+    return LEAD + paragraph + thread_text(thread) + QUESTION_MARK + question
 
 
 def tools(routes: Sequence[Route]) -> str:
@@ -290,7 +339,7 @@ def launch_command(ask: Ask, platform: str) -> list[str] | None:
     return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
-            prompt(ask.question, ask.routes)]
+            prompt(ask.question, ask.routes, ask.thread)]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:
@@ -390,6 +439,7 @@ class AskedQuestion:
     answer: str | None = None
     reason: str | None = None
     answered_at: str | None = None
+    thread_id: str | None = None
 
 
 def _part(lines: list[str], key: str) -> str | None:
@@ -442,8 +492,34 @@ def asked_questions(events: Iterable[Event],
         if event.kind == PROJECT_QUESTION_ASKED:
             question = payload.get("question")
             if index is None and isinstance(question, str):
-                items.append(AskedQuestion(question_id, question, event.at, event.seq))
+                named = payload.get("thread_id")
+                head = next((item for item in items if isinstance(named, str) and named
+                             and item.question_id == named), None)
+                thread_id = (head.thread_id or head.question_id) if head else question_id
+                items.append(AskedQuestion(question_id, question, event.at, event.seq,
+                                           thread_id=thread_id))
         elif event.kind == PROJECT_QUESTION_ANSWERED:
             if index is not None and items[index].state == WORKING:
                 items[index] = _answered(items[index], event)
     return {project: tuple(items) for project, items in found.items() if items}
+
+
+def threads(questions: Sequence[AskedQuestion]) -> tuple[tuple[AskedQuestion, ...], ...]:
+    groups: dict[str, list[AskedQuestion]] = {}
+    for question in sorted(questions, key=lambda q: q.seq):
+        groups.setdefault(question.thread_id or question.question_id, []).append(question)
+    ordered = sorted(groups.values(), key=lambda group: -group[-1].seq)
+    return tuple(tuple(group) for group in ordered)
+
+
+def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str) -> tuple[Turn, ...]:
+    thread = next((group for group in threads(questions)
+                   if (group[0].thread_id or group[0].question_id) == thread_id), None)
+    if thread is None:
+        raise Refused(THREAD_UNKNOWN)
+    if thread[-1].state != ANSWERED:
+        raise Refused(THREAD_UNANSWERED)
+    turns = tuple(Turn(q.question, q.answer or "") for q in thread)
+    if len(thread_text(turns).encode("utf-8")) + len(question.encode("utf-8")) > MAX_THREAD_BYTES:
+        raise Refused(THREAD_TOO_LONG)
+    return turns

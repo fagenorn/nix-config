@@ -1,5 +1,6 @@
 """The console's inbox reader (#859): owner-action markers into inbox items, and the local activity reading."""
 
+import base64
 import copy
 import hashlib
 import json
@@ -888,6 +889,50 @@ def NEVER(argv):
     raise AssertionError("no pull request read")
 
 
+class Forge:
+    """A fake `gh` JSON call that answers each `repos/<slug>/<path>` read from a dict and records every argv."""
+
+    def __init__(self, reads):
+        self.reads, self.argvs = reads, []
+
+    def __call__(self, argv):
+        self.argvs.append(argv)
+        prefix = f"repos/{SLUG}/"
+        if len(argv) != 2 or argv[0] != "api" or not argv[1].startswith(prefix):
+            raise AssertionError(f"unexpected read {argv}")
+        path = argv[1][len(prefix):]
+        if path not in self.reads:
+            raise ForgeError("not_found", path)
+        return self.reads[path]
+
+
+KEPT_A, KEPT_BT, KEPT_MC, KEPT_FORK = "5" * 40, "3" * 40, "2" * 40, "e" * 40
+KEPT_PAGE, KEPT_TESTF = "python/agent_tools/console/page.html", "tests/test_console_page.py"
+
+
+def _kept_compare(files=(), status="ahead", commits=()):
+    return {"status": status, "files": [{"filename": f, "status": "modified", "patch": f"@@ -1,2 +1,2 @@\n {f}\n-old\n+new"}
+                                         for f in files],
+            "total_commits": len(commits),
+            "commits": [{"sha": sha, "parents": [{"sha": p} for p in parents]} for sha, parents in commits]}
+
+
+def kept_reads(ah_files=(KEPT_TESTF,), pull_extra=None):
+    """The reads of a merge of the look head over an approval of KEPT_A, as GitHub answers them."""
+    raw = base64.b64encode(b'{"version": 1, "sets": {"console": ["python/agent_tools/console/**"]}}').decode()
+    pull = {"number": 42, "merged": True, "head": {"sha": LOOK_HEAD}, "merge_commit_sha": KEPT_MC}
+    pull.update(pull_extra or {})
+    return {
+        "pulls/42": pull,
+        f"commits/{KEPT_MC}": {"sha": KEPT_MC, "parents": [{"sha": KEPT_BT}, {"sha": LOOK_HEAD}]},
+        look_marker.contents_path(KEPT_BT): {"type": "file", "encoding": "base64", "content": raw},
+        look_marker.compare_path(KEPT_BT, KEPT_A): _kept_compare([KEPT_PAGE], commits=[(KEPT_A, [KEPT_FORK])]),
+        look_marker.compare_path(KEPT_A, LOOK_HEAD): _kept_compare(ah_files),
+        look_marker.compare_path(KEPT_BT, LOOK_HEAD): _kept_compare(
+            commits=[(KEPT_A, [KEPT_FORK]), (LOOK_HEAD, [KEPT_A])]),
+    }
+
+
 def keys(node, call, **kwargs):
     return [i["key"] for i in inbox.items_from_node(PROJECT, SLUG, node, call=call, **kwargs)]
 
@@ -973,6 +1018,34 @@ class LookAnsweredReviewTest(unittest.TestCase):
 
                 self.assertEqual(inbox.read_items(PROJECT, SLUG, call=fake), [])
                 self.assertEqual(pulls.argvs, [["api", f"repos/{SLUG}/pulls/42"]])
+
+    def test_a_merge_that_keeps_an_earlier_approval_raises_no_card(self):
+        forge = Forge(kept_reads())
+        self.assertEqual(keys(self.node([look(C1, head=KEPT_A)]), forge), [])
+        self.assertEqual(forge.argvs[:2], [["api", f"repos/{SLUG}/pulls/42"],
+                                           ["api", f"repos/{SLUG}/commits/{KEPT_MC}"]])
+
+    def test_a_kept_merge_that_cannot_be_read_keeps_the_card(self):
+        without_ah = kept_reads()
+        del without_ah[look_marker.compare_path(KEPT_A, LOOK_HEAD)]
+        malformed = kept_reads()
+        malformed[look_marker.compare_path(KEPT_BT, LOOK_HEAD)] = {}
+        cases = {"look file changed after": ([look(C1, head=KEPT_A)], kept_reads(ah_files=(KEPT_PAGE,))),
+                 "compare not found": ([look(C1, head=KEPT_A)], without_ah),
+                 "no merge commit": ([look(C1, head=KEPT_A)], kept_reads(pull_extra={"merge_commit_sha": None})),
+                 "malformed answer": ([look(C1, head=KEPT_A)], malformed),
+                 "withdrawn": ([look(C1, head=KEPT_A), look(C2, "changes", head=KEPT_A)], kept_reads())}
+        for name, (comments, reads) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(keys(self.node(comments), Forge(reads)), self.CARD)
+
+    def test_the_stop_is_asked_before_each_kept_read(self):
+        forge = Forge(kept_reads())
+        with self.assertRaises(ForgeError) as caught:
+            keys(self.node([look(C1, head=KEPT_A)]), forge, cancelled=lambda: len(forge.argvs) >= 2)
+        self.assertEqual(caught.exception.code, "cancelled")
+        self.assertEqual(len(forge.argvs), 2)
+        self.assertFalse([a for a in forge.argvs if "compare/" in a[1] or "contents/" in a[1]])
 
 
 class WaitingCheckTest(unittest.TestCase):

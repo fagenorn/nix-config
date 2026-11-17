@@ -912,11 +912,16 @@ drops the reading of every project not in that set, so a project with no such sp
 call. For a project it reads the local half, `local_reader(root, pattern)` (default
 `movement.read_local`: the branch reflogs and the release store), where `pattern` is the project's
 branch pattern, and the forge half, `pull_reader(slug, pattern, cancelled=...)` (`movement.read_pulls`:
-one call for the open pull requests), through `answer.with_retries`, so a transient `ForgeError`
+two calls, the GraphQL pulls query and the REST lock listing), through `answer.with_retries`, so a transient `ForgeError`
 is retried on ADR-console-032's schedule within its 30-second deadline and a non-transient one is
 not. A forge read that cannot be made (no `pull_reader`, no slug) or that failed leaves `pulls`
 None, and `movement.merged` keeps the last good reading of the pull requests: the sprint reads
-its wait for the quiet window from the last time anything moved, then goes quiet. The merged reading
+its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
+receives the issues whose run is in a session not ended (`live`) and those of them in a lock step (`IssueStage.locking`,
+#1184); a holding pull request's issues count only when live (a run that died holding the lock leaves its pull request
+holding until a waiter takes it over, ADR-console-061 D1); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
+of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
 log. The stop flag cancels the read in flight and a read finished after the stop changes nothing.
 Stderr lines: `console: movement_read_failed <project_id> <Type>: <message>` (a forge read that
@@ -924,7 +929,7 @@ failed), `console: movement_local_failed <project_id> <Type>: <message>` (the lo
 it reads as no movement), `console: movement_release_invalid <project_id> <transaction id>...` (the
 release store holds a transaction that is not readable; one line until a good read, and it moves
 nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
-loop goes on). The cost is one forge call per project with a running sprint per `MOVEMENT_SECONDS`.
+loop goes on). The cost is two forge calls per project with a running sprint per `MOVEMENT_SECONDS`.
 The sessions half (#1185): under the same lock the poll computes, per running project,
 `view.sprint_sessions_of` (the live sessions that carry a running sprint's manager name, are its
 `manager_session` or run a delivery of one of its issues); only for a project with at least one
@@ -1260,7 +1265,7 @@ lock held, and no row or stderr line carries the owner's text or the sprint's se
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
-re-folds the sessions and the inbox records and re-derives the last look and the moments from the
+re-folds the sessions, the inbox records and the project questions and re-derives the last look and the moments from the
 log under the ingest lock, with the construction code, and publishes, so the running digest equals
 the one a restart would publish, and a later change is judged against what the log still holds. A failing pass
 is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on. Each pass, the
@@ -1308,7 +1313,8 @@ A question session's spend is the `questions` aspect, its sessions folded from t
 `project_question.asked` rows' `session_id` and `profile` (`spend.question_sessions`), on
 construction and on each append. The asked and answered rows are folded by
 `project_question.asked_questions` into each project entry's `questions`, at construction and on
-each append; retention does not re-fold them.
+each append; a retention pass that removed rows re-folds them from the retained log, as a restart
+would, so a follow-up is admitted and grouped against what the log still holds (#1178).
 A failed iteration is one stderr line `console: spend_poll_failed <Type>: <message>` and the loop
 goes on.
 
@@ -1324,19 +1330,25 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question` (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062)
+(`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None)` admits a question under the ingest
 lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
-question's own checks, and no account the console would start a session under
-(`_session_choice`); a refusal appends nothing and counts nothing. An accepted question appends one
-`project_question.asked` row (`question_id`, `question`, `profile`, `session_id`, the last also
-passed as the session's `--session-id`) and counts itself open in that same section. Its job reads the project's read-only routes (a contract that cannot be resolved is a
+question's own checks, with a `thread_id` only the follow-up checks of
+`project_question.follow_up` against the project's folded questions (an unknown thread, a thread
+whose last question is not answered, a thread too long to carry), and no account the console would
+start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
+accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
+`session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
+`thread_id` it was given) and counts itself open in that same section. A follow-up's session gets
+the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
+model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's read-only routes (a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
@@ -1817,12 +1829,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question = project_question.parse_request(body)
+            project_id, question, thread_id = project_question.parse_request(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question)
+            console.ask_project_question(project_id, question, thread_id)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -3549,12 +3561,15 @@ class ConsoleService:
             worker.start()
             self._project_question_workers.append(worker)
 
-    def ask_project_question(self, project_id: str, text: str) -> str:
+    def ask_project_question(self, project_id: str, text: str,
+                             thread_id: str | None = None) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
-        session runs on a job handed to `project_question_dispatch` outside it. Refusals are
-        `project_question.Refused` and append and count nothing.
+        session runs on a job handed to `project_question_dispatch` outside it. A `thread_id`
+        makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
+        questions after the question's own checks and before the profile choice, and its thread's
+        turns go to the job. Refusals are `project_question.Refused` and append and count nothing.
         """
         with self._ingest:
             if self._project_asker is None:
@@ -3564,21 +3579,25 @@ class ConsoleService:
             if project_id not in self._states:
                 raise project_question.Refused(project_question.UNREGISTERED)
             text = project_question.checked_question(text)
+            thread = () if thread_id is None else project_question.follow_up(
+                self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
             if profile is None:
                 raise project_question.Refused(project_question.NO_PROFILE)
             root = self._states[project_id].root
             question_id = project_question.new_question_id()
             session_id = project_question.new_session_id()
-            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, {
-                "question_id": question_id, "question": text, "profile": profile,
-                "session_id": session_id})])
+            payload = {"question_id": question_id, "question": text, "profile": profile,
+                       "session_id": session_id}
+            if thread_id is not None:
+                payload["thread_id"] = thread_id
+            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, payload)])
             self._apply(appended)
             self._project_questions_open += 1
         try:
             self._project_question_dispatch(
                 lambda: self._run_project_question(
-                    question_id, project_id, root, text, profile, session_id))
+                    question_id, project_id, root, text, profile, session_id, thread))
         except BaseException as error:
             self._record_project_answer(question_id, project_id, project_question.Outcome(
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
@@ -3586,7 +3605,8 @@ class ConsoleService:
         return question_id
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
-                              profile: str, session_id: str) -> None:
+                              profile: str, session_id: str,
+                              thread: "tuple[project_question.Turn, ...]" = ()) -> None:
         """The job of one accepted question: stop check, routes, the session, then the one answer."""
         outcome = None
         try:
@@ -3614,7 +3634,7 @@ class ConsoleService:
                                 ask = project_question.new_ask(
                                     question_id, project_id, root, text, profile, routes,
                                     Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id)
+                                    session_id=session_id, thread=thread)
                                 try:
                                     outcome = self._project_asker(ask, self._stop)
                                 except Exception as error:
@@ -6456,8 +6476,8 @@ class ConsoleService:
     def retain(self) -> int:
         """One retention pass; when it removed rows, re-fold the digest's baselines and publish.
 
-        The folded sessions and inbox records are rebuilt from the retained log, as a
-        restart would, so a later change is judged against what the log still holds.
+        The folded sessions, inbox records and project questions are rebuilt from the retained
+        log, as a restart would, so a later change is judged against what the log still holds.
         """
         with self._ingest:
             removed = self.log.retain()
@@ -6478,6 +6498,7 @@ class ConsoleService:
                 self._adoptions = approve.adoptions(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
+                self._project_questions = project_question.asked_questions(events)
                 self._derive_digest(events)
                 self._publish()
             self._sweep_pictures(events)
@@ -6954,9 +6975,21 @@ class ConsoleService:
             with self._ingest:
                 if project_id not in self._states or self._closed:
                     continue
+                live, locking = self._live_issues(project_id)
                 self._movement[project_id] = movement.merged(
-                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local)
+                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local,
+                    locking=locking, live=live)
                 self._publish()
+
+    def _live_issues(self, project_id: str) -> tuple[frozenset[int], frozenset[int]]:
+        """Under the ingest lock: the issues of the runs in sessions not ended, and those of them sitting in a lock step."""
+        sids = {sid for sid, session in self._sessions.items()
+                if session.state != sessions.ENDED and session.repo is not None
+                and project_for(session.repo, self._states) == project_id}
+        stages = [stage for (sid, _), state in self._deliveries.items() if sid in sids
+                  for stage in state.issues]
+        return (frozenset(stage.issue for stage in stages),
+                frozenset(stage.issue for stage in stages if stage.locking))
 
     def _move(self) -> None:
         while True:
