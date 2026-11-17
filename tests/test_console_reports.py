@@ -321,8 +321,7 @@ class SprintBallViewTest(unittest.TestCase):
         failed = with_manager(sprint(A), state="failed")
         shown = self.shown(failed, T0_MS + MIN)
         self.assertEqual((shown["manager_state"], shown["retry"]), ("failed", True))
-        self.assertEqual((shown["ball"], shown["ball_text"]),
-                         ("nobody", "nothing running, may be stuck"))
+        self.assertEqual((shown["ball"], shown["ball_text"]), ("owner", "waiting on you"))
         handed_off = self.shown(failed, T0_MS + MIN, manager_session("working"))
         self.assertEqual(handed_off["ball"], "manager")
 

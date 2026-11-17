@@ -15,24 +15,42 @@ non-empty list of strings, a word is not a `project_question_hook.PLAIN_WORD`, o
 the project's root. The root it compares with is the snapshot's own `project.root`, never the path
 the caller passed: the resolver canonicalises the root and builds every cwd from that canonical
 root, while a registry root may hold a symlink, so comparing with the caller's path would drop every
-route of such a project and wrongly answer with the production line (D9). `routes_of(root)` is
-`read_only_routes(resolve(root))` and lets every exception, a `ContractError` included, propagate:
-`()` means only "resolved, no runnable read-only command" (bootstrap: never guess a value the
-resolver declined). `resolve` is a test seam only.
+route of such a project and wrongly answer with the production line (D9). When the root holds a
+`devenv.nix` that is a regular file (an inference from the root, not a contract field), each kept
+route's argv is `devenv shell -- <declared argv>` unless it already starts with `devenv`, so the
+read runs in the project's environment; its `id` and `cwd` do not change, and the skip rules above
+run on the declared argv first (D7). `repo_slug(snapshot)` is `bindings.tracker.repo_slug` only for a
+`github` tracker whose slug fullmatches `project_question_hook.REPO_SLUG`, else None, and never raises.
+`credential_unset(snapshot)` is `bindings.tracker.credential_env.unset_before_invocation` (the
+non-empty strings of it, else ()). `session_environment(ask, environ)` is `manager.client_environment`
+minus the `GIT_REPOSITORY_ENV` variables (an inherited `GIT_DIR` would point the admitted git reads at
+another repository) and minus the names in `ask.unset` (a stale `GH_TOKEN` would override the working
+`gh` credential); the run uses it, and the hook rejects `env` and `unset` so the session cannot repair it.
+`reach_of(root)` is `Reach(read_only_routes(s), repo_slug(s), credential_unset(s))` with `s = resolve(root)` and lets every
+exception, a `ContractError` included, propagate: an empty `routes` means only "resolved, no
+runnable read-only command" (bootstrap: never guess a value the resolver declined). `resolve` is a
+test seam only.
 
-Prompt. `LEAD`, then a routes paragraph (the declared commands, each exactly as written and alone;
-or that none is declared so production cannot be read), then `QUESTION_MARK` and the question.
+Prompt. `LEAD` (the owner's framing, the `ANSWER_RULES` and the heading shape: a direct answer in two
+or three sentences in plain business terms, what is live first, no decision-record jargon, history
+and tracker before decision records, a failed command named in the answer), then a routes paragraph
+(the declared commands, each exactly as written and alone; or that none is declared so production
+cannot be read), then the reads paragraph (the git reads with their examples, and either the gh
+reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
+thread text, then `QUESTION_MARK` and the question (ADR-console-065).
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`.
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
 so the account's `auto` mode and its allows never apply; `dontAsk` denies every call that is not
-pre-approved; the allow list is `READ_RULES` plus one `Bash(<argv>)` per route; the deny list is
-`DENIED_RULES`, which wins over any allow; `--tools` removes every other built-in tool, and with no
-route the Bash tool does not exist at all. On top of those, a PreToolUse command hook
-(`project_question_hook`, run through `siblings.sibling_argv`) admits only reads and the bare
-declared commands; `"onFailure": "block"` makes the pinned client treat a hook that errors, fails
+pre-approved; the allow list is `READ_RULES`, one `Bash(<argv>)` per route, the `GIT_READ_RULES` and,
+when the project has a GitHub repository, the `GH_READ_RULES`; the deny list is `DENIED_RULES`,
+which wins over any allow; `--tools` removes every other built-in tool, and Bash is always a tool
+(the git reads need it even with no route). On top of those, a PreToolUse command hook
+(`project_question_hook`, run through `siblings.sibling_argv`, given the allowed argv and the
+repository) admits only reads, the bare declared commands and the plain git and gh reads;
+`"onFailure": "block"` makes the pinned client treat a hook that errors, fails
 to start or times out as a block, because without it such a hook is non-blocking and the call would
 fall to the permission rules. The file lives in `SETTINGS_DIR` under the console's state (a 0700
 directory, the file 0600, written atomically) and is removed when the run ends.
@@ -107,7 +125,8 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import manager
 from agent_tools.console.event_log import (
     PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, Event)
-from agent_tools.console.project_question_hook import PLAIN_WORD
+from agent_tools.console.project_question_hook import (
+    GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD, REPO_SLUG)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -118,6 +137,9 @@ MAX_QUESTION_CHARS = 2000
 SETTINGS_DIR = "project-question-settings"
 SETTINGS_SUFFIX = ".settings.json"
 HOOK_MODULE = "console.project_question_hook"
+GIT_REPOSITORY_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
 HOOK_TIMEOUT = 10
 QUESTION_MARK = "The question: "
 EARLIER_QUESTION = "Earlier question: "
@@ -129,6 +151,9 @@ TIMED_OUT = "timed_out"
 WORKING = "working"
 
 READ_RULES = ("Read", "Grep", "Glob")
+GIT_READ_RULES = tuple(f"Bash(git {verb}:*)" for verb in GIT_READS)
+GH_READ_RULES = tuple(
+    f"Bash(gh {group} {verb}:*)" for group in GH_READ_GROUPS for verb in GH_READ_VERBS)
 DENIED_RULES = (
     "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
     "Bash(git push:*)", "Bash(gh pr create:*)", "Bash(gh pr merge:*)",
@@ -150,10 +175,23 @@ UNREADABLE_TEXT = "the session's answer could not be read"
 STOPPING = "the console is stopping"
 PROFILE_GONE = "the account {profile} was removed before the session started"
 
+ANSWER_RULES = (
+    "Lead with the direct answer in two or three sentences, in the owner's plain business terms, "
+    "then at most a short list of five lines. "
+    "When the question asks what is live or in production, say what is live first. "
+    "Use no decision-record jargon: no ADR numbers, decision ids or internal terms unless the "
+    "owner asks for them. "
+    "Answer from the project's history, its pull requests and releases and its declared "
+    "production read, not from its decision records alone. "
+    "If a command you run fails, say plainly in the answer which command failed and what it "
+    "printed. "
+)
+
 LEAD = (
     "You answer one question about this project for its owner, started by the console. You only "
     "read: a step you are refused stays refused. A step that would cost money or needs a "
     "credential you lack is never attempted: put it in your answer as a question for the owner. "
+    + ANSWER_RULES +
     "Reply in exactly this shape, one heading per line:\n"
     "Answer: <the answer in plain words>\n"
     "Read: <the files you read, or none>\n"
@@ -192,6 +230,13 @@ class Route:
 
 
 @dataclass(frozen=True)
+class Reach:
+    routes: tuple[Route, ...]
+    repo: str | None
+    unset: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Turn:
     question: str
     answer: str
@@ -208,6 +253,8 @@ class Ask:
     settings: Path
     session_id: str
     thread: tuple[Turn, ...] = ()
+    repo: str | None = None
+    unset: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -229,6 +276,7 @@ def read_only_routes(snapshot: Mapping) -> tuple[Route, ...]:
     if production["status"] != "declared":
         return ()
     root = os.path.normpath(snapshot["project"]["root"])
+    in_devenv = os.path.isfile(os.path.join(root, "devenv.nix"))
     bindings = snapshot["bindings"]["commands"]
     routes = []
     for id in production["read_only"]["commands"]:
@@ -238,13 +286,37 @@ def read_only_routes(snapshot: Mapping) -> tuple[Route, ...]:
         cwd = binding["cwd"]
         if not isinstance(cwd, str) or os.path.normpath(cwd) != root:
             continue
-        routes.append(Route(id, tuple(binding["argv"]), cwd))
+        argv = tuple(binding["argv"])
+        if in_devenv and argv[0] != "devenv":
+            argv = ("devenv", "shell", "--", *argv)
+        routes.append(Route(id, argv, cwd))
     return tuple(routes)
 
 
-def routes_of(root: str, *,
-              resolve: Callable[[str], Mapping] = resolve_project.resolve) -> tuple[Route, ...]:
-    return read_only_routes(resolve(root))
+def repo_slug(snapshot: Mapping) -> str | None:
+    bindings = snapshot.get("bindings")
+    tracker = bindings.get("tracker") if isinstance(bindings, Mapping) else None
+    if not isinstance(tracker, Mapping) or tracker.get("kind") != "github":
+        return None
+    slug = tracker.get("repo_slug")
+    return slug if isinstance(slug, str) and REPO_SLUG.fullmatch(slug) else None
+
+
+def credential_unset(snapshot: Mapping) -> tuple[str, ...]:
+    """`bindings.tracker.credential_env.unset_before_invocation`; () when absent or not strings."""
+    bindings = snapshot.get("bindings")
+    tracker = bindings.get("tracker") if isinstance(bindings, Mapping) else None
+    policy = tracker.get("credential_env") if isinstance(tracker, Mapping) else None
+    names = policy.get("unset_before_invocation") if isinstance(policy, Mapping) else None
+    if not isinstance(names, list):
+        return ()
+    return tuple(name for name in names if isinstance(name, str) and name)
+
+
+def reach_of(root: str, *,
+             resolve: Callable[[str], Mapping] = resolve_project.resolve) -> Reach:
+    snapshot = resolve(root)
+    return Reach(read_only_routes(snapshot), repo_slug(snapshot), credential_unset(snapshot))
 
 
 def new_question_id() -> str:
@@ -257,9 +329,11 @@ def new_session_id() -> str:
 
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
-            thread: Sequence[Turn] = ()) -> Ask:
+            thread: Sequence[Turn] = (), repo: str | None = None,
+            unset: Sequence[str] = ()) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
-               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread))
+               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo,
+               tuple(unset))
 
 
 def checked_question(text: str) -> str:
@@ -300,34 +374,51 @@ def thread_text(thread: Sequence[Turn]) -> str:
         for turn in thread)
 
 
-def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = ()) -> str:
+def reads_paragraph(repo: str | None) -> str:
+    text = ("You may also run these reads, each alone, in plain words with no quotes: git log, "
+            "git show, git diff, git status, git blame, git ls-files and git tag -l. For recent "
+            "work: git log --since=7.days.ago --oneline. Name revisions by sha, tag or --since, "
+            "since ~ and ^ are refused. ")
+    if repo:
+        return text + (
+            "For this project's GitHub repository: gh pr list, gh pr view, gh release list, "
+            "gh release view, gh issue list, gh issue view, gh run list and gh run view, each "
+            f"with --repo {repo} right after list or view, before any other word, and no --. "
+            f"For merged work: gh pr list --repo {repo} --state merged --limit 30. "
+            f"For what was released: gh release list --repo {repo}.\n\n")
+    return text + "gh cannot be used: this project's contract names no GitHub repository.\n\n"
+
+
+def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), *,
+           repo: str | None = None) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
     else:
         paragraph = ("This project declares no read-only command, so production cannot be read: "
-                     "answer from the code and docs only.\n\n")
-    return LEAD + paragraph + thread_text(thread) + QUESTION_MARK + question
+                     "answer from the code, the docs and the reads below.\n\n")
+    return LEAD + paragraph + reads_paragraph(repo) + thread_text(thread) + QUESTION_MARK + question
 
 
 def tools(routes: Sequence[Route]) -> str:
-    return "Read,Grep,Glob,Bash" if routes else "Read,Grep,Glob"
+    return "Read,Grep,Glob,Bash"
 
 
-def hook_command(routes: Sequence[Route]) -> str:
+def hook_command(routes: Sequence[Route], repo: str | None = None) -> str:
     allowed = json.dumps([list(route.argv) for route in routes], separators=(",", ":"))
-    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed])
+    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or ""])
 
 
-def settings_document(routes: Sequence[Route]) -> dict:
+def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
     return {
         "permissions": {
             "defaultMode": PERMISSION_MODE,
-            "allow": [*READ_RULES, *(f"Bash({' '.join(route.argv)})" for route in routes)],
+            "allow": [*READ_RULES, *(f"Bash({' '.join(route.argv)})" for route in routes),
+                      *GIT_READ_RULES, *(GH_READ_RULES if repo else ())],
             "deny": list(DENIED_RULES),
         },
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
-            "type": "command", "command": hook_command(routes),
+            "type": "command", "command": hook_command(routes, repo),
             "timeout": HOOK_TIMEOUT, "onFailure": "block",
         }]}]},
     }
@@ -339,12 +430,20 @@ def launch_command(ask: Ask, platform: str) -> list[str] | None:
     return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
-            prompt(ask.question, ask.routes, ask.thread)]
+            prompt(ask.question, ask.routes, ask.thread, repo=ask.repo)]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:
     text = result.strip()
     return text if routes else text + "\n" + NO_PRODUCTION_LINE
+
+
+def session_environment(ask: Ask, environ: Mapping[str, str]) -> dict[str, str]:
+    """The client's environment without the repository selection or the contract's credentials."""
+    env = manager.client_environment(ask.profile, environ)
+    for name in (*GIT_REPOSITORY_ENV, *ask.unset):
+        env.pop(name, None)
+    return env
 
 
 def _write_settings(ask: Ask) -> None:
@@ -354,7 +453,7 @@ def _write_settings(ask: Ask) -> None:
     descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(settings_document(ask.routes), handle)
+            json.dump(settings_document(ask.routes, ask.repo), handle)
         os.chmod(temporary, 0o600)
         os.replace(temporary, ask.settings)
     except BaseException:
@@ -385,7 +484,7 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
         with tempfile.TemporaryFile() as stderr:
             try:
                 done = run(argv, timeout=TIMEOUT_SECONDS, cancel=cancel, cwd=ask.root,
-                           env=manager.client_environment(ask.profile, environ),
+                           env=session_environment(ask, environ),
                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=stderr,
                            start_new_session=True)
             except subprocess.TimeoutExpired:

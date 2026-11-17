@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twenty-two screens the sprint block, the finished list, the message life, the
+- `STATES` names the twenty-four screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -18,7 +18,8 @@ Contract:
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
-  so the spend figures show; `goal-open` is the sprint block of `tell-box-open` with the top
+  so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
+  card carrying the reason and the Retry and Drop the sprint buttons; `goal-open` is the sprint block of `tell-box-open` with the top
   bar's goal field focused so its box is open; `inbox-card` is `owner/web`'s question card with
   two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
@@ -29,9 +30,13 @@ Contract:
   Questions fold left closed over two threads, an older one-question thread and a newer thread
   of a question and its answered follow-up, no sprint running so the three projects are quiet
   lines; `questions-open` is that desk with the fold and the newest thread opened when the page
-  has the fold, and on a page without it nothing is clicked, which is the before picture);
+  has the fold, and on a page without it nothing is clicked, which is the before picture;
+  `ask-goal` is the `ask-box` fixture with the Questions fold and `owner/web`'s answered
+  question's thread opened and that question's Make it a goal clicked, so the goal box shows
+  filled from it with `owner/web` chosen, and shot against a page without that control it is
+  unclicked, which is the before picture);
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 44 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 48 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -55,7 +60,8 @@ Contract:
   button does not show `owner/web`'s open field, its working question and its answered question's
   Read line (`OPEN_ASK`); or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
   opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
-  without the fold that still lists the follow-up and its answer, the before picture), or when any
+  without the fold that still lists the follow-up and its answer, the before picture), or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
+  closed, the wrong text or project, or the field clipping the filled text); or when any
   shot has a visible project line whose Ask a question button sits on another row than its Give it
   a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
@@ -92,8 +98,8 @@ from .console_test_support import hook_body, write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "goal-open", "inbox-card", "accounts-panel",
-          "ask-box", "questions-closed", "questions-open")
+          "notice-post-open", "desk-spend", "failed-start", "goal-open", "inbox-card", "accounts-panel",
+          "ask-box", "questions-closed", "questions-open", "ask-goal")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -110,11 +116,16 @@ OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
 ASK_ANSWERED_QUESTION = "What does the build check?"
 ASK_WORKING_QUESTION = "Is the importer deployed on this host?"
 ASK_READ_LINE = "Read: flake.nix, lib/helpers.nix"
+# Short on purpose: the open goal field shows three 22 px lines, so the filled question, a blank
+# line and this summary must each fit one line of its ~380 px width.
+ASK_ANSWER_SUMMARY = "It builds the three hosts and their checks."
 ASK_OPEN = 'li[data-project="owner/web"] button.ask-open'
 ASK_FOLD = 'details[data-key="questions:owner/web"] > summary'
 ASK_THREADS = tuple(f'details[data-key="thread:owner/web:{qid}"] > summary'
                     for qid in ("1177a2", "1177a1"))
 OPEN_ASK = (True, "Working on it", ASK_READ_LINE)
+ASK_GOAL = 'details[data-key="thread:owner/web:1177a1"] button.ask-goal'
+FILLED_GOAL = (True, ASK_ANSWERED_QUESTION + "\n\n" + ASK_ANSWER_SUMMARY, "owner/web", True)
 THREAD_QUESTION = "What does the build check?"
 FOLLOW_QUESTION = "Does it build the darwin hosts too?"
 FOLLOW_READ_LINE = "Read: .github/workflows/ci.yaml"
@@ -157,6 +168,7 @@ class Shot:
     scroll_y: float = 0.0
     short: tuple[str, ...] = ()
     ask: tuple[bool, str | None, str | None] | None = None
+    goal: tuple[bool, str | None, str | None, bool | None] | None = None
     acts: tuple[str, ...] = ()
     thread: tuple[bool, str | None, bool] | None = None
 
@@ -231,6 +243,17 @@ class _Seed:
             self.put(stop - 20, "manager.stopped", project, {"sprint_id": sid})
         return sid, goal
 
+    def failed_start(self, project: str, title: str, ago: float) -> tuple[str, str]:
+        """One sprint whose first launch was refused: a stated goal and a `manager.failed`."""
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        self.put(ago, "goal.stated", project, {"sprint_id": sid, "goal": goal})
+        self.put(ago - 10, "manager.failed", project, {"sprint_id": sid, "reason": (
+            "Workspace not trusted. Run `claude` in /home/owner/Projects/web once and accept "
+            "the trust prompt, then retry.")})
+        return sid, goal
+
     def check(self, project: str, issue: int, ago: float) -> None:
         """One open `verify-ask` inbox item on `issue`, which blocks none of the manager's work."""
         self.put(ago, "inbox.seen", project, {
@@ -280,6 +303,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
                     asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "failed-start":
+        seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open"):
@@ -321,15 +346,14 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
             "what": "python/agent_tools/console/page.html", "until": "the form lands"}})
         seed.put(30, "notice.posted", web, {"poster": "owner", "notice": {
             "kind": "heads-up", "text": "routes are frozen until Friday"}})
-    elif state == "ask-box":
+    elif state in ("ask-box", "ask-goal"):
         seed.put(3 * MINUTE, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a1", "question": ASK_ANSWERED_QUESTION,
             "profile": "work-main", "session_id": "5b1f0c2e-7a4d-4e8b-9c3a-1d2e3f4a5b6c"})
         seed.put(2 * MINUTE, event_log.PROJECT_QUESTION_ANSWERED, web, {
             "question_id": "1177a1", "outcome": "answered",
-            "answer": "Answer: It evaluates the three hosts and builds the console's checks.\n"
-                      f"{ASK_READ_LINE}\nRan: just build\nCould not find out: none\n"
-                      "Question for you: none"})
+            "answer": f"Answer: {ASK_ANSWER_SUMMARY}\n{ASK_READ_LINE}\nRan: just build\n"
+                      "Could not find out: none\nQuestion for you: none"})
         seed.put(20, event_log.PROJECT_QUESTION_ASKED, web, {
             "question_id": "1177a2", "question": ASK_WORKING_QUESTION,
             "profile": "work-main", "session_id": "8d3e9a40-2c6b-4f17-a5d8-0e9f8a7b6c5d"})
@@ -618,6 +642,17 @@ ASK_READING = f"""(() => {{
           read({json.dumps(ASK_ANSWERED_QUESTION)}, 'p.ask-read')];
 }})()"""
 
+GOAL_READING = """(() => {
+  const box = document.querySelector('#goal .goal-box');
+  const field = document.querySelector('#goal textarea.goal-text');
+  const pressed = document.querySelector('#goal .goal-project[aria-pressed="true"]');
+  const shown = field ? field.getClientRects().length > 0 : false;
+  return [Boolean(box && box.getClientRects().length > 0),
+          field ? field.value : null,
+          pressed ? pressed.textContent.trim() : null,
+          field ? shown && field.scrollHeight <= field.clientHeight + 1 : null];
+})()"""
+
 ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((line) => {
   const give = line.querySelector('button.give-goal');
   const ask = line.querySelector('button.ask-open');
@@ -718,6 +753,15 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
                 for selector in (ASK_FOLD, *ASK_THREADS):
                     page.click(selector)
             ask = tuple(page.evaluate(ASK_READING))
+        goal = None
+        if state == "ask-goal":
+            if page.query_selector(ASK_FOLD):
+                for selector in (ASK_FOLD, ASK_THREADS[1]):
+                    page.click(selector)
+            if page.query_selector(ASK_GOAL):
+                page.click(ASK_GOAL)
+                page.wait_for_selector("#goal .goal-box")
+                goal = tuple(page.evaluate(GOAL_READING))
         thread = None
         if state == "questions-open":
             if page.query_selector(ASK_FOLD):
@@ -736,7 +780,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
-                short=short, ask=ask, acts=acts, thread=thread)
+                short=short, ask=ask, goal=goal, acts=acts, thread=thread)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -779,6 +823,11 @@ def main(argv: list[str] | None = None) -> int:
                if shot.state == "ask-box" and shot.ask not in (None, OPEN_ASK)]
     for shot in unasked:
         print(f"console-screenshots: {shot.path.name} does not show the open Ask box")
+    unfilled = [shot for shot in taken
+                if shot.state == "ask-goal" and shot.goal not in (None, FILLED_GOAL)]
+    for shot in unfilled:
+        print(f"console-screenshots: {shot.path.name} does not show the goal box filled from "
+              "the answer")
     unthreaded = [shot for shot in taken
                   if shot.state == "questions-open"
                   and shot.thread not in (None, OPEN_THREAD, BASE_THREAD)]
@@ -796,7 +845,7 @@ def main(argv: list[str] | None = None) -> int:
     for shot in short:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
-    return 1 if (wide or squeezed or jargon or closed or unasked or unthreaded or offrow
+    return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or offrow
                  or scrolled or short) else 0
 
 

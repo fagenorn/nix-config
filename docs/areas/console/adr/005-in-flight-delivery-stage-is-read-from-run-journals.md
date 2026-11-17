@@ -1,6 +1,6 @@
 # ADR-console-005 — In-flight delivery stage is read from run journals
 
-- **Status:** accepted; amended by ADR-console-064
+- **Status:** accepted; amended by ADR-console-067
 - **Decided in:** #830, #837, #858
 
 ## Context

@@ -32,7 +32,14 @@ from .test_console_account_service import Listing
 from .test_console_writes import Case
 
 DECLARED = (("just", "build"),)
+REPO = "owner/p01"
+GIT_READ_RULES = [
+    "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git status:*)",
+    "Bash(git blame:*)", "Bash(git ls-files:*)", "Bash(git tag:*)"]
 ROUTES = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
+GITHUB = {"kind": "github", "cli": "gh", "repo_slug": "owner/p01",
+          "credential_env": {"unset_before_invocation": []}}
+REACH = project_question.Reach(ROUTES, "owner/p01")
 ENVIRON = {"HOME": "/home/u", "PATH": "/bin"}
 SESSION_ID = "0b5c8f9e-1d2a-4c3b-9e8f-7a6b5c4d3e2f"
 SUCCESS = (
@@ -41,7 +48,7 @@ SUCCESS = (
 )
 
 
-def SNAPSHOT(read_only, cwd_of=lambda id: "/srv/p01", root="/srv/p01"):  # noqa: N802 -- a fixture
+def SNAPSHOT(read_only, cwd_of=lambda id: "/srv/p01", root="/srv/p01", tracker=None):  # noqa: N802 -- a fixture
     return {
         "project": {"root": root, "id": "owner/p01", "name": "p01"},
         "production": {
@@ -55,7 +62,9 @@ def SNAPSHOT(read_only, cwd_of=lambda id: "/srv/p01", root="/srv/p01"):  # noqa:
             "nix-activate": {"argv": ["just", "switch"], "cwd": "/srv/p01", "env": []},
             "sub-check": {"argv": ["./check"], "cwd": "/srv/p01/sub", "env": []},
             "piped": {"argv": ["sh", "-c", "a|b"], "cwd": "/srv/p01", "env": []},
-        }},
+            "dev-read": {"argv": ["devenv", "shell", "--", "railway", "status"],
+                         "cwd": cwd_of("dev-read"), "env": []},
+        }, **({"tracker": tracker} if tracker is not None else {})},
     }
 
 
@@ -132,11 +141,109 @@ class HookTableTest(unittest.TestCase):
             with self.subTest(document):
                 self.assertEqual(hook.decide(document, allowed), expected)
 
-    def test_with_no_declared_command_every_shell_command_is_denied(self):
+    def test_with_no_declared_command_only_the_git_reads_run(self):
         denied = ("deny", hook.NO_COMMANDS)
         self.assertEqual(hook.decide(bash("just build"), ()), denied)
         self.assertEqual(hook.decide(bash("ls"), ()), denied)
         self.assertEqual(hook.decide(tool("Read"), ()), ("allow", hook.ALLOWED))
+        self.assertEqual(hook.decide(bash("git log --oneline"), ()), ("allow", hook.ALLOWED))
+        self.assertEqual(
+            hook.decide(bash("gh pr list --repo owner/p01"), ()), ("deny", hook.reads_denied(None)))
+
+    def test_the_hook_admits_the_git_and_gh_reads_of_the_projects_own_repository(self):
+        allow = ("allow", hook.ALLOWED)
+        for command in (
+            "git log", "git log --since=7.days.ago --oneline", "git log -n 20 --stat",
+            "git show abc123 --stat", "git diff main..HEAD --stat", "git status",
+            "git status --short", "git blame -- README.md", "git ls-files", "git tag",
+            "git tag -l", "git tag --list v1.0", "git tag -l --sort=-creatordate -n3",
+            "gh pr list --repo owner/p01 --state merged --limit 30",
+            "gh pr list --repo=owner/p01",
+            "gh pr view --repo owner/p01 12 --comments",
+            "gh pr view -R owner/p01 12",
+            "gh release list --repo owner/p01",
+            "gh release view --repo owner/p01 v1.2.0",
+            "gh issue list --repo owner/p01 --state closed",
+            "gh issue view --repo owner/p01 7",
+            "gh run list --repo owner/p01 --limit 10",
+            "gh run view --repo owner/p01 123 --log-failed",
+            "gh pr list --repo owner/p01 --search merged",
+        ):
+            with self.subTest(command):
+                self.assertEqual(hook.decide(bash(command), DECLARED, repo=REPO), allow)
+        self.assertEqual(hook.decide(bash("git log"), (), repo=None), allow)
+        self.assertEqual(hook.decide(bash("just build"), DECLARED, repo=REPO), allow)
+
+    def test_the_hook_denies_git_and_gh_writes_other_repositories_and_compositions(self):
+        reads = ("deny", hook.reads_denied(REPO))
+        undeclared = ("deny", hook.COMMAND_DENIED.format(commands="just build"))
+        lifecycle = ("deny", hook.LIFECYCLE_DENIED)
+        rows = []
+        for command in (
+            "git commit -m x", "git checkout main", "git reset --hard", "git fetch", "git pull",
+            "git stash", "git config user.name", "git branch topic",
+            "git tag v9", "git tag -d v1", "git tag -l -d v1", "git tag -ld", "git tag -a v9 -m x",
+            "git tag -f v1",
+            "git tag --format -l v9", "git tag --sort=refname --format -l v9",
+            "git tag --format --list v9 HEAD", "git tag -l --sort",
+            "git log --output=/tmp/x", "git diff --output /tmp/x", "git log --outp=/tmp/x",
+            "git diff --ext-diff",
+            "git -C /other log", "git -c core.pager=x log", "git --git-dir=/x log",
+            "git --no-pager log",
+            "/usr/bin/git log", "/usr/bin/gh pr list --repo owner/p01",
+            "gh pr list", "gh pr list --state open", "gh pr list --repo other/repo",
+            "gh pr list --repo=owner/p01x",
+            "gh pr list --repo owner/p01 --repo other/repo",
+            "gh pr list --repo owner/p01 -R owner/p01", "gh pr list -R other/repo",
+            "gh pr list -Rowner/p01", "gh pr list --repo=other/repo", "gh pr list --repo owner/p01x",
+            "gh pr list --repo Owner/p01", "gh pr list --repo",
+            "gh pr view --repo owner/p01 https://github.com/other/repo/pull/1",
+            "gh pr list --repo owner/p01 --head feature/x",
+            "gh pr list --search --repo=owner/p01",
+            "gh release view -- --repo=owner/p01",
+            "gh pr view 12 --repo owner/p01",
+            "gh release view --repo owner/p01 -- v1",
+            "gh pr list --repo owner/p01 --repo owner",
+            "gh pr list --repo owner/p01 -R owner",
+            "gh pr view --repo owner/p01 1 -cRowner",
+            "gh pr view --repo owner/p01 1 --web", "gh pr view --repo owner/p01 1 -w",
+            "gh pr view --repo owner/p01 1 -cw",
+            "gh issue create --repo owner/p01 --title t",
+            "gh issue comment 1 --repo owner/p01 --body b",
+            "gh issue close 1 --repo owner/p01", "gh pr checkout 1 --repo owner/p01",
+            "gh pr review 1 --repo owner/p01 --approve",
+            "gh release delete v1 --repo owner/p01", "gh release download v1 --repo owner/p01",
+            "gh run rerun 1 --repo owner/p01", "gh run cancel 1 --repo owner/p01",
+            "gh api repos/owner/p01", "gh -R owner/p01 pr list", "gh pr -R owner/p01 list",
+            "git log | cat", "git log > out.txt", "git log; rm -rf x", "git log && echo ok",
+            "git log || true", "git log &", "git log\nrm x", "git\tlog", "git log\n",
+            "git log --format='%h'", "git diff HEAD~3",
+            "gh pr list --repo owner/p01 | cat", "gh pr list --repo owner/p01 --jq .[0]",
+        ):
+            rows.append((command, REPO, reads))
+        for command in ("(git log)", "$(git log)", "`git log`", "FOO=1 git log"):
+            rows.append((command, REPO, undeclared))
+        for command in ("gh pr merge 1 --repo owner/p01", "gh release create v1 --repo owner/p01",
+                        "gh pr create --repo owner/p01 --title t", "git push"):
+            rows.append((command, REPO, lifecycle))
+        for command in ("gh pr list --repo owner/p01", "gh release list --repo owner/p01"):
+            rows.append((command, None, ("deny", hook.reads_denied(None))))
+        for command, repo, expected in rows:
+            with self.subTest(command=command, repo=repo):
+                self.assertEqual(hook.decide(bash(command), DECLARED, repo=repo), expected)
+        self.assertNotEqual(hook.reads_denied(None), hook.reads_denied(REPO))
+        self.assertIn("owner/p01", hook.reads_denied(REPO))
+        self.assertNotIn("owner/p01", hook.reads_denied(None))
+
+    def test_parse_repo_accepts_only_a_slug_or_nothing(self):
+        self.assertIsNone(hook.parse_repo(""))
+        self.assertEqual(hook.parse_repo("owner/p01"), "owner/p01")
+        self.assertEqual(hook.parse_repo("fagenorn/nix-config"), "fagenorn/nix-config")
+        for text in ("owner", "owner/p01/x", "-x/y", "owner/p 01", "a/b;c",
+                     "https://github.com/a/b", "/p01"):
+            with self.subTest(text):
+                with self.assertRaises(ValueError):
+                    hook.parse_repo(text)
 
     def test_a_malformed_call_is_denied(self):
         for document in (
@@ -179,7 +286,7 @@ class HookProcessTest(unittest.TestCase):
         }
 
     def test_the_module_prints_the_decision_in_the_client_format(self):
-        args = ['[["just","build"]]']
+        args = ['[["just","build"]]', "owner/p01"]
         done = self.run_hook(args, json.dumps(bash("just build")))
         self.assertEqual(done.returncode, 0)
         self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
@@ -190,22 +297,32 @@ class HookProcessTest(unittest.TestCase):
             json.loads(done.stdout),
             self.wire("deny", hook.COMMAND_DENIED.format(commands="just build")),
         )
+        done = self.run_hook(args, json.dumps(bash("gh pr list --repo owner/p01")))
+        self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
+        done = self.run_hook(
+            ['[["just","build"]]', ""], json.dumps(bash("gh pr list --repo owner/p01")))
+        self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.reads_denied(None)))
 
     def test_a_bad_argument_denies_everything(self):
         read = json.dumps(tool("Read", {"file_path": "/x"}))
         deep = "[" * 100000  # under the 128 KiB limit of one argv word
         for args, stdin_text in (
             ([], read),
-            (["not json"], read),
-            (['[["just","build"]]'], "{"),
-            (['[["just","build"]]'], deep),
-            ([deep], read),
+            (["not json", "owner/p01"], read),
+            (['[["just","build"]]', "owner/p01"], "{"),
+            (['[["just","build"]]', "owner/p01"], deep),
+            ([deep, "owner/p01"], read),
+            (['[["just","build"]]'], read),
+            (['[["just","build"]]', "owner/p01", "extra"], read),
+            (['[["just","build"]]', "not-a-slug"], read),
         ):
             with self.subTest(args=args, stdin=stdin_text):
                 done = self.run_hook(args, stdin_text)
                 self.assertEqual(done.returncode, 0)
                 self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.MALFORMED))
                 self.assertEqual(len(done.stdout.splitlines()), 1)
+        done = self.run_hook(['[["just","build"]]', "owner/p01"], read)
+        self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
 
 
 class LaunchTest(unittest.TestCase):
@@ -248,6 +365,18 @@ class LaunchTest(unittest.TestCase):
         return project_question.run_question(
             ask or self.ask, cancel, platform=platform, run=run, environ=ENVIRON)
 
+    def test_a_session_with_a_repository_passes_it_to_its_hook_and_settings(self):
+        ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "what shipped?", "work", self.routes,
+            self.settings_dir, session_id=SESSION_ID, repo="owner/p01")
+        self.ask = ask
+        self.start(self.fake(), ask=ask)
+        document = json.loads(self.settings["text"])
+        self.assertEqual(
+            shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])[-1], "owner/p01")
+        self.assertIn("Bash(gh pr list:*)", document["permissions"]["allow"])
+        self.assertIsNone(self.make_ask(self.routes).repo)
+
     def test_the_launch_runs_sonnet_headless_in_the_root_under_the_chosen_profile(self):
         outcome = self.start(self.fake())
 
@@ -264,6 +393,36 @@ class LaunchTest(unittest.TestCase):
         self.assertIs(kwargs["start_new_session"], True)
         self.assertEqual(outcome, project_question.Outcome("answered", answer="Answer: it builds the hosts."))
 
+    def test_the_session_environment_drops_repository_selection_and_the_declared_credentials(self):
+        ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "what shipped?", "work", self.routes,
+            self.settings_dir, session_id=SESSION_ID, repo="owner/p01", unset=("GH_TOKEN", "GITHUB_TOKEN"))
+        environ = {**ENVIRON, "GIT_DIR": "/other/.git", "GIT_WORK_TREE": "/other",
+                   "GIT_INDEX_FILE": "/other/index", "GH_TOKEN": "stale", "GITHUB_TOKEN": "stale",
+                   "KEEP": "1"}
+        self.ask = ask
+        project_question.run_question(ask, platform="linux", run=self.fake(), environ=environ)
+        env = self.calls[0][3]["env"]
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GH_TOKEN", "GITHUB_TOKEN"):
+            with self.subTest(name):
+                self.assertNotIn(name, env)
+        self.assertEqual((env["KEEP"], env["CLAUDE_ACCOUNT"]), ("1", "work"))
+
+    def test_a_credential_declared_for_unsetting_stays_when_the_contract_declares_none(self):
+        environ = {**ENVIRON, "GH_TOKEN": "mine"}
+        project_question.run_question(self.ask, platform="linux", run=self.fake(), environ=environ)
+        self.assertEqual(self.calls[0][3]["env"]["GH_TOKEN"], "mine")
+
+    def test_reach_carries_the_credentials_the_contract_unsets_before_invocation(self):
+        tracker = {**GITHUB, "credential_env": {"unset_before_invocation": ["GH_TOKEN", "GITHUB_TOKEN"]}}
+        reach = project_question.reach_of("/srv/p01", resolve=lambda p: SNAPSHOT([], tracker=tracker))
+        self.assertEqual(reach.unset, ("GH_TOKEN", "GITHUB_TOKEN"))
+        for name, snapshot in (("none", SNAPSHOT([], tracker=GITHUB)), ("no tracker", SNAPSHOT([])),
+                               ("not a list", SNAPSHOT([], tracker={**GITHUB, "credential_env": {
+                                   "unset_before_invocation": "GH_TOKEN"}}))):
+            with self.subTest(name):
+                self.assertEqual(project_question.credential_unset(snapshot), ())
+
     def test_each_question_gets_its_own_uuid_session_id(self):
         a, b = project_question.new_session_id(), project_question.new_session_id()
         self.assertNotEqual(a, b)
@@ -276,7 +435,7 @@ class LaunchTest(unittest.TestCase):
         document = json.loads(self.settings["text"])
         self.assertEqual(document["permissions"], {
             "defaultMode": "dontAsk",
-            "allow": ["Read", "Grep", "Glob", "Bash(just build)"],
+            "allow": ["Read", "Grep", "Glob", "Bash(just build)", *GIT_READ_RULES],
             "deny": ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Agent",
                      "Bash(git push:*)", "Bash(gh pr create:*)", "Bash(gh pr merge:*)",
                      "Bash(git branch -d:*)", "Bash(gh release create:*)"],
@@ -285,10 +444,22 @@ class LaunchTest(unittest.TestCase):
         self.assertEqual(document["hooks"], {"PreToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": hooks["command"], "timeout": 10, "onFailure": "block"}]}]})
         self.assertEqual(shlex.split(hooks["command"]), [
-            *siblings.sibling_argv("console.project_question_hook"), '[["just","build"]]'])
+            *siblings.sibling_argv("console.project_question_hook"), '[["just","build"]]', ""])
         self.assertEqual(self.settings["mode"], 0o600)
         self.assertEqual(self.settings["parent_mode"], 0o700)
         self.assertFalse(self.ask.settings.exists())
+
+    def test_a_repository_adds_its_gh_reads_to_the_settings_and_the_hook(self):
+        document = project_question.settings_document(self.routes, "owner/p01")
+        self.assertEqual(document["permissions"]["allow"][-8:], [
+            "Bash(gh pr list:*)", "Bash(gh pr view:*)", "Bash(gh release list:*)",
+            "Bash(gh release view:*)", "Bash(gh issue list:*)", "Bash(gh issue view:*)",
+            "Bash(gh run list:*)", "Bash(gh run view:*)"])
+        command = document["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertEqual(shlex.split(command)[-2:], ['[["just","build"]]', "owner/p01"])
+        allow = project_question.settings_document(self.routes)["permissions"]["allow"]
+        self.assertFalse([rule for rule in allow if rule.startswith("Bash(gh")])
+        self.assertEqual(project_question.tools(()), "Read,Grep,Glob,Bash")
 
     def test_a_session_past_the_time_cap_is_timed_out(self):
         outcome = self.start(self.fake(error=subprocess.TimeoutExpired(["claude-account"], 300)))
@@ -323,6 +494,44 @@ class LaunchTest(unittest.TestCase):
                     self.assertEqual(self.calls, [])
 
 
+class DevenvRouteTest(unittest.TestCase):
+    def roots(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        (base / "with_env").mkdir()
+        (base / "with_env" / "devenv.nix").write_text("{}\n")
+        (base / "plain").mkdir()
+        (base / "dir_env" / "devenv.nix").mkdir(parents=True)
+        return [str(base / name) for name in ("with_env", "plain", "dir_env")]
+
+    def routes_in(self, root):
+        return project_question.read_only_routes(
+            SNAPSHOT(["nix-build", "dev-read"], cwd_of=lambda id: root, root=root))
+
+    def test_a_declared_command_runs_inside_devenv_when_the_root_has_devenv_nix(self):
+        with_env, plain, dir_env = self.roots()
+        wrapped = (
+            project_question.Route("nix-build", ("devenv", "shell", "--", "just", "build"), with_env),
+            project_question.Route("dev-read", ("devenv", "shell", "--", "railway", "status"), with_env))
+        self.assertEqual(self.routes_in(with_env), wrapped)
+        bare = lambda root: (
+            project_question.Route("nix-build", ("just", "build"), root),
+            project_question.Route("dev-read", ("devenv", "shell", "--", "railway", "status"), root))
+        self.assertEqual(self.routes_in(plain), bare(plain))
+        self.assertEqual(self.routes_in(dir_env), bare(dir_env))
+
+    def test_a_devenv_route_is_what_the_hook_and_settings_admit(self):
+        routes = self.routes_in(self.roots()[0])
+        allowed = [list(route.argv) for route in routes]
+        self.assertIn("Bash(devenv shell -- just build)",
+                      project_question.settings_document(routes)["permissions"]["allow"])
+        self.assertEqual(hook.decide(bash("devenv shell -- just build"), allowed),
+                         ("allow", hook.ALLOWED))
+        self.assertEqual(hook.decide(bash("just build"), allowed)[0], "deny")
+        self.assertIn("devenv shell -- just build", project_question.prompt("q", routes))
+
+
 class NoProductionTest(unittest.TestCase):
     def test_read_only_routes_resolve_ids_to_argv(self):
         expected = (project_question.Route("nix-build", ("just", "build"), "/srv/p01"),)
@@ -341,7 +550,7 @@ class NoProductionTest(unittest.TestCase):
     def test_an_unresolvable_contract_raises_instead_of_answering_no_routes(self):
         with tempfile.TemporaryDirectory() as path:
             with self.assertRaises(resolve_project.ContractError):
-                project_question.routes_of(path)
+                project_question.reach_of(path)
 
     def test_a_contract_with_no_read_only_command_gets_the_production_line(self):
         for snapshot in (SNAPSHOT([]), {**SNAPSHOT([]), "production": {"status": "none"}},
@@ -365,11 +574,12 @@ class NoProductionTest(unittest.TestCase):
         self.assertEqual(
             outcome.answer, "Answer: it builds the hosts.\n" + project_question.NO_PRODUCTION_LINE)
         argv = seen["argv"]
-        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Bash")
         self.assertIn("This project declares no read-only command, so production cannot be read", argv[-1])
         hook_command = seen["settings"]["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
-        self.assertEqual(shlex.split(hook_command)[-1], "[]")
-        self.assertEqual(seen["settings"]["permissions"]["allow"], ["Read", "Grep", "Glob"])
+        self.assertEqual(shlex.split(hook_command)[-2:], ["[]", ""])
+        self.assertEqual(seen["settings"]["permissions"]["allow"],
+                         ["Read", "Grep", "Glob", *GIT_READ_RULES])
 
     def test_declared_routes_get_no_production_line(self):
         self.assertNotIn(project_question.NO_PRODUCTION_LINE, project_question.answer_text("Answer: x", ROUTES))
@@ -404,6 +614,20 @@ class NoProductionTest(unittest.TestCase):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 parse(body)
 
+    def test_reach_names_the_routes_and_the_github_repository_of_the_contract(self):
+        self.assertEqual(
+            project_question.reach_of("/srv/p01", resolve=lambda p: SNAPSHOT(["nix-build"], tracker=GITHUB)),
+            project_question.Reach(ROUTES, "owner/p01"))
+        for name, snapshot in (
+                ("no tracker", SNAPSHOT([])),
+                ("another kind", SNAPSHOT([], tracker={**GITHUB, "kind": "none"})),
+                ("no owner", SNAPSHOT([], tracker={**GITHUB, "repo_slug": "owner"})),
+                ("not a string", SNAPSHOT([], tracker={**GITHUB, "repo_slug": 3})),
+                ("not a slug", SNAPSHOT([], tracker={**GITHUB, "repo_slug": "a/b;c"})),
+                ("empty", {})):
+            with self.subTest(name):
+                self.assertIsNone(project_question.repo_slug(snapshot))
+
     def test_routes_compare_each_cwd_with_the_resolved_root_not_the_given_path(self):
         with tempfile.TemporaryDirectory() as directory:
             real = Path(directory) / "real"
@@ -416,9 +640,11 @@ class NoProductionTest(unittest.TestCase):
                 seen.append(path)
                 return SNAPSHOT(["nix-build"], cwd_of=lambda id: str(real), root=str(real))
 
-            routes = project_question.routes_of(str(link), resolve=resolve)
+            reach = project_question.reach_of(str(link), resolve=resolve)
         self.assertEqual(seen, [str(link)])
-        self.assertEqual(routes, (project_question.Route("nix-build", ("just", "build"), str(real)),))
+        self.assertEqual(
+            reach.routes, (project_question.Route("nix-build", ("just", "build"), str(real)),))
+        self.assertIsNone(reach.repo)
 
 
 if __name__ == "__main__":
@@ -658,6 +884,51 @@ class FollowUpTest(unittest.TestCase):
         self.assertEqual(len(project_question.follow_up(short, "q1", "why?")), 1)
 
 
+class AnswerRulesTest(unittest.TestCase):
+    def test_the_prompt_leads_with_the_direct_answer_in_plain_terms(self):
+        text = project_question.prompt(
+            "what was done in the last 7 days and what is in production?", ROUTES, repo="owner/p01")
+        rules = (
+            "Lead with the direct answer in two or three sentences, in the owner's plain business "
+            "terms, then at most a short list of five lines.",
+            "When the question asks what is live or in production, say what is live first.",
+            "Use no decision-record jargon: no ADR numbers, decision ids or internal terms unless "
+            "the owner asks for them.",
+            "Answer from the project's history, its pull requests and releases and its declared "
+            "production read, not from its decision records alone.",
+            "If a command you run fails, say plainly in the answer which command failed and what "
+            "it printed.",
+        )
+        for rule in rules:
+            self.assertIn(rule, project_question.LEAD)
+            self.assertLess(text.index(rule), text.index("Answer: <"))
+        self.assertEqual(project_question.ANSWER_RULES, " ".join(rules) + " ")
+
+    def test_the_prompt_names_reads_the_hook_admits(self):
+        text = project_question.prompt("q", (), repo="owner/p01")
+        examples = ("git log --since=7.days.ago --oneline", "git tag -l",
+                    "gh pr list --repo owner/p01 --state merged --limit 30",
+                    "gh release list --repo owner/p01")
+        for example in examples:
+            self.assertIn(example, text)
+            self.assertEqual(hook.decide(bash(example), (), repo="owner/p01"),
+                             ("allow", hook.ALLOWED))
+        bare = project_question.prompt("q", ())
+        self.assertIn("gh cannot be used: this project's contract names no GitHub repository.", bare)
+        self.assertNotIn("gh pr list", bare)
+        self.assertIn("This project declares no read-only command, so production cannot be read",
+                      text)
+
+    def test_the_launch_passes_the_rules_and_the_repository_to_the_session(self):
+        ask = project_question.new_ask(
+            "a" * 16, "owner/p01", "/srv/p01", "what is live?", "work", ROUTES, Path("/tmp/s"),
+            session_id=SESSION_ID, repo="owner/p01")
+        argv = project_question.launch_command(ask, "linux")
+        self.assertEqual(argv[-1], project_question.prompt("what is live?", ROUTES, repo="owner/p01"))
+        self.assertIn("gh pr list --repo owner/p01", argv[-1])
+        self.assertIn(project_question.ANSWER_RULES, argv[-1])
+
+
 class ThreadPromptTest(unittest.TestCase):
     def test_a_follow_up_prompt_puts_its_thread_before_the_question(self):
         turns = (project_question.Turn("what does the build check?", "Answer: it builds."),)
@@ -867,7 +1138,7 @@ class QuestionCase(Case):
         defaults = {
             "profile_dirs": [support.profile_dir(self.store, "work")],
             "session_poll_seconds": 3600, "project_asker": self.asker,
-            "project_routes": lambda root: ROUTES,
+            "project_reach": lambda root: REACH,
             "project_question_dispatch": lambda job: job()}
         for name, value in defaults.items():
             kwargs.setdefault(name, value)
@@ -920,10 +1191,19 @@ class QuestionServiceTest(QuestionCase):
         (ask, cancel), = self.asked
         self.assertEqual((ask.profile, ask.root, ask.routes, ask.question),
                          ("work", "/srv/p01", ROUTES, "why?"))
+        self.assertEqual(ask.repo, "owner/p01")
+        self.assertEqual(ask.unset, ())
         self.assertEqual(ask.settings.parent, self.store.with_name("project-question-settings"))
         self.assertIs(cancel, svc._stop)
         self.assertEqual(ask.session_id, SESSION_ID)
         self.assertEqual(self.question_rows()[0][2]["session_id"], ask.session_id)
+
+    def test_the_sessions_ask_carries_the_credentials_the_reach_unsets(self):
+        reach = project_question.Reach(ROUTES, "owner/p01", ("GH_TOKEN",))
+        svc = self.start(project_reach=lambda root: reach)
+        svc.ask_project_question(WHY, "why?")
+        (ask, _cancel), = self.asked
+        self.assertEqual(ask.unset, ("GH_TOKEN",))
 
     def test_a_questions_transcript_is_spent_under_its_project_and_the_questions_aspect(self):
         now = 1_800_000_000.0
@@ -1012,7 +1292,7 @@ class QuestionServiceTest(QuestionCase):
 
         def routes(root):
             raise error
-        svc = self.start(project_routes=routes)
+        svc = self.start(project_reach=routes)
         qid = svc.ask_project_question(WHY, "why?")
         self.assertEqual(self.asked, [])
         self.assertEqual(self.question_rows()[-1], (ANSWERED_KIND, WHY, {
@@ -1254,7 +1534,7 @@ class QuestionThreadServiceTest(QuestionCase):
                             ("--setting-sources", "")):
             self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
         self.assertEqual(follow_argv[-1], project_question.prompt(
-            "and which host is deployed?", ROUTES, follow_ask.thread))
+            "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01"))
         self.assertIn("Earlier question: what does the build check?\n"
                       "Earlier answer: Answer: it builds.\n", follow_argv[-1])
         self.assertEqual(_thread_ids(svc), [[first, follow]])

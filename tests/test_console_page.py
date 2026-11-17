@@ -321,7 +321,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 40)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 42)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -1687,6 +1687,17 @@ ASK_BACK = ask(id="q5", state="answered", state_text="Answered", answered_at=utc
                back_text="Question for you: May I run the paid billing export?",
                answer="I cannot read the bill.", production_text=NO_PRODUCTION_LINE)
 
+ASK_FULL = ask(id="q6", question="is the sessions table ever cleaned up?", state="answered",
+               state_text="Answered", answered_at=utc(30000),
+               answer="No: nothing deletes old rows, so the table only grows.",
+               read_text="Read: db/schema.sql", ran_text="Ran: sqlite3 console.db .tables",
+               unknown_text="Could not find out: who reads the old rows",
+               back_text="Question for you: May I run the paid export?",
+               production_text=NO_PRODUCTION_LINE)
+ASK_EMPTY = ask(id="q7", state="answered", state_text="Answered", answered_at=utc(30000),
+                answer=None, read_text="Read: flake.nix")
+FILLED = ASK_FULL["question"] + "\n\n" + ASK_FULL["answer"]
+
 
 def asking(entry: dict, *threads: dict) -> dict:
     """The entry with its Questions fold: each argument is one thread as `thread` builds it."""
@@ -1698,6 +1709,10 @@ def thread(*questions: dict, follow_up: bool | None = None) -> dict:
     """One question thread as the view carries it, oldest question first, its id the first question's id."""
     return {"id": questions[0]["id"], "questions": list(questions),
             "follow_up": questions[-1]["state"] == "answered" if follow_up is None else follow_up}
+
+
+GOAL_ASK_FRAME = {**view([asking(project(0, []), thread(ASK_FULL)), project(1, [])]),
+                  "recent_projects": ["owner/p01", "owner/p00"]}
 
 
 class PageAskTest(unittest.TestCase):
@@ -1875,7 +1890,7 @@ class PageAskTest(unittest.TestCase):
             self.assertEqual([n for n in nodes(row) if has_class(n, "ask-answer")], [])
         back = [c for c in rows[0]["children"]]
         self.assertEqual([c["cls"].split()[0] for c in back], ["ask-question", "ask-back", "ask-answer",
-                                                               "ask-production"])
+                                                               "ask-production", "ask-goal"])
         self.assertEqual(full(back[1]), ASK_BACK["back_text"])
         self.assertEqual(full(back[3]), NO_PRODUCTION_LINE)
 
@@ -1993,6 +2008,74 @@ class PageAskTest(unittest.TestCase):
         self.assertEqual(lines(three), [(second, working), (self.question, working)])
         self.assertEqual(lines(four), [(second, working), (self.question, working)])
         self.assertEqual(len(four["posts"]), 2)
+
+
+class PageAskGoalTest(unittest.TestCase):
+    """Make it a goal on an answered question (#1179)."""
+
+    @staticmethod
+    def found(snap: dict, cls: str) -> list:
+        return [n for n in nodes(snap["projects"]) if has_class(n, cls)]
+
+    def test_only_an_answered_question_with_an_answer_offers_make_it_a_goal(self) -> None:
+        frame = view([asking(project(0, []), thread(ASK_FULL), thread(ASK_EMPTY), thread(ASK_WORKING),
+                            thread(ASK_TIMED), thread(ASK_FAILED))])
+        snap, pending = render([
+            START, {"frame": frame}, {"snapshot": True},
+            {"frame": view([project(0, [])])}, {"click": "ask-open"},
+            {"type": {"class": "ask-text", "text": "what runs?"}}, {"hold": True},
+            {"click": "ask-send"}, {"snapshot": True}])
+        (button,) = self.found(snap, "ask-goal")
+        self.assertEqual((button["tag"], button["cls"], full(button)),
+                         ("button", "ask-goal btn-quiet", "Make it a goal"))
+        (row,) = [r for r in self.found(snap, "ask") if button in r["children"]]
+        self.assertTrue(full(row["children"][0]).startswith(ASK_FULL["question"]))
+        self.assertIs(row["children"][-1], button)
+        self.assertEqual(len(self.found(pending, "ask")), 1)
+        self.assertEqual(self.found(pending, "ask-goal"), [])
+
+    def test_make_it_a_goal_fills_the_projects_goal_box_and_states_nothing(self) -> None:
+        (snap,) = render([START, {"frame": GOAL_ASK_FRAME}, {"click": "ask-goal"}, {"snapshot": True}])
+        self.assertTrue(box_open(snap))
+        (text,) = goal_named(snap, "goal-text")
+        self.assertEqual(text["value"], FILLED)
+        for key in ("read_text", "ran_text", "unknown_text", "back_text", "production_text"):
+            self.assertNotIn(ASK_FULL[key], text["value"])
+        self.assertEqual(goal_picked(snap), ["owner/p00"])
+        self.assertEqual(role(snap["active"]), "goal-text")
+        self.assertEqual(snap["posts"], [])
+        self.assertEqual(goal_fail(snap), [])
+
+    def test_a_filled_goal_is_stated_only_when_the_owner_sends_it(self) -> None:
+        with self.subTest("unedited"):
+            (snap,) = render([START, {"frame": GOAL_ASK_FRAME}, {"click": "ask-goal"},
+                              {"click": "goal-send"}, {"snapshot": True}])
+            (post,) = goals(snap)
+            self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p00", "goal": FILLED})
+            self.assertEqual(post["headers"], GOAL_HEADERS)
+        with self.subTest("edited"):
+            edited = FILLED + " Delete rows older than 90 days."
+            before, after = render([
+                START, {"frame": GOAL_ASK_FRAME}, {"click": "ask-goal"},
+                {"input": {"cls": "goal-text", "value": edited}}, {"snapshot": True},
+                {"click": "goal-send"}, {"snapshot": True}])
+            self.assertEqual(before["posts"], [])
+            (post,) = goals(after)
+            self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p00", "goal": edited})
+
+    def test_make_it_a_goal_replaces_a_typed_goal_and_clears_the_filter(self) -> None:
+        (snap,) = render([
+            START, {"frame": GOAL_ASK_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "p01"}},
+            {"input": {"cls": "goal-text", "value": "draft"}},
+            {"click": "ask-goal"}, {"snapshot": True}])
+        (text,) = goal_named(snap, "goal-text")
+        self.assertEqual(text["value"], FILLED)
+        (flt,) = goal_named(snap, "goal-filter")
+        self.assertEqual(flt["value"], "")
+        self.assertEqual(goal_picked(snap), ["owner/p00"])
+        self.assertEqual(sorted(goal_names(snap)), ["owner/p00", "owner/p01"])
+        self.assertEqual(snap["posts"], [])
 
 
 class PageFollowUpTest(unittest.TestCase):
@@ -5003,6 +5086,76 @@ PROGRESS = {
     "last_status": "two slices are building", "answered": False,
     "waiting_since": "2026-11-10T08:00:00+00:00",
 }
+
+
+FAILED_START = {
+    "type": "inbox_item", "reason": "failed_start", "key": "failed-start/" + "a" * 16,
+    "project_id": "owner/p00", "sprint_id": "a" * 16, "title": "make the importer resumable",
+    "headline": "The manager for make the importer resumable failed to start.",
+    "last_reason": "this account does not trust the project's folder", "answered": False,
+    "waiting_since": "2026-11-10T08:00:00+00:00",
+}
+
+
+class PageFailedStartTest(unittest.TestCase):
+    def test_a_failed_start_card_shows_its_headline_reason_and_retry_posts_the_retry(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([FAILED_START])},
+            {"respond": {"status": 409, "text": "this sprint has a manager\n"}},
+            {"click": "start-retry"}, {"snapshot": True},
+        ])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "failed-start")]
+        self.assertEqual(card["tag"], "article")
+        self.assertTrue(has_class(card, "card"))
+        self.assertIn(FAILED_START["headline"], full(card))
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "reason")],
+                         ["this account does not trust the project's folder"])
+        self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"],
+                         ["Retry", "Drop the sprint"])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/retry-manager"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16})
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "fail")],
+                         ["Could not retry: this sprint has a manager"])
+
+    def test_a_failed_start_card_drop_posts_the_withdrawal(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([FAILED_START])}, {"click": "start-withdraw"},
+            {"snapshot": True},
+        ])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/withdraw"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16})
+        self.assertEqual(
+            [p["url"] for p in snap["posts"] if p["url"] == "/api/retry-manager"], [])
+
+    def test_a_failed_start_card_sits_after_the_stalls_and_before_progress(self) -> None:
+        other = {**FAILED_START, "sprint_id": "b" * 16, "key": "failed-start/" + "b" * 16}
+        (snap,) = render([
+            START, {"frame": frame([STALL, other, PROGRESS])}, {"snapshot": True},
+        ])
+        cards = [n for n in nodes(snap["inbox"]) if n["tag"] == "article"]
+        order = [next(c for c in ("stall", "failed-start", "progress") if has_class(n, c))
+                 for n in cards]
+        self.assertEqual(order, ["stall", "failed-start", "progress"])
+        self.assertEqual(
+            [n for n in nodes(snap["inbox"])
+             if n["tag"] == "li" and FAILED_START["headline"] in full(n)], [])
+
+    def test_a_sending_retry_is_disabled(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([FAILED_START])}, {"hold": True},
+            {"click": "start-retry"}, {"snapshot": True},
+        ])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "failed-start")]
+        (retry,) = [n for n in nodes(card) if has_class(n, "start-retry")]
+        (drop,) = [n for n in nodes(card) if has_class(n, "start-withdraw")]
+        self.assertIs(retry["disabled"], True)
+        self.assertIs(drop["disabled"], False)
 
 
 class PageManagerTest(unittest.TestCase):
