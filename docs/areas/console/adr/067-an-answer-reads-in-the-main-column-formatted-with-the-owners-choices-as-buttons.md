@@ -1,4 +1,4 @@
-# ADR-console-066 — An answer reads in the main column, formatted, with the owner's choices as buttons
+# ADR-console-067 — An answer reads in the main column, formatted, with the owner's choices as buttons
 
 - **Status:** accepted
 - **Decided in:** #1226

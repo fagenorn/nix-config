@@ -1014,12 +1014,12 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
 
-    def test_adr_console_066_records_the_reading_surface(self):
+    def test_adr_console_067_records_the_reading_surface(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
-        found = sorted(adr_dir.glob("066-*.md"))
+        found = sorted(adr_dir.glob("067-*.md"))
         self.assertEqual(len(found), 1)
         first = found[0].read_text().splitlines()[0]
-        self.assertEqual(first, "# ADR-console-066 \u2014 An answer reads in the main column, "
+        self.assertEqual(first, "# ADR-console-067 \u2014 An answer reads in the main column, "
                                 "formatted, with the owner's choices as buttons")
         adr = self.doc("docs/areas/console/adr/" + found[0].name)
         for needle in ("- **Status:** accepted", "- **Decided in:** #1226",
@@ -1031,7 +1031,7 @@ class DocsTreeTest(unittest.TestCase):
                         "## Consequences"):
             self.assertIn(section, adr)
         adr065 = next((adr_dir).glob("065-*.md")).read_text().splitlines()
-        self.assertIn("- **Status:** accepted; amended by ADR-console-066", adr065)
+        self.assertIn("- **Status:** accepted; amended by ADR-console-067", adr065)
         adr002 = (adr_dir / "002-the-desk-page-design-rules.md").read_text()
         decided = next(row for row in adr002.splitlines()
                        if row.startswith("- **Decided in:**"))
@@ -1041,7 +1041,7 @@ class DocsTreeTest(unittest.TestCase):
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text()
         entry = " ".join(next(p for p in context.split("\n\n")
                               if p.startswith("**Project question**:")).split())
-        self.assertIn("ADR-console-066", entry)
+        self.assertIn("ADR-console-067", entry)
         self.assertNotIn("where the answer shows under the question", entry)
 
     def test_the_desk_page_rules_name_the_follow_up_box(self):
