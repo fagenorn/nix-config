@@ -46,6 +46,8 @@ def fake_browser(present):
             self.clicks = []
             self.waits = []
             self.reads = 0
+            self.card = ()
+            self.fills = []
 
         def goto(self, url):
             pass
@@ -58,6 +60,9 @@ def fake_browser(present):
 
         def click(self, selector):
             self.clicks.append(selector)
+
+        def fill(self, selector, text):
+            self.fills.append((selector, text))
 
         def evaluate(self, expression, arg=None):
             if expression == shots.ASK_READING:
@@ -73,6 +78,9 @@ def fake_browser(present):
             if expression == shots.GOAL_READING:
                 self.reads += 1
                 return list(shots.FILLED_GOAL)
+            if expression == shots.CARD_READING:
+                self.reads += 1
+                return list(self.card)
             if expression == shots.ACTS_ROW:
                 return []
             if expression == shots.SCROLL_Y:
@@ -99,8 +107,10 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_five_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 25)
+    def test_the_set_is_twenty_seven_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 27)
+        self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
+                         ("inbox-card", "question-words", "question-refused"))
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
@@ -112,9 +122,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
     def test_the_module_contract_counts_the_screens_the_set_names(self) -> None:
         doc = shots.__doc__.replace("\n", " ")
-        self.assertIn("`STATES` names the twenty-five screens", doc)
-        self.assertIn("a full run writes 50 files", doc)
-        self.assertEqual(len(shots.STATES) * len(shots.WIDTHS), 50)
+        self.assertIn("`STATES` names the twenty-seven screens", doc)
+        self.assertIn("a full run writes 54 files", doc)
+        self.assertEqual(len(shots.STATES) * len(shots.WIDTHS), 54)
 
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
@@ -299,6 +309,62 @@ class ScreenshotFixtureTest(unittest.TestCase):
             self.assertEqual(page.clicks, [])
             self.assertIsNone(shot.thread)
             self.assertEqual(shot.acts, ())
+
+    def test_a_question_card_shot_without_its_pick_and_words_or_its_refusal_fails_the_command(
+            self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        phrase = "does not show the question card"
+        wrong = {"question-words": ((None, shots.LOOK_WORDS, True, None),
+                                    ("Ask for changes", "", True, None),
+                                    ("Ask for changes", shots.LOOK_WORDS, False, None),
+                                    ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change.")),
+                 "question-refused": (("Ask for changes", "", True, None),
+                                      (None, "", True, "Say what to change."),
+                                      ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change."))}
+        right = {"question-words": ("Ask for changes", shots.LOOK_WORDS, True, None),
+                 "question-refused": ("Ask for changes", "", True, "Say what to change.")}
+        for state, readings in wrong.items():
+            for card in readings:
+                with self.subTest(state=state, card=card):
+                    code, text = run(lambda path: shots.Shot(state, 480, path, 480, card=card))
+                    self.assertEqual(code, 1)
+                    self.assertIn(phrase, text)
+            for card in (right[state], None):
+                with self.subTest(state=state, card=card):
+                    code, text = run(lambda path: shots.Shot(state, 480, path, 480, card=card))
+                    self.assertEqual(code, 0)
+                    self.assertNotIn(phrase, text)
+        self.assertEqual((shots.WORDS_CARD, shots.REFUSED_CARD), (right["question-words"],
+                                                                  right["question-refused"]))
+
+    def test_the_question_card_shots_pick_ask_for_changes_and_type_or_send_only_on_a_page_with_the_words_box(
+            self) -> None:
+        third = ".lead ul.opts li:nth-child(3) button.opt"
+        cases = (("question-words", {shots.WORDS_BOX}, [third], [(shots.WORDS_BOX, shots.LOOK_WORDS)],
+                  shots.WORDS_CARD),
+                 ("question-refused", {shots.WORDS_BOX}, [third, ".lead button.send"], [],
+                  shots.REFUSED_CARD),
+                 ("question-words", set(), [], [], None),
+                 ("question-refused", set(), [], [], None),
+                 ("inbox-card", {shots.WORDS_BOX}, [], [], None))
+        for state, present, clicks, fills, card in cases:
+            for width in shots.WIDTHS:
+                with self.subTest(state=state, present=bool(present), width=width), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    browser, page = fake_browser(present)
+                    page.card = card or ()
+                    shot = shots._shoot(browser, "http://console.test/", state, width, Path(tmp))
+                    self.assertEqual(page.clicks, clicks)
+                    self.assertEqual(page.fills, fills)
+                    self.assertEqual(shot.card, card)
+                    self.assertEqual(page.reads, 1 if card else 0)
 
     def test_a_question_read_shot_that_does_not_read_the_answer_in_the_main_column_fails_the_command(
             self) -> None:
@@ -630,6 +696,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         again.close()
                 elif state == "inbox-card":
                     self.assertEqual(len(view["inbox"]["open"][0]["questions"][0]["options"]), 2)
+                elif state in ("question-words", "question-refused"):
+                    (asked,) = view["inbox"]["open"]
+                    (look,) = asked["questions"]
+                    self.assertEqual(look["options"],
+                                     ["Approve", "Approve with one fix", "Ask for changes"])
+                    self.assertEqual(look["recommended_index"], 0)
+                    self.assertEqual(look["needs_words_index"], [1, 2])
                 elif state == "accounts-panel":
                     self.assertEqual(
                         sorted(e["profile"] for e in view["capacity"]["profiles"]),
