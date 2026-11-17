@@ -226,7 +226,7 @@ registered); and, under the ingest lock, a second registration while one runs
 adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
 ADR-console-069): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
 and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
-run and carries `remote` (`register.unread`) on its row; no origin or no default branch runs today's
+run and carries `remote` (`register.unread`) on its row, and each plan-answer row after it; no origin or no default branch runs today's
 run. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
 with no report (#1078, ADR-console-034), and the Register card waits for the owner (below). One
 `registration.ended` row (also for a failed child) is appended, unless the
@@ -4241,12 +4241,13 @@ class ConsoleService:
                 answers = [*latest["answered"], {"id": question, "subject": subject, "value": value}]
             asked = {"id": question, "subject": subject}
             draft = latest["draft"]
+            remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
             self._registering = root
             self._answering = True
             self._answer_refusal = None
             self._publish()
         try:
-            self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed))
+            self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed, remote))
         except BaseException:
             with self._ingest:
                 self._registering = None
@@ -4327,7 +4328,13 @@ class ConsoleService:
         return register.summary(root, plan, None, draft=fields)
 
     def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,
-                    draft: list[dict] | None = None, changed: list[dict] | None = None) -> None:
+                    draft: list[dict] | None = None, changed: list[dict] | None = None,
+                    remote: str | None = None) -> None:
+        """Plan again with one more answer; the row keeps the shown row's `remote` sentence (#1233).
+
+        The sentence says the registration used a checkout whose remote was never read, which stays
+        true of every later plan of that run.
+        """
         payload = None
         text = None
         try:
@@ -4351,7 +4358,7 @@ class ConsoleService:
                     self._log_answer_error({"root": root, "error": result["error"]})
                     text = plan_questions.refusal_text(result["error"])
                 else:
-                    payload = result
+                    payload = result if remote is None else {**result, "remote": remote}
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})

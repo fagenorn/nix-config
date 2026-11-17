@@ -1690,6 +1690,44 @@ class RegisterRemoteTest(Case):
         self.assertEqual(row["result"], "drafting")
         self.assertEqual(row["remote"], register.REMOTE_UNREAD)
 
+    def test_a_plan_answer_keeps_the_unreadable_remote_sentence(self):
+        root = self.missing_origin()
+        self.begin(Fake(plan=[DRAFT, READY]))
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        first = self.settled_row(root)
+        self.assertEqual(first["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        row = self.settled_row(root)
+        self.assertEqual((row["result"], row["plan_id"]), ("planned", PID_B))
+        self.assertEqual(row["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(self.view()["registration"]["remote"], register.REMOTE_UNREAD)
+
+    def test_a_draft_answer_keeps_the_unreadable_remote_sentence(self):
+        root = self.missing_origin(contract=False)
+        self.begin(Fake(plan=PLANNED), draft_reader=lambda root: READ_NO_BUILD)
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        first = self.settled_row(root)
+        self.assertEqual(first["remote"], register.REMOTE_UNREAD)
+        status, _, _ = self.answer(answer_of(
+            first["plan_id"], {"id": "contract-draft", "subject": "build-command", "value": "none"}))
+        self.assertEqual(status, 204)
+        row = self.settled_row(root)
+        self.assertEqual(row["result"], "drafting")
+        self.assertNotEqual(row["questions"], first["questions"])
+        self.assertEqual(row["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(self.view()["registration"]["remote"], register.REMOTE_UNREAD)
+
+    def test_an_answer_after_a_readable_remote_carries_no_sentence(self):
+        checkout, _ = remote_checkout(self.parent, contract=True, ahead=False)
+        self.begin(Fake(plan=[DRAFT, READY]))
+        self.assertEqual(self.post({"path": str(checkout)})[0], 204)
+        self.settled_row(checkout)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        row = self.settled_row(checkout)
+        self.assertEqual(row["plan_id"], PID_B)
+        self.assertNotIn("remote", row)
+        self.assertIsNone(self.view()["registration"]["remote"])
+
     def test_a_confirmed_register_and_an_answer_do_not_compare_again(self):
         calls, reader = spy(CURRENT_CHECKOUT)
         fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
