@@ -1,6 +1,6 @@
 # ADR-console-054 — A held issue whose only open criterion is an owner review gets an owner check card
 
-- **Status:** accepted; amended in #1186 (D8)
+- **Status:** accepted; amended in #1186 (D8) and #1211 (D8)
 - **Decided in:** #1113
 
 ## Context
@@ -23,7 +23,7 @@ A delivery run that has finished its work holds its issue with the `needs-verifi
 
 **D7. The page change is held for the owner.** This is a change to how the page looks. The delivery makes before and after PNG screenshots of the review card at 1440 and 480 px, and the pull request merges only after the owner approves them.
 
-**D8. An approved look answers its look marker.** A criterion whose line is a look marker (issue 1138) raises no card when a trusted (OWNER or MEMBER) live `agent:look` marker of the issue, the latest for its pull request and head, answers `approved` and that pull request reads merged with that head as its head commit. The check is one REST read `repos/<slug>/pulls/<n>` per approved pull request and head, made only for an issue that would otherwise raise a look-marker card, outside D1's four calls, with the stop asked before each. An approval of another head, a `changes` answer, an untrusted or ended marker, an unmerged pull request or a failed read keeps the card. The write (D5) does not check it again, so an Approve on a card read before the approval ticks the box the approval answers.
+**D8. An approved look answers its look marker.** A criterion whose line is a look marker (issue 1138) raises no card when a pull request that a trusted (OWNER or MEMBER) live `agent:look` approval of the issue names reads merged, and its merged head is either approved by the latest such marker naming that head or keeps an earlier approval by the rule of ADR-guard-010 (#1211), judged at the merge commit's first parent with the reads the guard makes. The check is one REST read `repos/<slug>/pulls/<n>` per pull request a trusted approval names, and, for a merged head no answer names, one read of its merge commit and at most 48 set and compare reads, made only for an issue that would otherwise raise a look-marker card, outside D1's four calls, with the stop asked before each. A merged head no approval covers, a `changes` answer, an untrusted or ended marker, an unmerged pull request or a failed or unreadable read keeps the card. The write (D5) does not check it again, so an Approve on a card read before the approval ticks the box the approval answers.
 
 ## Consequences
 
@@ -32,4 +32,5 @@ A delivery run that has finished its work holds its issue with the `needs-verifi
 - GitHub has no conditional update of an issue body, so an issue edited by someone else between the read and the write may lose that edit; the version check narrows the exposure to the criterion line.
 - ADR-console-003's search and ADR-console-012 D7's rule of no item without a live prompt are amended.
 - An issue held before landings ticked its look marker costs one pull request read per poll until its box is ticked.
+- A held issue whose merged head keeps an earlier approval costs up to 50 reads per poll until its box is ticked.
 - Related: ADR-console-003, ADR-console-010, ADR-console-012, ADR-console-045, ADR-console-047.

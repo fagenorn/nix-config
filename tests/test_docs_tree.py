@@ -470,6 +470,28 @@ class DocsTreeTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((REPO_ROOT / path).read_text().split())
 
+    def test_the_kept_look_approval_is_recorded(self):
+        adr = (REPO_ROOT / "docs/areas/guard/adr/"
+               "010-a-merge-of-a-marked-issue-needs-the-owners-look-at-its-head.md").read_text()
+        self.assertIn("\n- **Status:** accepted; amended in #1211\n", adr)
+        for gone in ("One approval covers one head.", "and its current head."):
+            self.assertNotIn(gone, adr)
+        for needle in ("look file set", "worded fix"):
+            self.assertIn(needle, adr)
+        context = self.doc("docs/areas/delivery/CONTEXT.md")
+        self.assertIn("**Look file set**:", context)
+        self.assertIn("issue 1211", context.split("**Look approval**:")[1].split("**Look file set**:")[0])
+        self.assertIn("| Look file set | Delivery |", (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text())
+
+    def test_the_console_reads_a_kept_look_approval(self):
+        path = ("docs/areas/console/adr/"
+                "054-a-held-issue-whose-only-open-criterion-is-an-owner-review-gets-an-owner-check-card.md")
+        text = (REPO_ROOT / path).read_text()
+        self.assertIn("\n- **Status:** accepted; amended in #1186 (D8) and #1211 (D8)\n", text)
+        d8 = next(" ".join(line.split()) for line in text.splitlines() if line.startswith("**D8."))
+        for needle in ("#1211", "merge commit's first parent"):
+            self.assertIn(needle, d8)
+
     def test_the_console_session_decision_is_recorded(self):
         path = "docs/areas/console/adr/004-sessions-arrive-by-hooks-and-a-registry-poll.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

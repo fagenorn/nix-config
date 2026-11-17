@@ -16,10 +16,11 @@ and the fence lines never match; an unclosed fence runs to the end of the body.
 
 The look approval is an issue comment whose first line is
 `<!-- agent:look v1 issue=<issue> pr=<pr> head=<head> answer=<answer> message=<message> -->`
-with `answer` either `approved` or `changes`, `head` the 40-hex head commit and `message` the
+with `answer` one of `approved`, `changes` or `fix`, `head` the 40-hex head commit and `message` the
 console message it came from (a `forge_markers.VALUE`). Line 2 is `The owner approved head
 <head[:7]> of pull request <pr> after a look.`, or for `changes` `The owner asked for changes to
-head <head[:7]> of pull request <pr>.`
+head <head[:7]> of pull request <pr>.` For `fix` line 2 is `The owner approved head <head[:7]> of
+pull request <pr> with one fix.` and line 3 is `The fix: <the owner's words>`.
 
 Trust and latest-wins: `look_answer` reads only comments whose `author_association` is in
 `TRUSTED` (OWNER or MEMBER), filtered before parsing so an untrusted `end` marker ends nothing.
@@ -41,17 +42,50 @@ immediately followed by `before[\\s_-]*merg`. Prose, a bullet that only talks ab
 marker and text inside inline code are never near misses. `near_misses` returns them in body order with their 1-based
 line numbers; `look-lint` prints them, and a body with any is refused even beside a valid marker.
 
-The console reads a look-marker line with `marker_line`, the approved `(pr, head)` pairs of an issue
-with `approved_heads` (trust and latest-wins as `look_answer`), and the head commit of a merged REST
-pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
+The console reads a look-marker line with `marker_line`. It names the pull requests an issue's
+approvals mention with `look_prs` and asks `merged_under_look` whether a merged pull request's
+head was merged under an approval, exact or kept; `merged_under_look` reads the head commit of
+the merged REST pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
 look-marker line outside fences changed from `- [ ]` to `- [x]` and the number it changed; every
 other byte of the body, the rest of a changed line (trailing spaces, `\\r`) included, is kept, and
 lines are split and joined on `\\n` alone.
 
-This module reads no network, runs no subprocess and reads no clock.
+Kept approvals (issue 1211). An approval of an earlier head A stays valid for the current head H of
+the same pull request while no commit after A changes a look file. `.github/look-files.json`
+(`{"version": 1, "sets": {<name>: [<glob>, ...]}}`, nothing else) names the look file sets, read at
+the pinned base commit B. A set is covered when one of its globs matches a file name (or previous
+name) of the compare `B...A`, the pull request's own change at the approved head; the look files
+are the covered sets' globs. `glob_match` splits on `/`: `**` is zero or more whole segments, `*`
+and `?` stay inside a segment, anything else is literal.
+D3, the candidate: `carry_candidate` is the latest trusted live look marker of the issue and pull
+request, whatever its head, only when no trusted live look marker names H and its answer is
+`approved` or `fix` with a 40-hex head. A later `changes` withdraws the carry.
+D4, `kept(candidate, head, carry)` judges from reads it is given (`Carry(base, reads)`) and names
+the reads it lacks in `Kept.need`: round one is the set file at B and the compares `B...A`,
+`A...H` and `B...H`; round two is one compare per commit the pull request added after A. A readable
+refusal (a 404 read passed as None, `A...H` not `ahead`, no covered set) is `Kept(False)`; a
+successful answer the rule cannot read raises `Unreadable`. There is no final-diff shortcut. The
+commits after A are walked first-parent from H to A and must be exactly the commits `B...H` has
+and `B...A` lacks, at most `CHAIN_LIMIT`, and no second parent may be a pull request commit. A
+one-parent commit is a look commit when its compare lists a look file. A merge is clean when, for
+every look file f its four compares list, f is neither renamed nor copied, every listing of f
+carries a patch when a side lists f, and each side's added and removed lines of f equal the other side's change
+(`P1...c` equals `P1...P2`, `P2...c` equals `P2...P1`; context lines and hunk bounds are ignored, since an independent edit moves them). An
+`approved` candidate is kept at zero look commits, a `fix` at exactly one.
+`settle` drives `kept` for at most `CARRY_RUNS` runs and `READ_LIMIT` reads through a `read`
+callable (the parsed JSON, None for a 404, an exception for anything else), and
+`merged_under_look` applies it to a merged pull request at its merge commit's first parent.
+`judge` takes an optional `Carry`; a refusal lists the `candidates` and the `need` of undecided
+issues, and an `Unreadable` read fails its issue with no need.
+
+This module reads no network of its own, runs no subprocess and reads no clock; `settle` and
+`merged_under_look` read only through the `read` callable they are given.
 """
+import base64
+import binascii
+import json
 import re
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,7 +94,15 @@ from agent_tools.claims import forge_markers
 KIND = "look"
 # Only the owner's own association counts as the owner: ADR-verification-004.
 TRUSTED: tuple[str, ...] = ("OWNER", "MEMBER")
-ANSWERS: tuple[str, ...] = ("approved", "changes")
+ANSWERS: tuple[str, ...] = ("approved", "changes", "fix")
+CARRIED: tuple[str, ...] = ("approved", "fix")
+LOOK_FILES_PATH = ".github/look-files.json"
+COMPARE_FILE_LIMIT = 300
+CHAIN_LIMIT = 10
+CARRY_RUNS = 3
+READ_LIMIT = 48
+FILE_STATUSES: tuple[str, ...] = ("added", "removed", "modified", "renamed", "copied", "changed", "unchanged")
+FIX_WORDS_LIMIT = 2000
 
 LINE = re.compile(r"- \[[ xX]\] \[human\] before merge: (?P<what>\S.*?) — measured: (?P<measured>\S.*)")
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -102,6 +144,32 @@ class Verdict:
     issue: int | None = None
     covers: tuple[str, ...] = ()
     marked: tuple[int, ...] = ()
+    candidates: tuple["Candidate", ...] = ()
+    need: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Candidate:
+    issue: int
+    head: str
+    answer: str
+    comment_id: int
+
+
+@dataclass(frozen=True)
+class Carry:
+    base: str
+    reads: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class Kept:
+    kept: bool
+    need: tuple[str, ...] = ()
+
+
+class Unreadable(Exception):
+    """A successful forge answer the kept-approval rule cannot read."""
 
 
 def body_lines(body: str | None) -> Iterator[tuple[int, str]]:
@@ -171,9 +239,18 @@ def approval_fields(issue: int, pr: int, head: str, answer: str, message: str) -
     return {"issue": str(issue), "pr": str(pr), "head": head, "answer": answer, "message": message}
 
 
-def approval_body(issue: int, pr: int, head: str, answer: str, message: str) -> str:
-    """The comment body of a look approval."""
+def approval_body(issue: int, pr: int, head: str, answer: str, message: str,
+                  words: str | None = None) -> str:
+    """The comment body of a look approval; `words` is the owner's fix and goes with `fix` alone."""
     fields = approval_fields(issue, pr, head, answer, message)
+    if (answer == "fix") != (words is not None):
+        raise ValueError("words go with the answer fix and no other")
+    if answer == "fix":
+        fix = words.strip()
+        if not fix or len(fix) > FIX_WORDS_LIMIT:
+            raise ValueError(f"the fix words are empty or longer than {FIX_WORDS_LIMIT} characters")
+        sentence = f"The owner approved head {head[:7]} of pull request {pr} with one fix."
+        return forge_markers.render(KIND, fields, sentence, f"The fix: {fix}")
     if answer == "approved":
         sentence = f"The owner approved head {head[:7]} of pull request {pr} after a look."
     else:
@@ -198,25 +275,6 @@ def marker_line(line: str) -> bool:
     return LINE.fullmatch(line.rstrip()) is not None
 
 
-def approved_heads(comments: Iterable[Mapping[str, Any]], issue: int) -> tuple[tuple[int, str], ...]:
-    """The `(pr, head)` pairs, ascending, a trusted live look marker of this issue names and `look_answer` approves."""
-    comments = list(comments)
-    parsed = [forge_markers.parse(c) for c in comments if c.get("author_association") in TRUSTED]
-    pairs = set()
-    for marker in parsed:
-        if marker is None or marker.kind != KIND or marker.fields.get("issue") != str(issue):
-            continue
-        pr, head = marker.fields.get("pr"), marker.fields.get("head")
-        if not isinstance(pr, str) or not isinstance(head, str):
-            continue
-        if re.fullmatch(r"[1-9][0-9]*", pr) is None or HEAD_PATTERN.fullmatch(head) is None:
-            continue
-        answer = look_answer(comments, issue, int(pr), head)
-        if answer is not None and answer.fields.get("answer") == "approved":
-            pairs.add((int(pr), head))
-    return tuple(sorted(pairs))
-
-
 def merged_head(pull: Any) -> str | None:
     """The head commit of a REST pull request read that is merged, else None."""
     if not isinstance(pull, dict) or pull.get("merged") is not True:
@@ -237,18 +295,384 @@ def tick_markers(body: str | None) -> tuple[str, int]:
     return "\n".join(lines), changed
 
 
-def judge(pr: int, head: str | None, issues: Iterable[IssueFacts]) -> Verdict:
+def contents_path(base: str) -> str:
+    return f"contents/{LOOK_FILES_PATH}?ref={base}"
+
+
+def compare_path(a: str, b: str) -> str:
+    return f"compare/{a}...{b}"
+
+
+COMPARE_PATH = re.compile(r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}")
+
+
+def read_path_ok(path: str, base: str) -> bool:
+    """Whether `path` is the set file at `base` or a compare of two full commit shas."""
+    return path == contents_path(base) or COMPARE_PATH.fullmatch(path) is not None
+
+
+def _segment(pattern: str, name: str) -> bool:
+    regex = "".join("[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c) for c in pattern)
+    return re.fullmatch(regex, name) is not None
+
+
+def _glob(pattern: tuple[str, ...], path: tuple[str, ...]) -> bool:
+    if not pattern:
+        return not path
+    if pattern[0] == "**":
+        return any(_glob(pattern[1:], path[n:]) for n in range(len(path) + 1))
+    return bool(path) and _segment(pattern[0], path[0]) and _glob(pattern[1:], path[1:])
+
+
+def glob_match(pattern: str, path: str) -> bool:
+    """Whether the glob matches the path: `**` is whole segments, `*` and `?` stay in a segment."""
+    return _glob(tuple(pattern.split("/")), tuple(path.split("/")))
+
+
+SET_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _good_glob(glob: Any) -> bool:
+    if not isinstance(glob, str) or not glob:
+        return False
+    return all(part not in ("", ".", "..") for part in glob.split("/"))
+
+
+def read_look_files(contents: Any) -> dict[str, tuple[str, ...]] | None:
+    """The look file sets a contents read of `LOOK_FILES_PATH` declares, or None when unreadable."""
+    if not isinstance(contents, dict) or contents.get("type") != "file" \
+            or contents.get("encoding") != "base64" or not isinstance(contents.get("content"), str):
+        return None
+    try:
+        raw = base64.b64decode(contents["content"].replace("\n", ""), validate=True)
+        parsed = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, ValueError):
+        return None
+    if not isinstance(parsed, dict) or set(parsed) != {"version", "sets"}:
+        return None
+    version, sets = parsed["version"], parsed["sets"]
+    if isinstance(version, bool) or version != 1 or not isinstance(sets, dict) or not sets:
+        return None
+    found: dict[str, tuple[str, ...]] = {}
+    for name, globs in sets.items():
+        if SET_NAME.fullmatch(name) is None or not isinstance(globs, list) or not globs \
+                or not all(_good_glob(g) for g in globs):
+            return None
+        found[name] = tuple(globs)
+    return found
+
+
+def patch_hunks(patch: str) -> tuple[tuple[str, ...], ...] | None:
+    """The hunks of a file patch, each the tuple of its lines after the `@@` line; None when unreadable."""
+    lines = patch.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    hunks: list[list[str]] = []
+    for line in lines:
+        if line.startswith("@@ "):
+            hunks.append([])
+        elif not hunks or line[:1] not in (" ", "+", "-", "\\"):
+            return None
+        else:
+            hunks[-1].append(line)
+    return tuple(tuple(hunk) for hunk in hunks)
+
+
+def _entries(compare: Any) -> list[dict[str, Any]] | None:
+    """The file entries of a compare read, or None when it is not readable."""
+    if not isinstance(compare, dict):
+        return None
+    files = compare.get("files")
+    if not isinstance(files, list) or len(files) >= COMPARE_FILE_LIMIT:
+        return None
+    for entry in files:
+        if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str) \
+                or entry.get("status") not in FILE_STATUSES:
+            return None
+        if "previous_filename" in entry and not isinstance(entry["previous_filename"], str):
+            return None
+        if "patch" in entry and (not isinstance(entry["patch"], str) or patch_hunks(entry["patch"]) is None):
+            return None
+    return files
+
+
+def compare_files(compare: Any) -> tuple[str, ...] | None:
+    """Every file name and previous name a compare read lists, in order; None when unreadable."""
+    files = _entries(compare)
+    if files is None:
+        return None
+    names: list[str] = []
+    for entry in files:
+        names.append(entry["filename"])
+        if "previous_filename" in entry:
+            names.append(entry["previous_filename"])
+    return tuple(names)
+
+
+def _sha(value: Any) -> bool:
+    return isinstance(value, str) and HEAD_PATTERN.fullmatch(value) is not None
+
+
+def compare_commits(compare: Any) -> dict[str, tuple[str, ...]] | None:
+    """Each commit sha of a compare read mapped to its parent shas; None unless the list is complete."""
+    if not isinstance(compare, dict) or not isinstance(compare.get("commits"), list):
+        return None
+    total = compare.get("total_commits")
+    if isinstance(total, bool) or not isinstance(total, int) or total != len(compare["commits"]):
+        return None
+    found: dict[str, tuple[str, ...]] = {}
+    for commit in compare["commits"]:
+        parents = commit.get("parents") if isinstance(commit, dict) else None
+        if not _sha(commit.get("sha") if isinstance(commit, dict) else None) or not isinstance(parents, list) \
+                or not all(isinstance(p, dict) and _sha(p.get("sha")) for p in parents):
+            return None
+        found[commit["sha"]] = tuple(p["sha"] for p in parents)
+    return found
+
+
+def _look_markers(comments: Iterable[Mapping[str, Any]], issue: int, pr: int) -> list[forge_markers.Marker]:
+    """The trusted live look markers naming this issue and pull request, whatever their head."""
+    parsed = [forge_markers.parse(c) for c in comments if c.get("author_association") in TRUSTED]
+    markers = [m for m in parsed if m is not None]
+    return [m for m in markers
+            if m.kind == KIND and forge_markers.is_live(m, markers)
+            and m.fields.get("issue") == str(issue) and m.fields.get("pr") == str(pr)]
+
+
+def carry_candidate(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, head: str) -> Candidate | None:
+    """The earlier approval that may carry to `head`, or None."""
+    named = _look_markers(comments, issue, pr)
+    if not named or any(m.fields.get("head") == head for m in named):
+        return None
+    latest = max(named, key=lambda m: m.comment_id)
+    if latest.fields.get("answer") not in CARRIED or not _sha(latest.fields.get("head")):
+        return None
+    return Candidate(issue, latest.fields["head"], latest.fields["answer"], latest.comment_id)
+
+
+def look_prs(comments: Iterable[Mapping[str, Any]], issue: int) -> tuple[int, ...]:
+    """The ascending pull request numbers a trusted live look approval of this issue names."""
+    comments = list(comments)
+    parsed = [forge_markers.parse(c) for c in comments if c.get("author_association") in TRUSTED]
+    markers = [m for m in parsed if m is not None]
+    found = set()
+    for m in markers:
+        pr = m.fields.get("pr")
+        if m.kind == KIND and m.fields.get("issue") == str(issue) and forge_markers.is_live(m, markers) \
+                and isinstance(pr, str) and re.fullmatch(r"[1-9][0-9]*", pr) \
+                and _sha(m.fields.get("head")) and m.fields.get("answer") in CARRIED:
+            found.add(int(pr))
+    return tuple(sorted(found))
+
+
+def _entry_of(compare: Any, name: str) -> dict[str, Any] | None:
+    return next((e for e in compare["files"] if e["filename"] == name), None)
+
+
+def _changes(compare: Any, name: str) -> tuple[str, ...]:
+    """The added and removed lines of a file's patch, in order, without context or hunk bounds.
+
+    Context lines (and a no-newline marker that follows one) are left out: an independent edit
+    elsewhere in the file changes another patch's context and its hunk grouping, not its edit.
+    """
+    entry = _entry_of(compare, name)
+    if entry is None or "patch" not in entry:
+        return ()
+    changed: list[str] = []
+    after_change = False
+    for hunk in patch_hunks(entry["patch"]) or ():
+        for line in hunk:
+            if line[:1] in ("+", "-"):
+                changed.append(line)
+                after_change = True
+            elif line[:1] == "\\" and after_change:
+                changed.append(line)
+            else:
+                after_change = False
+    return tuple(changed)
+
+
+def _clean_merge(parents: tuple[str, ...], commit: str, reads: Mapping[str, Any],
+                 look: Callable[[Any], set[str]]) -> bool:
+    p1, p2 = parents
+    c1, c2, d12, d21 = (reads[compare_path(a, b)] for a, b in ((p1, commit), (p2, commit), (p1, p2), (p2, p1)))
+    for name in look(c1) | look(c2) | look(d12) | look(d21):
+        listings = [e for compare in (c1, c2, d12, d21) for e in compare["files"]
+                    if name in (e["filename"], e.get("previous_filename"))]
+        if any(e["status"] in ("renamed", "copied") for e in listings):
+            return False
+        lists_name = name in compare_files(c1) or name in compare_files(c2)
+        if not lists_name:
+            continue
+        if any("patch" not in e for e in listings):
+            return False
+        if _changes(c1, name) != _changes(d12, name) or _changes(c2, name) != _changes(d21, name):
+            return False
+    return True
+
+
+def kept(candidate: Candidate, head: str, carry: Carry) -> Kept:
+    """Whether the candidate's approval still holds at `head`, or the reads still needed to say."""
+    base, approved_head, reads = carry.base, candidate.head, carry.reads
+    if not (_sha(base) and _sha(approved_head) and _sha(head)):
+        return Kept(False)
+    contents = contents_path(base)
+    base_a, a_head, base_h = (compare_path(base, approved_head), compare_path(approved_head, head),
+                              compare_path(base, head))
+    round_one = (contents, base_a, a_head, base_h)
+    missing = tuple(p for p in round_one if p not in reads)
+    if missing:
+        return Kept(False, missing)
+    if any(reads[p] is None for p in round_one):
+        return Kept(False)
+    sets = read_look_files(reads[contents])
+    if sets is None:
+        raise Unreadable(contents)
+    own_names = compare_files(reads[base_a])
+    if own_names is None:
+        raise Unreadable(base_a)
+    covered = [globs for globs in sets.values() if any(glob_match(g, n) for g in globs for n in own_names)]
+    if not covered:
+        return Kept(False)
+    globs = tuple(g for group in covered for g in group)
+
+    def look(compare: Any) -> set[str]:
+        return {n for n in compare_files(compare) or () if any(glob_match(g, n) for g in globs)}
+
+    ahead = reads[a_head]
+    if not isinstance(ahead, dict) or not isinstance(ahead.get("status"), str) or compare_files(ahead) is None:
+        raise Unreadable(a_head)
+    if ahead["status"] != "ahead":
+        return Kept(False)
+    own_h, own_a = compare_commits(reads[base_h]), compare_commits(reads[base_a])
+    if own_h is None or own_a is None:
+        raise Unreadable(base_h)
+    added = set(own_h) - set(own_a) - {approved_head}
+    if len(added) > CHAIN_LIMIT:
+        return Kept(False)
+    chain: list[str] = []
+    current = head
+    while current != approved_head:
+        parents = own_h.get(current, ())
+        if current not in added or current in chain or not 1 <= len(parents) <= 2 \
+                or (len(parents) == 2 and parents[1] in own_h):
+            return Kept(False)
+        chain.append(current)
+        current = parents[0]
+    if set(chain) != added:
+        return Kept(False)
+    chain.reverse()
+    wanted: list[str] = []
+    for commit in chain:
+        parents = own_h[commit]
+        if len(parents) == 1:
+            paths = [compare_path(parents[0], commit)]
+        else:
+            p1, p2 = parents
+            paths = [compare_path(p1, p2), compare_path(p2, p1), compare_path(p1, commit), compare_path(p2, commit)]
+        wanted.extend(p for p in paths if p not in wanted)
+    missing = tuple(p for p in wanted if p not in reads)
+    if missing:
+        return Kept(False, missing)
+    if any(reads[p] is None for p in wanted):
+        return Kept(False)
+    for path in wanted:
+        answer = reads[path]
+        if not isinstance(answer, dict) or not isinstance(answer.get("status"), str) \
+                or compare_files(answer) is None:
+            raise Unreadable(path)
+    looks = 0
+    for commit in chain:
+        parents = own_h[commit]
+        for p in parents:
+            if reads[compare_path(p, commit)]["status"] != "ahead":
+                return Kept(False)
+        if len(parents) == 1:
+            looks += bool(look(reads[compare_path(parents[0], commit)]))
+        elif not _clean_merge(parents, commit, reads, look):
+            return Kept(False)
+    if candidate.answer == "approved":
+        return Kept(looks == 0)
+    if candidate.answer == "fix":
+        return Kept(looks == 1)
+    return Kept(False)
+
+
+def settle(candidate: Candidate, head: str, base: str, read: Callable[[str], Any]) -> bool:
+    """Run `kept` to a decision, reading what it names through `read`, within the carry bounds."""
+    reads: dict[str, Any] = {}
+    for run in range(1, CARRY_RUNS + 1):
+        found = kept(candidate, head, Carry(base, reads))
+        if not found.need:
+            return found.kept
+        if run == CARRY_RUNS or len(reads) + len(found.need) > READ_LIMIT:
+            return False
+        for path in found.need:
+            reads[path] = read(path)
+    return False
+
+
+def merged_under_look(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, pull: Any,
+                      read: Callable[[str], Any]) -> bool:
+    """Whether a merged pull request's head was merged under an approval, exact or kept."""
+    comments = list(comments)
+    head = merged_head(pull)
+    if head is None:
+        return False
+    answer = look_answer(comments, issue, pr, head)
+    if answer is not None:
+        return answer.fields.get("answer") == "approved"
+    found = carry_candidate(comments, issue, pr, head)
+    if found is None:
+        return False
+    sha = pull.get("merge_commit_sha")
+    if not _sha(sha):
+        raise Unreadable("merge_commit_sha")
+    commit = read(f"commits/{sha}")
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    first = parents[0] if isinstance(parents, list) and parents else None
+    if not isinstance(first, dict) or not _sha(first.get("sha")):
+        raise Unreadable("merge commit parents")
+    return settle(found, head, first["sha"], read)
+
+
+def judge(pr: int, head: str | None, issues: Iterable[IssueFacts], carry: Carry | None = None) -> Verdict:
     """Admit the merge, or name the first marked issue (by number) that lacks an approval.
 
-    An admit names the marked issues it admitted in `marked`, ascending.
+    An admit names the marked issues it admitted in `marked`, ascending. A refusal lists the
+    candidates of its failing issues when each has one, and their `need` while each is undecided.
     """
     marked = []
+    refusal: tuple[int, tuple[str, ...]] | None = None
+    candidates: list[Candidate | None] = []
+    needs: list[tuple[str, ...] | None] = []
     for facts in sorted(issues, key=lambda f: f.number):
         look = read_look(facts.body)
         if not look.marked:
             continue
         marked.append(facts.number)
-        marker = look_answer(facts.comments, facts.number, pr, head) if head is not None else None
-        if marker is None or marker.fields.get("answer") != "approved":
-            return Verdict(False, facts.number, look.covers)
-    return Verdict(True, marked=tuple(marked))
+        if head is None:
+            found = None
+        else:
+            marker = look_answer(facts.comments, facts.number, pr, head)
+            if marker is not None and marker.fields.get("answer") == "approved":
+                continue
+            found = carry_candidate(facts.comments, facts.number, pr, head)
+        need: tuple[str, ...] | None = None
+        if found is not None and carry is not None:
+            try:
+                decided = kept(found, head, carry)
+            except Unreadable:
+                decided = Kept(False)
+            if decided.kept:
+                continue
+            need = decided.need or None
+        if refusal is None:
+            refusal = (facts.number, look.covers)
+        candidates.append(found)
+        needs.append(need)
+    if refusal is None:
+        return Verdict(True, marked=tuple(marked))
+    listed = tuple(c for c in candidates if c is not None) if all(c is not None for c in candidates) else ()
+    undecided = tuple(sorted({p for n in needs if n for p in n})) if all(needs) else ()
+    return Verdict(False, refusal[0], refusal[1], candidates=listed, need=undecided)

@@ -1,10 +1,12 @@
 """Tests for `agent_tools.delivery.look_approval` (issue 1138): post, status and judge."""
+import base64
 import contextlib
 import io
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -23,11 +25,50 @@ T0 = "2026-11-16T10:00:00Z"
 ISSUE_ARGV = ["api", f"repos/{SLUG}/issues/{ISSUE}"]
 POST = ["--repo", SLUG, "--issue", "7", "--pr", "12", "--head", HEAD]
 STATUS = ["status", *POST]
+A = "5" * 40
+B = "b" * 40
+BT = "3" * 40
+MC = "2" * 40
+FORK = "e" * 40
+PAGE = "python/agent_tools/console/page.html"
+TESTF = "tests/test_console_page.py"
+PULL_ARGV = ["api", f"repos/{SLUG}/pulls/{PR}"]
 
 
 def comment(cid, body, association="OWNER"):
     return {"id": cid, "body": body, "updated_at": T0, "created_at": T0,
             "author_association": association, "user": {"login": "octo"}}
+
+
+def contents(text):
+    raw = base64.b64encode(text.encode()).decode()
+    return {"type": "file", "encoding": "base64",
+            "content": "\n".join(raw[i:i + 60] for i in range(0, len(raw), 60))}
+
+
+def cmp(files=(), status="ahead", commits=()):
+    listed = [{"filename": name, "status": "modified",
+               "patch": f"@@ -1,2 +1,2 @@\n {name} line 0\n-{name} old\n+{name} new"} for name in files]
+    return {"status": status, "files": listed, "total_commits": len(commits),
+            "commits": [{"sha": sha, "parents": [{"sha": p} for p in parents]} for sha, parents in commits]}
+
+
+CONSOLE = contents('{"version": 1, "sets": {"console": ["python/agent_tools/console/**"]}}')
+SHRUNK = contents('{"version": 1, "sets": {"console": ["python/agent_tools/console/*.py"]}}')
+
+
+def reads(base, ah_files=(TESTF,)):
+    return {
+        f"contents/.github/look-files.json?ref={base}": CONSOLE,
+        f"compare/{base}...{A}": cmp([PAGE, "python/agent_tools/console/view.py"], commits=[(A, [FORK])]),
+        f"compare/{A}...{HEAD}": cmp(ah_files),
+        f"compare/{base}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A])]),
+    }
+
+
+def serve(world, slug, served):
+    for path, value in served.items():
+        world.respond_json("gh", ["api", f"repos/{slug}/{path}"], value)
 
 
 def run(*argv):
@@ -67,6 +108,44 @@ class PostTest(unittest.TestCase):
         self.assertEqual(out["verdict"], "untrusted")
 
 
+class PostFixTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def words_file(self, text):
+        path = self.tmp / "words.txt"
+        path.write_text(text, encoding="utf-8")
+        return str(path)
+
+    def fix(self, *tail):
+        return run("post", *POST, "--answer", "fix", "--message", "msg-1", *tail)
+
+    def test_a_fix_approval_posts_the_words(self):
+        self.world.comment_store(SLUG, ISSUE, [], labels=[])
+        code, out = self.fix("--words-file", self.words_file("make the label bold\n"))
+        self.assertEqual((code, out["verdict"], out["answer"]), (0, "posted", "fix"))
+        lines = self.world.stored()[0]["body"].splitlines()
+        self.assertEqual(lines[0], f"<!-- agent:look v1 issue=7 pr=12 head={HEAD} answer=fix message=msg-1 -->")
+        self.assertEqual(lines[1], "The owner approved head 1a2b3c4 of pull request 12 with one fix.")
+        self.assertEqual(lines[2], "The fix: make the label bold")
+
+    def test_fix_word_errors_come_before_any_gh_call(self):
+        cases = {
+            "no words file": ["--answer", "fix", "--message", "m"],
+            "words with approved": ["--answer", "approved", "--message", "m",
+                                    "--words-file", self.words_file("x")],
+            "missing file": ["--answer", "fix", "--message", "m", "--words-file", str(self.tmp / "none.txt")],
+            "only spaces": ["--answer", "fix", "--message", "m", "--words-file", self.words_file("   \n ")],
+            "too long": ["--answer", "fix", "--message", "m", "--words-file", self.words_file("x" * 2001)],
+        }
+        for name, tail in cases.items():
+            with self.subTest(name):
+                code, out = run("post", *POST, *tail)
+                self.assertEqual((code, out["error"], out["verdict"]), (2, "usage", "error"))
+        self.assertEqual(self.world.argvs("gh"), [])
+
+
 class StatusTest(unittest.TestCase):
     def setUp(self):
         self.world = ForgeWorld(self)
@@ -87,7 +166,10 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(out["covers"], [WHAT])
 
     def test_status_of_another_head_is_needed(self):
-        self.seed([comment(5, lm.approval_body(7, 12, OTHER, "approved", "m1"))])
+        self.seed([comment(5, lm.approval_body(7, 12, A, "approved", "m1"))])
+        self.world.respond_json("gh", PULL_ARGV, {"number": 12, "base": {"ref": "main"}, "head": {"sha": HEAD}})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/branches/main"], {"name": "main", "commit": {"sha": B}})
+        serve(self.world, SLUG, reads(B, ah_files=(PAGE,)))
         code, out = run(*STATUS)
         self.assertEqual((code, out["verdict"]), (0, "needed"))
 
@@ -195,7 +277,6 @@ class TickTest(unittest.TestCase):
     def test_tick_writes_nothing_without_a_trusted_approval_of_that_head(self):
         cases = {
             "untrusted": [self.approval(5, association="CONTRIBUTOR")],
-            "other head": [self.approval(5, head=OTHER)],
             "changes after": [self.approval(5), self.approval(6, answer="changes")],
         }
         for name, comments in cases.items():
@@ -236,6 +317,193 @@ class TickTest(unittest.TestCase):
         code, out = run("tick", "--repo", SLUG, "--issue", "7", "--pr", "12", "--head", "abc")
         self.assertEqual((code, out["error"]), (2, "usage"))
         self.assertEqual(self.world.argvs("gh"), [])
+
+
+class StatusCarryTest(unittest.TestCase):
+    BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
+    PULL = {"number": 12, "base": {"ref": "main"}, "head": {"sha": HEAD}}
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def seed(self, comments, served=None):
+        self.world.comment_store(SLUG, ISSUE, comments)
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+        self.world.respond_json("gh", PULL_ARGV, self.PULL)
+        self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+        serve(self.world, SLUG, reads(B) if served is None else served)
+
+    def kept(self):
+        return [comment(5, lm.approval_body(7, 12, A, "approved", "m1"))]
+
+    def test_status_of_a_head_that_keeps_an_approval_is_approved(self):
+        self.seed(self.kept())
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "approved", "approved", 5, A))
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("ref=main" in part or "compare/main" in part for part in argv), argv)
+
+    def test_status_of_a_head_that_changed_a_look_file_is_needed(self):
+        self.seed(self.kept(), reads(B, ah_files=(PAGE,)))
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "needed", None, None, None))
+
+    def test_status_reports_an_unreadable_carry_as_an_error(self):
+        malformed = {
+            "empty compare": (f"compare/{B}...{HEAD}", {}),
+            "unknown file status": (f"compare/{A}...{HEAD}",
+                                    {"status": "ahead", "files": [{"filename": PAGE, "status": "weird"}]}),
+            "set file a dir": (f"contents/.github/look-files.json?ref={B}", {"type": "dir"}),
+        }
+        self.seed(self.kept())
+        self.world.respond("gh", ["api", f"repos/{SLUG}/compare/{B}...{HEAD}"], exit=1,
+                           stderr="gh: Internal Server Error (HTTP 500)")
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"]), (1, "error"))
+        self.assertNotIn("kept_from", out)
+        for name, (path, value) in malformed.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed(self.kept())
+                self.world.respond_json("gh", ["api", f"repos/{SLUG}/{path}"], value)
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+                self.assertNotIn("kept_from", out)
+        with self.subTest("pull without a base"):
+            self.world = ForgeWorld(self)
+            self.seed(self.kept())
+            self.world.respond_json("gh", PULL_ARGV, {"number": 12})
+            code, out = run(*STATUS)
+            self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+            self.assertNotIn("kept_from", out)
+        with self.subTest("branch not found"):
+            self.world = ForgeWorld(self)
+            self.seed(self.kept())
+            self.world.not_found("gh", self.BRANCH_ARGV)
+            code, out = run(*STATUS)
+            self.assertEqual((code, out["verdict"]), (1, "error"))
+            self.assertNotIn("kept_from", out)
+
+    def test_status_of_an_absent_carry_read_is_needed(self):
+        for path in (f"contents/.github/look-files.json?ref={B}", f"compare/{A}...{HEAD}"):
+            with self.subTest(path):
+                self.world = ForgeWorld(self)
+                self.seed(self.kept())
+                self.world.not_found("gh", ["api", f"repos/{SLUG}/{path}"])
+                code, out = run(*STATUS)
+                self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                                 (0, "needed", None, None, None))
+
+    def test_an_exact_approval_reports_no_kept_head(self):
+        self.seed([comment(5, lm.approval_body(7, 12, HEAD, "approved", "m1"))])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["kept_from"]), (0, "approved", None))
+        self.assertNotIn(PULL_ARGV, self.world.argvs("gh"))
+
+
+class TickCarryTest(unittest.TestCase):
+    TICK = ["tick", *POST]
+    PULL = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"}, "merge_commit_sha": MC}
+    COMMIT = {"sha": MC, "parents": [{"sha": BT}, {"sha": HEAD}]}
+    PATCH = TickTest.PATCH
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def seed(self, served=None, pull=None):
+        self.world.comment_store(SLUG, ISSUE, [comment(5, lm.approval_body(7, 12, A, "approved", "m5"))])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": TickTest.TICK_BODY})
+        self.world.respond_json("gh", PULL_ARGV, self.PULL if pull is None else pull)
+        self.world.respond_json("gh", self.PATCH, {"number": 7})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{MC}"], self.COMMIT)
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref=main"], SHRUNK)
+        serve(self.world, SLUG, reads(BT) if served is None else served)
+
+    def patches(self):
+        return [argv for argv in self.world.argvs("gh") if argv[:3] == ["api", "-X", "PATCH"]]
+
+    def test_tick_ticks_under_a_kept_approval(self):
+        self.seed()
+        code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
+        self.assertEqual(len(self.patches()), 1)
+
+    def test_tick_reads_the_set_at_the_merge_base(self):
+        self.seed(reads(BT, ah_files=(PAGE,)))
+        code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"]), (1, "needed"))
+        self.assertEqual(self.patches(), [])
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(argv[-1].endswith("?ref=main"), argv)
+
+    def test_tick_reports_an_unreadable_carry_as_an_error(self):
+        cases = {
+            "http 500": lambda: self.world.respond(
+                "gh", ["api", f"repos/{SLUG}/compare/{BT}...{HEAD}"], exit=1,
+                stderr="gh: Internal Server Error (HTTP 500)"),
+            "empty compare": lambda: self.world.respond_json(
+                "gh", ["api", f"repos/{SLUG}/compare/{BT}...{HEAD}"], {}),
+            "no merge commit sha": lambda: self.world.respond_json(
+                "gh", PULL_ARGV, {k: v for k, v in self.PULL.items() if k != "merge_commit_sha"}),
+            "merge commit not found": lambda: self.world.not_found("gh", ["api", f"repos/{SLUG}/commits/{MC}"]),
+        }
+        for name, break_it in cases.items():
+            with self.subTest(name):
+                self.world = ForgeWorld(self)
+                self.seed()
+                break_it()
+                code, out = run(*self.TICK)
+                self.assertEqual((code, out["verdict"]), (1, "error"))
+                if name != "http 500":
+                    self.assertEqual(out["error"], "payload_invalid")
+                self.assertEqual(self.patches(), [])
+
+
+class CarryJudgeTest(unittest.TestCase):
+    ROUND_ONE = sorted([f"contents/.github/look-files.json?ref={B}", f"compare/{B}...{A}",
+                        f"compare/{A}...{HEAD}", f"compare/{B}...{HEAD}"])
+
+    def judge(self, stdin):
+        return JudgeTest.judge(self, stdin)
+
+    def payload(self, carry=None):
+        data = {"pr": 12, "head": HEAD, "issues": [{"number": 1200, "body": BODY, "comments": [
+            comment(5, lm.approval_body(1200, 12, A, "approved", "m1"))]}]}
+        if carry is not None:
+            data["carry"] = carry
+        return json.dumps(data)
+
+    def test_a_refusal_names_the_carry_candidates(self):
+        code, out = self.judge(self.payload())
+        self.assertEqual((code, out), (1, {
+            "command": "look-approval", "action": "judge", "verdict": "refuse", "issue": 1200, "covers": [WHAT],
+            "candidates": [{"issue": 1200, "head": A, "answer": "approved"}]}))
+
+    def test_a_carry_run_names_its_reads(self):
+        code, out = self.judge(self.payload({"base": B, "reads": {}}))
+        self.assertEqual(code, 1)
+        self.assertEqual(out["need"], self.ROUND_ONE)
+
+    def test_a_kept_approval_admits_once_its_reads_are_given(self):
+        served = {path: value for path, value in reads(B).items()}
+        code, out = self.judge(self.payload({"base": B, "reads": served}))
+        self.assertEqual((code, out), (0, {"command": "look-approval", "action": "judge", "verdict": "admit",
+                                           "marked": [1200]}))
+
+    def test_a_changed_look_file_refuses_with_nothing_to_read(self):
+        code, out = self.judge(self.payload({"base": B, "reads": reads(B, ah_files=(PAGE,))}))
+        self.assertEqual((code, out["verdict"]), (1, "refuse"))
+        self.assertNotIn("need", out)
+
+    def test_a_malformed_carry_is_a_usage_error(self):
+        cases = [[], {"base": B}, {"base": "main", "reads": {}}, {"base": B, "reads": []},
+                 {"base": B, "reads": {"issues/1": {}}}, {"base": B, "reads": {}, "x": 1}]
+        for carry in cases:
+            with self.subTest(carry=carry):
+                code, out = self.judge(self.payload(carry))
+                self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "usage"))
 
 
 class UsageTest(unittest.TestCase):

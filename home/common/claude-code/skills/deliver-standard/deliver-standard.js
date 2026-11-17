@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look?, review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, look? (with cont: {answer: approve, head, message?}, {answer: fix, head, words, message?} to approve that head with one fix, or {answer: changes, words}), review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of the status clerk steps (a trial, #803); the setup steps and every step that emits a lifecycle verb stay on sonnet (#813); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message?} records the approval for that head when the pull request head and the verified head are still it, then lands; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), look (#1139: with cont, in ship mode, the owner's answer to an awaiting-look stop: {answer: approve, head: <the 40-hex head the owner saw>, message?} records the approval for that head when the pull request head and the verified head are still it, then lands; {answer: fix, head, words, message?} (#1211) records the approval of that head with the owner's words when the pull request head is still it, runs one fix round on the words, verifies again and lands the fixed head when look-approval status keeps the approval for it; {answer: changes, words} runs one fix round on the owner's words, verifies again and stops at awaiting-look at the new head; an unmarked delivery ignores an approve answer), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, look-pr, look-push, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -90,21 +90,25 @@ if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean')
 const REVIEW_SIZING = args.review_sizing === true
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return { stage: 'args', error: 'clerk_model must be sonnet or haiku' }
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
-// #1139: the owner's answer to an awaiting-look stop: {answer: approve, head, message?} or {answer: changes, words}; only with a cont, only in ship mode.
+// #1139: the owner's answer to an awaiting-look stop: {answer: approve, head, message?}, {answer: fix, head, words, message?} or {answer: changes, words}; only with a cont, only in ship mode.
 const LOOK_ANSWER = args.look === undefined ? null : args.look
 if (LOOK_ANSWER !== null) {
   if (!CONT) return { stage: 'args', error: 'look needs a cont: it answers an awaiting-look stop' }
   if (MODE !== 'ship') return { stage: 'args', error: 'look needs mode ship' }
   const held = CONT.look
-  if (LOOK_ANSWER && LOOK_ANSWER.answer === 'approve' && !(held && typeof held === 'object' && Number.isInteger(held.pr) && held.pr > 0 && /^[0-9a-f]{40}$/.test(held.head))) return { stage: 'args', error: 'look approve needs a cont that stopped at awaiting-look' }
-  const sound = !!LOOK_ANSWER && typeof LOOK_ANSWER === 'object' && !Array.isArray(LOOK_ANSWER) && (LOOK_ANSWER.answer === 'approve'
-    ? typeof LOOK_ANSWER.head === 'string' && /^[0-9a-f]{40}$/.test(LOOK_ANSWER.head) && (LOOK_ANSWER.message === undefined || (typeof LOOK_ANSWER.message === 'string' && /^[A-Za-z0-9._:\/@+-]+$/.test(LOOK_ANSWER.message)))
-    : LOOK_ANSWER.answer === 'changes' && typeof LOOK_ANSWER.words === 'string' && LOOK_ANSWER.words.trim() !== '' && LOOK_ANSWER.words.length <= 2000)
-  if (!sound) return { stage: 'args', error: 'look must be {answer: approve, head, message?} or {answer: changes, words}' }
+  const heldLook = !!held && typeof held === 'object' && Number.isInteger(held.pr) && held.pr > 0 && /^[0-9a-f]{40}$/.test(held.head)
+  if (LOOK_ANSWER && LOOK_ANSWER.answer === 'approve' && !heldLook) return { stage: 'args', error: 'look approve needs a cont that stopped at awaiting-look' }
+  const wordsOk = typeof (LOOK_ANSWER && LOOK_ANSWER.words) === 'string' && LOOK_ANSWER.words.trim() !== '' && LOOK_ANSWER.words.length <= 2000
+  const headOk = typeof (LOOK_ANSWER && LOOK_ANSWER.head) === 'string' && /^[0-9a-f]{40}$/.test(LOOK_ANSWER.head) && (LOOK_ANSWER.message === undefined || (typeof LOOK_ANSWER.message === 'string' && /^[A-Za-z0-9._:\/@+-]+$/.test(LOOK_ANSWER.message)))
+  const sound = !!LOOK_ANSWER && typeof LOOK_ANSWER === 'object' && !Array.isArray(LOOK_ANSWER) && (LOOK_ANSWER.answer === 'approve' ? headOk
+    : LOOK_ANSWER.answer === 'fix' ? headOk && wordsOk
+    : LOOK_ANSWER.answer === 'changes' && wordsOk)
+  if (!sound) return { stage: 'args', error: 'look must be {answer: approve, head, message?}, {answer: fix, head, words, message?} or {answer: changes, words}' }
+  if (LOOK_ANSWER.answer === 'fix' && !heldLook) return { stage: 'args', error: 'look fix needs a cont that stopped at awaiting-look' }
 }
-// The owner's changes answer rejects the approved head: the approval leaves the cont here, before any stop, so every stop of this resume (a setup, amend,
+// The owner's changes answer rejects the approved head, and a fix answer replaces the approval of the head it was given for with a new one made after the fix: the approval leaves the cont here, before any stop, so every stop of this resume (a setup, amend,
 // blocked, dirty or plan stop that returns the cont as it came, or the fix itself) carries a cont with no approval and a resume with no look cannot land that head.
-if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes' && CONT && CONT.look && typeof CONT.look === 'object' && CONT.look.approved !== undefined) {
+if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix') && CONT && CONT.look && typeof CONT.look === 'object' && CONT.look.approved !== undefined) {
   const { approved: _revoked, ...unapproved } = CONT.look
   CONT = { ...CONT, look: unapproved }
 }
@@ -731,7 +735,7 @@ const LOOK_READ = !!LOOK && (LOOK.verdict === 'marked' || LOOK.verdict === 'unma
 const MARKED = LOOK_READ && LOOK.verdict === 'marked'
 const COVERS = MARKED && Array.isArray(LOOK.covers) ? LOOK.covers.filter(c => typeof c === 'string' && c.trim()) : []
 const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
-const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to approve that head, or look {answer: changes, words: <the owner's words>} to ask for a change.`
+const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to approve that head, or look {answer: fix, head: <head>, words: <the owner's words>, message?} to approve that head with one fix, or look {answer: changes, words: <the owner's words>} to ask for a change.`
 // #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
 // The pull request and head the awaiting-look stop left for the owner, carried in cont.look; a resume keeps it only when well formed.
 const lookOf = l => (isEntry(l) && Number.isInteger(l.pr) && l.pr > 0 && typeof l.head === 'string' && SHA_RE.test(l.head) ? { pr: l.pr, head: l.head, ...(typeof l.approved === 'string' && SHA_RE.test(l.approved) ? { approved: l.approved } : {}) } : null)
@@ -1971,8 +1975,42 @@ const rerunOnce = async (v, n) => {
   return { ...v, results }
 }
 const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_diff: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'why'] } }, unrelated: { type: 'object', properties: { test: { type: 'string' }, evidence: { type: 'string' } }, required: ['test', 'evidence'] } } }
-// #1139: the owner looked and asked for changes: one fix round on their words, then a fresh verify; a review that finds a defect stops.
-if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
+let verify = null
+// The awaiting-look stop of a marked delivery: its pull request is open and its head pushed and current; it holds no lock and merges nothing.
+const lookStop = (pr, sha) => {
+  lookAt = { pr, head: sha }
+  // A fix answer stops here before its verify has run: the cont's own verified record stays and speaks for the stop.
+  if (verify) verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(picturesOf(verify).length ? { pictures: picturesOf(verify) } : {}) }
+  const shown = picturesOf(verify || verified)
+  return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(shown.length ? { pictures: shown } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: LOOK_REASON }
+}
+const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
+const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
+// #1211: the owner's fix answer approves the head it was given for with one fix. The approval is recorded before the fix, only while the pull request is open and its head is
+// both the head the owner saw and the head the awaiting-look stop left; anything else posts nothing and stops at awaiting-look with the head just read.
+const FIX_WORDS_FILE = `${setup.plan_dir}/look-fix-words.txt`
+// A look marker the setup could not read is neither marked nor unmarked: a fix answer stops here, before the head check, the approval and the fix round.
+const LOOK_UNREAD = () => stop('look', { details: clip(`the look marker of issue ${ISSUE} was not read: ${LOOK && present(LOOK.detail) ? LOOK.detail : 'no verdict'}`) })
+if (!LOOK_READ && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') return LOOK_UNREAD()
+if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'fix') {
+  const hd = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then read the head of PR #${lookAt.pr}, changing nothing: run ${UNSET}gh pr view ${lookAt.pr} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
+${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(LOOK_HEAD_SCHEMA) }), r => r.renew)
+  if (!hd) return stop('look-approve', { result: null })
+  const lostLook = renewed(hd.renew, 'look-approve')
+  if (lostLook) return lostLook
+  if (!complete(hd, LOOK_HEAD_SCHEMA) || !SHA_RE.test(hd.head)) return stop('look-approve', { result: hd })
+  if (hd.state !== 'OPEN') return stop('look-approve', { details: `PR #${lookAt.pr} is ${hd.state}, not open, so the approval of ${LOOK_ANSWER.head} was not recorded` })
+  if (!sameSha(hd.head, LOOK_ANSWER.head) || !sameSha(LOOK_ANSWER.head, lookAt.head)) return lookStop(lookAt.pr, hd.head)
+  const posted = await call(`${CTX}
+Record the owner's look approval of issue #${ISSUE} of ${SLUG} with one fix. First write the owner's words, the JSON string ${JSON.stringify(LOOK_ANSWER.words)} decoded, exactly as the whole content of ${FIX_WORDS_FILE} with the Write tool. Then run alone and exactly: look-approval post --repo ${SLUG} --issue ${ISSUE} --pr ${lookAt.pr} --head ${LOOK_ANSWER.head} --answer fix --message ${LOOK_ANSWER.message || String(setup.holder).split('/').pop()} --words-file ${FIX_WORDS_FILE}
+It prints one JSON line. Return its verdict, comment_id and any detail. Run nothing else.
+${RULES}`, { label: 'look-post', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_POST_SCHEMA })
+  if (!posted || posted.verdict !== 'posted') return stop('look-approve', { result: posted })
+}
+// #1139: the owner looked and asked for changes (#1211: or approved with one fix): one fix round on their words, then a fresh verify; a review that finds a defect stops.
+if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === 'fix')) {
   const asked = [{ severity: 'important', source: 'owner', summary: LOOK_ANSWER.words, failing_input: `the owner's look at head ${lookAt ? lookAt.head : setup.head}` }]
   // The approval was revoked at the top of the program (see lookAt); the fix is tried with the delivery stopped at the look.
   LOOK_STOP = MARKED
@@ -1985,8 +2023,14 @@ if (LOOK_ANSWER && LOOK_ANSWER.answer === 'changes') {
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
   verified = null
+  // The fix answer's approval was recorded for the head it was given for: the delivery lands the fixed head when look-approval status keeps it.
+  if (MARKED && LOOK_ANSWER.answer === 'fix') {
+    approvedHead = LOOK_ANSWER.head
+    lookAt = { pr: lookAt.pr, head: approvedHead, approved: approvedHead }
+    LOOK_STOP = false
+  }
 }
-let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results, ...(picturesOf(verified).length ? { pictures: picturesOf(verified) } : {}) } : null
+verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results, ...(picturesOf(verified).length ? { pictures: picturesOf(verified) } : {}) } : null
 if (VERIFY_CACHED) noteFlaky(verified.results)
 if (!VERIFY_CACHED) {
 verify = await recall(() => call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(VERIFY) }), r => r.renew)
@@ -2023,7 +2067,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 const PICTURES = picturesOf(verify)
 // #1139: a look read with neither verdict is not read as unmarked: nothing is pushed or landed until the marker is read.
-if (!LOOK_READ) return stop('look', { details: clip(`the look marker of issue ${ISSUE} was not read: ${LOOK && present(LOOK.detail) ? LOOK.detail : 'no verdict'}`) })
+if (!LOOK_READ) return LOOK_UNREAD()
 if (MODE === 'ready') {
   verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(PICTURES.length ? { pictures: PICTURES } : {}) }
   return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, look: { verdict: LOOK.verdict, covers: COVERS }, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
@@ -2200,14 +2244,7 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
 }
 // #1139: the pull request text of the pr call, shared with a marked delivery's look-pr call.
 const PR_OPEN = `Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).`
-// The awaiting-look stop of a marked delivery: its pull request is open and its head pushed and current; it holds no lock and merges nothing.
-const lookStop = (pr, sha) => {
-  lookAt = { pr, head: sha }
-  verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap(), ...(PICTURES.length ? { pictures: PICTURES } : {}) }
-  return { ...stop('awaiting-look', { issue: ISSUE, pr, head: sha, covers: COVERS, ...(PICTURES.length ? { pictures: PICTURES } : {}), ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ways: LOOK_WAYS }), reason: LOOK_REASON }
-}
-const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
-const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
+const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is posted
 // only for the head the owner saw, when that is also the verified head. Anything else posts nothing and merges nothing.
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
@@ -2600,8 +2637,18 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       continue
     }
     if (state === 'passed') {
-      // #1139: a marked delivery merges only the head the owner approved; a head that moved since stops for a new look, the lock released.
-      if (MARKED && approvedHead && !sameSha(head, approvedHead)) return lookStop(PR, head)
+      // #1139: a marked delivery merges only a head the owner's approval covers. #1211: a head that moved since lands when look-approval status
+      // says the approval is kept; needed stops for a new look, the lock released, and any other reply stops without asking the owner (a forge failure is no reason for a look).
+      if (MARKED && approvedHead && !sameSha(head, approvedHead)) {
+        const ls = await call(`${CTX}
+Read whether the owner's look approval of issue #${ISSUE} of ${SLUG} still covers the head ${head} of PR #${PR}. Run alone and exactly: look-approval status --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --head ${head}
+It prints one JSON line. Return its verdict, kept_from and any detail. Run nothing else.
+${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
+        if (!complete(ls, LOOK_STATUS_SCHEMA) || (ls.verdict !== 'approved' && ls.verdict !== 'needed')) return stop('look-status', { pr: PR, head, result: ls })
+        if (ls.verdict === 'needed') return lookStop(PR, head)
+        approvedHead = head
+        lookAt = { pr: PR, head, approved: head }
+      }
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       mg = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
