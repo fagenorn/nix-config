@@ -242,10 +242,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-list > summary .message-new, .sprint-earlier summary .message-new { margin-left: 10px; }
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
 .activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
+.activation .btn-quiet { margin-left: 8px; }
+.activation-refused { margin-left: 8px; color: var(--sub0); }
 .wait { margin-top: 6px; font-size: .84375rem; color: var(--sub0); max-width: 44rem; overflow-wrap: anywhere; }
 .wait a { color: inherit; text-underline-offset: 3px; }
 .sprint-checks .wait { margin: 0; padding: 2px 0; font-size: .8125rem; max-width: none; }
-.activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
@@ -1831,6 +1832,28 @@ async function postNotice(projectId) {
     state.phase = "failed";
     state.reason = reason;
   }
+  redrawNotices();
+}
+// The owner's Activate click (ADR-console-043): posts the commit the line shows and is disabled only while sending. The refusal stays on the line until a frame brings a different line.
+let activationPost = null;
+async function postActivation(commit, key) {
+  if (activationPost !== null && activationPost.key === key && activationPost.refused === null) return;
+  const state = { key, refused: null };
+  activationPost = state;
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/activate", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ commit }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (activationPost !== state) return;
+  // An accepted click ends the sending state: a retry that fails the same way brings a line with the same key, so no frame would clear it.
+  if (reason === null) activationPost = null;
+  else state.refused = reason;
   redrawNotices();
 }
 async function withdrawNotice(projectId, id) {
@@ -3927,18 +3950,27 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
-// The activation line (#1114, ADR-console-043): the one sentence at the head of the Work column when a merged console change is not active on this host. The command rides in a code span; the rest of the text is drawn with pathWords so the checkout's path breaks after a slash.
+// The activation line (#1114, #1193, ADR-console-043): the one sentence at the head of the Work column about activating this host, drawn with pathWords so a path breaks after a slash. While Activate is offered the line ends with its button; a refusal of the click shows beside it until a frame brings a different line.
 function activationLine(view) {
   const found = view.activation;
-  if (found === null || typeof found !== "object") return null;
-  const { text, command } = found;
-  if (typeof text !== "string" || typeof command !== "string") return null;
-  const at = text.indexOf(command);
-  if (at < 0) return null;
+  if (found === null || typeof found !== "object") {
+    activationPost = null;
+    return null;
+  }
+  const { text, state, commit, activate } = found;
+  if (typeof text !== "string" || typeof commit !== "string") return null;
+  const key = state + " " + commit + " " + text;
+  if (activationPost !== null && activationPost.key !== key) activationPost = null;
   const line = el("p", "activation");
-  line.appendChild(el("span", "", text.slice(0, at)));
-  line.appendChild(el("code", "", command));
-  pathWords(line.appendChild(el("span")), text.slice(at + command.length));
+  pathWords(line.appendChild(el("span")), text);
+  if (activate === true) {
+    const button = actionButton("activate btn-quiet", "Activate", () => postActivation(commit, key));
+    button.disabled = activationPost !== null && activationPost.refused === null;
+    line.appendChild(button);
+  }
+  if (activationPost !== null && activationPost.refused !== null) {
+    line.appendChild(el("span", "activation-refused", "The console refused: " + activationPost.refused + "."));
+  }
   return line;
 }
 function drawProjects(view) {

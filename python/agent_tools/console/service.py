@@ -84,7 +84,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice`, `POST /api/owner-notice-withdraw` and `POST /api/project-question`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question` and `POST /api/activate`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -839,6 +839,38 @@ a failed read) keeps the previous reading, publishes nothing and is one stderr l
 exception escaping a poll is one stderr line `console: activation_poll_failed <Type>: <message>` and
 the loop goes on. Without a reader no thread starts and no line is shown.
 
+The owner's Activate (#1193): `POST /api/activate`, a page write whose body is exactly one JSON
+object `{"commit": <40 lowercase hex>}` of at most `MAX_ACTIVATE_BYTES` (the `_json_body` 411, 415
+and 413 rules apply; any other body is 400 `bad activation`). It is answered 409 `text/plain`, one
+line, appending nothing, in this order: `nothing to activate` (no `activator`, no reading, or a
+reading with no changed file); `an activation is already running`; `that commit is no longer the
+tip of origin's integration branch` (the body's commit is not the shown reading's); then a fresh
+`activator.tip(root)`, read outside the ingest lock, that cannot be read (`the tip of origin's
+integration branch could not be read`) or is not the commit (the same text as before). The claim on
+the activation is one flag taken under the ingest lock together with the first three checks, so two
+concurrent requests cannot both pass; the last check releases it when it refuses. An admitted request
+calls `activator.start(root, commit, record)` on the request thread, `record` being what writes the
+`activation.started` row. An `Outcome` (nothing was launched) is
+one `activation.finished` row, the claim released and an empty `204`; the page shows the failure. A
+`Run` is one `activation.started {root, commit, tree}` row, written by the activator's `record` callback
+before the process is launched where the tree is named in advance (a scope) and right after it otherwise (a
+failed write then kills the process group), a thread `ACTIVATE_THREAD` that runs
+`activator.wait(run, stop)`, and an empty `204`. Any other exception from `start` is a failed
+`activation.finished` row ("the activation could not run (<Type>: <message>)"), one stderr line
+`console: activation_run_failed <Type>: <message>` and the claim released. The claim lasts until
+`wait` returns an `Outcome`, which it does only once the run's whole process tree is gone, not when
+its first process exits: then one `activation.finished {root, commit, ok, reason, next_step}` row is
+appended, the claim released and the view published. `Stopped` (the service is closing) appends
+nothing and keeps the claim; the run goes on. Any other exception from `wait` is one stderr line
+`console: activation_wait_failed <Type>: <message>`, no row, the claim kept. The newest started and
+finished rows are folded (`activation_run.fold`) into `_activation_run`, at construction and in
+`_fold`. Resume: at `start()`, before the server listens, a run still `running` in the log whose
+started row carries a `tree` takes the claim and a new `ACTIVATE_THREAD` waits for that tree (the run
+outlived the old console, and its recorded exit decides); a `running` run with no `tree` is settled
+by a failed `activation.finished` row, `activation_run.UNRECORDED_REASON`. `close()` sets the stop
+flag and joins the thread, which raises `Stopped` within `activation_run.POLL_SECONDS`. Neither kind
+is in `KEPT_KINDS`, but retention leaves the newest row of each kind whatever its age (`EventLog.retain`), so the last run folds after a restart, and the page token appears in no row, answer or line.
+
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
 (`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_state(slug, number,
@@ -1338,7 +1370,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    project_question, account_add, account_remove, activation, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    project_question, account_add, account_remove, activation, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, manager, movement, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -1404,6 +1436,11 @@ NOTICES_PATH = "/api/notices"
 WITHDRAW_NOTICE_PATH = "/api/withdraw-notice"
 OWNER_NOTICE_PATH = "/api/owner-notice"
 OWNER_NOTICE_WITHDRAW_PATH = "/api/owner-notice-withdraw"
+ACTIVATE_PATH = "/api/activate"
+ACTIVATE_NOTHING = "nothing to activate"
+ACTIVATE_RUNNING = "an activation is already running"
+ACTIVATE_MOVED = "that commit is no longer the tip of origin's integration branch"
+ACTIVATE_UNREADABLE = "the tip of origin's integration branch could not be read"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
@@ -1428,7 +1465,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH})
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1469,6 +1506,7 @@ MAX_NOTICES_BYTES = 4096
 MAX_WITHDRAW_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
+MAX_ACTIVATE_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -1490,6 +1528,7 @@ TRACKER_SECONDS = 120.0
 TRACKER_THREAD = "console-tracker-poll"
 ACTIVATION_SECONDS = 60.0
 ACTIVATION_THREAD = "console-activation-poll"
+ACTIVATE_THREAD = "console-activate"
 ADOPTION_SECONDS = 120.0
 ADOPTION_THREAD = "console-adoption-poll"
 MOVEMENT_SECONDS = 120.0
@@ -2484,6 +2523,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _activate_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's Activate for the shown commit; False when it was refused."""
+        body = self._json_body(MAX_ACTIVATE_BYTES)
+        if body is None:
+            return False
+        try:
+            commit = activation_run.parse_request(body)
+        except ValueError:
+            self._refuse(400, "bad activation")
+            return False
+        try:
+            console.activate(commit)
+        except sprints.Refused as error:
+            print(f"console: activate_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: activate_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "activation failed")
+            return False
+        return True
+
     def _owner_notice_withdraw_request(self, console: "ConsoleService") -> bool:
         """Read and carry out the owner's withdrawal of a heads-up; False when it was refused."""
         body = self._json_body(MAX_OWNER_NOTICE_WITHDRAW_BYTES)
@@ -2766,6 +2827,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._owner_notice_withdraw_request(console):
                 return
+        elif route == ACTIVATE_PATH:
+            self.close_connection = True
+            if not self._activate_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2908,6 +2973,7 @@ class ConsoleService:
                  movement_seconds: float = MOVEMENT_SECONDS,
                  activation_reader: Callable[[Iterable[str]], activation.Activation | None] | None = None,
                  activation_seconds: float = ACTIVATION_SECONDS,
+                 activator: activation_run.Activator | None = None,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
@@ -3073,6 +3139,10 @@ class ConsoleService:
         self._activation_seconds = activation_seconds
         self._activation: activation.Activation | None = None
         self._activation_thread: threading.Thread | None = None
+        self._activator = activator
+        self._activation_run: activation_run.LastRun | None = None
+        self._activating = False
+        self._activate_thread: threading.Thread | None = None
         self._slug_of = slug_of
         self._branch_pattern_of = branch_pattern_of
         self._patterns: dict[str, str] = {}
@@ -3142,6 +3212,7 @@ class ConsoleService:
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
             self._owner_notices = sprints.owner_notices(events)
+            self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
             self._settle_stops()
             self._publish()
@@ -3245,6 +3316,7 @@ class ConsoleService:
             digest=digest.digest(self._moments, self._looked, self._now()),
             spend=self._spend_view,
             capacity=cap, activation=self._activation,
+            activation_run=self._activation_run,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
@@ -6335,6 +6407,7 @@ class ConsoleService:
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
+        self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
@@ -6484,6 +6557,99 @@ class ConsoleService:
             if found != self._activation:
                 self._activation = found
                 self._publish()
+
+    def activate(self, commit: str) -> None:
+        """Start one activation of `commit`, the shown tip; see the module docstring."""
+        with self._ingest:
+            reading = self._activation
+            if self._activator is None or reading is None or not reading.changed:
+                raise sprints.Refused(ACTIVATE_NOTHING)
+            if self._activating:
+                raise sprints.Refused(ACTIVATE_RUNNING)
+            if reading.commit != commit:
+                raise sprints.Refused(ACTIVATE_MOVED)
+            self._activating = True
+            root = reading.root
+        try:
+            try:
+                tip = self._activator.tip(root)
+            except activation.ReadFailed:
+                tip = None
+            if tip is None:
+                raise sprints.Refused(ACTIVATE_UNREADABLE)
+            if tip != commit:
+                raise sprints.Refused(ACTIVATE_MOVED)
+        except BaseException:
+            self._release_activation()
+            raise
+        try:
+            started = self._activator.start(root, commit, self._record_started)
+        except Exception as error:
+            print(f"console: activation_run_failed {type(error).__name__}: {error}", file=sys.stderr)
+            started = activation_run.Outcome(
+                commit, False, f"the activation could not run ({type(error).__name__}: {error})",
+                activation_run.NEXT_STEP.format(log=self._activation_log()))
+        if isinstance(started, activation_run.Outcome):
+            try:
+                self._finish_activation(root, started)
+            finally:
+                self._release_activation()
+            return
+        self._wait_for_activation(started)
+
+    def _record_started(self, run: activation_run.Run) -> None:
+        """Persist the run's ownership; the activator calls it before a scope's launch, so no run lacks a record."""
+        with self._ingest:
+            self._apply(self.log.append([activation_run.started_row(run)]))
+
+    def _release_activation(self) -> None:
+        with self._ingest:
+            self._activating = False
+
+    def _activation_log(self) -> Path:
+        if self._activator is not None:
+            return self._activator.log_path
+        return Path(self._store).parent / activation_run.LOG_FILE
+
+    def _finish_activation(self, root: str, outcome: activation_run.Outcome) -> None:
+        with self._ingest:
+            self._apply(self.log.append([activation_run.finished_row(root, outcome)]))
+
+    def _wait_for_activation(self, run: activation_run.Run) -> None:
+        self._activate_thread = threading.Thread(
+            target=self._await_activation, args=(run,), name=ACTIVATE_THREAD, daemon=True)
+        self._activate_thread.start()
+
+    def _await_activation(self, run: activation_run.Run) -> None:
+        try:
+            outcome = self._activator.wait(run, self._stop)
+        except activation_run.Stopped:
+            return
+        except Exception as error:
+            print(f"console: activation_wait_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return
+        try:
+            self._finish_activation(run.root, outcome)
+        except Exception as error:
+            print(f"console: activation_finish_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return
+        self._release_activation()
+
+    def _resume_activation(self) -> None:
+        """Settle or keep waiting for a run the log still holds as running; see the module docstring."""
+        last = self._activation_run
+        if last is None or last.state != "running":
+            return
+        if last.tree is None:
+            outcome = activation_run.Outcome(
+                last.commit, False, activation_run.UNRECORDED_REASON,
+                activation_run.NEXT_STEP.format(log=self._activation_log()))
+            self._finish_activation(last.root, outcome)
+        elif self._activator is not None:
+            with self._ingest:
+                self._activating = True
+            self._wait_for_activation(activation_run.Run(last.root, last.commit, last.tree))
 
     def _read_failed(self, project_id: str, error: Exception) -> None:
         print(f"console: tracker_failed {project_id} {type(error).__name__}: {error}", file=sys.stderr)
@@ -6793,6 +6959,7 @@ class ConsoleService:
                 self._signature = current
 
     def start(self) -> None:
+        self._resume_activation()
         self._watcher = threading.Thread(target=self._watch, name=WATCH_THREAD, daemon=True)
         self._watcher.start()
         self._session_poller = threading.Thread(
@@ -6855,6 +7022,8 @@ class ConsoleService:
             self._tracker_thread.join()
         if self._activation_thread is not None:
             self._activation_thread.join()
+        if self._activate_thread is not None:
+            self._activate_thread.join()
         if self._adoption_thread is not None:
             self._adoption_thread.join()
         if self._movement_thread is not None:

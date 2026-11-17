@@ -204,6 +204,7 @@ agent-workflow-tests *args:
     tests/test_console_view.py \
     tests/test_console_failed_start.py \
     tests/test_console_activation.py \
+    tests/test_console_activation_check.py \
     tests/test_console_capacity.py \
     tests/test_console_capacity_check.py \
     tests/test_console_probe.py \

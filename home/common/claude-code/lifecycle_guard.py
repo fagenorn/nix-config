@@ -767,6 +767,13 @@ hits names the refusal, which is one line:
     <id>), so it runs only through the release profile <release_profile> with
     release transaction preview and release transaction run.
 
+The rule a row's `console_activation` names (issue 1193) is approved through the
+console's Activate instead, and its refusal is the second form:
+
+    lifecycle guard: `<argv>` changes the production of <slug> (production rule
+    <id>), so it runs only through the console's Activate, on the line that says
+    a console change is not active on this host.
+
 Known limits: a production command reached by another name (a bare `just` that
 runs the default recipe, a script or alias), words fed on stdin, a program's own
 directory option (`env -C`, `make -C`) and a one-word command handed to a program
@@ -968,15 +975,18 @@ resolver's own rule for the contract member, so a contract that resolves always
 yields a row the guard loads; any other value is a malformed row, and the whole
 compiled policy contributes no row. The same holds for the optional
 `production` member: an object with `changes`, `read_only` and
-`release_profile` and optionally `key_files` (a list of non-empty strings) and
-`mcp_tools` (a list of `mcp__<server>__<tool>` names), the two lists holding `{id, argv}` objects with a non-empty
+`release_profile` and optionally `key_files` (a list of non-empty strings),
+`mcp_tools` (a list of `mcp__<server>__<tool>` names) and `console_activation` (a
+non-empty string equal to the `id` of one `changes` entry), the two lists holding `{id, argv}` objects with a non-empty
 `id` and a non-empty `argv` of non-empty strings, and a non-empty
 `release_profile`; any other value drops the whole file. The compiler writes
-`derivation.schema_version` 5, whose `production` also carries `key_files` and
-`mcp_tools` (issue 1150); this guard reads schema 3 and 4 rows as before
-(`production`, `key_files` and `mcp_tools` are each optional). A guard
-from before issue 1150 reads a schema-5 row as malformed and drops the file until
-its session restarts. A guard
+`derivation.schema_version` 6, whose `production` also carries `key_files` and
+`mcp_tools` (issue 1150) and, when the contract names one, `console_activation`
+(issue 1193); this guard reads schema 3, 4 and 5 rows as before
+(`production`, `key_files`, `mcp_tools` and `console_activation` are each
+optional). A guard from before issue 1150 reads a schema-5 row as malformed, and
+one from before issue 1193 reads a row carrying `console_activation` as malformed
+and drops the file until its session restarts. A guard
 from before issue 1149, in a session started before the switch, reads a row
 carrying `production` as malformed and drops the whole file, so a repository
 that relies on a derived row is refused until that session restarts; a
@@ -1034,7 +1044,11 @@ DERIVED_ROW_KEYS = frozenset(
 DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
 PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
 # Schema 5 rows also carry the changing key-file globs and MCP tool names (issue 1150).
-PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools"})
+# Schema 6 rows may also name the changing rule the console's Activate approves (issue 1193).
+PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools", "console_activation"})
+CONSOLE_ACTIVATION_ROUTE = (
+    "the console's Activate, on the line that says a console change is not active on this host"
+)
 MCP_TOOL_NAME = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+")
 PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
@@ -3628,7 +3642,8 @@ def production_problem(production):
     `mcp__<server>__<tool>` names; `changes` and `read_only` are lists
     (possibly empty) of objects with exactly PRODUCTION_COMMAND_KEYS, each a
     non-empty `id` and a non-empty `argv` list of non-empty strings, and
-    `release_profile` is a non-empty string.
+    `release_profile` is a non-empty string; `console_activation`, when present, is a
+    non-empty string equal to the `id` of one `changes` entry.
     """
     if not isinstance(production, dict) or not (
         PRODUCTION_KEYS <= set(production) <= PRODUCTION_KEYS | PRODUCTION_OPTIONAL_KEYS
@@ -3668,6 +3683,12 @@ def production_problem(production):
     profile = production["release_profile"]
     if not isinstance(profile, str) or not profile:
         return "release_profile must be a non-empty string"
+    if "console_activation" in production:
+        activation = production["console_activation"]
+        if not isinstance(activation, str) or activation not in [
+            command["id"] for command in production["changes"]
+        ]:
+            return "console_activation must name the id of one changes entry"
     return None
 
 
@@ -4216,12 +4237,21 @@ def production_hits(command, rules):
     return hits, certain
 
 
-def production_refusal_text(slug, rule, release_profile):
-    """The one sentence that refuses a production command (issue 1149 D8)."""
-    return (
+def production_refusal_text(slug, rule, production):
+    """The one sentence that refuses a production command (issue 1149 D8).
+
+    The rule `production` names as `console_activation` is approved through the console's
+    Activate (issue 1193); every other rule through the row's release profile.
+    """
+    head = (
         f"`{shown_value(shlex.join(rule['argv']))}` changes the production of {slug} "
-        f"(production rule {shown_value(rule['id'])}), so it runs only through the "
-        f"release profile {shown_value(release_profile)} with {PRODUCTION_ROUTE}."
+        f"(production rule {shown_value(rule['id'])}), so it runs only through "
+    )
+    if production.get("console_activation") == rule["id"]:
+        return f"{head}{CONSOLE_ACTIVATION_ROUTE}."
+    return (
+        f"{head}the release profile {shown_value(production['release_profile'])} "
+        f"with {PRODUCTION_ROUTE}."
     )
 
 
@@ -4254,7 +4284,7 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     for slug in order:
         for index, change in enumerate(rules[slug]["changes"]):
             if (slug, index) in hits:
-                return production_refusal_text(slug, change, rules[slug]["release_profile"])
+                return production_refusal_text(slug, change, rules[slug])
     return None
 
 

@@ -310,7 +310,7 @@ class PageTest(unittest.TestCase):
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
-             "/api/owner-notice", "/api/owner-notice-withdraw"},
+             "/api/owner-notice", "/api/owner-notice-withdraw", "/api/activate"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -319,7 +319,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 39)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 40)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -797,14 +797,16 @@ class PageRenderTest(unittest.TestCase):
 
 
 ACTIVATION = {
-    "text": "A console change merged and is not active on this host: run just switch in /home/owner/nix-config.",
-    "command": "just switch",
+    "text": "A console change merged at 0123456789ab is not active on this host.",
+    "state": "pending",
+    "commit": "0123456789ab" + "c" * 28,
     "root": "/home/owner/nix-config",
+    "activate": True,
 }
 
 
 class ActivationPageTest(unittest.TestCase):
-    def test_the_activation_line_heads_the_work_column_with_the_command_in_a_code_span(self) -> None:
+    def test_the_activation_line_heads_the_work_column_with_its_activate_button(self) -> None:
         frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         work = snap["projects"]
@@ -813,10 +815,42 @@ class ActivationPageTest(unittest.TestCase):
         self.assertEqual(line["tag"], "p")
         self.assertIn("activation", line["cls"].split())
         # a snapshot node carries its own text only, so the line reads back as its nodes in document order
-        self.assertEqual("".join(n["text"] for n in nodes(line)), ACTIVATION["text"])
-        codes = [n for n in nodes(line) if n["tag"] == "code"]
-        self.assertEqual(len(codes), 1)
-        self.assertEqual(codes[0]["text"], "just switch")
+        self.assertEqual("".join(n["text"] for n in nodes(line)), ACTIVATION["text"] + "Activate")
+        buttons = [n for n in nodes(line) if n["tag"] == "button"]
+        self.assertEqual(len(buttons), 1)
+        self.assertIn("activate", buttons[0]["cls"].split())
+
+    def test_activate_posts_the_shown_commit(self) -> None:
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([{"frame": frame}, {"click": "activate"}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/activate")
+        self.assertEqual(posted(post), {"commit": ACTIVATION["commit"]})
+        self.assertIn("X-Console-Token", post["headers"])
+
+    def test_a_refused_activation_shows_the_consoles_reason(self) -> None:
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([
+            {"frame": frame}, {"respond": {"status": 409, "text": "an activation is already running\n"}},
+            {"click": "activate"}, {"snapshot": True}])
+        (refusal,) = [n for n in nodes(snap["projects"]) if has_class(n, "activation-refused")]
+        self.assertEqual(full(refusal), "The console refused: an activation is already running.")
+
+    def test_an_accepted_click_can_be_pressed_again_when_the_line_comes_back_unchanged(self) -> None:
+        # a retry that fails the same way appends a finished row with the same line, so no frame changes the key
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([
+            {"frame": frame}, {"click": "activate"}, {"click": "activate"}, {"snapshot": True}])
+        self.assertEqual(len(snap["posts"]), 2)
+        (button,) = [n for n in nodes(snap["projects"]) if n["tag"] == "button" and has_class(n, "activate")]
+        self.assertIs(button["disabled"], False)
+
+    def test_a_running_line_has_no_activate(self) -> None:
+        running = dict(ACTIVATION, state="running", activate=False,
+                       text="Activating this host at 0123456789ab. The console may restart before it reports.")
+        frame = dict(view([project(0, [], quiet=True)]), activation=running)
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        self.assertFalse([n for n in nodes(snap["projects"]) if has_class(n, "activate")])
 
     def test_no_activation_draws_no_line(self) -> None:
         plain = view([project(0, [], quiet=True)])
@@ -824,7 +858,6 @@ class ActivationPageTest(unittest.TestCase):
             (snap,) = render([{"frame": frame}, {"snapshot": True}])
             flat = nodes(snap["projects"])
             self.assertFalse([n for n in flat if "activation" in n["cls"].split()])
-            self.assertFalse([n for n in flat if n["tag"] == "code"])
 
     def test_the_line_shows_with_no_project_registered(self) -> None:
         frame = dict(view([], count=0), activation=ACTIVATION)
@@ -832,13 +865,6 @@ class ActivationPageTest(unittest.TestCase):
         work = snap["projects"]
         self.assertIn("activation", work["children"][1]["cls"].split())
         self.assertEqual(work["children"][2]["text"], "No project is registered yet.")
-
-    def test_the_activation_code_span_uses_no_web_font(self) -> None:
-        page = PAGE.read_text()
-        rule = re.search(r"\.activation code\s*\{([^}]*)\}", page)
-        self.assertIsNotNone(rule)
-        self.assertIn("monospace", rule.group(1))
-        self.assertNotIn("@font-face", page)
 
 
 def profile(name: str, state: str, **fields) -> dict:

@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for issue 1193: this host runs the commit the console's Activate activated.
+# Reads the console's event store read-only: the last successful page activation must contain the
+# merge commit (--merge SHA) and equal the configuration revision this host runs.
+# Exit 0 met, 1 not met, 2 store unreadable, 75 not yet. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.activation_check "$@"

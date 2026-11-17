@@ -91,8 +91,8 @@ from pathlib import Path
 
 import agent_tools
 from agent_tools.console import (
-    account_add, activation, account_remove, approve, inbox, manager, movement, nudge, probe, project_question, register,
-    service, signin, signin_run)
+    account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge, probe,
+    project_question, register, service, signin, signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -133,6 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             project_asker=project_question.asker_for(sys.platform),
             forge=approve.forge_for(sys.platform), trust_home=Path.home(), trust_at_start=True,
             activation_reader=activation.reader_for(Path(agent_tools.__file__).resolve().parent.parent),
+            activator=activation_run.Activator(service.default_store().parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots)
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)

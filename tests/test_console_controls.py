@@ -11,10 +11,10 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .console_screenshots import CONTROL_SELECTOR
 from .test_console_spend_page import render_spend, spend_view_fixture
 from .test_console_page import (
-    ADD_STEPS, ADDED, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
+    ACTIVATION, ADD_STEPS, ADDED, ANSWERABLE, ASKING, BRIEF, CHECK, DECISION_ITEM, DRAFTED, F3, FAILED_ITEM,
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
-    SIGNIN, SPRINT, START, STALL, T0, V, WORK_CAP, ANSWER, cards,
+    SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, cards,
     check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
     style_rules, view, with_check, with_notices, with_run, with_sprints)
 
@@ -58,7 +58,7 @@ DESK_CONTROLS: dict = {
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
-        "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick"),
+        "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
              "notice-text", "register-path", "goal-filter", "goal-text"),
@@ -186,6 +186,9 @@ def desk_scenarios() -> list:
         [START, {"frame": with_sprints([{**SPRINT, "manager_state": "failed",
                                          "manager_text": "no manager", "retry": True}])}, snapshot],
         [START, {"frame": with_check([])}, snapshot],
+        # the activation line with its Activate button (#1193)
+        [START, {"frame": {**view([project(0, [], quiet=True)]), "activation": ACTIVATION}},
+         snapshot],
         [START, {"frame": with_check([DECISION_ITEM])}, snapshot],
         # a stall and a progress card
         [START, {"frame": frame([STALL, PROGRESS])}, snapshot],
