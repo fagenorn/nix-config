@@ -1717,6 +1717,30 @@ class RegisterRemoteTest(Case):
         self.assertEqual(row["remote"], register.REMOTE_UNREAD)
         self.assertEqual(self.view()["registration"]["remote"], register.REMOTE_UNREAD)
 
+    def test_a_confirmed_register_keeps_the_unreadable_remote_sentence(self):
+        root = self.missing_origin()
+        fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
+        self.begin(fake)
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        self.assertEqual(self.settled_row(root)["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(self.confirm({"root": str(root), "choice": "register"})[0], 204)
+        row = self.settled_row(root)
+        self.assertEqual(row["result"], "registered")
+        self.assertEqual(row["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(self.view()["registration"]["remote"], register.REMOTE_UNREAD)
+
+    def test_a_confirmed_register_after_a_readable_remote_carries_no_sentence(self):
+        checkout, _ = remote_checkout(self.parent, contract=True, ahead=False)
+        fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
+        self.begin(fake)
+        self.assertEqual(self.post({"path": str(checkout)})[0], 204)
+        self.settled_row(checkout)
+        self.assertEqual(self.confirm({"root": str(checkout), "choice": "register"})[0], 204)
+        row = self.settled_row(checkout)
+        self.assertEqual(row["result"], "registered")
+        self.assertNotIn("remote", row)
+        self.assertIsNone(self.view()["registration"]["remote"])
+
     def test_an_answer_after_a_readable_remote_carries_no_sentence(self):
         checkout, _ = remote_checkout(self.parent, contract=True, ahead=False)
         self.begin(Fake(plan=[DRAFT, READY]))

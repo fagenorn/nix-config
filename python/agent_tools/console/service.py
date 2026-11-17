@@ -4023,6 +4023,8 @@ class ConsoleService:
             self._registering = root
             self._publish()
 
+        remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
+
         def run() -> None:
             if choice in (register.TRY_VALUE, register.UPDATE_VALUE):
                 self._run_registration(root, entries, update=choice == register.UPDATE_VALUE)
@@ -4032,7 +4034,7 @@ class ConsoleService:
             except Exception as error:
                 print(f"console: trust_grant_failed {type(error).__name__}", file=sys.stderr)
             self._run_registration(root, entries, confirmed=True,
-                                   answers=latest["answered"], draft=latest["draft"])
+                                   answers=latest["answered"], draft=latest["draft"], remote=remote)
 
         try:
             self._dispatch(run)
@@ -4124,12 +4126,14 @@ class ConsoleService:
 
     def _run_registration(self, root: str, entries: list[dict], *, confirmed: bool = False,
                           answers: list[dict] | None = None, draft: list[dict] | None = None,
-                          update: bool = False) -> None:
+                          update: bool = False, remote: str | None = None) -> None:
         """Plan and, when confirmed, register; a confirmed run plans with the waiting row's answers.
 
         A fresh run compares the checkout with its remote first (#1233, ADR-console-069): a checkout
         behind a remote that has a contract is one `behind` row and nothing else runs; `update` moves
-        the checkout forward first. A confirmed run and an answer run never compare.
+        the checkout forward first. A confirmed run and an answer run never compare; a confirmed run
+        keeps the waiting row's `remote` sentence, as an answer run does, because it still uses the
+        checkout that was never compared.
 
         The Register card can follow an answer run, and a plan without those answers goes back to
         `reconcile` (a `retain` answer adds no operation), so `register` would never run.
@@ -4185,6 +4189,8 @@ class ConsoleService:
             payload = register.failed(root, type(error).__name__, verb)
         if unread:
             payload = register.unread(payload)
+        elif remote is not None:
+            payload = {**payload, "remote": remote}
         with self._ingest:
             if not self._closed:
                 self._fold(self.log.append([register.ended(payload)]))
