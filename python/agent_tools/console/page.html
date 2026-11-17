@@ -337,8 +337,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .ask-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
 .ask-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
 .ask-list { margin-top: 8px; }
-.line.questions summary { display: revert; list-style: revert; }
-.line.questions summary::-webkit-details-marker { display: revert; }
+.line.questions > details > summary { display: revert; list-style: revert; }
+.line.questions > details > summary::-webkit-details-marker { display: revert; }
 .questions-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
 .thread-list { margin-top: 4px; }
 .thread + .thread { margin-top: 4px; }

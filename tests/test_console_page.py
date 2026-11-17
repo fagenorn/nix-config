@@ -1697,6 +1697,19 @@ class PageAskTest(unittest.TestCase):
         self.assertEqual([role(c["cls"]) for c in acts["children"]], ["give-goal", "ask-open"])
         self.assertEqual([n for n in nodes(snap["projects"]) if has_class(n, "asks")], [])
 
+    def test_no_fold_rule_reaches_a_thread_summary_to_undo_its_flex_row(self) -> None:
+        # A bare `.line.questions summary` (0,2,1) outranks `.thread > details > summary` (0,1,2),
+        # so the thread's summary fell back to block and `.thread-first` lost its ellipsis.
+        rules = [(x.strip(), d) for s, d in css_rules(PAGE_TEXT) for x in s.split(",")
+                 if "display" in d and re.search(r"summary$", x.strip())]
+        reaching = [s for s, _ in rules if s.startswith(".line.questions") and ">" not in s]
+        self.assertEqual(reaching, [])
+        self.assertTrue([d for d in css_decls(".thread > details > summary") if d.get("display") == "flex"])
+        self.assertTrue([d for d in css_decls(".line.questions > details > summary")
+                         if d.get("display") == "revert" and d.get("list-style") == "revert"])
+        self.assertTrue([d for d in css_decls(".thread-first")
+                         if d.get("text-overflow") == "ellipsis" and d.get("white-space") == "nowrap"])
+
     def test_the_questions_fold_is_closed_and_counts_its_threads(self) -> None:
         first = ask(id="q8")
         entry = asking(project(0, [], quiet=True), thread(ASK_BACK), thread(ASK_ANSWERED, first))
