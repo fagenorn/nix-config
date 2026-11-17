@@ -2417,6 +2417,18 @@ class PageFollowUpTest(unittest.TestCase):
                 self.assertEqual(len(self.found(self.inside(refused), "ask")), 1)
                 self.assertEqual(full(self.found(cleared["reading"], "follow-reason")[0]), "")
 
+    def test_a_frame_restores_a_held_follow_up_draft_without_scrolling_the_owner_back(self) -> None:
+        # The draft's own focus restore must not scroll the textarea into view while the owner rereads the answer above
+        # it (#1226).
+        frame = {"frame": view([asking(project(0, []), self.T)])}
+        (typed, kept) = render([
+            *self.opened(), {"click": "follow-open"},
+            {"type": {"class": "follow-text", "text": "routes are frozen"}}, {"scroll": 640}, {"snapshot": True},
+            frame, {"snapshot": True}])
+        self.assertEqual(role(kept["active"]), "follow-text")
+        self.assertGreater(kept["focus_count"], typed["focus_count"])
+        self.assertEqual(kept["scrolling_focus"], typed["scrolling_focus"])
+
     def test_a_follow_up_draft_survives_a_frame_and_escape_closes_an_empty_one(self) -> None:
         frame = {"frame": view([asking(project(0, []), self.T)])}
         kept, cancelled, escaped = render([

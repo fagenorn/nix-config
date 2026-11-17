@@ -4766,7 +4766,7 @@ function drawProjects(view) {
   if (heldFollow !== null) {
     const again = followField(heldFollow.id);
     if (again !== undefined) {
-      again.focus();
+      again.focus({ preventScroll: true });
       again.setSelectionRange(heldFollow.start, heldFollow.end);
     }
   }
