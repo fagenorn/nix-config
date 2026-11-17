@@ -187,7 +187,7 @@ def reference_questions(references: References, answers: dict[str, str],
     open_policies = sorted({
         occurrence.policy for occurrence in references.occurrences
         if occurrence.policy is not None and occurrence.policy not in policies
-        and occurrence.subject not in answers})
+        and occurrence.subject not in answers and not occurrence.named})
     questions = [
         {"id": "path-reference",
          "subject": occurrence.subject,
