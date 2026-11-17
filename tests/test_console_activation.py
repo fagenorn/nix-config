@@ -113,6 +113,9 @@ class Trees(unittest.TestCase):
         git(clone, "push", "-q", "origin", "main")
         git(self.checkout, "fetch", "-q", "origin")
 
+    def origin_commit(self) -> str:
+        return git(self.checkout, "rev-parse", "refs/remotes/origin/main").strip()
+
     def read(self, roots=None, **seams):
         seams.setdefault("branch_of", lambda root: "main")
         return reading([str(self.checkout)] if roots is None else roots, self.running, **seams)
@@ -140,7 +143,7 @@ class ActivationReadingTest(Trees):
             self.assertEqual(value, blob_id((self.package_root / relative).read_bytes()), key)
 
     def test_a_matching_tree_names_nothing(self):
-        self.assertEqual(self.read(), Activation(str(self.checkout), ()))
+        self.assertEqual(self.read(), Activation(str(self.checkout), (), self.origin_commit()))
 
     def test_a_console_file_behind_origin_is_named(self):
         self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
@@ -154,26 +157,20 @@ class ActivationReadingTest(Trees):
         self.advance({"python/agent_tools/system/util.py": "X = 2\n"})
         self.assertEqual(self.read().changed, ("python/agent_tools/system/util.py",))
 
-    def test_a_checkout_behind_the_compared_origin_is_marked_behind(self):
-        self.assertFalse(self.read().local_behind)
+    def test_the_reading_names_the_origin_commit_it_compared(self):
         self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        self.assertTrue(self.read().local_behind)
-
-    def test_a_checkout_that_already_holds_the_origin_change_is_not_behind(self):
-        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        git(self.checkout, "merge", "-q", "--ff-only", "origin/main")
         result = self.read()
+        self.assertEqual(result.commit, git(self.checkout, "rev-parse", "refs/remotes/origin/main").strip())
         self.assertEqual(result.changed, (f"{CONSOLE}/view.py",))
-        self.assertFalse(result.local_behind)
 
-    def test_a_failed_read_of_the_checkout_counts_as_behind(self):
-        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        git(self.checkout, "merge", "-q", "--ff-only", "origin/main")
-
-        def failing(root):
-            raise activation.ReadFailed("no head")
-
-        self.assertTrue(self.read(local=failing).local_behind)
+    def test_origin_tip_is_the_remote_tracking_commit(self):
+        expected = git(self.checkout, "rev-parse", "refs/remotes/origin/main").strip()
+        with mock.patch.object(activation, "integration_branch", lambda root: "main"):
+            self.assertEqual(activation.origin_tip(str(self.checkout)), expected)
+        with mock.patch.object(activation, "integration_branch", lambda root: "nope"):
+            self.assertIsNone(activation.origin_tip(str(self.checkout)))
+        with mock.patch.object(activation, "integration_branch", lambda root: None):
+            self.assertIsNone(activation.origin_tip(str(self.checkout)))
 
     def test_a_change_outside_the_console_files_is_not_named(self):
         self.advance({"docs/notes.md": "more\n", "python/agent_tools/verification/other.py": "Y = 2\n"})
@@ -215,7 +212,7 @@ class ActivationReadingTest(Trees):
                     origin_files(str(self.checkout), "main")
         self.assertEqual(
             self.read([str(self.tmp / "a-missing"), str(self.checkout)]),
-            Activation(str(self.checkout), ()))
+            Activation(str(self.checkout), (), self.origin_commit()))
 
     def test_the_integration_branch_is_the_project_contracts(self):
         home = Path(tempfile.mkdtemp(dir=accounts_sandbox.root())).resolve()
@@ -274,7 +271,7 @@ class ActivationViewTest(Trees):
 
     def test_the_line_is_not_an_inbox_item(self):
         result = view.derive_view(
-            [], activation=Activation("/srv/cfg", ("python/agent_tools/console/view.py",)))
+            [], activation=Activation("/srv/cfg", ("python/agent_tools/console/view.py",), "a" * 40))
         self.assertEqual(result["statement"], view.derive_view([])["statement"])
         self.assertEqual(result["statement"]["headline"], "Nothing needs you")
         self.assertEqual(json.loads(view.encode_view(result))["activation"]["root"], "/srv/cfg")
@@ -288,7 +285,7 @@ class ActivationViewTest(Trees):
         self.assertEqual(view.ACTIVATE_COMMAND, "just switch")
 
 
-CHANGED = Activation("/srv/p00", ("python/agent_tools/console/view.py",))
+CHANGED = Activation("/srv/p00", ("python/agent_tools/console/view.py",), "a" * 40)
 
 
 class Fake:
@@ -339,7 +336,7 @@ class ActivationServiceTest(Trees):
         self.assertEqual(reader.calls[-1], ["/srv/p00", "/srv/p01"])
 
     def test_a_matching_reading_clears_the_line(self):
-        svc = self.opened(Fake(CHANGED, CHANGED, Activation("/srv/p00", ())))
+        svc = self.opened(Fake(CHANGED, CHANGED, Activation("/srv/p00", (), "a" * 40)))
         svc.poll_activation()
         rows, version = support.log_rows(self.store), svc.version
         svc.poll_activation()
