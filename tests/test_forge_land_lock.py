@@ -1879,6 +1879,41 @@ class QueueTest(Base):
         self.assertEqual([op for op, _ in self.queue_calls()], ["create", "create", "delete", "delete"])
         self.assertEqual(self.world.refs(), {REF: A, self.others[13]: D})
 
+    def test_the_first_in_line_sees_the_holders_merge_within_one_short_read(self):
+        """Issue 1204: a merge leaves the lock ref's value unchanged, so the reads of the ref
+        between two polls saw nothing and the first in line noticed at its next whole poll.
+        The same read now also asks whether the holder's pull request is still open."""
+        def forge(elapsed):
+            if elapsed == 40:
+                self.pulls(B, pull(12, state="closed", merged=True, sha=B))  # 12 merges; the lock stays at B
+        clock = self.clock(forge)
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["took_over"], out["position"], out["ahead"]),
+                         (0, "acquired", "closed", 1, []))
+        self.assertEqual(out["waited_s"], 40)  # the read right after the merge, not the poll at 120
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_a_failing_read_of_the_holders_pull_request_does_not_repeat_whole_polls(self):
+        """Issue 1204: only the read of the holder's pull request fails, the lock and the polls'
+        other reads are fine. The failure ends the short reads' check of that holder, so the
+        waiter polls at the 120-second rate, not at every short read."""
+        real_open, real_once, polls = fm.pull_open, land_lock.acquire_once, []
+
+        def pull_open(slug, pr):
+            if pr == 12:
+                raise fm.ForgeError("gh_failed", "HTTP 502")
+            return real_open(slug, pr)
+
+        def acquire_once(*args, **kwargs):
+            polls.append(True)
+            return real_once(*args, **kwargs)
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 300 else None)
+        with mock.patch.object(fm, "pull_open", pull_open), \
+                mock.patch.object(land_lock, "acquire_once", acquire_once):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["waited_s"]), (0, "acquired", 300))
+        self.assertEqual(len(polls), 4)  # at 0, 120, 240, and at 300 when the lock reads free
+
     def test_the_first_in_line_takes_a_lock_its_own_poll_saw_released(self):
         """Issue 1018: the whole poll at 120 finds the lock closed (12 merged) and its takeover
         loses to 12's release, so the poll ends having read the lock free. The reads between
@@ -2211,7 +2246,8 @@ class QueueTest(Base):
                        "the idle takeover of D4 does not depend on the caller's place",
                        "watched the lock free for `FREE_GRACE` seconds (60)",
                        "seen it closed for `CLOSED_GRACE` seconds (150)",
-                       "a closed one within one poll of 120 seconds",
+                       "a closed one within `FAST_POLL` seconds too (issue 1204",
+                       "is no longer open (issue 1204",
                        "is not queued either, so the lock it gave up is not left free behind a waiter",
                        "more than `QUEUE_SKEW` seconds (60) ahead of it, is dead",
                        "which the forge answers whole, unpaginated",
