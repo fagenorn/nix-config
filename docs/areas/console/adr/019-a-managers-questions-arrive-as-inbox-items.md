@@ -1,6 +1,6 @@
 # ADR-console-019 — A manager's questions arrive as inbox items and are answered on the page
 
-- **Status:** accepted; amended by ADR-console-038, ADR-console-040
+- **Status:** accepted; amended by ADR-console-038, ADR-console-040, ADR-console-067
 - **Decided in:** #826, #836, #891
 
 ## Context
