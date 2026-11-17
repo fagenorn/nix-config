@@ -327,7 +327,7 @@ class SuiteWorld:
 
     def pages(self):
         runs = [self.run(i, self.after_created(i)) for i in reversed(self.after_ids)]
-        return {f"{self.LISTING}&created>={self.STAMP}&per_page=100":
+        return {f"{self.LISTING}&created=>={self.STAMP}&per_page=100":
                 [{"total_count": len(runs), "workflow_runs": runs}]}
 
     def check(self, n=20):

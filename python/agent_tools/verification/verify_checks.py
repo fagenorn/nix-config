@@ -489,7 +489,7 @@ def suite_regressions(repo: str, workflow: str, job: str, branch: str, merge: st
     report["merge_run"] = at_merge[0][1]
     start = at_merge[0][3]
     after: list[tuple[int, list[tuple[int, str]]]] = []
-    pages = _counted_pages(forge_api.api_pages(f"{listing}&created>={start}&per_page=100"),
+    pages = _counted_pages(forge_api.api_pages(f"{listing}&created=>={start}&per_page=100"),
                            "workflow_runs", "run listing")
     for run in sorted(_suite_run(entry) for entry in pages):
         pending, counted = _suite_attempts(repo, job, run)
