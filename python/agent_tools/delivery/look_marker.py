@@ -69,8 +69,8 @@ commits after A are walked first-parent from H to A and must be exactly the comm
 and `B...A` lacks, at most `CHAIN_LIMIT`, and no second parent may be a pull request commit. A
 one-parent commit is a look commit when its compare lists a look file. A merge is clean when, for
 every look file f its four compares list, f is neither renamed nor copied, every listing of f
-carries a patch when a side lists f, and each side's hunks of f equal the other side's change
-(`P1...c` equals `P1...P2`, `P2...c` equals `P2...P1`; `patch_hunks` drops the `@@` lines). An
+carries a patch when a side lists f, and each side's added and removed lines of f equal the other side's change
+(`P1...c` equals `P1...P2`, `P2...c` equals `P2...P1`; context lines and hunk bounds are ignored, since an independent edit moves them). An
 `approved` candidate is kept at zero look commits, a `fix` at exactly one.
 `settle` drives `kept` for at most `CARRY_RUNS` runs and `READ_LIMIT` reads through a `read`
 callable (the parsed JSON, None for a 404, an exception for anything else), and
@@ -469,9 +469,27 @@ def _entry_of(compare: Any, name: str) -> dict[str, Any] | None:
     return next((e for e in compare["files"] if e["filename"] == name), None)
 
 
-def _hunks(compare: Any, name: str) -> tuple[tuple[str, ...], ...]:
+def _changes(compare: Any, name: str) -> tuple[str, ...]:
+    """The added and removed lines of a file's patch, in order, without context or hunk bounds.
+
+    Context lines (and a no-newline marker that follows one) are left out: an independent edit
+    elsewhere in the file changes another patch's context and its hunk grouping, not its edit.
+    """
     entry = _entry_of(compare, name)
-    return patch_hunks(entry["patch"]) if entry is not None and "patch" in entry else ()
+    if entry is None or "patch" not in entry:
+        return ()
+    changed: list[str] = []
+    after_change = False
+    for hunk in patch_hunks(entry["patch"]) or ():
+        for line in hunk:
+            if line[:1] in ("+", "-"):
+                changed.append(line)
+                after_change = True
+            elif line[:1] == "\\" and after_change:
+                changed.append(line)
+            else:
+                after_change = False
+    return tuple(changed)
 
 
 def _clean_merge(parents: tuple[str, ...], commit: str, reads: Mapping[str, Any],
@@ -488,7 +506,7 @@ def _clean_merge(parents: tuple[str, ...], commit: str, reads: Mapping[str, Any]
             continue
         if any("patch" not in e for e in listings):
             return False
-        if _hunks(c1, name) != _hunks(d12, name) or _hunks(c2, name) != _hunks(d21, name):
+        if _changes(c1, name) != _changes(d12, name) or _changes(c2, name) != _changes(d21, name):
             return False
     return True
 

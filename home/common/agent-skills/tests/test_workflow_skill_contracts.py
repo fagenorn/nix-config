@@ -2009,6 +2009,15 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         self.assertIn("On `error`, merge nothing: run `forge-claim release` and report it", rules)
         self.assertIn("On `approved`, land as step 6 does", rules)
 
+    def test_a_resync_that_ends_approved_keeps_landing(self):
+        """#1211: after a resync only `needed` stops; `approved` goes on to the merge and the
+        release-and-report fallback is for every other verdict."""
+        land = self.section("Land")
+        resync = land[land.index("After every resync"):land.index("The merge is")]
+        self.assertIn("when it is `approved`, keep landing with the merge below", resync)
+        self.assertLess(resync.index("when it is `approved`"), resync.index("when it is `needed`"))
+        self.assertLess(resync.index("when it is `needed`"), resync.index("on any other verdict"))
+
     def test_the_look_rules_exist_once_and_are_in_no_hot_list(self):
         found = sorted((REPO_ROOT / "home").rglob("look-before-merge.md"))
         self.assertEqual(found, [LOOK_RULES])

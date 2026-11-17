@@ -28,7 +28,9 @@ request's commit list (oldest first) and M its head, which must be in C.
 Answers. `pre` is the counted issue's comments created before the pull request's `merged_at`, as the
 merge guard saw them. The answers are the trusted live `look` markers of `pre` naming the issue and the
 pull request, in comment id order, whatever their answer; the approvals are those whose answer is in
-`look_marker.CARRIED`.
+`look_marker.CARRIED`. A comment created before the merge but updated at or after it, whose current
+body is a marker, has a pre-merge body this read cannot see: that is incomplete evidence (exit 2), as
+is a marker comment with no readable `updated_at`.
 
 Needless. `gains(P, h)` holds when P's head and h are in C, P's first, and some commit c of C after P's
 head up to h has one parent p, a readable compare `p...c` listing at least one file and no file
@@ -254,6 +256,11 @@ def landing(get: Get, repo: str, globs: list[str], boundary) -> dict | None:
                 if created is None:
                     raise ForgeError("payload_invalid", f"comment {comment.get('id')} has no readable created_at")
                 if created < merged:
+                    if forge_markers.parse(comment) is not None:
+                        updated = parse_time(comment.get("updated_at"))
+                        if updated is None or updated >= merged:
+                            raise ForgeError("payload_invalid", f"marker comment {comment.get('id')} was "
+                                             "edited at or after the merge: its pre-merge body is unknown")
                     pre.append(comment)
             approvals, second, carried = _grade(kept, issue, pre)
             if second or carried:

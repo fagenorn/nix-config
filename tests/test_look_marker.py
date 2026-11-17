@@ -400,6 +400,20 @@ class KeptTest(unittest.TestCase):
         extra = {(A, T): [TESTF], (T, X): [INBOX], (X, T): [PAGE], (T, H): [INBOX], (X, H): [PAGE, TESTF]}
         self.assertEqual(self.kept(world([(T, [A]), (H, [T, X])], [INBOX, TESTF], extra)), lm.Kept(True, ()))
 
+    def test_a_clean_merge_of_independent_edits_that_change_each_others_context_keeps_the_approval(self):
+        def patch(*lines):
+            return {"filename": PAGE, "status": "modified", "patch": "@@ -1,5 +1,5 @@\n" + "\n".join(lines)}
+
+        base_side = patch(" l1", " l2 old", " l3", "-l4 old", "+l4 base", " l5")
+        base_in_merge = patch(" l1", " l2 pr", " l3", "-l4 old", "+l4 base", " l5")
+        pr_side = patch(" l1", "-l2 old", "+l2 pr", " l3", " l4 old", " l5")
+        pr_in_merge = patch(" l1", "-l2 old", "+l2 pr", " l3", " l4 base", " l5")
+        extra = {(A, X): [base_side], (X, A): [pr_side], (X, H): [pr_in_merge]}
+        reads = world([(H, [A, X])], [base_in_merge], extra)
+        self.assertEqual(self.kept(reads), lm.Kept(True, ()))
+        reads[lm.compare_path(X, H)] = cmp([patch(" l1", "-l2 old", "+l2 other", " l3", " l4 base", " l5")])
+        self.assertEqual(self.kept(reads), lm.Kept(False, ()))
+
     def test_a_merge_where_both_sides_made_the_same_look_edit_is_clean(self):
         extra = {(A, X): [PAGE, INBOX], (X, A): [PAGE], (X, H): []}
         self.assertEqual(self.kept(world([(H, [A, X])], [INBOX], extra)), lm.Kept(True, ()))
