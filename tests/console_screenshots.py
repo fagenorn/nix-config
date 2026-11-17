@@ -13,7 +13,8 @@ Contract:
   that has no such control it is the same fold, which is how the before pictures are made;
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
   lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
-  step (a run that is not live is no holder of the sprint's);
+  step (a run that is not live is no holder of the sprint's), whose run line reads
+  "waiting its turn to merge", not quiet;
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
