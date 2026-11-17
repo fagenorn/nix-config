@@ -19,8 +19,11 @@ ADR-console-021 left a manager's session on the owner's global `defaultMode`, `a
 
 **D5. The owner's global `defaultMode` stays `auto`.** The mode is set only in the manager's own settings file, which outranks user settings for that session.
 
+**D6. Amended by #1228: bypass is not chosen until a bypass manager can be woken.** The console wakes a manager with a message from another local session, and the client holds every message from another session for a human's approval when the receiving session bypasses prompts, unless the sender also bypasses ([cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging.md)). The console's wakes come from a prompting session, so a manager in bypass went deaf after its first turn, with nobody at its terminal to approve the held messages. Until a bypass wake path is proved, `permission.read` never returns `bypassPermissions`: wherever D1 would choose it, for `no production` and for `production rules in place` alike, it returns `auto` with the reason `waking a bypass manager is not yet possible`. D1's rule that picks bypass, and every other reason, are unchanged, and the page's mode line shows the new reason as it shows any other. Removing this amendment, once a wake path into a bypass manager is proved, restores D1 as written.
+
 ## Consequences
 
+- Until D6 is lifted no manager started by the console runs in bypass, whatever its project declares. The sprint fold still reads a `bypassPermissions` row an older console logged, and `bypass_proof` reports `refused` for the same reason.
 - A project whose compiled row is missing, or whose policy file the guard drops (a refused derivation, a stale policy, a session before the switch), runs its manager in `auto`.
 - A change to the guard's loader must be mirrored in `permission.policy_rows`, or the parity test fails.
 - `bypassPermissions` relies on `skipDangerousModePermissionPrompt`, already set in the global settings, so a background session meets no acceptance dialog.
