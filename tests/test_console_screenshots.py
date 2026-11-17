@@ -118,6 +118,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertIn("a full run writes 52 files", doc)
         self.assertEqual(len(shots.STATES) * len(shots.WIDTHS), 52)
 
+    def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
+        justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
+        count = len(shots.STATES) * len(shots.WIDTHS)
+        self.assertIn(f"sprint states against a fixture console, {count} PNGs into out", justfile)
+
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
             out = StringIO()
