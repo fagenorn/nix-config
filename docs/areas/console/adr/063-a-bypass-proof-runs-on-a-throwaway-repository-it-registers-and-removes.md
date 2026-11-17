@@ -1,4 +1,4 @@
-# ADR-console-062 — A bypass proof runs on a throwaway repository it registers and removes
+# ADR-console-063 — A bypass proof runs on a throwaway repository it registers and removes
 
 - **Status:** accepted
 - **Decided in:** #1152

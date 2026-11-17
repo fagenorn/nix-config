@@ -22,6 +22,7 @@ from agent_tools.console.bypass_proof import (ATTEMPT_NAMES, REQUIRED_CHECK, TEA
 from agent_tools.console.permission import AUTO, BYPASS, Permission
 from agent_tools.project_contract import agent_platform
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .guard_policy_world import MANIFEST
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

@@ -10,6 +10,7 @@ from pathlib import Path
 from agent_tools.console import bypass_proof, manager
 from agent_tools.console.permission import BYPASS, Permission
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .bypass_proof_world import SLUG, BypassProofWorld
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

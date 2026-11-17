@@ -522,7 +522,7 @@ def ensure_directory(path: Path) -> Path:
 #
 # Read by both binaries; written from `adopt-project verify --register` and,
 # for its own `bypass-proof/` entry only, by `bypass-proof github`
-# (ADR-console-062), through the locked transaction below. The registry is platform-written
+# (ADR-console-063), through the locked transaction below. The registry is platform-written
 # state, so every failure to read one that exists is an installation defect
 # published as `resolver_failure` — an absent file is the one benign case,
 # because nothing has been registered yet.

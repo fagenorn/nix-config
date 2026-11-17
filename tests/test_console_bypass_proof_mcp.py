@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.console.bypass_proof_mcp import split_tool
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = "mcp__bypassproof__apply"

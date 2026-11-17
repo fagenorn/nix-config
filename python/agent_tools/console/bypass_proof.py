@@ -58,7 +58,7 @@ After the attempts, also on an exception, the proof resets the checkout to where
 removes the key-file target.
 
 `bypass-proof github --owner OWNER --template PATH [--claude CLAUDE]` runs `run` on a throwaway
-private repository it creates, records the result and removes everything it made (ADR-console-062).
+private repository it creates, records the result and removes everything it made (ADR-console-063).
 The owner starts it from their own terminal after a switch, and the token must carry the
 `delete_repo` scope:
 
