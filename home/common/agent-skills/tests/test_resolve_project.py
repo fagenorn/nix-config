@@ -1039,12 +1039,16 @@ class CommittedContractTest(ResolverTestCase):
         self.assertEqual(orchestration["attempt_budget_minutes"], 240)
         self.assertFalse((REPO_ROOT / ".claude" / "skills.config.json").exists())  # policy-gate-pattern
 
-    def test_the_repositorys_own_contract_declares_no_production_rules(self):
+    def test_the_repositorys_own_contract_declares_its_production_rules(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
-        # Issue 1191, interim: the host activation command is not declared as production.
         code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
         self.assertEqual(code, 0, err or out)
-        self.assertEqual(json.loads(out)["production"], {"status": "not_declared"})
+        self.assertEqual(json.loads(out)["production"], {
+            "status": "declared",
+            "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+            "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+            "release_profile": "github-release",
+            "console_activation": "nix-activate"})
 
     def test_nix_activate_is_exact_and_the_snapshot_has_no_deploy(self):
         # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
@@ -2349,6 +2353,36 @@ class ProductionRulesTest(ResolverTestCase):
             "changes": self.VALID["changes"],
             "read_only": self.VALID["read_only"],
             "release_profile": "github-release"})
+
+    def test_console_activation_names_a_changing_command(self):
+        production = {**self.VALID, "console_activation": "nix-activate"}
+        code, snap, err = self.resolve(self.make_root(self.contract_with(production)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["production"]["console_activation"], "nix-activate")
+
+    def test_console_activation_outside_changes_is_refused(self):
+        production = {**self.VALID, "console_activation": "nix-build"}
+        code, payload, _ = self.resolve(self.make_root(self.contract_with(production)))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/production/console_activation"])
+        self.assertEqual(error["repair_id"], "contract.production.console_activation_not_a_change")
+
+    def test_console_activation_beside_none_is_refused(self):
+        production = {"none": True, "console_activation": "nix-activate"}
+        code, payload, _ = self.resolve(self.make_root(self.contract_with(production)))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/production/console_activation"])
+        self.assertEqual(error["repair_id"], "contract.production.none_with_rules")
+
+    def test_console_activation_must_be_a_string(self):
+        production = {**self.VALID, "console_activation": 1}
+        code, payload, _ = self.resolve(self.make_root(self.contract_with(production)))
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/production/console_activation"])
+        self.assertEqual(error["repair_id"], "contract.production.not_string")
 
     def test_no_production_beside_rules_is_refused(self):
         production = {"none": True, "changes": self.VALID["changes"],

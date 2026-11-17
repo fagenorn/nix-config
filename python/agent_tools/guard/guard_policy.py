@@ -81,8 +81,10 @@ blob id at that commit, the provider's `full_name` and each compiled profile's
 `id`, `version` and `digest`. No resolved snapshot and no contract body is
 persisted. The written document has exactly two members, the rows under
 `derived_repositories` and `derivation`: `{schema_version, platform_version,
-registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (5; rows from schema 5 carry `key_files` and
-`mcp_tools`) and
+registry_digest}`, where `schema_version` is `DERIVATION_SCHEMA_VERSION` (6; rows from schema 5 carry `key_files` and
+`mcp_tools`, and a schema 6 `production` carries `console_activation`, the id of
+the changing command approved through the console's Activate, exactly when the
+snapshot does: issue 1193) and
 the digest is `null` when no registry file exists. The base policy is only
 validated and consulted for `literal_conflict`, and none of its members is
 copied into the output. The lifecycle guard reads its trusted members
@@ -211,7 +213,7 @@ from agent_tools.system import github_remote
 
 REPORT_SCHEMA_VERSION = 1
 DERIVE_REPORT_SCHEMA_VERSION = 2
-DERIVATION_SCHEMA_VERSION = 5
+DERIVATION_SCHEMA_VERSION = 6
 
 BASE_MEMBERS = ("authorized_owners", "integration_bases", "git_bin", "gh_bin", "jq_bin")
 POLICY_MEMBERS = ("derived_repositories", "derivation")
@@ -441,11 +443,14 @@ def production_row(snapshot: dict) -> dict | None:
         return [{"id": command_id, "argv": list(commands[command_id]["argv"])}
                 for command_id in ids]
 
-    return {"changes": resolved(production["changes"]["commands"]),
-            "read_only": resolved(production["read_only"]["commands"]),
-            "release_profile": production["release_profile"],
-            "key_files": list(production["changes"]["key_files"]),
-            "mcp_tools": list(production["changes"]["mcp_tools"])}
+    row = {"changes": resolved(production["changes"]["commands"]),
+           "read_only": resolved(production["read_only"]["commands"]),
+           "release_profile": production["release_profile"],
+           "key_files": list(production["changes"]["key_files"]),
+           "mcp_tools": list(production["changes"]["mcp_tools"])}
+    if "console_activation" in production:
+        row["console_activation"] = production["console_activation"]
+    return row
 
 
 def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.VerificationSource) -> dict:

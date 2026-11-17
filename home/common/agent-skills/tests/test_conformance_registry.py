@@ -240,16 +240,18 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
         self.assertEqual([promoted["status"], promoted["facts"]], ["passed", {
             "duplicates": [], "count": 0, "deferred_count": 0, "retained_count": 0}])
 
-    def test_this_repository_declares_no_production_section(self):
-        """Issue 1191, interim: the host activation command is not declared as
-        production until the console can activate on the owner's approval."""
+    def test_this_repository_declares_nix_activate_as_production_through_the_console(self):
+        """Issue 1193: the host activation command is production, and the console's
+        Activate is its approved path."""
         proc = subprocess.run(
             [sys.executable, "-m", "agent_tools.project_contract.resolve_project",
              "resolve", "--repo-root", str(REPO_ROOT)],
             capture_output=True, text=True, timeout=60, env=HERMETIC_ENV)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(proc.stdout)["production"],
-                         {"status": "not_declared"})
+        production = json.loads(proc.stdout)["production"]
+        self.assertEqual(production["status"], "declared")
+        self.assertEqual(production["changes"]["commands"], ["nix-activate"])
+        self.assertEqual(production["console_activation"], "nix-activate")
 
     def test_workflow_entry_on_a_broken_contract_stops_at_one_root_cause(self):
         with fixture() as tmp:
