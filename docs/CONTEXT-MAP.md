@@ -55,6 +55,7 @@
 | Fleet registry | Project contract |
 | Folder trust | Console |
 | Goal | Console |
+| Guest | Console |
 | Held issue | Verification |
 | Held work | Console |
 | Inbox item | Console |

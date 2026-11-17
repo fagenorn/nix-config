@@ -680,6 +680,30 @@ class DocsTreeTest(unittest.TestCase):
         entry = context.split("**Spend page**:", 1)[1].split("_Avoid_", 1)[0]
         self.assertIn("ADR-console-056", entry)
 
+    def test_the_tailscale_serve_boundary_decision_is_recorded(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("066-*.md"))
+        self.assertEqual(len(found), 1, found)
+        path = "docs/areas/console/adr/" + found[0].name
+        text = (REPO_ROOT / path).read_text()
+        self.assertTrue(text.splitlines()[0].startswith("# ADR-console-066 \u2014 "))
+        self.assertIn("- **Status:** accepted", text)
+        for needle in (
+            "#1235", "ADR-console-008", "Tailscale-User-Login", "X-Forwarded-For",
+            "mirrored", "guest port", "guest token", "Funnel",
+            "Confirming a release", "spend", "project registration", "the access list",
+            "every manager route",
+            "tailscale.exe", "serve --bg --https=443", "serve status", "--https=443 off",
+            "<host>.<tailnet>.ts.net", "<colleague-login>",
+        ):
+            self.assertIn(needle, text)
+        for found_name in re.findall(r"\S*ts\.net\S*", text):
+            self.assertIn("<host>.<tailnet>.ts.net", found_name)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for term in ("**Console**:", "**Guest**:"):
+            entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
+            self.assertIn("ADR-console-066", entry)
+
     def test_the_held_review_decision_is_recorded(self):
         path = ("docs/areas/console/adr/054-a-held-issue-whose-only-open-criterion-is-an-owner-"
                 "review-gets-an-owner-check-card.md")
