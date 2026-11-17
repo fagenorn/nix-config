@@ -3413,7 +3413,7 @@ function isRetry(item) {
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-069): a question card whose first option grants its folder trust and registers it, or updates the checkout, and whose second sets it aside; both post to /api/register-confirm.
+// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-070): a question card whose first option grants its folder trust and registers it, or updates the checkout, and whose second sets it aside; both post to /api/register-confirm.
 function isConfirm(item) {
   return item.reason === "register_confirm" || item.reason === "register_behind";
 }

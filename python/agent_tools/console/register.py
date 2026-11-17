@@ -110,7 +110,7 @@ the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, va
 `parse_confirm_request` takes `TRY_VALUE` as a third choice. `NOT_WAITING` is the text of
 a confirmation for a root that is not the waiting one.
 
-Behind row (#1233, ADR-console-069). `RESULTS` ends with `behind`. `behind(root, count, contract)` is
+Behind row (#1233, ADR-console-070). `RESULTS` ends with `behind`. `behind(root, count, contract)` is
 the row of a checkout that is `count` commits behind its remote: `result` `behind`, `plan_id` None,
 `lines` and `questions` empty, `note` `BEHIND_NOTE`, `headline` `<name> is <N> commit(s) behind its
 remote, which already has a project contract.` or `... which has no project contract yet.` by `contract`.

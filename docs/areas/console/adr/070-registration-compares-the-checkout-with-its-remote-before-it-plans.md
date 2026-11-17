@@ -1,4 +1,4 @@
-# ADR-console-069 — Registration compares the checkout with its remote before it plans
+# ADR-console-070 — Registration compares the checkout with its remote before it plans
 
 - **Status:** accepted
 - **Decided in:** #1233

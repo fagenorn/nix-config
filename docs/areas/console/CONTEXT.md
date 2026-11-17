@@ -158,7 +158,7 @@ The user service that runs the console on each host. On Linux the systemd unit r
 _Avoid_: daemon
 
 **Registration**:
-The owner's request, from the page, that the console plan a repository's adoption and, when it is already adopted, record it in the fleet registry; the page shows its result in plain lines (ADR-console-028). Before it plans, the console compares the checkout with its remote and offers to update a checkout that is behind (ADR-console-069).
+The owner's request, from the page, that the console plan a repository's adoption and, when it is already adopted, record it in the fleet registry; the page shows its result in plain lines (ADR-console-028). Before it plans, the console compares the checkout with its remote and offers to update a checkout that is behind (ADR-console-070).
 _Avoid_: import, onboarding
 
 **Plan question**:

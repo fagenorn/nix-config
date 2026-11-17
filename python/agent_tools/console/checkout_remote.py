@@ -1,6 +1,6 @@
 """The console's comparison of a registered checkout with its remote, and its fast-forward (#1233).
 
-Decided in ADR-console-069 (#1233). Two functions, both total (they never raise) and both
+Decided in ADR-console-070 (#1233). Two functions, both total (they never raise) and both
 cancellable: `compare(root, cancel=None)` says whether the checkout is behind its remote's default
 branch and whether that branch carries a `.agents/project.json`, and `update(root, cancel=None)` moves
 the checkout forward to it when that is safe. `cancel` is a `threading.Event` (or anything with

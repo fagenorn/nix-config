@@ -224,7 +224,7 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
 adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
-ADR-console-069): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
+ADR-console-070): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
 and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
 run and carries `remote` (`register.unread`) on its row, and each plan-answer row after it; no origin or no default branch runs today's
 run. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
@@ -249,7 +249,7 @@ writes no trust and runs no child, and answers `204`. `try_again` takes the same
 `POST /api/register-project` (the fleet read, `register.refusal`, the running mark, the plan, and for a
 `no_change` plan the Register card as today), with the shown row re-checked by its `at` under the ingest
 lock before the mark is set; it grants no folder trust and never runs the register child directly.
-`update` answers the behind card the same way (#1233, ADR-console-069): `checkout_updater` runs first,
+`update` answers the behind card the same way (#1233, ADR-console-070): `checkout_updater` runs first,
 `register.update_failed` is the row when it returns a reason (nothing else runs), and otherwise the
 run is a fresh one that compares again; it grants no trust. `not_now` sets the behind card aside.
 Both seams (`checkout_reader`, `checkout_updater`) are called as `(root, cancel=stop)` with the event
@@ -4131,7 +4131,7 @@ class ConsoleService:
                           update: bool = False, remote: str | None = None) -> None:
         """Plan and, when confirmed, register; a confirmed run plans with the waiting row's answers.
 
-        A fresh run compares the checkout with its remote first (#1233, ADR-console-069): a checkout
+        A fresh run compares the checkout with its remote first (#1233, ADR-console-070): a checkout
         behind a remote that has a contract is one `behind` row and nothing else runs; `update` moves
         the checkout forward first. A confirmed run and an answer run never compare; a confirmed run
         keeps the waiting row's `remote` sentence, as an answer run does, because it still uses the

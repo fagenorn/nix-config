@@ -363,7 +363,7 @@ the options `Register it` and `Not now` with the values `register` and `not_now`
 folder-trust sentence as its `why`. It is copied as given and not filtered by the registered
 projects, sits right after the apply items, and counts once in `inbox_items` and the headline.
 While one is open the sentence is `REGISTER_SENTENCE`. It also carries the behind card of a checkout
-behind its remote (#1233, ADR-console-069): reason `register_behind`, key `register-behind/<root>/<at>`,
+behind its remote (#1233, ADR-console-070): reason `register_behind`, key `register-behind/<root>/<at>`,
 `plan_id` null, the options `Update it` and `Not now` with the values `update` and `not_now`. Without
 `confirm_items` the view is unchanged.
 
