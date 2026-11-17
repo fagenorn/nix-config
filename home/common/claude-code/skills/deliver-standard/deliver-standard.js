@@ -2208,6 +2208,7 @@ const lookStop = (pr, sha) => {
 }
 const LOOK_HEAD_SCHEMA = { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] }
 const LOOK_POST_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: 'integer' }, detail: { type: 'string' } }, required: ['verdict'] }
+const LOOK_STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] }
 // #1139: the owner's approve answer is always validated here, never from a cached approval: the answer clears it, the pull request head is read, and the approval is posted
 // only for the head the owner saw, when that is also the verified head. Anything else posts nothing and merges nothing.
 if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
@@ -2600,8 +2601,18 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       continue
     }
     if (state === 'passed') {
-      // #1139: a marked delivery merges only the head the owner approved; a head that moved since stops for a new look, the lock released.
-      if (MARKED && approvedHead && !sameSha(head, approvedHead)) return lookStop(PR, head)
+      // #1139: a marked delivery merges only a head the owner's approval covers. #1211: a head that moved since lands when look-approval status
+      // says the approval is kept; needed stops for a new look, the lock released, and any other reply stops without asking the owner (a forge failure is no reason for a look).
+      if (MARKED && approvedHead && !sameSha(head, approvedHead)) {
+        const ls = await call(`${CTX}
+Read whether the owner's look approval of issue #${ISSUE} of ${SLUG} still covers the head ${head} of PR #${PR}. Run alone and exactly: look-approval status --repo ${SLUG} --issue ${ISSUE} --pr ${PR} --head ${head}
+It prints one JSON line. Return its verdict, kept_from and any detail. Run nothing else.
+${RULES}`, { label: 'look-status', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: LOOK_STATUS_SCHEMA })
+        if (!complete(ls, LOOK_STATUS_SCHEMA) || (ls.verdict !== 'approved' && ls.verdict !== 'needed')) return stop('look-status', { pr: PR, head, result: ls })
+        if (ls.verdict === 'needed') return lookStop(PR, head)
+        approvedHead = head
+        lookAt = { pr: PR, head, approved: head }
+      }
       // One call: renew, the pre-merge lock check (still held or moved merges; retaken after a loss rechecks first, once), then the merge.
       mg = await recall(() => call(`${CTX}
 ${RENEW_FIRST}

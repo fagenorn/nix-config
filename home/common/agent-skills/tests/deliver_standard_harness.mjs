@@ -51,6 +51,7 @@ const DEFAULTS = [
   // #1139: the owner's look answers: the pull request head read, the approval post, and the fix round of a changes answer (look-fix-review falls to the review default).
   [/^look-head$/, { head: SHA, state: 'OPEN', renew: { verdict: 'renewed' } }],
   [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
+  [/^look-status$/, { verdict: 'needed', kept_from: null }],
   [/^look-fix$/, { ...DONE, start_head: SHA, commit: 'f1c0de' }],
   [/^land-unlock$/, { verdict: 'released' }],
   [/^land-(re)?lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
