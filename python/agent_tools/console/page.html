@@ -3399,7 +3399,15 @@ function fireAnswer(id) {
   state.timer = null;
   const item = lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
   if (item === undefined) {
-    answers.delete(id);
+    // A question that left during the undo window sends nothing; its typed words stay reachable as a failed answer.
+    if (keptWords({ phase: "failed", pending: state.pending })) {
+      state.phase = "failed";
+      state.again = false;
+      state.reason = "the question was withdrawn before the answer was sent";
+      redraw();
+    } else {
+      answers.delete(id);
+    }
     return;
   }
   sendAnswer(id, state, item);

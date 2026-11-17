@@ -2997,6 +2997,22 @@ class PageQuestionTest(unittest.TestCase):
         self.assertIn("Could not send: this question is already answered", full(gone["inbox"]))
         self.assertEqual(count(dismissed, "kept-words"), 0)
 
+    def test_a_question_that_left_during_the_undo_window_keeps_the_words_reachable(self) -> None:
+        waiting, kept, later, dismissed = render([
+            START, {"frame": frame([QC])}, {"key": "3"},
+            {"type": {"class": "words-text", "text": "make the line shorter"}},
+            {"click": "send"}, {"snapshot": True},
+            {"frame": frame([])}, {"clock": 5000}, {"snapshot": True},
+            {"frame": frame([])}, {"snapshot": True},
+            {"click": "kept-words-dismiss"}, {"snapshot": True},
+        ])
+        self.assertEqual(count(waiting, "kept-words"), 0)
+        self.assertEqual(round_posts(dismissed), [])
+        self.assertEqual(field(kept, "kept-words-text")["value"], "make the line shorter")
+        self.assertIn("Could not send", full(kept["inbox"]))
+        self.assertEqual(field(later, "kept-words-text")["value"], "make the line shorter")
+        self.assertEqual(count(dismissed, "kept-words"), 0)
+
     def test_the_send_waits_for_an_option_or_words(self) -> None:
         first, second = render([
             START, {"frame": frame([Q0, Q1])}, {"click": "opt", "nth": 1}, {"snapshot": True},
