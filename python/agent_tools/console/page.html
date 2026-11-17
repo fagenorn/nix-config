@@ -336,6 +336,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .asks .asks-project { display: block; min-width: 0; margin-bottom: 4px; font-weight: 600; color: var(--sub0); overflow-wrap: anywhere; }
 .ask-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
 .ask-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
+.follow { margin-top: 8px; }
+.follow-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; font-size: .8125rem; color: var(--sub0); }
+.follow-text { width: 100%; box-sizing: border-box; min-height: 3.5rem; resize: vertical; }
 .ask-list { margin-top: 8px; }
 .line.questions > details > summary { display: revert; list-style: revert; }
 .line.questions > details > summary::-webkit-details-marker { display: revert; }
@@ -351,7 +354,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .ask-question { color: var(--lav); white-space: pre-line; overflow-wrap: anywhere; }
 .ask-age { margin-left: 8px; color: var(--ov2); white-space: nowrap; }
 .ask-answer { color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
-.ask-back, .ask-state, .ask-reason { color: var(--sub0); }
+.ask-back, .ask-state, .ask-reason, .follow-reason { color: var(--sub0); }
 .ask-read, .ask-ran, .ask-unknown, .ask-production { color: var(--ov2); }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
@@ -756,6 +759,11 @@ const askOpen = new Set();
 const askPosts = new Map();
 const askSent = new Map();
 const askLatest = new Map();
+const followOpen = new Set();
+const followDrafts = new Map();
+const followPosts = new Map();
+const followSent = new Map();
+const followLatest = new Map();
 const askReveal = new Set();
 let sprintRedraw = 0;
 function messageLabel(message) {
@@ -2017,24 +2025,26 @@ function askRows(entry) {
 function askIds(entry) {
   return askRows(entry).map((question) => question.id);
 }
-// Every submission still outstanding for a project: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own thread, one the project did not hold when the first of them was sent and whose first question carries the same text (the console stores it stripped), the oldest submission taking the oldest such thread, so one question's row never stands for another.
-function askMatches(projectId, entry) {
-  const sent = askSent.get(projectId);
-  const post = askPosts.get(projectId);
+// Every submission still outstanding: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own row among the fresh ones (not held when the first of them was sent, oldest first) whose question carries the same text (the console stores it stripped), the oldest submission taking the oldest such row, so one question's row never stands for another.
+function matchSent(sent, post, fresh) {
   const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
   const taken = new Map();
-  if (sent !== undefined && entry !== undefined) {
-    const fresh = askThreads(entry).map((thread) => thread.questions[0]).filter((question) => !sent.base.has(question.id)).reverse();
-    const used = new Set();
-    for (const submission of submissions) {
-      const found = fresh.find((question) => !used.has(question.id) && question.question === submission.text.trim());
-      if (found !== undefined) {
-        used.add(found.id);
-        taken.set(submission, found.id);
-      }
+  const used = new Set();
+  for (const submission of submissions) {
+    const found = fresh.find((question) => !used.has(question.id) && question.question === submission.text.trim());
+    if (found !== undefined) {
+      used.add(found.id);
+      taken.set(submission, found.id);
     }
   }
   return { submissions, taken };
+}
+// A project's: the fresh rows are the first questions of the threads the project did not hold then.
+function askMatches(projectId, entry) {
+  const sent = askSent.get(projectId);
+  const fresh = sent === undefined || entry === undefined ? []
+    : askThreads(entry).map((thread) => thread.questions[0]).filter((question) => !sent.base.has(question.id)).reverse();
+  return matchSent(sent, askPosts.get(projectId), fresh);
 }
 function askOutstanding(projectId, entry) {
   const { submissions, taken } = askMatches(projectId, entry);
@@ -2136,6 +2146,12 @@ function askRow(question) {
   }
   return row;
 }
+function pendingRow(post) {
+  const row = el("li", "ask");
+  row.appendChild(phrase("p", "ask-question", post.text, timeEl("ago", post.at, "ask-age")));
+  row.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending\u2026" : "Working on it"));
+  return row;
+}
 // A project's Ask block: the open box and the submissions the view does not carry yet, newest first, never a row the view carries. A project whose line is drawn has its button there and draws no block while it has nothing to hold; one without a line keeps its named block holding the button.
 function askBlock(entry, afterLine, lined) {
   const id = entry.project_id;
@@ -2148,15 +2164,132 @@ function askBlock(entry, afterLine, lined) {
   else if (!lined) item.appendChild(actionButton("ask-open btn-quiet", "Ask a question", () => openAsk(id)));
   if (pending.length > 0) {
     const list = el("ul", "ask-list");
-    for (const post of pending) {
-      const row = el("li", "ask");
-      row.appendChild(phrase("p", "ask-question", post.text, timeEl("ago", post.at, "ask-age")));
-      row.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending\u2026" : "Working on it"));
-      list.appendChild(row);
-    }
+    for (const post of pending) list.appendChild(pendingRow(post));
     item.appendChild(list);
   }
   return item;
+}
+// A thread's follow-up box (#1178, ADR-console-002): the Ask box's draft, refusal and pending rules for one thread, keyed by its project and its id.
+function followKey(projectId, threadId) {
+  return projectId + "\n" + threadId;
+}
+function followHolds(projectId) {
+  return [...followOpen].some((key) => key.startsWith(projectId + "\n"));
+}
+function followField(key) {
+  return Array.from(document.querySelectorAll("textarea.follow-text")).find((area) => area.dataset.followDraft === key);
+}
+function openFollow(key) {
+  followOpen.add(key);
+  redrawNotices();
+  const field = followField(key);
+  if (field !== undefined) field.focus();
+}
+function cancelFollow(key) {
+  followOpen.delete(key);
+  followDrafts.delete(key);
+  // A follow-up already sent stays outstanding until the view carries its row; only a refusal is dropped.
+  const post = followPosts.get(key);
+  if (post !== undefined && post.phase !== "sending") followPosts.delete(key);
+  redrawNotices();
+}
+function followMatches(key, thread) {
+  const sent = followSent.get(key);
+  const fresh = sent === undefined || thread === undefined ? [] : thread.questions.filter((question) => !sent.base.has(question.id));
+  return matchSent(sent, followPosts.get(key), fresh);
+}
+function followOutstanding(key, thread) {
+  const { submissions, taken } = followMatches(key, thread);
+  return submissions.filter((submission) => !taken.has(submission));
+}
+// Drops the accepted follow-ups the view now shows and counts their rows as held.
+function followReconcile(key, thread) {
+  const sent = followSent.get(key);
+  if (sent === undefined) return;
+  const { taken } = followMatches(key, thread);
+  for (const submission of sent.list) {
+    if (taken.has(submission)) sent.base.add(taken.get(submission));
+  }
+  sent.list = sent.list.filter((submission) => !taken.has(submission));
+}
+async function postFollowUp(projectId, thread) {
+  const key = followKey(projectId, thread.id);
+  const current = followPosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const draft = followDrafts.get(key);
+  const text = draft === undefined ? "" : draft.value;
+  if (text.trim() === "") return;
+  const state = { phase: "sending", reason: "", text, at: new Date(Date.now()).toISOString() };
+  const sent = followSent.get(key);
+  if (sent === undefined || sent.list.length === 0) followSent.set(key, { base: new Set(thread.questions.map((question) => question.id)), list: [] });
+  followPosts.set(key, state);
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/project-question", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ project_id: projectId, question: text, thread_id: thread.id }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (followPosts.get(key) !== state) return;
+  if (reason === null) {
+    followOpen.delete(key);
+    followDrafts.delete(key);
+    followPosts.delete(key);
+    followSent.get(key).list.push({ text, at: state.at, phase: "sent" });
+    followReconcile(key, followLatest.get(key));
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawNotices();
+}
+function followBox(projectId, thread) {
+  const key = followKey(projectId, thread.id);
+  const state = followPosts.get(key);
+  const sending = state !== undefined && state.phase === "sending";
+  const box = el("div", "follow-box");
+  const field = el("textarea", "follow-text field-area");
+  field.setAttribute("aria-label", "Follow-up about " + projectId);
+  field.setAttribute("placeholder", "What do you want to ask next?");
+  field.dataset.followDraft = key;
+  const draft = followDrafts.get(key);
+  if (draft !== undefined) field.value = draft.value;
+  const send = actionButton("follow-send btn-quiet", "Send", () => postFollowUp(projectId, thread));
+  const reason = el("span", "follow-reason", state !== undefined && state.phase === "failed" ? state.reason : "");
+  send.disabled = sending || field.value.trim() === "";
+  markBusy(send, sending);
+  field.addEventListener("input", () => {
+    followDrafts.set(key, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
+    const shown = followPosts.get(key);
+    if (shown !== undefined && shown.phase === "failed") {
+      followPosts.delete(key);
+      reason.textContent = "";
+    }
+    const busy = shown !== undefined && shown.phase === "sending";
+    send.disabled = busy || field.value.trim() === "";
+    markBusy(send, busy);
+  });
+  field.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    if (field.value === "") cancelFollow(key);
+  });
+  box.appendChild(field);
+  box.appendChild(send);
+  box.appendChild(actionButton("follow-cancel btn-quiet", "Cancel", () => cancelFollow(key)));
+  box.appendChild(reason);
+  return box;
+}
+// The box, or the "Ask a follow-up" button under an answered thread with no follow-up pending, or null.
+function followBlock(projectId, thread, pending) {
+  const key = followKey(projectId, thread.id);
+  const open = followOpen.has(key);
+  if (!open && (thread.follow_up !== true || pending > 0)) return null;
+  const block = el("div", "follow");
+  block.appendChild(open ? followBox(projectId, thread) : actionButton("follow-open btn-quiet", "Ask a follow-up", () => openFollow(key)));
+  return block;
 }
 // A fold drawn open once when its key was revealed by a sent question the view now carries, closed otherwise.
 function revealed(key) {
@@ -2170,7 +2303,8 @@ function threadItem(projectId, thread) {
   const item = el("li", "thread");
   const fold = el("details");
   fold.dataset.key = "thread:" + projectId + ":" + thread.id;
-  if (revealed(fold.dataset.key)) fold.open = true;
+  const key = followKey(projectId, thread.id);
+  if (revealed(fold.dataset.key) || followOpen.has(key)) fold.open = true;
   const summary = el("summary");
   const head = el("span", "thread-first", first.question);
   head.setAttribute("title", first.question);
@@ -2183,7 +2317,11 @@ function threadItem(projectId, thread) {
   fold.appendChild(summary);
   const list = el("ul", "ask-list");
   for (const question of thread.questions) list.appendChild(askRow(question));
+  const pending = followOutstanding(key, thread);
+  for (const post of pending) list.appendChild(pendingRow(post));
   fold.appendChild(list);
+  const follow = followBlock(projectId, thread, pending.length);
+  if (follow !== null) fold.appendChild(follow);
   item.appendChild(fold);
   return item;
 }
@@ -2194,7 +2332,7 @@ function questionsFold(entry, afterLine) {
   const item = el("li", afterLine ? "line questions after-line" : "line questions");
   const fold = el("details");
   fold.dataset.key = "questions:" + entry.project_id;
-  if (revealed(fold.dataset.key)) fold.open = true;
+  if (revealed(fold.dataset.key) || followHolds(entry.project_id)) fold.open = true;
   const summary = el("summary");
   summary.appendChild(el("b", "", entry.questions.label + " (" + threads.length + ")"));
   if (!afterLine) summary.appendChild(el("span", "questions-project", entry.project_id));
@@ -4211,17 +4349,23 @@ function drawProjects(view) {
     && active.dataset.askDraft !== undefined
     ? { id: active.dataset.askDraft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  const heldFollow = active && active.tagName === "TEXTAREA" && active.dataset
+    && active.dataset.followDraft !== undefined
+    ? { id: active.dataset.followDraft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
   section.replaceChildren(heading);
   const activation = activationLine(view);
   if (activation !== null) section.appendChild(activation);
   const offering = new Set();
   const listed = new Set();
   const asked = new Set();
+  followLatest.clear();
   for (const entry of view.entries) {
     for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
       if (project.notice_post === true) offering.add(project.project_id);
       asked.add(project.project_id);
       askLatest.set(project.project_id, project);
+      for (const thread of askThreads(project)) followLatest.set(followKey(project.project_id, thread.id), thread);
       for (const notice of Array.isArray(project.notices) ? project.notices : []) {
         listed.add(noticeKey(project.project_id, notice.id));
       }
@@ -4254,6 +4398,19 @@ function drawProjects(view) {
   }
   for (const id of [...askLatest.keys()]) {
     if (!asked.has(id)) askLatest.delete(id);
+  }
+  for (const key of [...followDrafts.keys()]) {
+    if (!followLatest.has(key)) followDrafts.delete(key);
+  }
+  for (const key of [...followOpen]) {
+    if (!followLatest.has(key)) followOpen.delete(key);
+  }
+  for (const key of [...followPosts.keys()]) {
+    if (!followLatest.has(key)) followPosts.delete(key);
+  }
+  for (const key of [...followSent.keys()]) {
+    if (followLatest.has(key)) followReconcile(key, followLatest.get(key));
+    else followSent.delete(key);
   }
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
@@ -4305,7 +4462,7 @@ function drawProjects(view) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
       fold.dataset.key = "quiet";
-      if (entry.projects.some((project) => (project.notice_post === true && noticeOpen.has(project.project_id)) || askOpen.has(project.project_id) || askReveal.has("questions:" + project.project_id))) fold.open = true;
+      if (entry.projects.some((project) => (project.notice_post === true && noticeOpen.has(project.project_id)) || askOpen.has(project.project_id) || followHolds(project.project_id) || askReveal.has("questions:" + project.project_id))) fold.open = true;
       const summary = el("summary");
       summary.appendChild(quietIcon());
       summary.appendChild(el("b", "", entry.label));
@@ -4360,6 +4517,13 @@ function drawProjects(view) {
     if (again !== undefined) {
       again.focus();
       again.setSelectionRange(heldAsk.start, heldAsk.end);
+    }
+  }
+  if (heldFollow !== null) {
+    const again = followField(heldFollow.id);
+    if (again !== undefined) {
+      again.focus();
+      again.setSelectionRange(heldFollow.start, heldFollow.end);
     }
   }
 }

@@ -902,6 +902,11 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("| Project question | Console |", self.doc("docs/CONTEXT-MAP.md"))
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("058-*.md"))), 1)
 
+    def test_the_desk_page_rules_name_the_follow_up_box(self):
+        adr = " ".join(self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md").split())
+        for needle in ("Ask a follow-up", "Follow-up about <project>"):
+            self.assertIn(needle, adr)
+
     def test_the_question_milestone_decisions_are_recorded(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         found = sorted(adr_dir.glob("059-*.md"))
