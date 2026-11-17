@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import event_log, folder_trust, register, register_check
+from agent_tools.console import checkout_remote, event_log, folder_trust, register, register_check
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -1538,6 +1538,254 @@ class DraftRunTest(DraftCase):
         self.assertEqual(question["why"],
                          "sample-owner/sample-app is already registered for another checkout")
         self.assertEqual(fake.calls, [])
+
+
+def remote_checkout(parent: Path, *, contract: bool, ahead: bool,
+                    ahead_contract: bool = False) -> tuple[Path, Path]:
+    """A clone of a bare remote, and the seed repository that can push more to it (#1233)."""
+    seed = git_repo(parent / "seed", contract=contract)
+    bare = parent / "origin.git"
+    git(parent, "init", "-q", "--bare", "-b", "main", str(bare))
+    git(seed, "remote", "add", "origin", str(bare))
+    git(seed, "push", "-q", "origin", "main")
+    checkout = parent / "checkout"
+    git(parent, "clone", "-q", str(bare), str(checkout))
+    git(checkout, "config", "user.name", "t")
+    git(checkout, "config", "user.email", "t@example.invalid")
+    git(checkout, "config", "commit.gpgsign", "false")
+    if ahead:
+        if ahead_contract:
+            (seed / ".agents").mkdir(exist_ok=True)
+            (seed / ".agents/project.json").write_text("{}\n")
+        else:
+            (seed / "NOTES.md").write_text("n\n")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-q", "-m", "ahead")
+        git(seed, "push", "-q", "origin", "main")
+    return checkout.resolve(), seed
+
+
+def spy(*results):
+    """A reader or updater that records `(root, cancel)` and returns the next result (the last repeats)."""
+    calls = []
+    queue = list(results)
+
+    def reader(root, *, cancel):
+        calls.append((root, cancel))
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    return calls, reader
+
+
+def logged(errors: io.StringIO) -> list[dict]:
+    prefix = "console: registration_error "
+    return [json.loads(line[len(prefix):]) for line in errors.getvalue().splitlines()
+            if line.startswith(prefix)]
+
+
+CURRENT_CHECKOUT = checkout_remote.Comparison("current", "main", 0, False, None)
+
+
+class RegisterRemoteTest(Case):
+    def behind_card(self, *, dirty=False, **begin):
+        checkout, seed = remote_checkout(self.parent, contract=False, ahead=True, ahead_contract=True)
+        fake = Fake(plan=PLANNED)
+        reads = []
+        self.begin(fake, draft_reader=lambda root: reads.append(root) or READ_ALL, **begin)
+        if dirty:
+            (checkout / "README.md").write_text("changed\n")
+        self.assertEqual(self.post({"path": str(checkout)})[0], 204)
+        self.settled_row(checkout)
+        return checkout, seed, fake, reads
+
+    def missing_origin(self, *, contract=True):
+        root = git_repo(self.parent / "r", contract=contract)
+        git(root, "remote", "add", "origin", str(self.parent / "missing.git"))
+        return root
+
+    def test_a_checkout_behind_a_remote_with_a_contract_raises_the_behind_card_and_plans_nothing(self):
+        checkout, _ = remote_checkout(self.parent, contract=False, ahead=True, ahead_contract=True)
+        fake = Fake(plan=PLANNED)
+        reads = []
+        self.begin(fake, draft_reader=lambda root: reads.append(root) or READ_ALL)
+        self.assertEqual(self.post({"path": str(checkout)})[0], 204)
+        row = self.settled_row(checkout)
+        self.assertEqual(row["result"], "behind")
+        self.assertEqual(row["headline"],
+                         "checkout is 1 commit behind its remote, which already has a project contract.")
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(reads, [])
+        self.assertEqual([p["result"] for _, p in self.rows("registration.ended")], ["behind"])
+        (item,) = [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_behind"]
+        self.assertEqual(item["values"], ["update", "not_now"])
+        self.assertFalse((checkout / ".agents/project.json").exists())
+
+    def test_update_it_moves_the_checkout_and_plans_with_the_remotes_contract(self):
+        checkout, seed, fake, reads = self.behind_card()
+        status, _, body = self.confirm({"root": str(checkout), "choice": "update"})
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(self.settled_row(checkout)["result"], "planned")
+        self.assertEqual(fake.calls, [("plan", str(checkout))])
+        self.assertEqual(fake.contracts, [(None, False, True)])
+        self.assertEqual(reads, [])
+        self.assertEqual((checkout / ".agents/project.json").read_text(), "{}\n")
+        self.assertEqual(git(checkout, "rev-parse", "HEAD"), git(seed, "rev-parse", "HEAD"))
+        self.assertEqual(self.rows("trust.granted"), [])
+
+    def test_not_now_sets_the_behind_card_aside_and_plans_nothing(self):
+        checkout, _, fake, _ = self.behind_card()
+        self.assertEqual(self.confirm({"root": str(checkout), "choice": "not_now"})[0], 204)
+        row = self.rows("registration.ended")[-1][1]
+        self.assertEqual((row["result"], row["note"]), ("behind", register.LATER_NOTE))
+        self.assertEqual([i for i in self.view()["inbox"]["open"]
+                          if i["reason"] == "register_behind"], [])
+        self.assertEqual(fake.calls, [])
+
+    def test_a_failed_update_is_a_try_again_card_and_keeps_the_checkout(self):
+        checkout, _ = remote_checkout(self.parent, contract=False, ahead=True, ahead_contract=True)
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        (checkout / "README.md").write_text("changed\n")
+        self.assertEqual(self.post({"path": str(checkout)})[0], 204)
+        self.settled_row(checkout)
+        self.assertEqual(self.confirm({"root": str(checkout), "choice": "update"})[0], 204)
+        row = self.settled_row(checkout)
+        self.assertEqual(row["result"], "failed")
+        self.assertEqual(row["headline"],
+                         "checkout could not be updated: it has changes that are not committed.")
+        self.assertEqual(row["note"], "Update the checkout in a terminal, then choose Try again.")
+        self.assertEqual(len([i for i in self.view()["inbox"]["open"]
+                              if i["reason"] == "register_failed"]), 1)
+        self.assertEqual(fake.calls, [])
+        self.assertEqual((checkout / "README.md").read_text(), "changed\n")
+
+    def test_a_current_checkout_plans_as_today(self):
+        checkout, _ = remote_checkout(self.parent, contract=True, ahead=False)
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        self.assertEqual(self.post({"path": str(checkout)})[0], 204)
+        row = self.settled_row(checkout)
+        self.assertEqual(row["result"], "planned")
+        self.assertNotIn("remote", row)
+        self.assertEqual(fake.calls, [("plan", str(checkout))])
+        self.assertIsNone(self.view()["registration"]["remote"])
+
+    def test_an_unreadable_remote_plans_as_today_and_says_so(self):
+        root = self.missing_origin()
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        row = self.settled_row(root)
+        self.assertEqual(row["result"], "planned")
+        self.assertEqual(row["remote"], register.REMOTE_UNREAD)
+        self.assertEqual(row["lines"], register.plan_lines(PLANNED))
+        self.assertEqual(fake.calls, [("plan", str(root))])
+        self.assertEqual(self.view()["registration"]["remote"], register.REMOTE_UNREAD)
+
+    def test_an_unreadable_remote_on_a_checkout_with_no_contract_drafts_and_says_so(self):
+        root = self.missing_origin(contract=False)
+        self.begin(Fake(plan=PLANNED), draft_reader=lambda root: READ_NO_BUILD)
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        row = self.settled_row(root)
+        self.assertEqual(row["result"], "drafting")
+        self.assertEqual(row["remote"], register.REMOTE_UNREAD)
+
+    def test_a_confirmed_register_and_an_answer_do_not_compare_again(self):
+        calls, reader = spy(CURRENT_CHECKOUT)
+        fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
+        self.begin(fake, checkout_reader=reader)
+        root = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        self.settled_row(root)
+        self.assertEqual(self.confirm({"root": str(root), "choice": "register"})[0], 204)
+        self.settled_row(root)
+        self.assertEqual([called for called, _ in calls], [str(root)])
+        self.assertIs(calls[0][1], self.svc._stop)
+        self.svc.close()
+        self.begin(Fake(plan=[DRAFT, READY]), checkout_reader=reader)
+        again = git_repo(self.parent / "again")
+        before = len(calls)
+        self.assertEqual(self.post({"path": str(again)})[0], 204)
+        self.settled_row(again)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        self.settled_row(again)
+        self.assertEqual(len(calls) - before, 1)
+
+    def test_try_again_compares_again(self):
+        calls, reader = spy(CURRENT_CHECKOUT)
+        error = {"code": "x", "repair_id": "adopt.git.fetch_failed",
+                 "violations": [{"pointer": "", "message": "m"}]}
+        self.begin(Fake(plan={"error": error}), checkout_reader=reader)
+        root = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        self.assertEqual(self.settled_row(root)["result"], "failed")
+        self.assertEqual(self.confirm({"root": str(root), "choice": "try_again"})[0], 204)
+        self.settled_row(root)
+        self.assertEqual([called for called, _ in calls], [str(root), str(root)])
+
+    def test_an_unreadable_remote_is_logged_with_gits_words(self):
+        root = self.missing_origin()
+        self.begin(Fake(plan=PLANNED))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.post({"path": str(root)})[0], 204)
+            row = self.settled_row(root)
+        (entry,) = logged(errors)
+        self.assertEqual((entry["root"], entry["verb"], entry["step"]),
+                         (str(root), "compare", "ls-remote"))
+        self.assertTrue(entry["detail"].startswith("exit "))
+        self.assertIn("missing.git", entry["detail"])
+        for member in (row["headline"], row["remote"]):
+            self.assertNotIn("missing.git", member)
+            self.assertNotIn("/", member)
+
+    def test_a_failed_update_logs_the_step_and_gits_words(self):
+        _, reader = spy(checkout_remote.Comparison("behind", "main", 1, True, None))
+        failure = checkout_remote.Failure(
+            "merge", "exit 128: error: The following untracked working tree files would be "
+                     "overwritten by merge")
+        _, updater = spy(checkout_remote.Updated(checkout_remote.NOT_MOVED, failure))
+        root = git_repo(self.parent / "r", contract=False)
+        self.begin(Fake(plan=PLANNED), checkout_reader=reader, checkout_updater=updater)
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        self.settled_row(root)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.confirm({"root": str(root), "choice": "update"})[0], 204)
+            self.settled_row(root)
+        self.assertEqual(logged(errors), [{"root": str(root), "verb": "update", "step": "merge",
+                                           "detail": failure.detail}])
+        row = self.rows("registration.ended")[-1][1]
+        self.assertEqual(row["headline"], "r could not be updated: git could not move it forward.")
+        self.assertNotIn("untracked", row["headline"])
+        self.assertNotIn("untracked", row["note"])
+
+    def test_a_shutdown_during_the_update_starts_nothing_after_it(self):
+        reads, reader = spy(checkout_remote.Comparison("behind", "main", 1, True, None))
+        seen = []
+
+        def updater(root, *, cancel):
+            seen.append(cancel)
+            cancel.set()
+            return checkout_remote.Updated(None, None)
+
+        fake = Fake(plan=PLANNED)
+        draws = []
+        self.begin(fake, checkout_reader=reader, checkout_updater=updater,
+                   draft_reader=lambda root: draws.append(root) or READ_ALL)
+        root = git_repo(self.parent / "r", contract=False)
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        self.settled_row(root)
+        self.assertEqual(self.confirm({"root": str(root), "choice": "update"})[0], 204)
+        deadline = time.monotonic() + 30
+        while self.svc._registering is not None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(seen, [self.svc._stop])
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(draws, [])
+        self.assertEqual([p["result"] for _, p in self.rows("registration.ended")
+                          if p["result"] in ("planned", "drafting")], [])
 
 
 class PlanAnswerSecretTest(Case):
