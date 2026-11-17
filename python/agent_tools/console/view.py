@@ -63,7 +63,13 @@ Wire format, one object:
      "profile_sessions": {"<profile>": <int>, ...},
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
      "activation": <activation line> | null,
-     "spend": <spend view> | null}
+     "spend": <spend view> | null,
+     "sharing": {"tailnet": <name> | null, "colleagues": [{"login", "projects"}, ...],
+                 "state": "off" | "unchecked" | "not_proxying" | "serving"}}
+
+`sharing` is the owner's access list for the guest door and its Serve state (#1237,
+`guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
+(`guest.scrub`).
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
@@ -641,6 +647,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
+from types import MappingProxyType
 
 from agent_tools.console import contract_draft, inbox, project_question
 from agent_tools.console.activation import Activation
@@ -858,6 +865,7 @@ ACTIVATED_TEXT = "Activated this host at {commit}."
 ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {next_step}"
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
+SHARING_OFF = MappingProxyType({"tailnet": None, "colleagues": [], "state": "off"})
 
 
 @dataclass(frozen=True)
@@ -1913,6 +1921,7 @@ def derive_view(
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
+    sharing: Mapping | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2135,7 +2144,12 @@ def derive_view(
                 key=lambda p: (p.failed_at, p.sprint_id))],
         "activation": _activation_line(activation, activation_run, now_ms),
         "spend": dict(spend) if spend is not None else None,
+        "sharing": _sharing_copy(SHARING_OFF if sharing is None else sharing),
     }
+
+
+def _sharing_copy(sharing: Mapping) -> dict:
+    return {**sharing, "colleagues": list(sharing["colleagues"])}
 
 
 def _activation_line(activation: Activation | None, run: LastRun | None, now_ms: int | None) -> dict | None:

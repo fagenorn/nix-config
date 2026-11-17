@@ -1,4 +1,4 @@
-"""The guest door's policy (#1237): the access list, admission, the owner-port rule and the probe.
+"""The guest door's policy (#1237): the access list, admission, scoping, the owner-port rule and the probe.
 
 A guest is a listed colleague who reaches the console through Tailscale Serve on the console's
 guest port (ADR-console-066). This module holds the pure rules only; `service.py` documents the
@@ -27,6 +27,28 @@ Serve must never reach the owner's port, and a forged header gains a local proce
 `whoami` is the probe's answer (`PROBE_HEADER` carries a forged login the probe sends to learn
 whether Serve strips it): counts and flags only, never the login values.
 
+A guest sees a scoped copy of the owner's view (`scoped`, `scrub`). `scoped(inputs, projects)`
+takes the keyword inputs of `view.derive_view` and a guest's project ids and returns inputs that
+hold only those projects: `states`, `records`, `health`, `movement`, `owner_notices`, `sprints` and
+`pending` keep the members of a listed project; `sessions` keep only those whose repository is a
+kept project's root (so no unmanaged entry, no other repository); `deliveries` keep only those of a
+kept session. `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
+empty value whether or not it was given. The input set is closed: a key of none of the three sets
+is refused with `ValueError("unscoped view input <name>")`, so a view input added later must be
+classified before a guest can see it. `scrub(view)` then drops what the inputs cannot: the `sharing`
+member, the unmanaged list, the per-profile session counts, the sign-in, account, pin and
+registration members, the digest, the activation line, the spend view and the capacity profiles.
+`picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
+stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
+finds in that guest's scoped view.
+
+`sharing_entry(access, state)` is the owner's `sharing` view member. `state` is one of
+`SERVE_STATES`: `off` (no tailnet is configured), `unchecked` (the Serve status was not read),
+`not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest port) and
+`serving`. `serve_state(status, tailnet, guest_port)` reads the parsed `tailscale serve status
+--json` ServeConfig, `{"Web": {"<tailnet>:443": {"Handlers": {"/": {"Proxy":
+"http://127.0.0.1:<guest port>"}}}}}`, and treats any other shape as not proxying.
+
 `parse_tailnet`, `parse_colleague` and `parse_removal` read the owner's write bodies as strict
 JSON (a duplicate key, a non-object or an extra or missing key is refused) and raise
 `ValueError` on a malformed body. Whether each project of a colleague is registered is checked by
@@ -40,8 +62,21 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event)
+from agent_tools.console.view import project_for
+
+OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
+    "capacity": None, "digest": None, "spend": None, "activation": None,
+    "activation_run": None, "signin_runs": None, "accounts_added": (), "pin": None,
+    "pin_launches": (), "registration": None, "adoption_items": (), "retry_items": (),
+    "apply_items": (), "confirm_items": (), "trust_items": (), "failure_items": (),
+    "project_questions": None, "sharing": None})
+PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
+FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
+                             "pending", "movement", "owner_notices"})
+SERVE_STATES = ("off", "unchecked", "not_proxying", "serving")
 
 LOGIN_HEADER = "Tailscale-User-Login"
 PROBE_HEADER = "X-Console-Probe"
@@ -189,3 +224,86 @@ def whoami(hosts: Sequence[str], logins: Sequence[str], forwarded: Sequence[str]
             "login_headers": len(logins),
             "forwarded_for": bool(forwarded),
             "probe_login_arrived": len(probes) == 1 and probes[0] in logins}
+
+
+def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
+    for name in inputs:
+        if name not in FILTERED_INPUTS | PASSED_INPUTS | OWNER_ONLY_INPUTS.keys():
+            raise ValueError(f"unscoped view input {name}")
+    result: dict = {name: inputs[name] for name in PASSED_INPUTS if name in inputs}
+    result.update(OWNER_ONLY_INPUTS)
+    states = [state for state in inputs.get("states") or () if state.project_id in projects]
+    kept = {state.project_id: state for state in states}
+    sessions = [session for session in inputs.get("sessions") or ()
+                if session.repo is not None and project_for(session.repo, kept) is not None]
+    session_ids = {session.session_id for session in sessions}
+
+    def keep(name: str, wanted) -> None:
+        folded = inputs.get(name)
+        if name in inputs:
+            result[name] = None if folded is None else {
+                key: value for key, value in folded.items() if wanted(key, value)}
+
+    result["states"] = states
+    result["sessions"] = sessions
+    keep("records", lambda key, _: key[0] in projects)
+    keep("health", lambda key, _: key in projects)
+    keep("movement", lambda key, _: key in projects)
+    keep("owner_notices", lambda key, _: key in projects)
+    keep("sprints", lambda _, value: value.project_id in projects)
+    keep("pending", lambda _, value: value.project_id in projects)
+    keep("deliveries", lambda _, value: value.session_id in session_ids)
+    return result
+
+
+def scrub(view: Mapping) -> dict:
+    scrubbed = {name: member for name, member in view.items() if name != "sharing"}
+    scrubbed.update({"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
+                     "accounts_added": [], "pin": None, "pin_launches": [],
+                     "registration": None, "digest": None, "activation": None, "spend": None,
+                     "capacity": dict(EMPTY)})
+    return scrubbed
+
+
+def picture_ids(view: object) -> frozenset[str]:
+    found: set[str] = set()
+
+    def walk(node: object, pictures: bool) -> None:
+        if isinstance(node, Mapping):
+            if pictures:
+                identifier = node.get("id")
+                if isinstance(identifier, str):
+                    found.add(identifier)
+            for key, member in node.items():
+                if key == "pictures" and isinstance(member, list):
+                    for picture in member:
+                        walk(picture, True)
+                else:
+                    walk(member, False)
+        elif isinstance(node, list):
+            for member in node:
+                walk(member, False)
+
+    walk(view, False)
+    return frozenset(found)
+
+
+def serve_state(status: object, tailnet: str | None, guest_port: int | None) -> str:
+    if tailnet is None:
+        return "off"
+    if status is None:
+        return "unchecked"
+    node: object = status
+    for step in ("Web", f"{tailnet}:443", "Handlers", "/", "Proxy"):
+        node = node.get(step) if isinstance(node, Mapping) else None
+    if (isinstance(guest_port, int) and not isinstance(guest_port, bool)
+            and node in (f"http://127.0.0.1:{guest_port}", f"http://localhost:{guest_port}")):
+        return "serving"
+    return "not_proxying"
+
+
+def sharing_entry(access: Access, state: str) -> dict:
+    return {"tailnet": access.tailnet,
+            "colleagues": [{"login": login, "projects": sorted(access.colleagues[login])}
+                           for login in sorted(access.colleagues)],
+            "state": state}

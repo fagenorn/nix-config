@@ -9,9 +9,15 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
-from agent_tools.console import guest
+from agent_tools.console import guest, sprints, view
+from agent_tools.console import capacity as capacity_module
 from agent_tools.console.event_log import (
-    SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, EventLog)
+    GOAL_STATED, INBOX_SEEN, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
+    Event, EventLog)
+from agent_tools.console.guest import Access
+from agent_tools.console.sessions import SessionState
+from agent_tools.console.sprints import Notice
+from agent_tools.console.view import REGISTERED, derive_view, encode_view
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 TAILNET = "desk.invented-tailnet.ts.net"
@@ -192,6 +198,129 @@ class RetentionTest(LogCase):
              if event.kind in (SHARING_TAILNET, SHARING_COLLEAGUE, SHARING_REMOVED)],
             [(SHARING_TAILNET, {"tailnet": TAILNET}),
              (SHARING_COLLEAGUE, {"login": COLLEAGUE, "projects": ["owner/p00"]})])
+
+
+def at(n):
+    return f"2026-11-11T00:00:{n:02d}.000000+00:00"
+
+
+def guest_inputs():
+    events = [
+        Event(1, at(1), REGISTERED, "owner/p00", {"root": "/srv/p00"}),
+        Event(2, at(2), REGISTERED, "owner/p01", {"root": "/srv/p01"}),
+        Event(3, at(3), GOAL_STATED, "owner/p00", {"sprint_id": "s-p00", "goal": "other-goal-zq7"}),
+        Event(4, at(4), GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+        Event(5, at(5), INBOX_SEEN, "owner/p00", inbox_item("owner/p00", "k-p00")),
+        Event(6, at(6), INBOX_SEEN, "owner/p01", inbox_item("owner/p01", "k-p01")),
+    ]
+    return {
+        "states": view.project_states(events).values(),
+        "sprints": sprints.sprint_states(events),
+        "records": view.inbox_records(events),
+        "sessions": [SessionState("sid-p00", "/srv/p00", "/srv/p00", "idle", None, 7, at(7), None),
+                     SessionState("sid-p01", "/srv/p01", "/srv/p01", "idle", None, 8, at(8), None),
+                     SessionState("sid-x", "/srv/unregistered-zq9", "/srv/unregistered-zq9",
+                                  "idle", None, 9, at(9), None)],
+        "owner_notices": {"owner/p00": (Notice(1, at(10), "heads-up", "other-notice-zq6"),)},
+        "now_ms": 1_000,
+    }
+
+
+def inbox_item(project_id, key):
+    return {"key": key, "project_id": project_id, "repo": project_id, "issue": 7,
+            "comment_id": 11, "url": f"https://example.test/{key}",
+            "reason": "question", "question": "Which one?", "questions": [],
+            "items": [], "answered": False, "held_work": 1}
+
+
+class ScopeTest(unittest.TestCase):
+    def test_scoped_inputs_keep_only_the_guest_projects(self):
+        inputs = guest_inputs()
+        everything = encode_view(derive_view(**inputs))
+        for marker in (b"owner/p00", b"/srv/p00", b"other-goal-zq7", b"other-notice-zq6",
+                       b"unregistered-zq9"):
+            self.assertIn(marker, everything)
+        kept = guest.scoped(inputs, frozenset({"owner/p01"}))
+        self.assertEqual([session.session_id for session in kept["sessions"]], ["sid-p01"])
+        self.assertEqual([state.project_id for state in kept["states"]], ["owner/p01"])
+        self.assertEqual(kept["owner_notices"], {})
+        scoped = encode_view(guest.scrub(derive_view(**kept)))
+        for marker in (b"owner/p00", b"/srv/p00", b"other-goal-zq7", b"other-notice-zq6",
+                       b"unregistered-zq9"):
+            self.assertNotIn(marker, scoped)
+        for marker in (b"own-goal-zq8", b"owner/p01"):
+            self.assertIn(marker, scoped)
+
+    def test_owner_only_inputs_are_reset(self):
+        result = guest.scoped({name: object() for name in guest.OWNER_ONLY_INPUTS},
+                              frozenset())
+        for name, reset in guest.OWNER_ONLY_INPUTS.items():
+            with self.subTest(name=name):
+                self.assertEqual(result[name], reset)
+
+    def test_an_unclassified_input_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "new_member"):
+            guest.scoped({"now_ms": 1, "new_member": 2}, frozenset())
+
+    def test_scrub_removes_the_owner_members(self):
+        access = Access(TAILNET, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        owner_view = derive_view([], sharing=guest.sharing_entry(access, "serving"))
+        owner_view["spend"] = {"x": 1}
+        owner_view["unmanaged"] = [{"root": "/srv/x"}]
+        owner_view["profile_sessions"] = {"work": 1}
+        result = guest.scrub(owner_view)
+        self.assertNotIn("sharing", result)
+        resets = {"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
+                  "accounts_added": [], "pin": None, "pin_launches": [], "registration": None,
+                  "digest": None, "activation": None, "spend": None,
+                  "capacity": dict(capacity_module.EMPTY)}
+        for name, reset in resets.items():
+            with self.subTest(name=name):
+                self.assertEqual(result[name], reset)
+        encoded = encode_view(result)
+        for secret in (COLLEAGUE.encode(), TAILNET.encode()):
+            self.assertNotIn(secret, encoded)
+
+    def test_picture_ids_walk_every_pictures_list(self):
+        walked = {"inbox": {"open": [{"pictures": [{"id": "a"}, {"id": "b"}]}]},
+                  "entries": [{"sprints": [{"pictures": [{"id": "c"}]}]}],
+                  "other": [{"id": "not-a-picture"}]}
+        self.assertEqual(guest.picture_ids(walked), frozenset({"a", "b", "c"}))
+
+
+class SharingTest(unittest.TestCase):
+    def test_serve_state_table(self):
+        def serving(key=f"{TAILNET}:443", proxy="http://127.0.0.1:27185"):
+            return {"Web": {key: {"Handlers": {"/": {"Proxy": proxy}}}}}
+
+        rows = [
+            (None, None, 27185, "off"),
+            ({"Web": {}}, None, 27185, "off"),
+            (None, TAILNET, 27185, "unchecked"),
+            ({}, TAILNET, 27185, "not_proxying"),
+            (serving(), TAILNET, 27185, "serving"),
+            (serving(proxy="http://localhost:27185"), TAILNET, 27185, "serving"),
+            (serving(proxy="http://127.0.0.1:27184"), TAILNET, 27185, "not_proxying"),
+            (serving(key=f"{OTHER_HOST}:443"), TAILNET, 27185, "not_proxying"),
+            ({"Web": []}, TAILNET, 27185, "not_proxying"),
+            (serving(), TAILNET, None, "not_proxying"),
+        ]
+        for status, tailnet, port, expected in rows:
+            with self.subTest(status=status, tailnet=tailnet, port=port):
+                self.assertEqual(guest.serve_state(status, tailnet, port), expected)
+
+    def test_the_view_carries_the_sharing_entry(self):
+        self.assertEqual(derive_view([])["sharing"], view.SHARING_OFF)
+        self.assertEqual(guest.sharing_entry(guest.NO_ACCESS, "off"), view.SHARING_OFF)
+        access = Access(TAILNET, MappingProxyType({
+            SECOND: frozenset({"owner/p01", "owner/p00"}), COLLEAGUE: frozenset({"owner/p01"})}))
+        entry = guest.sharing_entry(access, "serving")
+        self.assertEqual(entry, {"tailnet": TAILNET, "colleagues": [
+            {"login": COLLEAGUE, "projects": ["owner/p01"]},
+            {"login": SECOND, "projects": ["owner/p00", "owner/p01"]}], "state": "serving"})
+        self.assertEqual(derive_view([], sharing=entry)["sharing"], entry)
+        derive_view([])["sharing"]["colleagues"].append("x")
+        self.assertEqual(view.SHARING_OFF["colleagues"], [])
 
 
 if __name__ == "__main__":
