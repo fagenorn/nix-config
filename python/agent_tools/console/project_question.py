@@ -33,7 +33,9 @@ test seam only.
 
 Prompt. `LEAD` (the owner's framing, the `ANSWER_RULES` and the heading shape: a direct answer in two
 or three sentences in plain business terms, what is live first, no decision-record jargon, history
-and tracker before decision records, a failed command named in the answer), then a routes paragraph
+and tracker before decision records, every item in a question's time window counted from the dates
+read with list limits raised until the window is covered and the count's source named, a failed
+command named in the answer), then a routes paragraph
 (the declared commands, each exactly as written and alone; or that none is declared so production
 cannot be read), then the reads paragraph (the git reads with their examples, and either the gh
 reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
@@ -193,6 +195,14 @@ ANSWER_RULES = (
     "production read, not from its decision records alone. "
     "If a command you run fails, say plainly in the answer which command failed and what it "
     "printed. "
+    "When the question covers a time window, count every release, pull request or deploy dated "
+    "inside it from the dates you read: raise the list limit (for example --limit) until a list "
+    "returns fewer items than the limit, so you have read every item, never stop at a first page "
+    "or an arbitrary limit and never stop at the first item older than the window, because gh "
+    "lists by creation date and a release published or a pull request merged inside the window "
+    "can have been created before it; when a list is too long to read whole, filter it by the "
+    "date that counts (for example --search merged:2026-01-01..2026-01-31), and say in the answer where "
+    "the count comes from. "
     "Format only with **bold**, list lines starting with \"- \", `inline code` and fenced code "
     "blocks; use no headings, tables, links or HTML. "
 )
@@ -396,9 +406,11 @@ def reads_paragraph(repo: str | None) -> str:
         return text + (
             "For this project's GitHub repository: gh pr list, gh pr view, gh release list, "
             "gh release view, gh issue list, gh issue view, gh run list and gh run view, each "
-            f"with --repo {repo} right after list or view, before any other word, and no --. "
+            f"with --repo {repo} right after list or view, before any other word, and no --; a "
+            "view may instead name its one tag or number just before --repo, never both. "
             f"For merged work: gh pr list --repo {repo} --state merged --limit 30. "
-            f"For what was released: gh release list --repo {repo}.\n\n")
+            f"For what was released: gh release list --repo {repo} --limit 100. "
+            f"To read one release: gh release view v1.2.0 --repo {repo}.\n\n")
     return text + "gh cannot be used: this project's contract names no GitHub repository.\n\n"
 
 
