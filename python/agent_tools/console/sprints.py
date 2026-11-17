@@ -22,11 +22,11 @@ Three more kinds record the sprint's manager (#888), none of them kept (`event_l
 its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept either):
 
     manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "seen_after"?: <int>,
-                      "takeover"?: true}
+                      "takeover"?: true, "permission"?: {"mode", "reason"}}
     manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
     manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
     manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
-                      "back"?: <bool>, "listing_failed"?: <str>}
+                      "back"?: <bool>, "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
     manager.stalled  {"sprint_id", "reason": <str>}
 
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
@@ -226,8 +226,8 @@ order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
 A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
 `BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants (among them the wait sentences
-`NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT`, #1110) or the stage phrase
-(`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
+`NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` (#1110) and `NOW_LOCK_TEXT` (#1184)) or
+the stage phrase (`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
 line and never shortened. A sprint's check line (#1111) reads `CHECK_LINE_TEXT`. The now-sentence of a report whose status marks a refused merge
 (`refused_reason`) is `NOW_REFUSED_TEXT` in place of the stage phrase, shown by `merge_refused`
 until a later report without the marker or a closing clears it (no run observation clears it: the
@@ -241,9 +241,9 @@ on `SprintState.messages`. Four rows carry them, the first three kept (`event_lo
     sprint.read     {"sprint_id", "through": <int message id>}
     sprint.answered {"sprint_id", "message": <int message id>, "reply": <str>}
     sprint.nudged   {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": true,
-                     "listing_failed"?: <str>}
+                     "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
                     {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": false,
-                     "reason": <str>, "listing_failed"?: <str>}
+                     "reason": <str>, "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
 
 A message's id is the `seq` of the row that made it. A `brief.approved` row that approves the open
 brief makes a `MESSAGE_APPROVED` message (`version` the brief's, no text); a `brief.replied` row
@@ -416,6 +416,10 @@ project column):
                        "to"?}}
     notice.withdrawn  {"sprint_id", "goal": <str>, "notice": <int>}
 
+A third row, `notice.nudged {"sprint_id", "notice", "route", "ok", "reason"?, "listing_failed"?,
+"permission"?: {"mode", "reason"}}` (`event_log.NOTICE_NUDGED`, not kept), is the nudge an owner's notice
+cost a manager; the fold reads only its `permission`.
+
 `checked_notice(notice)` returns a new dict of exactly the kind's members (`NOTICE_MEMBERS`: a claim
 has kind, text, what and until; a heads-up kind and text; a hand-off kind, text and to), texts
 stripped, or raises `Refused` at the first failure, in this order: not an object
@@ -584,7 +588,8 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_NO_PROGRESS,
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
-                                           MANAGER_WOKEN, NOTICE_POSTED, NOTICE_WITHDRAWN,
+                                           MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
+                                           NOTICE_WITHDRAWN,
                                            PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
                                            SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
@@ -592,6 +597,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
+from agent_tools.console.permission import Permission, from_payload
 from agent_tools.console.pictures import PICTURE_ID
 from agent_tools.console.sessions import SEEN
 
@@ -687,6 +693,7 @@ CHECK_LINE_TEXT = "Your check: {question}"
 NOW_CI_TEXT = "waiting for CI on its pull request"
 NOW_COMMITTING_TEXT = "a delivery is committing"
 NOW_RELEASE_TEXT = "waiting for a release step"
+NOW_LOCK_TEXT = "waiting its turn to merge"
 NOW_REFUSED_TEXT = "merge refused: {reason}"
 REFUSED_STATUS = re.compile(r"merge refused:\s*(\S.*)", re.IGNORECASE | re.DOTALL)
 SECRETS_DIR = "sprint-secrets"
@@ -997,6 +1004,7 @@ class SprintState:
     no_progress_at: str | None = None
     pictures: frozenset[str] = frozenset()
     notices: tuple[Notice, ...] = ()
+    permission: Permission | None = None
 
     @property
     def state(self) -> str:
@@ -1996,7 +2004,8 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
             return replace(state, manager=Manager(STARTED, event.at, profile, name,
                                                   takeover=takeover),
                            manager_session=state.manager_session if current else None,
-                           revivals=revivals, stalled=None, stalled_at=None)
+                           revivals=revivals, stalled=None, stalled_at=None,
+                           permission=from_payload(payload.get("permission")))
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):
@@ -2024,6 +2033,12 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
         if isinstance(reason, str):
             return replace(state, stalled=reason, stalled_at=event.at)
     return state
+
+
+def _folded_permission(state: SprintState, event: Event) -> SprintState:
+    """The mode a wake, nudge or notice nudge wrote replaces the sprint's; a row without a valid one leaves it."""
+    chosen = from_payload(event.payload.get("permission"))
+    return state if chosen is None else replace(state, permission=chosen)
 
 
 def _folded_idle(state: SprintState, event: Event) -> SprintState:
@@ -2159,6 +2174,8 @@ def sprint_states(events: Iterable[Event],
         elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING, MANAGER_WOKEN,
                             MANAGER_STALLED) and sprint_id in folded:
             folded[sprint_id] = _folded_manager(folded[sprint_id], event)
+            if event.kind == MANAGER_WOKEN:
+                folded[sprint_id] = _folded_permission(folded[sprint_id], event)
         elif event.kind in (MANAGER_NUDGED, MANAGER_NO_PROGRESS, SPRINT_CONTINUED) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_idle(folded[sprint_id], event)
@@ -2168,6 +2185,10 @@ def sprint_states(events: Iterable[Event],
         elif event.kind in (SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED, SPRINT_NUDGED) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
+            if event.kind == SPRINT_NUDGED:
+                folded[sprint_id] = _folded_permission(folded[sprint_id], event)
+        elif event.kind == NOTICE_NUDGED and sprint_id in folded:
+            folded[sprint_id] = _folded_permission(folded[sprint_id], event)
         elif event.kind in (QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_question(folded[sprint_id], event)

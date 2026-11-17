@@ -52,6 +52,22 @@ stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-ac
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
 else `ANSWERED` with `answer_text`, which adds `NO_PRODUCTION_LINE` when no route is declared (D5).
 `asker_for(platform)` is `run_question` where the manager is supported, else None.
+
+Fold and answer shape (#1177). `asked_questions(events, known)` folds the two row kinds into each
+project's questions, a tuple of `AskedQuestion` in ascending `seq`. An asked row counts only with
+a string project column, a non-empty string `question_id` not already folded for that project and
+a string `question`; an answered row applies only to a still-working question of the same id in
+the same project (the first answer wins, strays are ignored): outcome `answered` with a string
+`answer` is `ANSWERED`, `answered` without one is `FAILED` with `UNREADABLE_TEXT`, `timed_out` is
+`TIMED_OUT`, anything else is `FAILED`; `reason` is kept only when a string and `answered_at` is
+the answered row's `at`. Folding two batches through `known` equals folding once, and `known` is
+never mutated. `answer_parts(text)` splits a stored answer by the `HEADINGS` of the shape `LEAD`
+asks for: a heading matches at line start after optional spaces, case-insensitively, followed by
+`:`; the lines after a heading up to the next one belong to it (joined with a newline, stripped);
+text before the first heading starts the answer part, and a text with no heading is wholly the
+answer; an empty part is None, and so is a part other than the answer that is `none` (any case, a
+trailing `.` ignored): an answer of `None.` is an answer and keeps its text; a text
+ending with `NO_PRODUCTION_LINE` carries that line as `production` and in no other part.
 """
 
 from __future__ import annotations
@@ -65,12 +81,15 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager
+from agent_tools.console.event_log import (
+    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, Event)
 from agent_tools.console.project_question_hook import PLAIN_WORD
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
@@ -87,6 +106,7 @@ QUESTION_MARK = "The question: "
 ANSWERED = "answered"
 FAILED = "failed"
 TIMED_OUT = "timed_out"
+WORKING = "working"
 
 READ_RULES = ("Read", "Grep", "Glob")
 DENIED_RULES = (
@@ -121,6 +141,15 @@ LEAD = (
     "Could not find out: <what you could not find out, or none>\n"
     "Question for you: <a step that needs money or a credential, or none>\n\n"
 )
+
+HEADINGS: tuple[tuple[str, str], ...] = (
+    ("answer", "Answer"), ("read", "Read"), ("ran", "Ran"),
+    ("unknown", "Could not find out"), ("back", "Question for you"),
+)
+_HEADING = re.compile(
+    r"^\s*(" + "|".join(re.escape(label) for _, label in HEADINGS) + r")\s*:\s?(.*)$",
+    re.IGNORECASE | re.ASCII)
+_KEY_OF = {label.lower(): key for key, label in HEADINGS}
 
 
 class Refused(Exception):
@@ -339,3 +368,82 @@ def _outcome_of(stdout: bytes | None, routes: Sequence[Route]) -> Outcome:
 
 def asker_for(platform: str) -> Callable[[Ask, threading.Event | None], Outcome] | None:
     return run_question if manager.supported(platform) else None
+
+
+@dataclass(frozen=True)
+class AnswerParts:
+    answer: str | None
+    read: str | None
+    ran: str | None
+    unknown: str | None
+    back: str | None
+    production: str | None
+
+
+@dataclass(frozen=True)
+class AskedQuestion:
+    question_id: str
+    question: str
+    asked_at: str
+    seq: int
+    state: str = WORKING
+    answer: str | None = None
+    reason: str | None = None
+    answered_at: str | None = None
+
+
+def _part(lines: list[str], key: str) -> str | None:
+    text = "\n".join(lines).strip()
+    if not text or (key != "answer" and text.rstrip(".").strip().lower() == "none"):
+        return None
+    return text
+
+
+def answer_parts(text: str) -> AnswerParts:
+    body, production = text.rstrip(), None
+    if body.endswith(NO_PRODUCTION_LINE):
+        body, production = body[:-len(NO_PRODUCTION_LINE)], NO_PRODUCTION_LINE
+    buckets: dict[str, list[str]] = {key: [] for key, _ in HEADINGS}
+    current = "answer"
+    for line in body.splitlines():
+        match = _HEADING.match(line)
+        if match:
+            current = _KEY_OF[match.group(1).lower()]
+            line = match.group(2)
+        buckets[current].append(line)
+    return AnswerParts(*(_part(buckets[key], key) for key, _ in HEADINGS), production)
+
+
+def _answered(question: AskedQuestion, event: Event) -> AskedQuestion:
+    payload = event.payload
+    outcome, answer, reason = payload.get("outcome"), payload.get("answer"), payload.get("reason")
+    reason = reason if isinstance(reason, str) else None
+    if outcome == ANSWERED and isinstance(answer, str):
+        state = ANSWERED
+    elif outcome == ANSWERED:
+        state, answer, reason = FAILED, None, UNREADABLE_TEXT
+    else:
+        state, answer = (TIMED_OUT if outcome == TIMED_OUT else FAILED), None
+    return replace(question, state=state, answer=answer, reason=reason, answered_at=event.at)
+
+
+def asked_questions(events: Iterable[Event],
+                    known: Mapping[str, tuple[AskedQuestion, ...]] | None = None
+                    ) -> dict[str, tuple[AskedQuestion, ...]]:
+    """Each project's questions in ascending `seq`; see "Fold and answer shape" above."""
+    found = {project: list(items) for project, items in known.items()} if known else {}
+    for event in events:
+        project, payload = event.project, event.payload
+        question_id = payload.get("question_id")
+        if not isinstance(project, str) or not isinstance(question_id, str) or not question_id:
+            continue
+        items = found.setdefault(project, [])
+        index = next((i for i, item in enumerate(items) if item.question_id == question_id), None)
+        if event.kind == PROJECT_QUESTION_ASKED:
+            question = payload.get("question")
+            if index is None and isinstance(question, str):
+                items.append(AskedQuestion(question_id, question, event.at, event.seq))
+        elif event.kind == PROJECT_QUESTION_ANSWERED:
+            if index is not None and items[index].state == WORKING:
+                items[index] = _answered(items[index], event)
+    return {project: tuple(items) for project, items in found.items() if items}

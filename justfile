@@ -226,9 +226,11 @@ agent-workflow-tests *args:
     tests/test_console_approve_service.py \
     tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
+    tests/test_console_permission_check.py \
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \
     tests/test_console_cleanup_check.py \
+    tests/test_console_lock_wait_check.py \
     tests/test_console_look_check.py \
     tests/test_console_page.py \
     tests/test_console_controls.py \
@@ -255,6 +257,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_command.py \
     tests/test_console_pictures.py \
     tests/test_console_manager.py \
+    tests/test_console_permission.py \
     tests/test_console_manager_service.py \
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \

@@ -21,7 +21,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture)
+    paths = [value for field in dataclasses.fields(fixture) if field.name != "holding"
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -41,12 +41,14 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 20)
-        self.assertEqual(shots.STATES[-10:], ("owner-check", "spend-page", "notices-fold",
+    def test_the_set_is_twenty_two_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 22)
+        self.assertEqual(shots.STATES.index("waiting-its-turn"),
+                         shots.STATES.index("nothing-running") + 1)
+        self.assertEqual(shots.STATES[-11:], ("owner-check", "spend-page", "notices-fold",
                                               "notice-post-open", "desk-spend", "goal-open",
                                               "goal-near", "goal-over", "inbox-card",
-                                              "accounts-panel"))
+                                              "accounts-panel", "ask-box"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -72,6 +74,91 @@ class ScreenshotFixtureTest(unittest.TestCase):
         code, text = run(lambda path: shots.Shot("tell-box-open", 480, path, 480, 0, 0,
                                                  shots.OPEN_TELL))
         self.assertEqual(code, 0)
+
+    def test_an_ask_box_shot_without_the_open_box_and_its_questions_fails_the_command(self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        phrase = "does not show the open Ask box"
+        for ask in ((False, None, None), (True, None, shots.ASK_READ_LINE),
+                    (True, "Working on it", None)):
+            with self.subTest(ask=ask):
+                code, text = run(lambda path: shots.Shot("ask-box", 480, path, 480, ask=ask))
+                self.assertEqual(code, 1)
+                self.assertIn(phrase, text)
+        code, text = run(lambda path: shots.Shot("ask-box", 480, path, 480, ask=shots.OPEN_ASK))
+        self.assertEqual(code, 0)
+        code, text = run(lambda path: shots.Shot("ask-box", 480, path, 480, ask=None))
+        self.assertEqual(code, 0)
+        self.assertNotIn(phrase, text)
+        code, text = run(lambda path: shots.Shot("live-several", 480, path, 480,
+                                                 ask=(False, None, None)))
+        self.assertEqual(code, 0)
+
+    def test_the_ask_box_shot_opens_owner_webs_box_only_on_a_page_that_has_one(self) -> None:
+        field = 'li.asks[data-project="owner/web"] textarea.ask-text'
+
+        def fake(has_ask):
+            class Page:
+                def __init__(self):
+                    self.clicks = []
+                    self.waits = []
+                    self.reads = 0
+
+                def goto(self, url):
+                    pass
+
+                def wait_for_selector(self, selector):
+                    self.waits.append(selector)
+
+                def query_selector(self, selector):
+                    return object() if has_ask and selector == "li.asks" else None
+
+                def click(self, selector):
+                    self.clicks.append(selector)
+
+                def evaluate(self, expression):
+                    if expression == shots.ASK_READING:
+                        self.reads += 1
+                        return list(shots.OPEN_ASK)
+                    if expression == shots.SCROLL_Y:
+                        return 0.0
+                    if expression == "document.documentElement.scrollWidth":
+                        return 480
+                    if expression == shots.SHORT_CONTROLS:
+                        return []
+                    return 0
+
+                def screenshot(self, path, full_page):
+                    pass
+
+                def close(self):
+                    pass
+
+            page = Page()
+
+            class Browser:
+                def new_page(self, viewport):
+                    return page
+
+            return Browser(), page
+
+        cases = (("head", "ask-box", True, [shots.ASK_OPEN], shots.OPEN_ASK),
+                 ("base", "ask-box", False, [], None),
+                 ("other state", "live-several", True, [], None))
+        for name, state, has_ask, clicks, ask in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake(has_ask)
+                shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                self.assertEqual(page.clicks, clicks)
+                self.assertEqual(shot.ask, ask)
+                self.assertEqual(page.reads, 1 if ask else 0)
+                self.assertEqual(field in page.waits, bool(clicks))
 
     def test_a_shot_with_a_short_control_fails_the_command(self) -> None:
         out = StringIO()
@@ -331,6 +418,10 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state == "waiting-its-turn":
+                    self.assertEqual(
+                        [(s["state"], s["ball"], s["now_text"]) for s in running],
+                        [("on_track", "manager", "waiting its turn to merge")])
                 elif state in ("goal-open", "goal-near", "goal-over"):
                     other = shots.build_fixture(Path(tmp) / "other", "tell-box-open", now_s)
                     again = shots.start_service(other, now_s)
@@ -357,6 +448,15 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         [("You", "heads-up", "routes are frozen until Friday", True),
                          ("Fix the settings page", "claim", "reworking the settings form",
                           False)])
+                elif state == "ask-box":
+                    web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+                    self.assertEqual([q["state"] for q in web["questions"]],
+                                     ["working", "answered"])
+                    self.assertEqual([q["question"] for q in web["questions"]],
+                                     [shots.ASK_WORKING_QUESTION, shots.ASK_ANSWERED_QUESTION])
+                    self.assertEqual(web["questions"][1]["read_text"], shots.ASK_READ_LINE)
+                    self.assertEqual(web["questions"][1]["ran_text"], "Ran: just build")
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
                 days = (view["spend"] or {"days": []})["days"]
                 self.assertIsNotNone(view["spend"])
                 if state == "desk-spend":
@@ -407,6 +507,10 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 list(shots.WIDTHS))
             self.assertEqual(
                 [s for s in taken if s.state != "tell-box-open" and s.tell is not None], [])
+            self.assertEqual(
+                [s.width for s in taken if s.state == "ask-box" and s.ask == shots.OPEN_ASK],
+                list(shots.WIDTHS))
+            self.assertEqual([s for s in taken if s.state != "ask-box" and s.ask is not None], [])
             self.assertEqual(shots.main(["--out", str(out)]), 0)
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
@@ -503,6 +607,30 @@ class ScreenshotReadingTest(unittest.TestCase):
             with self.subTest(name):
                 self.assertEqual(reading[:3], [True, "Send", "hint"])
                 self.assertIs(reading[3], name == "good")
+
+    def test_the_ask_reading_reads_the_open_box_and_its_questions(self) -> None:
+        field = ('<div class="ask-box"><textarea class="ask-text" '
+                 'style="width:300px;height:60px"></textarea></div>')
+
+        def block(*, textarea=True, working_style=""):
+            return ('<ul><li class="line asks" data-project="owner/web">'
+                    + (field if textarea else '<div class="ask-box"></div>')
+                    + '<ul class="ask-list"><li class="ask"' + working_style + '>'
+                    '<p class="ask-question">Is the importer deployed on this host? '
+                    '<time>just now</time></p><p class="ask-state">Working on it</p></li>'
+                    '<li class="ask"><p class="ask-question">What does the build check? '
+                    '<time>3 min ago</time></p><p class="ask-answer">It builds.</p>'
+                    '<p class="ask-read">Read: flake.nix, lib/helpers.nix</p></li></ul>'
+                    '</li></ul>')
+
+        found = self.read_pages(
+            [block(), block(textarea=False), block(working_style=' style="display:none"'),
+             "<ul><li>nothing</li></ul>"], shots.ASK_READING)
+        self.assertEqual(found, [
+            list(shots.OPEN_ASK),
+            [False, "Working on it", "Read: flake.nix, lib/helpers.nix"],
+            [True, None, "Read: flake.nix, lib/helpers.nix"],
+            None])
 
 
 if __name__ == "__main__":
