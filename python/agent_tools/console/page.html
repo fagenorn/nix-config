@@ -2050,14 +2050,16 @@ function askOutstanding(projectId, entry) {
   const { submissions, taken } = askMatches(projectId, entry);
   return submissions.filter((submission) => !taken.has(submission));
 }
-// Drops the accepted submissions the view now shows and counts their rows as held, so a later submission is matched only to a row of its own.
+// Drops the accepted submissions the view now shows and counts their rows as held, so a later submission is matched only to a row of its own. A question the view carries while its send is still in flight is revealed at once, and only once (its fold the owner closed since stays closed when the send answers).
 function askReconcile(projectId, entry) {
   const sent = askSent.get(projectId);
   if (sent === undefined) return;
-  const { taken } = askMatches(projectId, entry);
-  for (const submission of sent.list) {
+  const { submissions, taken } = askMatches(projectId, entry);
+  for (const submission of submissions) {
     if (!taken.has(submission)) continue;
-    sent.base.add(taken.get(submission));
+    if (sent.list.includes(submission)) sent.base.add(taken.get(submission));
+    if (submission.revealed === true) continue;
+    submission.revealed = true;
     // The view now carries the question: its fold and its thread are drawn open, once (D8).
     askReveal.add("questions:" + projectId);
     askReveal.add("thread:" + projectId + ":" + taken.get(submission));
@@ -2089,7 +2091,7 @@ async function postAsk(projectId, entry) {
     const typed = askDrafts.get(projectId);
     if (typed !== undefined && typed.value === text) askDrafts.delete(projectId);
     askPosts.delete(projectId);
-    askSent.get(projectId).list.push({ text, at: state.at, phase: "sent" });
+    askSent.get(projectId).list.push({ text, at: state.at, phase: "sent", revealed: state.revealed === true });
     askReconcile(projectId, askLatest.get(projectId));
   } else {
     state.phase = "failed";
@@ -2235,8 +2237,12 @@ async function postFollowUp(projectId, thread) {
   }
   if (followPosts.get(key) !== state) return;
   if (reason === null) {
-    followOpen.delete(key);
-    followDrafts.delete(key);
+    // Text typed while the send was in flight is a new draft: the editor stays open on it, as the Ask box does.
+    const typed = followDrafts.get(key);
+    if (typed === undefined || typed.value === text) {
+      followOpen.delete(key);
+      followDrafts.delete(key);
+    }
     followPosts.delete(key);
     followSent.get(key).list.push({ text, at: state.at, phase: "sent" });
     followReconcile(key, followLatest.get(key));

@@ -1923,6 +1923,23 @@ class PageAskTest(unittest.TestCase):
                 self.assertEqual(d["posts"][0]["url"], "/api/project-question")
                 self.assertEqual(self.found(gone, "ask"), [])
 
+    def test_a_question_streamed_before_its_send_answers_opens_its_fold_once(self) -> None:
+        def keyed(snap: dict, prefix: str) -> list:
+            return [n for n in nodes(snap["projects"]) if (n["key"] or "").startswith(prefix)]
+
+        streamed, answered = render([
+            *self.sent({"hold": True}, {"click": "ask-send"},
+                       {"frame": view([asking(project(0, []), thread(ASK_WORKING))])}, {"snapshot": True},
+                       {"close": "questions:owner/p00"},
+                       {"frame": view([asking(project(0, []), thread(ASK_WORKING))])},
+                       {"release": {"status": 204, "text": ""}}, {"snapshot": True})])
+        (fold,) = keyed(streamed, "questions:")
+        (inner,) = keyed(streamed, "thread:")
+        self.assertTrue(fold["open"])
+        self.assertTrue(inner["open"])
+        (fold,) = keyed(answered, "questions:")
+        self.assertFalse(fold["open"])
+
     def test_a_second_question_sent_before_the_first_is_shown_keeps_its_working_row(self) -> None:
         second = "which credentials are required?"
         first_row = ask(id="q1")
@@ -2005,6 +2022,17 @@ class PageFollowUpTest(unittest.TestCase):
         self.assertEqual(json.loads(post["body"]),
                          {"project_id": "owner/p00", "question": text, "thread_id": "q4"})
         self.assertIn("X-Console-Token", post["headers"])
+
+    def test_text_typed_while_a_follow_up_is_sending_is_kept_as_the_new_draft(self) -> None:
+        (sent,) = render([
+            *self.opened(), {"click": "follow-open"},
+            {"type": {"class": "follow-text", "text": "and darwin?"}}, {"hold": True},
+            {"click": "follow-send"}, {"append": {"class": "follow-text", "text": " and wsl?"}},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
+        (field,) = self.found(sent["projects"], "follow-text")
+        self.assertEqual(field["value"], "and darwin? and wsl?")
+        self.assertIs(self.found(sent["projects"], "follow-send")[0]["disabled"], False)
+        self.assertEqual(len(sent["posts"]), 1)
 
     def test_a_refused_follow_up_keeps_its_draft_and_shows_why(self) -> None:
         cases = [
