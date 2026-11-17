@@ -1460,6 +1460,15 @@ class HeadingCountsOwnerBallTest(unittest.TestCase):
                 self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
                 self.assertEqual(shown["statement"]["sentence"], sentence)
 
+    def test_a_deaf_manager_whose_sprint_is_stopping_is_not_sent_to_a_terminal(self):
+        held = moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),))
+        stopping = dataclasses.replace(reported(with_manager(started(A)), R), stop_at=iso(R + MIN))
+        shown = derive_view([state("p00", 1)], None, sprints={A: stopping},
+                            sessions=[session("s1", "idle", name=NAME)],
+                            now_ms=R + 2 * MIN, managers=True, movement=held)
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], view.DEAF_SENTENCE)
+
     def test_a_deaf_manager_beside_a_terminal_question_reads_both(self):
         B = "b" * 16
         deaf = reported(with_manager(started(A)), R)

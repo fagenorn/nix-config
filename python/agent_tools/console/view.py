@@ -101,7 +101,8 @@ when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
 merge, else `QUESTION_SENTENCE` when any manager question is open, else, when only such sprints are
 counted, `TERMINAL_SENTENCE` for managers waiting at their terminals, `DEAF_SENTENCE` for managers
-that cannot hear the console, `TERMINAL_DEAF_SENTENCE` for both, else
+that cannot hear the console or are otherwise not waiting at a terminal (nothing to answer there),
+`TERMINAL_DEAF_SENTENCE` for both, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
@@ -2115,10 +2116,11 @@ def derive_view(
                            if sprint["ball"] == BALL_OWNER and not sprint["waiting"]
                            and sprint["sprint_id"] not in counted]
     at_terminal = [sprint["sprint_id"] for sprint in at_terminal_sprints]
-    # A manager that cannot hear the console (ADR-console-042 D5) is counted, but nothing is to
-    # be answered at its terminal: it has its own recovery sentence.
+    # Only a manager the sprint reads as waiting at its terminal sends the owner there; any other
+    # counted sprint (one that cannot hear the console, ADR-console-042 D5, or one stopping) has
+    # no terminal to go to and reads the recovery sentence.
     at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints
-                        if sprint["now_text"] != NOW_DEAF_TEXT]
+                        if sprint["now_text"] in (NOW_ANSWER_TEXT, NOW_PERMISSION_TEXT)]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items) + len(at_terminal))
