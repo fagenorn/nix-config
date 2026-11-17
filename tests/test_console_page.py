@@ -723,6 +723,37 @@ class PageRenderTest(unittest.TestCase):
         self.assertEqual(full(moved), "quiet for 22 min")
         self.assertNotIn("stalled", text(snap["projects"]).lower())
 
+    def test_a_run_waiting_on_its_sprint_names_the_wait_and_never_reads_quiet(self) -> None:
+        wait = "waiting its turn to merge"
+        summary = f"2 issues in delivery: 1 building, 1 plan review, {wait}"
+        waiting = {**RUN, "quiet": False, "moved_text": wait, "wait_text": wait,
+                   "summary": summary, "moved_at": "2026-11-11T11:15:00+00:00"}
+        entry = project(0, [session("s1", "working", "working", deliveries=[waiting])])
+        entry["outside_sprints"]["summary"] = "1 working"
+        before, after = render([
+            {"start": {"focused": False, "clock": NOW_MS}},
+            {"frame": view([entry])}, {"open": "line:owner/p00"}, {"snapshot": True},
+            {"clock": NOW_MS + 3 * 3600 * 1000}, {"snapshot": True}])
+        for snap in (before, after):
+            (summed,) = [n for n in nodes(snap["projects"]) if "run-sum" in n["cls"].split()]
+            self.assertEqual(full(summed), summary)
+            (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
+            (moved,) = [n for n in nodes(run) if "moved" in n["cls"].split()]
+            self.assertEqual(full(moved), wait)
+            self.assertNotIn("quiet", moved["cls"].split())
+            for holder in (summed, moved):
+                self.assertEqual([n for n in nodes(holder) if n.get("tag") == "time"], [])
+            self.assertNotIn("quiet", text(snap["projects"]).lower())
+        with self.subTest("null wait_text renders as today"):
+            entry = project(0, [session("s1", "working", "working",
+                                        deliveries=[{**RUN, "wait_text": None}])])
+            (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
+                              {"frame": view([entry])}, {"open": "line:owner/p00"},
+                              {"snapshot": True}])
+            (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
+            (moved,) = [n for n in nodes(run) if "moved" in n["cls"].split()]
+            self.assertEqual(full(moved), "moved 3 min ago")
+
     def test_a_session_without_deliveries_renders_no_runs(self) -> None:
         entry = project(0, [session("e1", "idle", "idle", deliveries=[]),
                             session("m1", "working", "working")])

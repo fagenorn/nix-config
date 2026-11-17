@@ -563,12 +563,14 @@ function quietIcon() {
   return icon("quiet-icon");
 }
 function movedWords(run, cls) {
+  if (typeof run.wait_text === "string" && run.wait_text !== "") return el("span", cls, run.wait_text);
   if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
   return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.moved_at, ""))
                    : phrase("span", cls, "moved ", timeEl("ago", run.moved_at, ""));
 }
 function runSummary(run) {
-  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current.
+  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current,
+  // or leaves a named wait as the view wrote it.
   const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
   return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
 }
