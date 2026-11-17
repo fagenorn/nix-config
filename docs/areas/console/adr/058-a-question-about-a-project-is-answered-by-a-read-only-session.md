@@ -1,4 +1,4 @@
-# ADR-console-057 — A question about a project is answered by a read-only session
+# ADR-console-058 — A question about a project is answered by a read-only session
 
 - **Status:** accepted
 - **Decided in:** #1176

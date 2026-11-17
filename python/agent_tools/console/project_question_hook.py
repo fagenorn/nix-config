@@ -4,7 +4,7 @@ Why. The console answers an owner's question about a registered project with a C
 run in that project's folder. The session only reads: this hook is the one place that decides, for
 every tool call, whether the call is a read. It is a packaged sibling run by the console's own
 interpreter as `python -m agent_tools.console.project_question_hook '<allowed json>'`; it has no
-command-table row (ADR-console-057) and imports only the standard library.
+command-table row (ADR-console-058) and imports only the standard library.
 
 Input. `argv[1]` is the allowed commands: a JSON list of non-empty lists of non-empty strings, each
 one declared read-only command's argv (`parse_allowed`, `ValueError` otherwise). Stdin is the

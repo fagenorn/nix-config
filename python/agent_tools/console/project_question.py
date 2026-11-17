@@ -1,4 +1,4 @@
-"""The launch and runner of a read-only project question session (#1176, ADR-console-057).
+"""The launch and runner of a read-only project question session (#1176, ADR-console-058).
 
 Why. The console answers an owner's question about a registered project with one Claude Code
 client run in that project's folder, under the account the console chose. The session only reads.

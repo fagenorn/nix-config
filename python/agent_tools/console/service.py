@@ -1284,7 +1284,7 @@ re-raised. `start()` serves on a daemon thread named `console-http` and starts t
 sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
-`POST /api/project-question` (#1176, ADR-console-057) carries one JSON body of `project_id` and
+`POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question` (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
@@ -3465,7 +3465,7 @@ class ConsoleService:
             self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str) -> str:
-        """Accept one question about a registered project and return its id (#1176, ADR-console-057).
+        """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
         session runs on a job handed to `project_question_dispatch` outside it. Refusals are
