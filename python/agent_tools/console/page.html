@@ -354,7 +354,16 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .ask > * + * { margin-top: 6px; }
 .ask-question { color: var(--lav); white-space: pre-line; overflow-wrap: anywhere; }
 .ask-age { margin-left: 8px; color: var(--ov2); white-space: nowrap; }
-.ask-answer { min-width: 0; max-width: 46rem; font-size: .9375rem; line-height: 1.6; color: var(--text); white-space: pre-line; overflow-wrap: anywhere; }
+.ask-answer { min-width: 0; max-width: 46rem; font-size: .9375rem; line-height: 1.6; color: var(--text); overflow-wrap: anywhere; }
+.ask-answer p { white-space: pre-line; }
+.ask-answer > * + * { margin-top: 10px; }
+.ask-answer .md-list { padding-left: 1.5rem; }
+.ask-answer ul.md-list { list-style: disc; }
+.ask-answer ol.md-list { list-style: decimal; }
+.ask-answer li + li { margin-top: 4px; }
+.md-pre { max-width: 100%; overflow-x: auto; padding: 10px 14px; background: var(--mantle); border-radius: 8px; font-size: .8125rem; line-height: 1.5; }
+.md-pre code, code.md-code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; }
+code.md-code { padding: 0 4px; font-size: .875em; background: var(--mantle); border-radius: 4px; }
 #reading { margin-top: 40px; max-width: 46rem; }
 .reading-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; font-size: .8125rem; color: var(--ov2); }
 .reading-project { min-width: 0; overflow-wrap: anywhere; font-weight: 600; color: var(--sub0); }
@@ -2163,6 +2172,82 @@ function askBox(projectId, entry) {
   box.appendChild(reason);
   return box;
 }
+// An answer's text as block nodes (#1226, D6): fenced code, bullet and numbered lists and paragraphs, built with el() only. A fence runs to the closing fence or the end; every other markup stays text.
+function answerBlocks(text) {
+  const lines = String(text).split("\n").map((line) => line.replace(/\r$/, ""));
+  const blocks = [];
+  let para = [];
+  let list = null;
+  const endPara = () => {
+    if (para.length > 0) {
+      const p = el("p", "");
+      for (const node of inlineNodes(para.join("\n"))) p.appendChild(node);
+      blocks.push(p);
+    }
+    para = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trimStart().startsWith("```")) {
+      endPara();
+      list = null;
+      const code = [];
+      for (i++; i < lines.length && !lines[i].trimStart().startsWith("```"); i++) code.push(lines[i]);
+      const pre = el("pre", "md-pre");
+      pre.appendChild(el("code", "", code.join("\n")));
+      blocks.push(pre);
+      continue;
+    }
+    const bullet = /^\s{0,3}[-*+]\s+(.*)$/.exec(line);
+    const numbered = bullet === null ? /^\s{0,3}\d{1,3}[.)]\s+(.*)$/.exec(line) : null;
+    const item = bullet !== null ? bullet : numbered;
+    if (item !== null) {
+      endPara();
+      const tag = bullet !== null ? "ul" : "ol";
+      if (list === null || list.tagName.toLowerCase() !== tag) {
+        list = el(tag, "md-list");
+        blocks.push(list);
+      }
+      const li = el("li", "");
+      for (const node of inlineNodes(item[1])) li.appendChild(node);
+      list.appendChild(li);
+      continue;
+    }
+    list = null;
+    if (line.trim() === "") endPara();
+    else para.push(line);
+  }
+  endPara();
+  return blocks;
+}
+// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong; the rest is span text, an unmatched marker included.
+function inlineNodes(text) {
+  const nodes = [];
+  const plain = (run) => {
+    let at = 0;
+    for (const m of run.matchAll(/\*\*([\s\S]+?)\*\*/g)) {
+      if (m.index > at) nodes.push(el("span", "", run.slice(at, m.index)));
+      nodes.push(el("strong", "", m[1]));
+      at = m.index + m[0].length;
+    }
+    if (at < run.length) nodes.push(el("span", "", run.slice(at)));
+  };
+  const value = String(text);
+  let run = "";
+  for (let i = 0; i < value.length; i++) {
+    const end = value[i] === "`" ? value.indexOf("`", i + 1) : -1;
+    if (end === -1) {
+      run += value[i];
+      continue;
+    }
+    plain(run);
+    run = "";
+    nodes.push(el("code", "md-code", value.slice(i + 1, end)));
+    i = end;
+  }
+  plain(run);
+  return nodes;
+}
 // One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, the closed sources fold, Make it a goal, then the call-out, which is last.
 function askRow(projectId, question, first, last, thread) {
   const row = el("li", "ask");
@@ -2174,7 +2259,7 @@ function askRow(projectId, question, first, last, thread) {
   const answered = typeof question.answer === "string" && question.answer !== "";
   if (answered) {
     const answer = el("div", "ask-answer");
-    answer.appendChild(el("p", "", question.answer));
+    for (const block of answerBlocks(question.answer)) answer.appendChild(block);
     row.appendChild(answer);
   }
   for (const [key, cls] of [["unknown_text", "ask-unknown"], ["production_text", "ask-production"]]) {
@@ -2197,7 +2282,12 @@ function askCallout(projectId, question, last, thread) {
   const callout = el("div", "ask-callout");
   callout.setAttribute("role", "group");
   callout.setAttribute("aria-label", "Question for you");
-  callout.appendChild(el("p", "ask-back", question.back_text));
+  const back = el("p", "ask-back");
+  const lead = "Question for you: ";
+  const said = question.back_text.startsWith(lead);
+  if (said) back.appendChild(el("span", "", lead));
+  for (const node of inlineNodes(said ? question.back_text.slice(lead.length) : question.back_text)) back.appendChild(node);
+  callout.appendChild(back);
   const key = followKey(projectId, thread.id);
   const choices = Array.isArray(question.back_choices) ? question.back_choices : [];
   if (last && thread.follow_up === true && followOutstanding(key, thread).length === 0 && choices.length > 0) {

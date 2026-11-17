@@ -2126,6 +2126,69 @@ class PageReadingTest(unittest.TestCase):
         self.assertEqual(marks, sorted(marks))
 
 
+class PageReadingFormatTest(unittest.TestCase):
+    """An answer renders a safe formatting subset in the reading panel; all other markup is text (#1226, plan D6)."""
+
+    @staticmethod
+    def answer_of(text: str, **fields) -> dict:
+        answered = ask(state="answered", state_text="Answered", answered_at=utc(30000), answer=text, **fields)
+        (snap,) = render([*PageReadingTest.opened(thread(answered)), {"snapshot": True}])
+        (answer,) = [n for n in nodes(snap["reading"]) if has_class(n, "ask-answer")]
+        return answer
+
+    def test_an_answer_renders_bold_lists_and_code_and_shows_other_markup_as_text(self) -> None:
+        text = ("**Done:** two releases.\n\n- `just build` passes\n- <b>loud</b> stays text\n\n"
+                "```\n<script>x()</script>\n**not bold**\n```\n"
+                "See [the log](http://x), *this* and # not a heading")
+        answer = self.answer_of(text)
+        self.assertEqual([c["tag"] for c in answer["children"]], ["p", "ul", "pre", "p"])
+        first, bullets, block, last = answer["children"]
+        self.assertEqual([c["tag"] for c in first["children"]], ["strong", "span"])
+        self.assertEqual(full(first["children"][0]), "Done:")
+        self.assertEqual(full(first), "Done: two releases.")
+        self.assertEqual([c["tag"] for c in bullets["children"]], ["li", "li"])
+        one, two = bullets["children"]
+        (code,) = [n for n in nodes(one) if n["tag"] == "code"]
+        self.assertEqual(full(code), "just build")
+        self.assertEqual(full(one), "just build passes")
+        self.assertEqual(full(two), "<b>loud</b> stays text")
+        self.assertEqual(block["children"][0]["tag"], "code")
+        self.assertEqual(full(block), "<script>x()</script>\n**not bold**")
+        self.assertEqual([n for n in nodes(block) if n["tag"] == "strong"], [])
+        self.assertEqual(full(last), "See [the log](http://x), *this* and # not a heading")
+        allowed = {"div", "p", "ul", "ol", "li", "pre", "code", "strong", "span"}
+        self.assertEqual({n["tag"] for n in nodes(answer)} - allowed, set())
+
+    def test_an_unclosed_fence_runs_to_the_end_and_unmatched_markers_stay_text(self) -> None:
+        answer = self.answer_of("a ** b `c\n```\nx\n**y**")
+        self.assertEqual([c["tag"] for c in answer["children"]], ["p", "pre"])
+        para, block = answer["children"]
+        self.assertEqual(full(para), "a ** b `c")
+        self.assertEqual(full(block), "x\n**y**")
+
+    def test_numbered_lines_make_an_ordered_list_and_a_switch_starts_a_new_list(self) -> None:
+        answer = self.answer_of("1. one\n2) two\n- three")
+        self.assertEqual([c["tag"] for c in answer["children"]], ["ol", "ul"])
+        ordered, bullets = answer["children"]
+        self.assertEqual([full(li) for li in ordered["children"]], ["one", "two"])
+        self.assertEqual(full(bullets), "three")
+
+    def test_a_paragraph_keeps_its_line_breaks(self) -> None:
+        answer = self.answer_of("first line\nsecond line")
+        (para,) = answer["children"]
+        self.assertEqual((para["tag"], full(para)), ("p", "first line\nsecond line"))
+        self.assertTrue([d for d in css_decls(".ask-answer p") if d.get("white-space") == "pre-line"])
+
+    def test_the_call_out_question_takes_the_inline_subset(self) -> None:
+        answer_snap = render([*PageReadingTest.opened(thread(ask(
+            state="answered", state_text="Answered", answered_at=utc(30000), answer="ok",
+            back_text="Question for you: May I run `just deploy`?"))), {"snapshot": True}])[0]
+        (back,) = [n for n in nodes(answer_snap["reading"]) if has_class(n, "ask-back")]
+        (code,) = [n for n in nodes(back) if n["tag"] == "code"]
+        self.assertEqual(full(code), "just deploy")
+        self.assertEqual(full(back), "Question for you: May I run just deploy?")
+
+
 class PageAskGoalTest(unittest.TestCase):
     """Make it a goal on an answered question (#1179)."""
 
