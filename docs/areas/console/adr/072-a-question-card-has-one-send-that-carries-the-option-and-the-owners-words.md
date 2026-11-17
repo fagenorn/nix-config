@@ -1,4 +1,4 @@
-# ADR-console-071 — A question card has one send that carries the option and the owner's words
+# ADR-console-072 — A question card has one send that carries the option and the owner's words
 
 - **Status:** accepted
 - **Decided in:** #1242

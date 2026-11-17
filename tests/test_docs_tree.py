@@ -1804,11 +1804,11 @@ class DocsTreeTest(unittest.TestCase):
                     self.assertNotIn(number, seen, f"{seen.get(number)} and {adr.name}")
                 seen[number] = adr.name
 
-    def test_adr_console_071_records_one_send_for_a_question(self):
+    def test_adr_console_072_records_one_send_for_a_question(self):
         path = ("docs/areas/console/adr/"
-                "071-a-question-card-has-one-send-that-carries-the-option-and-the-owners-words.md")
+                "072-a-question-card-has-one-send-that-carries-the-option-and-the-owners-words.md")
         first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(first, "# ADR-console-071 \u2014 A question card has one send that "
+        self.assertEqual(first, "# ADR-console-072 \u2014 A question card has one send that "
                                 "carries the option and the owner's words")
         adr = self.doc(path)
         for needle in ("#1242", "needs_words", '"words"', "say what to change",
@@ -1816,7 +1816,7 @@ class DocsTreeTest(unittest.TestCase):
                        "ADR-console-027"):
             with self.subTest(needle):
                 self.assertIn(needle, adr)
-        self.assertIn("(ADR-console-071)", self.doc("docs/areas/console/CONTEXT.md"))
+        self.assertIn("(ADR-console-072)", self.doc("docs/areas/console/CONTEXT.md"))
 
     def test_adr_console_040_records_taking_back_and_replacing_a_question(self):
         path = ("docs/areas/console/adr/"
@@ -1838,7 +1838,7 @@ class DocsTreeTest(unittest.TestCase):
             return next(r for r in lines if r.startswith("- **Status:**"))
         self.assertEqual(status("019-a-managers-questions-arrive-as-inbox-items.md"),
                          "- **Status:** accepted; amended by ADR-console-038, ADR-console-040, "
-                         "ADR-console-071")
+                         "ADR-console-072")
         self.assertEqual(status("009-events-are-kept-for-90-days.md"),
                          "- **Status:** accepted; amended by ADR-console-036, ADR-console-040")
         retention = self.doc(base + "009-events-are-kept-for-90-days.md")

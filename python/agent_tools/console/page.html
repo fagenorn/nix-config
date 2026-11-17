@@ -3559,7 +3559,6 @@ function planBusy(item, state) {
 function needsWords(question, index) {
   return Array.isArray(question.needs_words_index) && question.needs_words_index.includes(index);
 }
-// One send for a manager question: the pick, the words or both; an option that needs words is refused without them.
 function startQuestion(item, state) {
   const words = draftOf(wordsKey(item)).value;
   const typed = words.trim() !== "";
@@ -3998,7 +3997,6 @@ function statusLine(act, state, item) {
   }
   return true;
 }
-// A failed answer that carried the owner's words keeps them after its question leaves; state.kept outlives a later pick or unpick.
 function roundWords(pending) {
   return pending !== null && pending !== undefined && pending.round === true && typeof pending.body.text === "string";
 }
@@ -4026,7 +4024,6 @@ function keptWordsCard(id, state) {
 function actionLine(item, state, lead, card) {
   const act = el("div", "act");
   const idle = !statusLine(act, state, item);
-  // A question's one send stays beside its status, disabled while the answer is pending.
   if ((idle || isQuestion(item)) && (item.questions.length > 0 || !textCard(item))) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send btn-primary" : "send btn-quiet", words, () => { if (start(item, state)) redraw(); });
@@ -4101,7 +4098,6 @@ function draftInput(cls, placeholder) {
 function draftBox(item, state, box) {
   const input = draftInput("draft-text field-line", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
   const row = el("div", "draft-row");
-  // Read-only until the pending answer is undone or settled.
   const pending = !choosable(state) || planBusy(item, state);
   const submit = () => {
     const text = input.value.trim();
@@ -4201,7 +4197,6 @@ function answerBox(item, state, lead) {
       if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
-        // Clicking a manager question's picked option takes the pick back, so the words can go alone.
         choose(state, qi, isQuestion(item) && state.picks[qi] === oi ? null : oi);
         redraw();
       });

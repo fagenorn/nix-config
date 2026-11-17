@@ -33,8 +33,10 @@ Contract:
   `LOOK_WORDS` typed in the card's words box (`WORDS_CARD`: the picked option, the words, the one
   send enabled, no refusal), `question-refused` with the one send clicked and no words
   (`REFUSED_CARD`: the picked option, an empty box, and the card's own "Say what to change."); on a
-  page without the words box (`WORDS_BOX`) nothing is picked, typed or sent, which is the before
-  picture; `accounts-panel` is the accounts panel opened over
+  page without the words box (`WORDS_BOX`) but with the question's options nothing is picked, typed or
+  sent, which is the before picture (the question is seeded without `needs_words` where the service
+  does not keep it, `NEEDS_WORDS_KEPT`), while a page with neither shows no question card at all, which
+  fails; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
   lines) and one question still working, each its own thread, the Questions fold and both
@@ -121,7 +123,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -129,7 +131,7 @@ from agent_tools.console import capacity, event_log, manager, sessions, signin
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
 
 from .console_test_support import hook_body, write_registry
 
@@ -273,6 +275,9 @@ CARD_READING = """(() => {
 })()"""
 WORDS_CARD = ("Ask for changes", LOOK_WORDS, True, None)
 REFUSED_CARD = ("Ask for changes", "", True, "Say what to change.")
+# A service whose questions have no `needs_words` rejects the key and discards the question, so the
+# look-check question is seeded with it only where the service keeps it (the base commit's is not).
+NEEDS_WORDS_KEPT = "needs_words" in {field.name for field in fields(Question)}
 READ_SESSION = "7c2f9d4e-1a8b-4e63-b5d0-9f3a6c1e8b27"
 
 
@@ -383,7 +388,7 @@ class _Seed:
             self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
                 "question": LOOK_QUESTION, "blocks": "the first slice",
                 "options": LOOK_OPTIONS, "recommended": LOOK_OPTIONS[0],
-                "needs_words": LOOK_OPTIONS[1:]}]})
+                **({"needs_words": LOOK_OPTIONS[1:]} if NEEDS_WORDS_KEPT else {})}]})
         if close is not None:
             self.put(close, "sprint.closed", project, {**base, "closing": {
                 "summary": f"{title} landed.\nBoth slices merged and the checks are green.",
@@ -974,13 +979,16 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                     page.click(selector)
             thread = tuple(page.evaluate(THREAD_READING))
         card = None
-        if state in ("question-words", "question-refused") and page.query_selector(WORDS_BOX):
-            page.click(LOOK_OPTION)
-            if state == "question-words":
-                page.fill(WORDS_BOX, LOOK_WORDS)
-            else:
-                page.click(CARD_SEND)
-            card = tuple(page.evaluate(CARD_READING))
+        if state in ("question-words", "question-refused"):
+            if page.query_selector(WORDS_BOX):
+                page.click(LOOK_OPTION)
+                if state == "question-words":
+                    page.fill(WORDS_BOX, LOOK_WORDS)
+                else:
+                    page.click(CARD_SEND)
+                card = tuple(page.evaluate(CARD_READING))
+            elif not page.query_selector(LOOK_OPTION):
+                card = (None, None, None, None)
         reading = None
         if state == "question-read":
             if paneled:

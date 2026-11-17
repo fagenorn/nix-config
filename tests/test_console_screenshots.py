@@ -336,10 +336,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
         wrong = {"question-words": ((None, shots.LOOK_WORDS, True, None),
                                     ("Ask for changes", "", True, None),
                                     ("Ask for changes", shots.LOOK_WORDS, False, None),
-                                    ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change.")),
+                                    ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change."),
+                                    (None, None, None, None)),
                  "question-refused": (("Ask for changes", "", True, None),
                                       (None, "", True, "Say what to change."),
-                                      ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change."))}
+                                      ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change."),
+                                      (None, None, None, None))}
         right = {"question-words": ("Ask for changes", shots.LOOK_WORDS, True, None),
                  "question-refused": ("Ask for changes", "", True, "Say what to change.")}
         for state, readings in wrong.items():
@@ -358,13 +360,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
     def test_the_question_card_shots_pick_ask_for_changes_and_type_or_send_only_on_a_page_with_the_words_box(
             self) -> None:
+        empty = (None, None, None, None)
         third = ".lead ul.opts li:nth-child(3) button.opt"
         cases = (("question-words", {shots.WORDS_BOX}, [third], [(shots.WORDS_BOX, shots.LOOK_WORDS)],
                   shots.WORDS_CARD),
                  ("question-refused", {shots.WORDS_BOX}, [third, ".lead button.send"], [],
                   shots.REFUSED_CARD),
-                 ("question-words", set(), [], [], None),
-                 ("question-refused", set(), [], [], None),
+                 ("question-words", {shots.LOOK_OPTION}, [], [], None),
+                 ("question-refused", {shots.LOOK_OPTION}, [], [], None),
+                 ("question-words", set(), [], [], empty),
+                 ("question-refused", set(), [], [], empty),
                  ("inbox-card", {shots.WORDS_BOX}, [], [], None))
         for state, present, clicks, fills, card in cases:
             for width in shots.WIDTHS:
@@ -376,7 +381,23 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(page.clicks, clicks)
                     self.assertEqual(page.fills, fills)
                     self.assertEqual(shot.card, card)
-                    self.assertEqual(page.reads, 1 if card else 0)
+                    self.assertEqual(page.reads, 1 if card and card != empty else 0)
+
+    def test_the_look_check_question_is_seeded_with_needs_words_only_where_the_service_keeps_it(
+            self) -> None:
+        for kept in (True, False):
+            with self.subTest(kept=kept), tempfile.TemporaryDirectory() as tmp:
+                at = [""]
+                log = shots.EventLog(Path(tmp) / "events.db", clock=lambda: at[0])
+                with mock.patch.object(shots, "NEEDS_WORDS_KEPT", kept):
+                    shots._Seed(log, at, 10000.0).sprint("owner/web", "t", started=1800,
+                                                           look=True)
+                (asked,) = [e for e in log.events() if e.kind == "questions.asked"]
+                log.close()
+                (question,) = asked.payload["questions"]
+                self.assertEqual(question["options"], shots.LOOK_OPTIONS)
+                self.assertEqual("needs_words" in question, kept)
+        self.assertTrue(shots.NEEDS_WORDS_KEPT)
 
     def test_a_question_read_shot_that_does_not_read_the_answer_in_the_main_column_fails_the_command(
             self) -> None:
