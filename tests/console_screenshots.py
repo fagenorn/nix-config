@@ -20,7 +20,7 @@ Contract:
   so the spend figures show; `goal-open` is the sprint block of `tell-box-open` with the top
   bar's goal field focused so its box is open; `goal-near` is `goal-open` with 1900
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
-  typed and Send clicked, so the count reads over the limit and the refusal line shows (#1214);
+  typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
   two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
@@ -731,8 +731,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
                 page.fill("textarea.goal-text", "x" * GOAL_NEAR_CHARS)
             if state == "goal-over":
                 page.fill("textarea.goal-text", "x" * GOAL_OVER_CHARS)
-                page.click("button.goal-send")
-                page.wait_for_selector(".goal-status .fail")
+                page.wait_for_selector(".goal-hint:not(:empty)")
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")

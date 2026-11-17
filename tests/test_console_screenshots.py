@@ -408,7 +408,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
         self.assertEqual(shots.GOAL_NEAR_CHARS, 1900)
         self.assertEqual(shots.GOAL_OVER_CHARS, 2100)
-        for state, typed, sent in (("goal-near", "x" * 1900, False),
+        for state, typed, over in (("goal-near", "x" * 1900, False),
                                    ("goal-over", "x" * 2100, True)):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
                 calls.clear()
@@ -420,15 +420,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertIn(focus, before)
                 self.assertIn(fill, before)
                 self.assertLess(before.index(focus), before.index(fill))
-                send = ("click", ("button.goal-send",))
-                if sent:
-                    refusal = ("wait_for_selector", (".goal-status .fail",))
-                    self.assertIn(send, before)
-                    self.assertIn(refusal, before)
-                    self.assertLess(before.index(fill), before.index(send))
-                    self.assertLess(before.index(send), before.index(refusal))
+                self.assertNotIn(("click", ("button.goal-send",)), calls)
+                hint = ("wait_for_selector", (".goal-hint:not(:empty)",))
+                if over:
+                    self.assertIn(hint, before)
+                    self.assertLess(before.index(fill), before.index(hint))
                 else:
-                    self.assertNotIn(send, calls)
+                    self.assertNotIn(hint, calls)
 
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
