@@ -474,6 +474,25 @@ receives it as `validate_release_merge`'s last parameter).
    verdict) is `look check failed: <child diagnostic>`; a missing `--look-bin` is
    `look check failed: no --look-bin was given`; a timeout is `look check timed
    out`.
+5. A kept approval (issue 1211). When run one refuses with an integer `issue`, a readable
+   head and a non-empty `candidates` list of objects (each an integer `issue`, a 40
+   lowercase hex `head` and an `answer` of `approved` or `fix`), the guard reads the
+   base branch's tip once, `gh api repos/<slug>/branches/<baseRefName>` and its
+   `commit.sha` B (40 lowercase hex; a PR with no string `baseRefName` or a base it
+   cannot read has no carry). It then runs the look check up to `LOOK_CARRY_RUNS` (3)
+   more times with run one's payload plus `"carry": {"base": B, "reads": {<path>:
+   <JSON>}}`, `reads` empty at first. An admit passes under step 4's pinning rule. An exit 1
+   `refuse` whose `need` is a non-empty list of paths proceeds when this is not the last
+   run, no path was read already, every path is `compare/<sha>...<sha>` (full
+   lowercase shas, matched in full) or exactly `contents/.github/look-files.json?ref=<B>`,
+   and the reads so far plus `need` stay within `LOOK_READ_LIMIT` (48); the guard
+   reads each as `gh api repos/<slug>/<path>`, in order, and the next run gets the
+   answers. A path outside that grammar, a repeated path, a failed, timed-out or
+   unreadable read (a `404` included), any other refusal and a run left asking
+   after the last run refuse as step 4 does, `issue <n> needs the owner's look
+   before merge`, with the `<n>` of run one. Any other output of a carry run is
+   `look check failed: <child diagnostic>`. Nothing is read at a branch name after
+   B nor at the head.
 Every lookup runs with the token variables scrubbed and the child timeout; a
 timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,
@@ -1318,6 +1337,15 @@ LOOK_REFERENCE = re.compile(
 # many or more may hold a closing keyword the lookup did not return, so the look
 # gate refuses it (issue 1138).
 LOOK_COMMIT_LIMIT = 100
+# The look file set the kept-approval rule reads (issue 1211) and the bounds the carry
+# keeps; they equal `look_marker`'s `LOOK_FILES_PATH`, `CARRY_RUNS` and `READ_LIMIT`
+# (a test pins the equality, since the guard imports nothing from `agent_tools`).
+LOOK_FILES_PATH = ".github/look-files.json"
+LOOK_CARRY_RUNS = 3
+LOOK_READ_LIMIT = 48
+# The one shape of read besides the set file at the pinned base: a compare of two
+# full commit shas.
+LOOK_READ_PATH = re.compile(r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}")
 # A linked issue's URL as `closingIssuesReferences` gives it: `(slug, number)`.
 LOOK_ISSUE_URL = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)")
@@ -6125,7 +6153,7 @@ def look_problem(context, number, pr_facts, head_commit, subject=None):
     commit's headline and body (its default body is the PR title). The gate reads the PR body, then
     each issue the PR settles (`look_issue_numbers`) with its comments, and asks the
     look check (`--look-bin`) whether every issue whose body carries a look marker
-    has the owner's approval of the PR's head. A PR settling no issue passes with
+    has the owner's approval of the PR's head or of an earlier head it keeps. A PR settling no issue passes with
     no further lookup; any failed, timed-out or unreadable lookup refuses. When
     the approval covers at least one marked issue the merge must carry
     `--match-head-commit` (the mergeability check has held it equal to the PR
@@ -6158,36 +6186,14 @@ def look_problem(context, number, pr_facts, head_commit, subject=None):
         head = None
     if context.look_bin is None:
         return block("look check failed: no --look-bin was given")
-    try:
-        child = subprocess.run(
-            [context.look_bin],
-            input=json.dumps({"pr": int(number), "head": head, "issues": issues}),
-            capture_output=True,
-            text=True,
-            timeout=context.timeout,
-            check=False,
-            env=row_check_env(),
-        )
-    except subprocess.TimeoutExpired:
+    payload = {"pr": int(number), "head": head, "issues": issues}
+    child, verdict = look_child(context, payload)
+    if child is None:
         return block("look check timed out")
-    try:
-        verdict = json.loads(child.stdout)
-    except ValueError:
-        verdict = None
     if isinstance(verdict, dict):
-        marked = verdict.get("marked")
-        if (
-            child.returncode == 0
-            and verdict.get("verdict") == "admit"
-            and isinstance(marked, list)
-            and all(isinstance(n, int) and not isinstance(n, bool) for n in marked)
-        ):
-            if marked and head_commit is None:
-                return refuse(
-                    "merge",
-                    f"issue {marked[0]} awaits the owner's look, so the merge must carry "
-                    f"--match-head-commit {head}, the head the owner approved")
-            return None
+        admitted = look_admit(verdict, child, head, head_commit)
+        if admitted is not False:
+            return admitted
         issue = verdict.get("issue")
         if (
             child.returncode == 1
@@ -6197,11 +6203,161 @@ def look_problem(context, number, pr_facts, head_commit, subject=None):
         ):
             if head is None:
                 return refuse("merge", "cannot read the PR head commit")
-            return refuse(
-                "merge",
+            problem = (
                 f"issue {issue} needs the owner's look before merge, and head {head[:7]} "
                 "has no recorded approval; ask the owner and record the answer")
+            if look_candidates(verdict):
+                return look_carry(context, payload, pr_facts, head, head_commit, problem)
+            return refuse("merge", problem)
     return block_child_failure("look check failed", child)
+
+
+def look_child(context, payload):
+    """`(child, verdict)` of one run of the look check with `payload` on stdin.
+
+    `child` is None when the run timed out; `verdict` is the parsed stdout, None
+    when it is not JSON.
+    """
+    try:
+        child = subprocess.run(
+            [context.look_bin],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=context.timeout,
+            check=False,
+            env=row_check_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return None, None
+    try:
+        return child, json.loads(child.stdout)
+    except ValueError:
+        return child, None
+
+
+def look_admit(verdict, child, head, head_commit):
+    """None when the look check admits and the merge is pinned as it must be, the refusal
+    status when it admits an unpinned merge of a marked issue, False when it does not admit."""
+    marked = verdict.get("marked")
+    if (
+        child.returncode == 0
+        and verdict.get("verdict") == "admit"
+        and isinstance(marked, list)
+        and all(isinstance(n, int) and not isinstance(n, bool) for n in marked)
+    ):
+        if marked and head_commit is None:
+            return refuse(
+                "merge",
+                f"issue {marked[0]} awaits the owner's look, so the merge must carry "
+                f"--match-head-commit {head}, the head the owner approved")
+        return None
+    return False
+
+
+def look_candidates(verdict):
+    """Whether a refusal lists at least one candidate and every entry is well formed."""
+    candidates = verdict.get("candidates")
+    return (
+        isinstance(candidates, list)
+        and bool(candidates)
+        and all(
+            isinstance(entry, dict)
+            and isinstance(entry.get("issue"), int)
+            and not isinstance(entry.get("issue"), bool)
+            and isinstance(entry.get("head"), str)
+            and HEAD_COMMIT.fullmatch(entry["head"]) is not None
+            and entry.get("answer") in ("approved", "fix")
+            for entry in candidates))
+
+
+def look_read(context, path):
+    """The parsed stdout of `gh api <path>`, or None on a timeout, a failed run or
+    output that is not JSON (`DeadlineExhausted` propagates)."""
+    try:
+        child = subprocess.run(
+            [context.gh_bin, "api", path],
+            capture_output=True,
+            text=True,
+            timeout=context.timeout,
+            check=False,
+            env=gh_lookup_env(),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if child.returncode != 0:
+        return None
+    try:
+        return json.loads(child.stdout)
+    except ValueError:
+        return None
+
+
+def look_base(context, base_ref):
+    """The sha of the base branch's tip, or None when it cannot be read as one."""
+    answer = look_read(context, f"repos/{context.repository}/branches/{base_ref}")
+    commit = answer.get("commit") if isinstance(answer, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if isinstance(sha, str) and HEAD_COMMIT.fullmatch(sha) is not None:
+        return sha
+    return None
+
+
+def look_carry(context, payload, pr_facts, head, head_commit, problem):
+    """The look gate's status once the look check has named a kept approval's candidates
+    (issue 1211): None when a carry run admits, else the step 4 refusal `problem`, or the look
+    check's own failure.
+
+    The guard reads the base branch's tip once, then each path a run names (the set file
+    at that sha or a compare of two full shas), at most `LOOK_READ_LIMIT` reads over at
+    most `LOOK_CARRY_RUNS` runs; any other path, a failed read or a run left asking
+    refuses with `problem`.
+    """
+    base_ref = pr_facts.get("baseRefName")
+    if not isinstance(base_ref, str) or not base_ref:
+        return refuse("merge", problem)
+    base = look_base(context, base_ref)
+    if base is None:
+        return refuse("merge", problem)
+    allowed = f"contents/{LOOK_FILES_PATH}?ref={base}"
+    reads = {}
+    for run in range(1, LOOK_CARRY_RUNS + 1):
+        child, verdict = look_child(
+            context, {**payload, "carry": {"base": base, "reads": reads}})
+        if child is None:
+            return block("look check timed out")
+        if not isinstance(verdict, dict):
+            return block_child_failure("look check failed", child)
+        admitted = look_admit(verdict, child, head, head_commit)
+        if admitted is not False:
+            return admitted
+        need = verdict.get("need")
+        issue = verdict.get("issue")
+        if not (
+            child.returncode == 1
+            and verdict.get("verdict") == "refuse"
+            and isinstance(issue, int)
+            and not isinstance(issue, bool)
+        ):
+            return block_child_failure("look check failed", child)
+        if (
+            not isinstance(need, list)
+            or not need
+            or run == LOOK_CARRY_RUNS
+            or len(reads) + len(need) > LOOK_READ_LIMIT
+            or not all(
+                isinstance(path, str)
+                and path not in reads
+                and (path == allowed or LOOK_READ_PATH.fullmatch(path) is not None)
+                for path in need)
+        ):
+            return refuse("merge", problem)
+        for path in need:
+            answer = look_read(context, f"repos/{context.repository}/{path}")
+            if answer is None:
+                return refuse("merge", problem)
+            reads[path] = answer
+    return refuse("merge", problem)
 
 
 def plan_gated_answer(stdout):
