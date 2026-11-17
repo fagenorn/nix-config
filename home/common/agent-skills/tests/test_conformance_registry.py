@@ -240,16 +240,19 @@ class AcceptanceDemoTest(ReportAssertions, unittest.TestCase):
         self.assertEqual([promoted["status"], promoted["facts"]], ["passed", {
             "duplicates": [], "count": 0, "deferred_count": 0, "retained_count": 0}])
 
-    def test_this_repository_declares_no_production_section(self):
-        """Issue 1193 AC3: this repository's own contract is not changed here; its
-        production declaration is issue 1206's, so it stays not declared."""
+    def test_this_repository_declares_host_activation_as_production(self):
+        """Issue 1206: this repository's contract declares nix-activate as production,
+        approved only through the console's Activate."""
         proc = subprocess.run(
             [sys.executable, "-m", "agent_tools.project_contract.resolve_project",
              "resolve", "--repo-root", str(REPO_ROOT)],
             capture_output=True, text=True, timeout=60, env=HERMETIC_ENV)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(proc.stdout)["production"],
-                         {"status": "not_declared"})
+        self.assertEqual(json.loads(proc.stdout)["production"], {"status": "declared",
+            "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+            "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+            "release_profile": "github-release",
+            "console_activation": "nix-activate"})
 
     def test_workflow_entry_on_a_broken_contract_stops_at_one_root_cause(self):
         with fixture() as tmp:
