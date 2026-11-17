@@ -81,11 +81,19 @@ the same project (the first answer wins, strays are ignored): outcome `answered`
 the answered row's `at`. Folding two batches through `known` equals folding once, and `known` is
 never mutated. `answer_parts(text)` splits a stored answer by the `HEADINGS` of the shape `LEAD`
 asks for: a heading matches at line start after optional spaces, case-insensitively, followed by
-`:`; the lines after a heading up to the next one belong to it (joined with a newline, stripped);
+`:`, and is not recognised inside fenced code (a line whose left-trimmed text starts with three
+backticks toggles the fence and stays in the current part, and so does a heading's text after its colon; an unclosed fence runs to the end, so
+every later line stays in the part the fence opened in); the lines after a heading up to the next one belong to it (joined with a newline, stripped);
 text before the first heading starts the answer part, and a text with no heading is wholly the
 answer; an empty part is None, and so is a part other than the answer that is `none` (any case, a
 trailing `.` ignored): an answer of `None.` is an answer and keeps its text; a text
 ending with `NO_PRODUCTION_LINE` carries that line as `production` and in no other part.
+A back part with question text and two to `MAX_CHOICES` (5) list lines (`-`, `*`, `+`, or one or
+two digits then `.` or `)`, then a space) is split: `back` is the question text alone and `choices`
+the list lines' texts in order. One list line, more than `MAX_CHOICES`, or no question text leaves
+`back` the whole part and `choices` empty (`()`). The prompt (`ANSWER_RULES`, `LEAD`) names the
+formatting subset (bold, `- ` list lines, inline code, fenced code; no headings, tables, links or
+HTML) and asks for a choice as two to five answers on their own `- ` lines.
 
 Threads (#1178, ADR-console-062). A `Turn` is one earlier question with the answer the session
 gave. An `Ask` carries a `thread` of turns, oldest first, and a thread changes only the prompt:
@@ -185,6 +193,8 @@ ANSWER_RULES = (
     "production read, not from its decision records alone. "
     "If a command you run fails, say plainly in the answer which command failed and what it "
     "printed. "
+    "Format only with **bold**, list lines starting with \"- \", `inline code` and fenced code "
+    "blocks; use no headings, tables, links or HTML. "
 )
 
 LEAD = (
@@ -197,7 +207,8 @@ LEAD = (
     "Read: <the files you read, or none>\n"
     "Ran: <the commands you ran, or none>\n"
     "Could not find out: <what you could not find out, or none>\n"
-    "Question for you: <a step that needs money or a credential, or none>\n\n"
+    "Question for you: <a step that needs money or a credential, or a choice only the owner can "
+    "make, then its two to five answers, each on its own line starting with \"- \", or none>\n\n"
 )
 
 THREAD_LEAD = (
@@ -216,6 +227,8 @@ _HEADING = re.compile(
     r"^\s*(" + "|".join(re.escape(label) for _, label in HEADINGS) + r")\s*:\s?(.*)$",
     re.IGNORECASE | re.ASCII)
 _KEY_OF = {label.lower(): key for key, label in HEADINGS}
+MAX_CHOICES = 5
+_LIST_LINE = re.compile(r"^\s*(?:[-*+]|\d{1,2}[.)])\s+(\S.*)$", re.ASCII)
 
 
 class Refused(Exception):
@@ -526,6 +539,7 @@ class AnswerParts:
     unknown: str | None
     back: str | None
     production: str | None
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -553,14 +567,25 @@ def answer_parts(text: str) -> AnswerParts:
     if body.endswith(NO_PRODUCTION_LINE):
         body, production = body[:-len(NO_PRODUCTION_LINE)], NO_PRODUCTION_LINE
     buckets: dict[str, list[str]] = {key: [] for key, _ in HEADINGS}
-    current = "answer"
+    current, in_fence = "answer", False
     for line in body.splitlines():
-        match = _HEADING.match(line)
-        if match:
-            current = _KEY_OF[match.group(1).lower()]
-            line = match.group(2)
+        if not in_fence:
+            match = _HEADING.match(line)
+            if match:
+                current = _KEY_OF[match.group(1).lower()]
+                line = match.group(2)
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
         buckets[current].append(line)
-    return AnswerParts(*(_part(buckets[key], key) for key, _ in HEADINGS), production)
+    answer, read, ran, unknown, back = (_part(buckets[key], key) for key, _ in HEADINGS)
+    choices: tuple[str, ...] = ()
+    if back is not None:
+        lines = back.splitlines()
+        listed = [m.group(1).strip() for m in map(_LIST_LINE.match, lines) if m]
+        asked = "\n".join(l for l in lines if not _LIST_LINE.match(l)).strip()
+        if asked and 2 <= len(listed) <= MAX_CHOICES:
+            back, choices = asked, tuple(listed)
+    return AnswerParts(answer, read, ran, unknown, back, production, choices)
 
 
 def _answered(question: AskedQuestion, event: Event) -> AskedQuestion:
