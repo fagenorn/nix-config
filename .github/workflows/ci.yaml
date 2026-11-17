@@ -88,7 +88,7 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v4
       - name: Run agent workflow tests
-        # Issue 1215 trial: 6 members at once on the 4-vCPU hosted runner (ADR-delivery-006).
+        # The hosted runner has 4 vCPUs: keep the job count the CI run has always used.
         env:
-          SUITE_RUNNER_JOBS: "6"
+          SUITE_RUNNER_JOBS: "4"
         run: WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just nixpkgs#nodejs --command just agent-workflow-tests

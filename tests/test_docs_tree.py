@@ -2407,6 +2407,37 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, alternatives)
         self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 5)
 
+    def test_the_ci_job_count_is_the_trials_decision(self):
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        section = land_queue_section(text, "Trial at 6 jobs")
+        decisions = re.findall(r"(?m)^Decision: (\d+) jobs\.$", section)
+        self.assertEqual(len(decisions), 1)
+        d = decisions[0]
+        ci = (REPO_ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8")
+        adr = (REPO_ROOT / "docs/areas/delivery/adr/006-suite-members-run-in-parallel.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(d, ("4", "6"))
+        self.assertEqual(re.findall(r'(?m)^\s+SUITE_RUNNER_JOBS: "(\d+)"$', ci), [d])
+        self.assertIn(f"the hosted CI job sets {d}", adr)
+        if d == "6":
+            decided = re.search(r"(?m)^- \*\*Decided in:\*\*.*$", adr)
+            self.assertIsNotNone(decided)
+            self.assertIn("1215", decided[0])
+            self.assertIn("../../../archive/agent-workflow-tests-time-2026-11-17.md", adr)
+        else:
+            reading = section.split("\nRuns: ", 1)[1].split("\n", 1)[1]
+            saving = re.search(r"(?m)^Saving: (\S+) s ", section)
+            failed = re.search(r"(?m)^Failed only at 6: (.*)\.$", section)
+            self.assertIsNotNone(saving)
+            self.assertIsNotNone(failed)
+            members = [] if failed[1] == "none" else failed[1].split(", ")
+            if members:
+                for member in members:
+                    self.assertIn(member, reading)
+            else:
+                self.assertIn(saving[1], reading)
+
     def _trial_fixture(self, six, four):
         """Each entry is (run_id, created, step_seconds, failed_members, summary_jobs)."""
         from datetime import datetime, timedelta

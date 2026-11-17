@@ -60,7 +60,7 @@ EVALUATED_ATTRIBUTE = (
 )
 
 # The run `Agent Workflow Tests` exists to perform (issue 608): the whole suite on the
-# source surface, at the job count ADR-delivery-006 sets for the hosted 4-vCPU runner, with node
+# source surface, at the job count the hosted 4-vCPU runner has always used, with node
 # for the deliver-standard program scenarios (issue 618).
 SUITE_INVOCATION = ("WORKFLOW_POLICY_SURFACE=source nix shell --inputs-from . nixpkgs#just "
                     "nixpkgs#nodejs --command just agent-workflow-tests")
@@ -400,7 +400,7 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn("          fetch-depth: 0", steps["Checkout"])
         suite = steps["Run agent workflow tests"]
         self.assertIn(f"        run: {SUITE_INVOCATION}", suite)
-        self.assertEqual(["SUITE_RUNNER_JOBS: \"6\""], step_env(suite))
+        self.assertEqual(["SUITE_RUNNER_JOBS: \"4\""], step_env(suite))
 
     def test_agent_workflow_tests_job_has_the_required_triggers_without_schedule(self):
         self.assertIsNotNone(trigger_block("pull_request"))
