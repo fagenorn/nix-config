@@ -131,7 +131,8 @@ malformed, changes nothing; a later `registration.ended` row starts a new regist
 `parse_cancel_request(body)` is exactly `{"root"}`, a non-empty string with no character below 0x20 and
 no 0x7F (`ValueError` otherwise). `cancellable(latest, adoption)` is true when `latest` is not None,
 its `result` is not `registered` and the plan's folded adoption is None or `apply_failed`.
-`CANCEL_REFUSED` and `CANCEL_DISCARD_FAILED` are the service's refusals. `view_entry` carries `cancel`
+`CANCEL_REFUSED`, `CANCEL_UNSEEN` (a failed commit's evidence card no page stream was sent yet, ADR-console-071)
+and `CANCEL_DISCARD_FAILED` are the service's refusals. `view_entry` carries `cancel`
 (false for a running entry, the `cancel` argument for a done one).
 
 Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
@@ -264,6 +265,7 @@ UPDATE_STEP = "Update the checkout in a terminal, then " + AGAIN
 REMOTE_UNREAD = "The remote could not be read, so the console used the checkout as it is."
 NOT_WAITING = "that project is not waiting to be registered"
 CANCEL_REFUSED = "only a registration that was not applied yet can be cancelled"
+CANCEL_UNSEEN = "the reason the last attempt failed has not been shown yet; read its card, then cancel"
 CANCEL_DISCARD_FAILED = ("The copy that the failed attempt left on this computer could not be removed, "
                          "so the registration was not cancelled. Choose Cancel registration to try again.")
 

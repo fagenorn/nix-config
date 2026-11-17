@@ -8,8 +8,9 @@ pre-commit gates and their ordered run, the fixed commit message (D28), the
 three proofs taken over the commit once it exists — that it changes exactly
 the planned paths, that no Markdown file in it has more non-resolving relative
 links than its pre-move counterpart, and that the branch carries it and
-nothing else — and the retention of a failed attempt beside its worktree
-(D17), and its removal: `discard_retained` is #72's acknowledged cleanup, the
+nothing else — the commit runner, which keeps git's own output and names the
+hook git's trace2 events show ended non-zero (#1236), and the retention of a
+failed attempt beside its worktree (D17), and its removal: `discard_retained` is #72's acknowledged cleanup, the
 one thing that deletes a retained copy. It removes that plan's worktree with
 its own administrative entry, its branch and its failure record, and nothing
 else. It never runs `git worktree prune`, because prune also deletes the
@@ -58,6 +59,7 @@ from agent_tools.project_contract.adopt_inspection import (
     AdoptError,
     COMMIT_GATES,
     CONTRACT_FILENAME,
+    GIT_TIMEOUT_SECONDS,
     OPERATION_KINDS,
     RUNTIME_SENTINEL,
     canonical_json,
@@ -791,6 +793,105 @@ def commit_message(project_id: str, digest: str, records: dict) -> str:
             f"adoption evidence record: {records['evidence_record']}\n")
 
 
+COMMIT_OUTPUT_BYTES = 16384
+COMMIT_OUTPUT_LINES = 40
+
+
+def failed_hook(trace: bytes) -> tuple[str, int] | None:
+    """The `(hook_name, exit code)` of the commit's own last failed hook.
+
+    Reads git's trace2 event stream, one JSON object per line, and only the
+    events of the commit's own session (the `sid` of the first `version`
+    event): a git process a hook started writes to the same file under a
+    longer `sid`. A line that is not a JSON object is skipped.
+    """
+    sid: object = None
+    hooks: dict[object, str] = {}
+    failed: tuple[str, int] | None = None
+    for raw in trace.splitlines():
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if sid is None:
+            if event.get("event") != "version":
+                continue
+            sid = event.get("sid")
+        if event.get("sid") != sid:
+            continue
+        child = event.get("child_id")
+        if event.get("event") == "child_start":
+            if event.get("child_class") == "hook":
+                hooks[child] = str(event.get("hook_name"))
+            else:
+                hooks.pop(child, None)
+        elif event.get("event") == "child_exit" and child in hooks:
+            code = event.get("code")
+            if isinstance(code, int) and not isinstance(code, bool) \
+                    and code != 0:
+                failed = (hooks[child], code)
+    return failed
+
+
+def commit_output_lines(tail: bytes, cut: bool) -> list[str]:
+    """The kept lines of a commit's output tail.
+
+    A tail that began mid-output loses its first (cut) line; the rest are
+    decoded with `replace`, right-stripped, stripped of blank ones and
+    bounded to the last `COMMIT_OUTPUT_LINES`.
+    """
+    lines = tail.decode("utf-8", "replace").split("\n")
+    if cut:
+        lines = lines[1:]
+    kept = [line.rstrip() for line in lines if line.strip()]
+    return kept[-COMMIT_OUTPUT_LINES:]
+
+
+def run_commit(worktree: Path, trace_dir: Path,
+               *args: str) -> tuple[int, dict]:
+    """`git -C <worktree> commit <args>`: its exit code and its output.
+
+    Git's stdout and stderr stay merged in order and only the last
+    `COMMIT_OUTPUT_BYTES` are read. A trace2 event file, made in `trace_dir`
+    and removed on every outcome, names the hook that failed. Nothing about
+    the commit itself changes: no hook is skipped and nothing is retried.
+    """
+    descriptor, trace_name = tempfile.mkstemp(dir=trace_dir,
+                                              prefix="commit-trace-")
+    os.close(descriptor)
+    trace_path = Path(trace_name)
+    try:
+        with tempfile.TemporaryFile() as output:
+            try:
+                completed = subprocess.run(
+                    ["git", "-C", str(worktree), "commit", *args],
+                    stdin=subprocess.DEVNULL, stdout=output,
+                    stderr=subprocess.STDOUT,
+                    env={**os.environ, "GIT_TRACE2_EVENT": trace_name},
+                    timeout=GIT_TIMEOUT_SECONDS)
+            except (OSError, subprocess.SubprocessError):
+                raise refuse("adopt_failure", "adopt.git.unavailable", "",
+                             "git could not be started") from None
+            size = output.seek(0, os.SEEK_END)
+            output.seek(max(0, size - COMMIT_OUTPUT_BYTES))
+            tail = output.read(COMMIT_OUTPUT_BYTES)
+            cut = size > COMMIT_OUTPUT_BYTES
+        try:
+            trace = trace_path.read_bytes()
+        except OSError:
+            trace = b""
+    finally:
+        trace_path.unlink(missing_ok=True)
+    hook = failed_hook(trace)
+    return completed.returncode, {
+        "hook": hook[0] if hook else None,
+        "exit": hook[1] if hook else None,
+        "lines": commit_output_lines(tail, cut),
+    }
+
+
 def failure_record_path(digest: str) -> Path:
     """The one home of a retained attempt's failure record."""
     return (agent_platform.state_root() / "adopt" / "worktrees"
@@ -837,14 +938,15 @@ def discard_retained(root: Path, digest: str) -> None:
 
 
 def retain_failure(digest: str, document: dict, worktree: Path, branch: str,
-                   gates: list[dict], repair_id: str) -> None:
+                   gates: list[dict], repair_id: str, *,
+                   commit_output: dict | None = None) -> None:
     """Record why the worktree is being kept, beside it and never in the
     target repository."""
     document["verification"]["commit_gates"] = gates
     store_document(document["plan"]["plan_id"], document)
     evidence = failure_record_path(digest)
     agent_platform.ensure_directory(evidence.parent)
-    agent_platform.write_atomically(evidence, canonical_json({
+    record = {
         "schema_version": ADOPT_SCHEMA_VERSION,
         "plan_id": document["plan"]["plan_id"],
         "base_revision": document["plan"]["base_revision"],
@@ -852,7 +954,10 @@ def retain_failure(digest: str, document: dict, worktree: Path, branch: str,
         "worktree": str(worktree),
         "repair_id": repair_id,
         "gates": gates,
-    }) + b"\n")
+    }
+    if commit_output is not None:
+        record["commit_output"] = commit_output
+    agent_platform.write_atomically(evidence, canonical_json(record) + b"\n")
 
 
 def signing_requested(payload: object) -> bool | None:

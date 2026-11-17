@@ -269,7 +269,10 @@ registration, which was not applied yet or whose apply failed. It takes exactly 
 The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
 <reason>`, appending nothing, in this order: while a run is under way, `register.running`; when the shown
 registration is none or names another root, `register.NOT_WAITING`; when `register.cancellable` is false
-for it and its adoption (an applied, pushed or opened one), `register.CANCEL_REFUSED`. When the plan's
+for it and its adoption (an applied, pushed or opened one), `register.CANCEL_REFUSED`; while the view
+carries a failed commit's evidence card that no `/api/stream` client has been sent, `register.CANCEL_UNSEEN`
+(a read of `/api/state` does not count and a new failure is a new card, ADR-console-071), so the kept copy
+stays until the owner could read why the commit failed. When the plan's
 adoption is `apply_failed`, or the shown failure names no plan id, the service looks at every plan of the
 root whose apply failed: `approve.left_behind` finds any copy that attempt kept (its failure record, its
 directory or its branch, whichever remains), and the service claims the run, has `Adopter.discard` remove
@@ -347,7 +350,9 @@ pushes only the one adoption branch, at the commit apply recorded (`approve.push
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
 `push_failed` or `open_failed` with plain words; the original error (code, detail, traceback) is one
-stderr line `console: plan_approve_error <json>` and never reaches the page. A step in
+stderr line `console: plan_approve_error <json>` and never reaches the page, except that a failed
+adoption commit's row carries the page-safe `evidence` (`approve.commit_evidence`), shown as the
+failure card's lines, while the raw `commit_output` goes only to the `plan_approve_error` line. A step in
 `approve.RESUMABLE` is resumed by the next approval (the card's Try again or Apply it again) at the step that
 failed: apply is never run twice for a pushed or kept branch, and an `open_failed` step resumes at
 the open without pushing again. The console stops between steps and inside every child
@@ -2951,6 +2956,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                     continue
                 seen, view = change
                 self.wfile.write(b"event: view\ndata: " + view + b"\n\n")
+                console.delivered(seen)
         except OSError:
             return
 
@@ -3212,6 +3218,9 @@ class ConsoleService:
         self._published = threading.Condition()
         self._view = b""
         self._version = 0
+        self._delivered = -1
+        # The key of the failed commit's evidence card in the view and the first version that carried it.
+        self._evidence_card: tuple[str, int] | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
         self._server = ConsoleServer(port, self)
@@ -3306,6 +3315,11 @@ class ConsoleService:
                 return None
             return self._version, self._view
 
+    def delivered(self, version: int) -> None:
+        """Record that the view of `version` was written to a page stream (ADR-console-071)."""
+        with self._published:
+            self._delivered = max(self._delivered, version)
+
     def _now(self) -> datetime:
         return datetime.fromtimestamp(self._clock(), timezone.utc)
 
@@ -3372,10 +3386,18 @@ class ConsoleService:
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement))
+        found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
+        evidence_key = None
+        if found is not None and found["step"] == "apply_failed" and found.get("evidence") is not None:
+            evidence_key = next((item["key"] for item in apply_items), None)
         with self._published:
             if view != self._view:
                 self._view = view
                 self._version += 1
+            if evidence_key is None:
+                self._evidence_card = None
+            elif self._evidence_card is None or self._evidence_card[0] != evidence_key:
+                self._evidence_card = (evidence_key, self._version)
             self._published.notify_all()
 
     def refresh(self) -> list[Event]:
@@ -4105,6 +4127,10 @@ class ConsoleService:
             raise sprints.Refused(register.NOT_WAITING)
         if not register.cancellable(latest, self._adoptions.get(latest["plan_id"])):
             raise sprints.Refused(register.CANCEL_REFUSED)
+        with self._published:
+            unseen = self._evidence_card is not None and self._delivered < self._evidence_card[1]
+        if unseen:
+            raise sprints.Refused(register.CANCEL_UNSEEN)
         return latest
 
     def _check_answerable(self, root: str, choice: str) -> dict:
@@ -4449,7 +4475,7 @@ class ConsoleService:
         payload = {"by": "owner", "plan_id": plan_id, "root": root,
                    "project_id": shown["project_id"], "step": step, "branch": None,
                    "commit": None, "base": None, "pull_request": None, "reason": None,
-                   "note": None, "kept": None, **members}
+                   "note": None, "kept": None, "evidence": None, **members}
         approve.step_row(payload)
         return payload
 
@@ -4600,8 +4626,10 @@ class ConsoleService:
                                           "error": result["error"]})
                 kept = approve.retained(plan_id)
                 reason, note = approve.apply_failure(name, result["error"], kept)
+                evidence = approve.commit_evidence(result["error"], kept)
                 return self._step(shown, plan_id, root, "apply_failed",
-                                         reason=approve.reason_of(reason), note=note, kept=kept)
+                                         reason=approve.reason_of(reason), note=note, kept=kept,
+                                         evidence=evidence)
             branch, commit = result["branch"], result["commit"]
             base = result.get("integration_branch")
             self._append_applied(self._step(

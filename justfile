@@ -226,6 +226,7 @@ agent-workflow-tests *args:
     tests/test_console_register_check.py \
     tests/test_console_approve.py \
     tests/test_console_approve_service.py \
+    tests/test_console_commit_failure.py \
     tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
     tests/test_console_permission_check.py \
