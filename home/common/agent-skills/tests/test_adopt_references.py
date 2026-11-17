@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.project_contract import adopt_references
+from agent_tools.project_contract import adopt_planning, adopt_references
 from agent_tools.project_contract.adopt_links import Tree
 
 PATHS = [".claude/specs/x.md", ".claude/specs/sub/s.md", ".claude/plans/y.md",
@@ -276,6 +276,65 @@ class OccurrenceTest(unittest.TestCase):
                    SPECS + "/")])):
             with self.subTest(text=text):
                 self.assertEqual(offers(text), expected)
+
+
+class NamedLineTest(unittest.TestCase):
+    """#1234: a line that already names every path `extend` would add is answered."""
+
+    NAMED = ('EXEMPT = ("docs/archive/", ".claude/", ".agents/artifacts/plans/", '
+             '".agents/artifacts/specs/")\n')
+    MISSING_ONE = 'EXEMPT = (".claude/", ".agents/artifacts/specs/")\n'
+    COMMENT_ONLY = ('EXEMPT = (".claude/", ".agents/artifacts/specs/")'
+                    '  # .agents/artifacts/plans/\n')
+    MOVED_NAMED = ('SKIP = (".claude", ".agents/artifacts/plans", '
+                   '".agents/artifacts/specs")\n')
+
+    def questions(self, text):
+        references = adopt_references.plan_references(
+            {"tools/check.py": text}, PATHS, MOVES, {})
+        return adopt_planning.reference_questions(references, {}, {})
+
+    def test_a_line_naming_every_addition_raises_no_question(self):
+        self.assertEqual(self.questions(self.NAMED), [])
+
+    def test_a_line_missing_one_addition_still_raises_its_question(self):
+        self.assertEqual(
+            [(q["id"], q["subject"], q["answers"])
+             for q in self.questions(self.MISSING_ONE)],
+            [("path-reference", "tools/check.py:1:12", ["extend", "retain"])])
+        self.assertEqual(len(self.questions(EXEMPT)), 1)
+
+    def test_an_addition_named_only_in_a_comment_still_raises_its_question(self):
+        self.assertEqual(
+            [(q["id"], q["subject"]) for q in self.questions(self.COMMENT_ONLY)],
+            [("path-reference", "tools/check.py:1:12")])
+
+    def test_a_named_line_is_answered_by_retain_and_changes_nothing(self):
+        (occurrence,) = found(self.NAMED)
+        self.assertEqual(adopt_references.effective_answer(occurrence, {}, {}),
+                         ("retain", "line"))
+        references = adopt_references.plan_references(
+            {"tools/check.py": self.NAMED}, PATHS, MOVES, {})
+        self.assertEqual(adopt_references.rewritten(references, {}, {}), {})
+
+    def test_an_own_answer_still_decides_a_named_line(self):
+        (occurrence,) = found(self.NAMED)
+        self.assertEqual(adopt_references.effective_answer(
+            occurrence, {occurrence.subject: "extend"}, {}),
+            ("extend", "occurrence"))
+
+    def test_a_named_occurrence_opens_no_policy_question(self):
+        references = adopt_references.plan_references(
+            {".claude/specs/tool.py": self.MOVED_NAMED}, POLICY_PATHS,
+            POLICY_MOVES, POLICY_TREES)
+        self.assertEqual(adopt_planning.reference_questions(
+            references, {}, {}), [])
+        unnamed = adopt_references.plan_references(
+            {".claude/specs/tool.py": 'SKIP = (".claude",)\n'}, POLICY_PATHS,
+            POLICY_MOVES, POLICY_TREES)
+        self.assertEqual(
+            [q["id"] for q in adopt_planning.reference_questions(
+                unnamed, {}, {})], ["reference-policy"])
 
 
 class EditTest(unittest.TestCase):

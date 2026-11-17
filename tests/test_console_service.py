@@ -2361,6 +2361,36 @@ class MovementTest(Case):
         self.poll(svc)
         self.assertEqual(reader.calls, [])
 
+    def test_an_absent_manager_whose_transcript_ends_held_makes_the_sprint_deaf(self):
+        # a console restart: the sprint's known manager session is in no registry file (#1229)
+        svc = self.open(Script(()))
+        t = self.running_sprint(svc)
+        sid = next(iter(svc._sprints))
+        svc._sprints[sid] = dataclasses.replace(svc._sprints[sid], manager_session="mgr-gone")
+        held = {"type": "system", "content": "Held peer message \u2014 from uds:/x.sock; preview: "
+                "\u00abhi\u00bb \u2014 not delivered to Claude (1 held). Review it below."}
+        path = self.sessions.parent / "projects" / "-srv-p00" / "mgr-gone.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(held) + "\n", encoding="utf-8")
+        self.now = t + 20 * 60
+        self.poll(svc)
+        self.assertEqual([(m.session_id, m.held, m.output_ms) for m in svc._movement["owner/p00"].sessions],
+                         [("mgr-gone", True, None)])
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["ball"], shown["now_text"]),
+                         ("owner", "the manager cannot hear the console: bring it back or drop the sprint"))
+
+    def test_an_absent_manager_target_reads_only_its_flag(self):
+        reader = self.session_reader()
+        svc = self.open(Script(()), session_reader=reader)
+        t = self.running_sprint(svc)
+        sid = next(iter(svc._sprints))
+        svc._sprints[sid] = dataclasses.replace(svc._sprints[sid], manager_session="mgr-gone")
+        self.now = t + 20 * 60
+        self.poll(svc)
+        self.assertEqual(reader.calls[0][1], (movement.SessionTarget(
+            "mgr-gone", None, frozenset({sid}), (), True),))
+
     def test_a_delivery_session_on_a_reported_issue_is_read(self):
         reader = self.session_reader()
         svc = self.open(Script(()), session_reader=reader)
