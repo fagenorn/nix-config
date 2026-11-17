@@ -1302,6 +1302,9 @@ session-subagent and workflow agent transcripts under the `projects` directory b
 ingest lock, then builds the spend view and publishes it under that lock; it appends nothing to the
 log. The account of a session is folded from the log's `session.seen` and `session.profile` rows
 (`spend.session_profiles`) and is kept after `session.gone`, for as long as those rows are retained.
+A question session's spend is the `questions` aspect, its sessions folded from the
+`project_question.asked` rows' `session_id` and `profile` (`spend.question_sessions`), on
+construction and on each append.
 A failed iteration is one stderr line `console: spend_poll_failed <Type>: <message>` and the loop
 goes on.
 
@@ -1328,8 +1331,8 @@ lock, in this order: no `project_asker` is `Refused` "questions are not availabl
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, and no account the console would start a session under
 (`_session_choice`); a refusal appends nothing and counts nothing. An accepted question appends one
-`project_question.asked` row (`question_id`, `question`, `profile`) and counts itself open in that
-same section. Its job reads the project's read-only routes (a contract that cannot be resolved is a
+`project_question.asked` row (`question_id`, `question`, `profile`, `session_id`, the last also
+passed as the session's `--session-id`) and counts itself open in that same section. Its job reads the project's read-only routes (a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
@@ -3114,6 +3117,7 @@ class ConsoleService:
         self._spend = spend.SpendReader(repo_of=repo_of)
         self._spend_view: dict | None = None
         self._spend_profiles: dict[str, str] = {}
+        self._spend_questions: dict[str, str] = {}
         self._absent: frozenset[str] = frozenset()
         self._deliveries: dict[tuple[str, str], deliveries.DeliveryState] = {}
         self._reader = deliveries.JournalReader()
@@ -3188,6 +3192,7 @@ class ConsoleService:
             self._sessions = sessions.session_states(events)
             self._use = manager.profile_use(events)
             self._spend_profiles = spend.session_profiles(events)
+            self._spend_questions = spend.question_sessions(events)
             self._inbox = inbox_records(events)
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
@@ -3556,13 +3561,16 @@ class ConsoleService:
                 raise project_question.Refused(project_question.NO_PROFILE)
             root = self._states[project_id].root
             question_id = project_question.new_question_id()
+            session_id = project_question.new_session_id()
             appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, {
-                "question_id": question_id, "question": text, "profile": profile})])
+                "question_id": question_id, "question": text, "profile": profile,
+                "session_id": session_id})])
             self._apply(appended)
             self._project_questions_open += 1
         try:
             self._project_question_dispatch(
-                lambda: self._run_project_question(question_id, project_id, root, text, profile))
+                lambda: self._run_project_question(
+                    question_id, project_id, root, text, profile, session_id))
         except BaseException as error:
             self._record_project_answer(question_id, project_id, project_question.Outcome(
                 project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
@@ -3570,7 +3578,7 @@ class ConsoleService:
         return question_id
 
     def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
-                              profile: str) -> None:
+                              profile: str, session_id: str) -> None:
         """The job of one accepted question: stop check, routes, the session, then the one answer."""
         outcome = None
         try:
@@ -3597,7 +3605,8 @@ class ConsoleService:
                             else:
                                 ask = project_question.new_ask(
                                     question_id, project_id, root, text, profile, routes,
-                                    Path(self._store).with_name(project_question.SETTINGS_DIR))
+                                    Path(self._store).with_name(project_question.SETTINGS_DIR),
+                                    session_id=session_id)
                                 try:
                                     outcome = self._project_asker(ask, self._stop)
                                 except Exception as error:
@@ -6379,6 +6388,7 @@ class ConsoleService:
         self._sessions = sessions.session_states(appended, self._sessions)
         self._use = manager.profile_use(appended, self._use)
         self._spend_profiles = spend.session_profiles(appended, self._spend_profiles)
+        self._spend_questions = spend.question_sessions(appended, self._spend_questions)
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
@@ -6470,7 +6480,7 @@ class ConsoleService:
             self._spend_view = spend.spend_view(
                 snapshot, today=today.isoformat(),
                 project_of=lambda repo: project_for(repo, self._states),
-                profiles=self._spend_profiles)
+                profiles=self._spend_profiles, questions=self._spend_questions)
             self._publish()
 
     def _spend_step(self) -> None:

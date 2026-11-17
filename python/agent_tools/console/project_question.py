@@ -38,10 +38,11 @@ fall to the permission rules. The file lives in `SETTINGS_DIR` under the console
 directory, the file 0600, written atomically) and is removed when the run ends.
 
 Argv. `launch_command` is None off Linux, else `claude-account run -p --model sonnet
---permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools <tools>
+--session-id <id> --permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools <tools>
 --output-format json --settings <file> <prompt>`. `--tools` is variadic: it is always followed by
-another option, so the prompt, which is last, is never swallowed into the tool list. No
-`systemd-run` scope is used.
+another option, so the prompt, which is last, is never swallowed into the tool list. The session id
+is a fresh UUID per question, which the service records in the asked row so the Spend page can tell
+the question's transcript (ADR-console-059). No `systemd-run` scope is used.
 
 Runner. `run_question` never raises for these cases and removes the settings file once written, in
 this order: no launch command (`UNAVAILABLE_TEXT`); a root that is not a directory; a settings
@@ -63,6 +64,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,6 +143,7 @@ class Ask:
     profile: str
     routes: tuple[Route, ...]
     settings: Path
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -184,10 +187,14 @@ def new_question_id() -> str:
     return secrets.token_hex(8)
 
 
+def new_session_id() -> str:
+    return str(uuid.uuid4())
+
+
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
-            routes: Sequence[Route], settings_dir: Path) -> Ask:
+            routes: Sequence[Route], settings_dir: Path, *, session_id: str) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
-               Path(settings_dir) / (question_id + SETTINGS_SUFFIX))
+               Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id)
 
 
 def checked_question(text: str) -> str:
@@ -251,8 +258,8 @@ def settings_document(routes: Sequence[Route]) -> dict:
 def launch_command(ask: Ask, platform: str) -> list[str] | None:
     if not manager.supported(platform):
         return None
-    return ["claude-account", "run", "-p", "--model", MODEL, "--permission-mode", PERMISSION_MODE,
-            "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
+    return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
+            "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
             prompt(ask.question, ask.routes)]
 

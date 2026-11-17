@@ -41,10 +41,11 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifteen_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 15)
-        self.assertEqual(shots.STATES[-5:], ("owner-check", "spend-page", "notices-fold",
-                                             "notice-post-open", "desk-spend"))
+    def test_the_set_is_eighteen_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 18)
+        self.assertEqual(shots.STATES[-8:], ("owner-check", "spend-page", "notices-fold",
+                                             "notice-post-open", "desk-spend", "goal-open",
+                                             "inbox-card", "accounts-panel"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -70,6 +71,18 @@ class ScreenshotFixtureTest(unittest.TestCase):
         code, text = run(lambda path: shots.Shot("tell-box-open", 480, path, 480, 0, 0,
                                                  shots.OPEN_TELL))
         self.assertEqual(code, 0)
+
+    def test_a_shot_with_a_short_control_fails_the_command(self) -> None:
+        out = StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shots, "capture", return_value=[
+                    shots.Shot("live-several", 1440, Path(tmp) / "p.png", 1440,
+                               short=("button.undo 24px",))]), \
+                redirect_stdout(out):
+            code = shots.main(["--out", tmp])
+        self.assertEqual(code, 1)
+        self.assertIn("has a control under 32 px", out.getvalue())
+        self.assertIn("button.undo 24px", out.getvalue())
 
     def test_a_shot_not_taken_from_the_top_fails_the_command(self) -> None:
         def run(shot):
@@ -114,6 +127,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         return self.y
                     if expression == "document.documentElement.scrollWidth":
                         return 480
+                    if expression == shots.SHORT_CONTROLS:
+                        return []
                     return 0
 
                 def screenshot(self, path, full_page):
@@ -253,6 +268,21 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state == "goal-open":
+                    other = shots.build_fixture(Path(tmp) / "other", "tell-box-open", now_s)
+                    again = shots.start_service(other, now_s)
+                    try:
+                        self.assertEqual(
+                            [s["title"] for s in running],
+                            [s["title"] for s in all_sprints(json.loads(again.view_bytes))])
+                    finally:
+                        again.close()
+                elif state == "inbox-card":
+                    self.assertEqual(len(view["inbox"]["open"][0]["questions"][0]["options"]), 2)
+                elif state == "accounts-panel":
+                    self.assertEqual(
+                        sorted(e["profile"] for e in view["capacity"]["profiles"]),
+                        ["work-main", "work-spare"])
                 elif state in ("notices-fold", "notice-post-open"):
                     self.assertEqual(
                         sorted(s["title"] for s in running),
@@ -379,6 +409,18 @@ class ScreenshotReadingTest(unittest.TestCase):
                 '<ul><li class="message"><span class="message-text">You: Approved version 2</span>'
                 '<span class="message-state">sent just now</span></li></ul></div></body>')
         self.assertEqual(self.read_pages([html], shots.JARGON_COUNT), [0])
+
+    def test_the_control_reading_flags_a_control_under_32_px(self) -> None:
+        bodies = ['<button style="height:24px">a</button>',
+                  '<button style="min-height:32px">b</button>',
+                  '<button style="display:none;height:10px">c</button>',
+                  '<input style="height:20px">',
+                  '<button style="height:31.75px;padding:0;border:0">e</button>',
+                  '<details><summary class="more-open btn-quiet" '
+                  'style="display:block;height:24px">f</summary></details>']
+        found = self.read_pages([f"<body>{html}</body>" for html in bodies], shots.SHORT_CONTROLS)
+        self.assertEqual([len(f) for f in found], [1, 0, 0, 1, 1, 1])
+        self.assertEqual(found[5], ["summary.more-open 24px"])
 
     def test_the_tell_reading_flags_an_overlapping_or_narrow_field(self) -> None:
         def layout(*, hint_first=False, field="width:100%"):
