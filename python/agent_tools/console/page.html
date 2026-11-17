@@ -3555,7 +3555,6 @@ function planBusy(item, state) {
   }
   return false;
 }
-// Whether the manager marked this option as needing words.
 function needsWords(question, index) {
   return Array.isArray(question.needs_words_index) && question.needs_words_index.includes(index);
 }
@@ -3576,7 +3575,6 @@ function startQuestion(item, state) {
   if (typed) answer.text = words;
   return begin(item, state, { round: true, body: roundBody(item, answer) });
 }
-// A question's send waits while its answer is pending, and for a pick or words.
 function questionSendOff(item, state) {
   return !choosable(state) || (typeof state.picks[0] !== "number" && draftOf(wordsKey(item)).value.trim() === "");
 }
@@ -4011,7 +4009,6 @@ function keptWordsCard(id, state) {
   card.appendChild(el("p", "q", state.headline || "A question that is no longer open"));
   card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.kept));
   const area = typedArea("kept-words-text field-area", "Your words, not sent", "");
-  // The current draft wins; the submitted text stands when it is empty.
   const edited = draftOf(id + "\nwords").value;
   area.value = edited.trim() === "" ? state.pending.body.text : edited;
   area.readOnly = true;
@@ -4085,11 +4082,9 @@ function noteBox(item, state, box) {
 }
 function wordsBox(item, state, box, card) {
   const area = typedArea("words-text field-area", "Answer in your own words", "Answer in your own words");
-  // Typing re-evaluates the card's one send without a redraw.
   box.appendChild(draftField(area, wordsKey(item), () => {
     if (card.send !== null) card.send.disabled = questionSendOff(item, state);
   }));
-  // Read-only until the pending answer is undone or settled.
   area.disabled = !choosable(state);
   markBusy(area, state.phase === "sending");
 }
