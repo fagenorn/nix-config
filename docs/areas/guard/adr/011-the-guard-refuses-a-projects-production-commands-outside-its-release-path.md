@@ -1,7 +1,7 @@
 # ADR-guard-011 — The guard refuses a project's production commands outside its release path
 
-- **Status:** accepted
-- **Decided in:** #1149
+- **Status:** accepted; amended by ADR-guard-012
+- **Decided in:** #1149, amended in #1192
 
 ## Context
 
@@ -20,6 +20,7 @@ The guard refuses a Bash command that runs a production command a project declar
 - **D7, which checkout.** The checkout is the `origin` slug of the call's working directory, and an unknown slug matches no row. A `cd`, `pushd`, `popd` or `chdir` word anywhere in the command, redirections and substitutions included, makes the guard judge every project that declares the command. The cwd's project is tried first.
 - **D8, the refusal.** The refusal is one line: ``<argv> changes the production of <slug> (production rule <id>), so it runs only through the release profile <profile> with release transaction preview and release transaction run.`` For this repository the argv is `just switch`, the slug `fagenorn/nix-config`, the rule `nix-activate` and the profile `github-release`.
 - **D9, the approved release path.** The approved release path is the `release` profile run through `release transaction preview` and `release transaction run`. The guard has no special case for it. Its arguments, a `--title` included, are inert because a one-word verb counts only at a command position, while an executed substitution or a chained command still counts.
+- **D10, a mention is not a run (#1192).** D5's raw-text readings apply only where the shell would read the text as code. An unparseable command, or a segment that cannot be tokenised, is still read as raw text whole. A segment whose command word is an evaluator or an `env -S`, or a runner holding one, is read as raw text, so shell code, `eval`, `sh -c`, `env -S` and an executed substitution still count. The whole command is read as raw text instead when such a segment may take its text from somewhere the segments do not show: a pipeline anywhere (`echo 'just switch' | { true; sh; }`), a shell with no `-c` (it reads a file or stdin), a `$` or backtick outside single quotes (`cmd='just switch'; eval "$cmd"`), a `$`, backtick or `<` in the shell's own text, a `<`, `{` or `(` outside every quote (a heredoc, a redirected input, a group or a subshell), or a file a segment redirects to that the shell's text names (`echo 'just switch' > f && bash f`). Every other segment is read as a command, so a production command's words in one quoted argument, a comment or an exactly-read heredoc body are a mention and pass, as the lifecycle verbs treat them; a `<<` inside quotes is no heredoc. A quoted word behind a runner counts as shell text only for the runners that run it so (`watch`, `nix-shell`, `flock`, `parallel`, wherever in the run, and the first word after `devenv shell`, which `devenv` splices unescaped into a script); behind any other runner it is the program's argument.
 
 ## Consequences
 
@@ -32,3 +33,5 @@ The guard refuses a Bash command that runs a production command a project declar
 - A one-word command behind a program outside the runner list (`ssh host kubectl apply`) is not seen. Where the guard reads raw text, or behind a runner, a one-word production command's name anywhere refuses, file arguments included (`sh -c 'cat scripts/deploy.sh'`), the same fail-closed reading the lifecycle verbs get.
 - A directory-changing word anywhere widens the judgement: `git commit -m 'cd later' && just switch` is judged against every declaring project.
 - The rewrite route stays open. A session that rewrites the compiled policy can remove a project's production refusals: deleting the row's production member keeps every derived authorization, and deleting the row or breaking the file removes the rest; it still gains no authorization.
+- A production command handed as one quoted word to a program outside the runner list, or behind an argv runner (`timeout 5 ssh host 'just switch'`), is not seen, the same limit as `ssh host kubectl apply`.
+- A production command written to a file by a program other than an output redirection (`cp`, `sed -i`) and run by a later `sh -c 'bash f'` is seen only when a marker above is present; a file the shell's text names that only a redirection wrote is the one file flow the guard follows.

@@ -1,4 +1,4 @@
-"""Claude Code's PreToolUse Bash lifecycle guard.
+"""Claude Code's PreToolUse lifecycle guard for Bash, file edits and MCP tools.
 
 The claude-code module's store wrapper clears NIX_PYTHON* and runs this file
 under `python3 -I` with `--base-policy` naming the store base policy, the only
@@ -12,7 +12,7 @@ Standard library only: it imports nothing from the repository's helper package,
 `agent_tools`.
 
 The decisions behind the rules below are the records in `docs/areas/guard/adr/`
-(ADR-guard-001 to ADR-guard-011), and the compiler that writes the compiled
+(ADR-guard-001 to ADR-guard-012), and the compiler that writes the compiled
 policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
@@ -714,10 +714,19 @@ load, before any lifecycle verb is judged. It reuses the segment and token
 readings of the lifecycle verbs, and reads a leading redirection out of the way
 (`>/dev/null ./scripts/deploy.sh` runs the script) and an ANSI-C quoted word as
 its text (`$'just' switch`). The guard reads the command as raw text when
-it cannot be parsed, a segment cannot be tokenised, a command word is an
-evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`, or the program at a command
-position is in `PRODUCTION_RUNNERS` and a later word of its run is an evaluator or
-`env -S` (`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`); there a verb counts when
+it cannot be parsed or a segment cannot be tokenised, and reads the text of a
+segment as raw text when a command word is an evaluator (`sh`, `bash`, `eval`,
+...) or an `env -S`, or the program at a command position is in
+`PRODUCTION_RUNNERS` and a later word of its run is an evaluator or `env -S`
+(`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`). The whole command is
+read as raw text instead when such a segment may take its text from somewhere the
+segments do not show: a pipeline, a shell with no `-c` (it reads a file or stdin), a
+`$` or backtick outside single quotes, a `$`, backtick or `<` in the shell's own text,
+a `<`, `{` or `(` outside every quote, or a file a segment redirects to that the
+shell's text names (`cmd='just switch'; eval "$cmd"`, `echo 'just switch' | { true;
+sh; }`, `echo 'just switch' > f && bash f`). Any other segment is read as a command
+(issue 1192, ADR-guard-011 D10), so words in one quoted argument, a comment or an
+exactly-read heredoc body beside an evaluator are a mention and pass. In raw text a verb counts when
 its words occur in order in either raw reading, or its words joined by one
 space are a substring of the command or of the command with its quotes and
 backslashes deleted, and nothing is lifted. Otherwise a verb of two or more
@@ -729,10 +738,13 @@ mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts
 only at a command position, or at a later word of a run whose command-position
 program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
 and the other programs that run a later word as a command). A quoted token that
-holds `$(` or a backtick, or whitespace behind a runner (`watch 'just switch'`,
-`nix-shell --run '...'`, `flock f -c '...'`), is also read as raw text alone, with no
-lift, since a
-substitution runs its text. A parsed match is lifted when its run begins with a
+holds `$(` or a backtick, or whitespace behind a runner that runs it as shell text
+(`PRODUCTION_SHELL_RUNNERS`: `watch 'just switch'`, `nix-shell --run '...'`,
+`flock f -c '...'`, `parallel`, wherever in the run: `timeout 5 flock f -c '...'`; and the
+first word after `devenv shell`, which splices it unescaped), is also read as raw text alone, with no
+lift, since a substitution runs its text. A quoted word behind any other runner
+(`timeout 5 echo 'just switch'`, `devenv shell -- git commit -m '...'`) is its
+argument, a mention. A parsed match is lifted when its run begins with a
 read-only verb that properly extends the production verb (`kubectl get pods`
 against `kubectl`, not `just build switch` against `just switch`); raw text
 lifts nothing. The release path, `release transaction preview` and
@@ -764,6 +776,46 @@ file arguments included. A command that mentions a directory-changing word
 anywhere is judged against every declaring project. Rewriting the compiled policy
 can remove a project's production refusals, though it still gains no authorization.
 
+Key files and MCP tools
+-----------------------
+
+The guard also serves the PreToolUse matchers `Edit|Write|MultiEdit|NotebookEdit`
+and `^mcp__` (issue 1150). A file tool names its file in `tool_input.file_path`
+(`tool_input.notebook_path` for NotebookEdit), a non-empty string, else the call is
+refused as invalid hook input. An MCP call's input is not read. The base and the
+detaching checks of the Bash path do not run for these tools.
+
+An MCP call is refused by exact tool name, in any cwd and with none, when a
+project's `production.mcp_tools` lists it: the first declaring project by sorted
+slug names the refusal, and no child process runs. The sentence is
+
+    `<tool>` changes the production of <slug> (production MCP tool), so it runs
+    only through the release profile <release_profile> with release transaction
+    preview and release transaction run.
+
+A write's path is resolved against `cwd` (a relative path with no absolute `cwd` is
+not judged). Three spellings are checked, each in
+the file system's own case: the path as named with `..` collapsed, the path with
+its directories resolved and the final component kept as named, and its full
+realpath (the file the write reaches). Each spelling is judged in its own checkout,
+the git toplevel of its nearest existing ancestor directory, and that checkout's
+`origin` slug names the project; the spelling is taken relative to the deepest
+ancestor that is that checkout's directory. A write is refused when any spelling
+matches. Globs are matched with `fnmatchcase` on the strings unchanged, as the
+contract matches them (`*` crosses `/`, no casefolding), the first glob in declared
+order naming the refusal. Git runs only after a glob matches a component suffix of
+a spelling, and the base policy is read only then, so an ordinary edit starts no
+child process and a bad base policy refuses only a key-file candidate. A repository
+lookup that fails (times out or cannot start) for a candidate refuses; a compiled
+policy that does not load refuses nothing. The sentence is
+
+    `<relative>` is a key file of <slug> (key file glob <glob>), so it changes only
+    through the release profile <release_profile> with release transaction preview
+    and release transaction run.
+
+Known limits: a key file written by a Bash command, a hard link to a key file under
+another name, and an MCP tool reached under another name are not seen.
+
 Guard policy
 ------------
 
@@ -780,7 +832,8 @@ the user state file `~/.agents/state/guard/policy.json`: an object with exactly
 compiled policy's `derived_repositories`, keyed by the exact repository slug,
 `{default_branch, integration_branch, required_checks, evidence}` with an
 optional `production` member (issue 1149: `{changes, read_only, release_profile}`,
-the project's declared production rules as command `{id, argv}` lists), where
+the project's declared production rules as command `{id, argv}` lists, plus, from
+issue 1150, the changing `key_files` globs and `mcp_tools` names), where
 `required_checks` is the sorted list of check names the project's contract
 declares in `bindings.vcs.merge.required_checks`, `[]` when it declares none.
 The row check is the store script `claude-guard-row-check`, which the wrapper
@@ -799,9 +852,10 @@ other, and each member has one trust rule:
     derived_repositories       compiled policy  A candidate row per slug, used
                                                 only after the row check
                                                 confirms it in this invocation.
-    production                 compiled policy  A row's declared production rules,
+    production                 compiled policy  A row's declared production rules
+                                                (commands, key_files, mcp_tools),
                                                 read unconfirmed: they only
-                                                refuse (issue 1149).
+                                                refuse (issues 1149, 1150).
     derivation                 compiled policy  Recorded for the reader; null or
                                                 an object; the guard does not
                                                 interpret it.
@@ -913,12 +967,16 @@ that a row's `required_checks` be a list of distinct non-empty strings, the
 resolver's own rule for the contract member, so a contract that resolves always
 yields a row the guard loads; any other value is a malformed row, and the whole
 compiled policy contributes no row. The same holds for the optional
-`production` member: an object with exactly `changes`, `read_only` and
-`release_profile`, the two lists holding `{id, argv}` objects with a non-empty
+`production` member: an object with `changes`, `read_only` and
+`release_profile` and optionally `key_files` (a list of non-empty strings) and
+`mcp_tools` (a list of `mcp__<server>__<tool>` names), the two lists holding `{id, argv}` objects with a non-empty
 `id` and a non-empty `argv` of non-empty strings, and a non-empty
 `release_profile`; any other value drops the whole file. The compiler writes
-`derivation.schema_version` 4, whose rows may carry `production` (issue 1149);
-this guard reads a schema-3 file as before (`production` is optional). A guard
+`derivation.schema_version` 5, whose `production` also carries `key_files` and
+`mcp_tools` (issue 1150); this guard reads schema 3 and 4 rows as before
+(`production`, `key_files` and `mcp_tools` are each optional). A guard
+from before issue 1150 reads a schema-5 row as malformed and drops the file until
+its session restarts. A guard
 from before issue 1149, in a session started before the switch, reads a row
 carrying `production` as malformed and drops the whole file, so a repository
 that relies on a derived row is refused until that session restarts; a
@@ -953,6 +1011,7 @@ registry, and a look check fixture that runs `look-approval judge` from source a
 import argparse
 from collections import namedtuple
 import errno
+import fnmatch
 import json
 import os
 import re
@@ -974,6 +1033,9 @@ DERIVED_ROW_KEYS = frozenset(
 # A row may also carry the project's declared production rules (issue 1149).
 DERIVED_ROW_OPTIONAL_KEYS = frozenset({"production"})
 PRODUCTION_KEYS = frozenset({"changes", "read_only", "release_profile"})
+# Schema 5 rows also carry the changing key-file globs and MCP tool names (issue 1150).
+PRODUCTION_OPTIONAL_KEYS = frozenset({"key_files", "mcp_tools"})
+MCP_TOOL_NAME = re.compile(r"mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+")
 PRODUCTION_COMMAND_KEYS = frozenset({"id", "argv"})
 # A policy file larger than this is refused unread. Either file is a few kilobytes,
 # so the cap only bounds the read of a file that is not what it claims to be.
@@ -3561,14 +3623,31 @@ def load_base_policy(path):
 def production_problem(production):
     """Why a row's `production` value is malformed, else None.
 
-    An object with exactly PRODUCTION_KEYS: `changes` and `read_only` are lists
+    An object with PRODUCTION_KEYS and optionally PRODUCTION_OPTIONAL_KEYS:
+    `key_files` is a list of non-empty strings and `mcp_tools` a list of
+    `mcp__<server>__<tool>` names; `changes` and `read_only` are lists
     (possibly empty) of objects with exactly PRODUCTION_COMMAND_KEYS, each a
     non-empty `id` and a non-empty `argv` list of non-empty strings, and
     `release_profile` is a non-empty string.
     """
-    if not isinstance(production, dict) or set(production) != PRODUCTION_KEYS:
+    if not isinstance(production, dict) or not (
+        PRODUCTION_KEYS <= set(production) <= PRODUCTION_KEYS | PRODUCTION_OPTIONAL_KEYS
+    ):
         keys = ", ".join(sorted(PRODUCTION_KEYS))
-        return f"must be an object with exactly the keys {keys}"
+        optional = ", ".join(sorted(PRODUCTION_OPTIONAL_KEYS))
+        return f"must be an object with exactly the keys {keys} and optionally {optional}"
+    if "key_files" in production:
+        globs = production["key_files"]
+        if not isinstance(globs, list) or not all(
+            isinstance(glob, str) and glob for glob in globs
+        ):
+            return "key_files must be a list of non-empty strings"
+    if "mcp_tools" in production:
+        names = production["mcp_tools"]
+        if not isinstance(names, list) or not all(
+            isinstance(name, str) and MCP_TOOL_NAME.fullmatch(name) for name in names
+        ):
+            return "mcp_tools must be a list of mcp__<server>__<tool> names"
     for member in ("changes", "read_only"):
         commands = production[member]
         if not isinstance(commands, list):
@@ -3668,6 +3747,9 @@ PRODUCTION_RUNNERS = frozenset({
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
     "devenv", "direnv",
 })
+# The runners that run a quoted word of their own run as shell text (issue 1192 D10).
+PRODUCTION_SHELL_RUNNERS = frozenset({"watch", "nix-shell", "flock", "parallel"})
+# `devenv shell` also runs its first word as shell text; see `devenv_command_words`.
 PRODUCTION_ROUTE = "release transaction preview and release transaction run"
 
 
@@ -3780,7 +3862,15 @@ def ansi_c_unquoted(text):
     as written otherwise. Quotes, backslashes and comments outside a `$'...'` are tracked as
     the segmenter does, so a `$'` inside another quote stays as it is; a `$'` with no closing
     quote is left for the segmenter to refuse."""
+    return "".join(ansi_c_pieces(text)[0])
+
+
+def ansi_c_pieces(text):
+    """`(pieces, guarded)`: the pieces `ansi_c_unquoted` joins, and the indices of those that
+    are a heredoc's delimiter redirection or body, which the shell reads as written and a
+    later rewrite of the text must therefore leave alone."""
     out = []
+    guarded = set()
     pending = []
     quote = None
     index = 0
@@ -3817,8 +3907,11 @@ def ansi_c_unquoted(text):
                 continue
             cursor, delimiter, strip_tabs, expands = read_heredoc_delimiter(text, index)
             if delimiter is None:
+                # The segmenter refuses the same text, and its bodies stay as written.
+                guarded.add(len(out))
                 out.append(text[index:])
                 break
+            guarded.add(len(out))
             out.append(text[index:cursor])
             pending.append((delimiter, strip_tabs, expands))
             index = cursor
@@ -3829,9 +3922,14 @@ def ansi_c_unquoted(text):
             end = skip_heredoc_bodies(text, index, pending)
             pending = []
             if end is None:
+                # The remainder holds bodies the scan could not read: it stays as
+                # written, so the segmenter refuses it as it does the original text
+                # and no earlier body is closed by a rewritten delimiter (issue 1173).
+                guarded.add(len(out))
                 out.append(text[index:])
                 break
             body = text[index:end]
+            guarded.add(len(out))
             if body.endswith("\n"):
                 out.append(body[:-1])
                 out.append("\n")
@@ -3864,7 +3962,7 @@ def ansi_c_unquoted(text):
             quote = character
         out.append(character)
         index += 1
-    return "".join(out)
+    return out, guarded
 
 
 def redirections_unglued(text):
@@ -3878,32 +3976,147 @@ def redirections_unglued(text):
     )
 
 
+def production_text(command):
+    """`command` as the segmenter reads it: ANSI-C words rewritten and redirection operators
+    unglued everywhere except in a heredoc's delimiter and body, so the segmenter ends each
+    body on the same line the shell does (issue 1173)."""
+    pieces, guarded = ansi_c_pieces(command)
+    out = []
+    run = []
+    for position, piece in enumerate(pieces):
+        if position in guarded:
+            out.append(redirections_unglued("".join(run)))
+            run = []
+            out.append(piece)
+        else:
+            run.append(piece)
+    out.append(redirections_unglued("".join(run)))
+    return "".join(out)
+
+
 def joined_continuations(text):
     """`text` with each backslash-newline deleted, as the shell joins the lines."""
     return text.replace("\\\n", "")
 
 
+PIPE_RUNS = frozenset({"|", "|&"})
+INLINE_SHELL_OPTION = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+
+
+def unquoted_readings(segment):
+    """`(bare, live)` for `segment`: its text outside every quote, and outside single quotes,
+    the text the shell may expand. A backslash-escaped pair stays in both, so an escaped quote
+    never opens a quote and an escaped marker still counts."""
+    bare = []
+    live = []
+    quote = None
+    index = 0
+    while index < len(segment):
+        character = segment[index]
+        if quote == "'":
+            quote = None if character == "'" else quote
+        elif character == "\\" and index + 1 < len(segment):
+            if quote is None:
+                bare.append(segment[index:index + 2])
+            live.append(segment[index:index + 2])
+            index += 1
+        elif quote == '"':
+            if character == '"':
+                quote = None
+            else:
+                live.append(character)
+        elif character in "'\"":
+            quote = character
+        else:
+            bare.append(character)
+            live.append(character)
+        index += 1
+    return "".join(bare), "".join(live)
+
+
+def redirect_targets(tokens):
+    """The words an output redirection of `tokens` writes to (`> f`, `>>f`, `2> f`)."""
+    targets = []
+    for index, (value, operator) in enumerate(tokens):
+        match = None if operator else REDIRECTION.fullmatch(value)
+        if match is None or ">" not in value[:len(value) - len(match.group(1))]:
+            continue
+        if match.group(1):
+            targets.append(match.group(1))
+        elif index + 1 < len(tokens) and not tokens[index + 1][1]:
+            targets.append(tokens[index + 1][0])
+    return targets
+
+
+def devenv_command_words(tokens):
+    """The word `devenv shell` splices unescaped into a bash script (`exec {cmd} ...`): the
+    first word after `shell` that is not an option or the `--` separator. Only the arguments
+    after it are passed literally, so a program name beside them stays a mention."""
+    words = [value for value, _ in tokens]
+    if "shell" not in words:
+        return []
+    for value in words[words.index("shell") + 1:]:
+        if not value.startswith("-"):
+            return [value]
+    return []
+
+
 def production_parse(command):
-    """The tokens and command-position flags of each segment of `command`, with the raw
-    text of the segments after it, or None when the guard reads the command as raw text:
-    it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
-    split = split_segments_with_runs(redirections_unglued(ansi_c_unquoted(command)))
+    """`(commands, code)` for `command`, or None when the guard reads the whole command as
+    raw text: it cannot be parsed or tokenised, or a segment that hands text to a shell may
+    take that text from somewhere the segments do not show (issue 1192 D10).
+
+    `commands` is the tokens and command-position flags of each segment read as commands, with
+    the raw text of the segments after it. `code` is the text of the segments that hand text
+    to a shell, which counts as raw text: a command word that is an evaluator or `env -S`, or
+    a runner holding one. The whole command is raw text when a shell is present with any of: a
+    pipeline, a shell that reads a file or stdin (no `-c`, not `eval`), a `$` or backtick
+    outside single quotes (a variable or substitution the shell expands), a `$`, backtick or
+    `<` in the shell's own text, a `<`, `{` or `(` outside every quote (input, a group or a
+    subshell: `echo 'just switch' | { true; sh; }`), or a file one segment redirects to that
+    the shell's text names."""
+    split = split_segments_with_runs(production_text(command))
     if split is None:
         return None
-    segments = split[0]
-    parsed = []
-    for position, segment in enumerate(segments):
+    segments, runs = split
+    read = []
+    for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
             return None
         flags, split_string = production_flags(tokens)
-        if split_string or any(
+        shell = split_string or any(
             flag and program_name(value) in SHELL_EVALUATORS
             for flag, (value, _) in zip(flags, tokens)
-        ) or production_runner_hides_shell(tokens, flags):
+        ) or production_runner_hides_shell(tokens, flags)
+        inline = split_string or any(
+            value == "eval" or (not operator and INLINE_SHELL_OPTION.fullmatch(value))
+            for value, operator in tokens
+        )
+        read.append((tokens, flags, shell, inline))
+    if any(shell for _, _, shell, _ in read):
+        if any(run in PIPE_RUNS for run in runs) or any(
+            shell and not inline for _, _, shell, inline in read
+        ):
             return None
-        parsed.append((tokens, flags, "\n".join(segments[position + 1:])))
-    return parsed
+        code_text = joined_continuations(
+            "\n".join(s for s, (_, _, shell, _) in zip(segments, read) if shell)
+        )
+        code_words = set(raw_words(code_text)) | set(raw_words(code_text, glued=True))
+        for segment, (tokens, _, shell, _) in zip(segments, read):
+            bare, live = unquoted_readings(segment)
+            if (
+                any(c in bare for c in "<{(") or any(c in live for c in "$`")
+                or (shell and any(c in segment for c in "$`<"))
+                or (not shell and any(t in code_words for t in redirect_targets(tokens)))
+            ):
+                return None
+    commands = [
+        (tokens, flags, "\n".join(segments[position + 1:]))
+        for position, (tokens, flags, shell, _) in enumerate(read)
+        if not shell
+    ]
+    return commands, "\n".join(s for s, (_, _, shell, _) in zip(segments, read) if shell)
 
 
 def production_hits(command, rules):
@@ -3927,12 +4140,17 @@ def production_hits(command, rules):
     hits = set()
     parsed = production_parse(command)
     if parsed is None:
+        raw_texts = [raw]
+        commands = []
+    else:
+        commands, code = parsed
+        raw_texts = [joined_continuations(code)] if code else []
+    for text in raw_texts:
         for slug, (changes, _) in verbs.items():
             for index, verb in enumerate(changes):
-                if production_raw_hit(raw, verb):
+                if production_raw_hit(text, verb):
                     hits.add((slug, index))
-        return hits, certain
-    for tokens, flags, later in parsed:
+    for tokens, flags, later in commands:
         later = joined_continuations(later)
         later_words = (raw_words(later), raw_words(later, glued=True))
         for value, operator in tokens:
@@ -3954,13 +4172,24 @@ def production_hits(command, rules):
             cut = end < len(tokens)
             if flagged is not None and runner in PRODUCTION_RUNNERS:
                 # Shell text a runner takes as one word (`watch 'just switch'`,
-                # `nix-shell --run '...'`, `flock f -c '...'`) is read as raw text.
-                for value, _ in tokens[flagged + 1:end]:
-                    if any(character.isspace() for character in value):
-                        for slug, (changes, _) in verbs.items():
-                            for index, verb in enumerate(changes):
-                                if production_raw_hit(value, verb):
-                                    hits.add((slug, index))
+                # `nix-shell --run '...'`, `flock f -c '...'`, `devenv shell 'just switch'`) is
+                # read as raw text, wherever the runner sits in the run (`timeout 5 flock f -c
+                # '...'`); a word an argv runner passes on (`timeout 5 echo 'just switch'`) is a
+                # mention.
+                for j in range(flagged, end):
+                    word = program_name(tokens[j][0])
+                    if word in PRODUCTION_SHELL_RUNNERS:
+                        spoken = [token[0] for token in tokens[j + 1:end]]
+                    elif word == "devenv":
+                        spoken = devenv_command_words(tokens[j + 1:end])
+                    else:
+                        continue
+                    for value in spoken:
+                        if any(character.isspace() for character in value):
+                            for slug, (changes, _) in verbs.items():
+                                for index, verb in enumerate(changes):
+                                    if production_raw_hit(value, verb):
+                                        hits.add((slug, index))
             for i in range(start, end):
                 name = program_name(tokens[i][0])
                 run = [token[0] for token in tokens[i:end]]
@@ -4027,6 +4256,237 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
             if (slug, index) in hits:
                 return production_refusal_text(slug, change, rules[slug]["release_profile"])
     return None
+
+
+FILE_EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path",
+                   "NotebookEdit": "notebook_path"}
+MCP_TOOL_PREFIX = "mcp__"
+
+
+def mcp_refusal_text(tool, slug, release_profile):
+    """The one sentence that refuses a declared production MCP tool (issue 1150)."""
+    return (
+        f"`{shown_value(tool)}` changes the production of {slug} (production MCP tool), so it "
+        f"runs only through the release profile {shown_value(release_profile)} with "
+        f"{PRODUCTION_ROUTE}."
+    )
+
+
+def key_file_refusal_text(relative, slug, glob, release_profile):
+    """The one sentence that refuses a write to a declared key file (issue 1150)."""
+    return (
+        f"`{shown_value(relative)}` is a key file of {slug} (key file glob {shown_value(glob)}), "
+        f"so it changes only through the release profile {shown_value(release_profile)} with "
+        f"{PRODUCTION_ROUTE}."
+    )
+
+
+def mcp_tool_problem(tool_name, rows):
+    """The reason to refuse the MCP tool `tool_name`, or None: the first project, by sorted
+    slug, whose `production.mcp_tools` names it exactly. No child process runs."""
+    for slug in sorted(rows):
+        production = rows[slug].get("production")
+        if production and tool_name in production.get("mcp_tools", []):
+            return mcp_refusal_text(tool_name, slug, production["release_profile"])
+    return None
+
+
+def disk_spelling(path):
+    """`path` with every existing component spelled as the file system spells it, so a case
+    alias on a case-insensitive file system reads as the file it reaches. The glob match
+    itself stays exact. Starts no child process."""
+    parts = [part for part in path.split("/") if part]
+    spelled = "/"
+    for index, name in enumerate(parts):
+        try:
+            found = os.lstat(os.path.join(spelled, name))
+        except OSError:
+            return os.path.join(spelled, *parts[index:])
+        kept = name
+        try:
+            other = name.swapcase()
+            if other != name:
+                alias = os.lstat(os.path.join(spelled, other))
+                identity = (found.st_dev, found.st_ino)
+                if (alias.st_dev, alias.st_ino) == identity:
+                    entries = os.listdir(spelled)
+                    if name not in entries:
+                        for entry in entries:
+                            listed = os.lstat(os.path.join(spelled, entry))
+                            if (listed.st_dev, listed.st_ino) == identity:
+                                kept = entry
+                                break
+        except OSError:
+            kept = name
+        spelled = os.path.join(spelled, kept)
+    return spelled
+
+
+def key_file_spellings(path, cwd):
+    """The spellings of `path` a key-file write is judged by, or None when `path` is relative
+    and `cwd` is not a non-empty absolute string: the path as named, its directories resolved
+    with the final component kept as named, and the file the write reaches."""
+    if not path.startswith("/") and not (
+            isinstance(cwd, str) and cwd.startswith("/")):
+        return None
+    lexical = os.path.normpath(os.path.join(cwd if isinstance(cwd, str) and cwd else "/", path))
+    named = os.path.join(os.path.realpath(os.path.dirname(lexical)), os.path.basename(lexical))
+    target = os.path.realpath(lexical)
+    spellings = []
+    for spelling in (named, target, lexical):
+        spelling = disk_spelling(spelling)
+        if spelling not in spellings:
+            spellings.append(spelling)
+    return spellings
+
+
+def key_file_candidate(spellings, rows):
+    """Whether some declared key file glob matches a component suffix of some spelling."""
+    globs = [glob for row in rows.values() for glob in
+             (row.get("production") or {}).get("key_files", [])]
+    if not globs:
+        return False
+    for spelling in spellings:
+        parts = [part for part in spelling.split("/") if part]
+        for index in range(len(parts)):
+            suffix = "/".join(parts[index:])
+            if any(fnmatch.fnmatchcase(suffix, glob) for glob in globs):
+                return True
+    return False
+
+
+def checkout_of(git_bin, directory, timeout):
+    """The realpath of the checkout `directory` is in, or None when git confirms it is in
+    none. Any other failure of the lookup (a timeout, a git that cannot start, or a nonzero
+    exit that is not git's "not a git repository", as dubious ownership or a malformed
+    config is) raises `RepositoryLookupFailed`: it is no answer, so it is never "outside"."""
+    try:
+        child = subprocess.run(
+            [git_bin, "-C", directory, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=timeout, check=False,
+            env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        raise RepositoryLookupFailed(
+            "timed out" if isinstance(error, subprocess.TimeoutExpired) else "could not start"
+        ) from error
+    top = child.stdout.strip()
+    if child.returncode == 0 and top:
+        return os.path.realpath(top)
+    if child.returncode != 0 and "not a git repository" in child.stderr:
+        return None
+    raise RepositoryLookupFailed(f"failed (exit {child.returncode})")
+
+
+def lookup_directories(spelling):
+    """The directories git is asked about for `spelling`: the nearest existing directory
+    (git follows a symlinked directory to its target), then each lexical ancestor holding a
+    `.git`, so a checkout reached through a symlinked directory inside it is still found."""
+    directory = os.path.dirname(spelling)
+    while not os.path.isdir(directory):
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    found = [directory]
+    ancestor = os.path.dirname(spelling)
+    while True:
+        if os.path.isdir(ancestor) and os.path.lexists(os.path.join(ancestor, ".git")):
+            found.append(ancestor)
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            return found
+        ancestor = parent
+
+
+def checkout_anchor(spelling, top):
+    """The deepest ancestor of `spelling` that is the directory `top`, whatever route names
+    it (a symlinked or case-variant route into the checkout), or None."""
+    try:
+        wanted = os.stat(top)
+    except OSError:
+        return None
+    ancestor = os.path.dirname(spelling)
+    while True:
+        try:
+            found = os.stat(ancestor)
+        except OSError:
+            found = None
+        if found is not None and (found.st_dev, found.st_ino) == (wanted.st_dev, wanted.st_ino):
+            return ancestor
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            return None
+        ancestor = parent
+
+
+def key_file_problem(spellings, rows, git_bin, deadline, child_timeout):
+    """The reason to refuse a write that reaches `spellings`, or None: the first spelling
+    that, relative to its own checkout, matches a declared key file glob of that checkout's
+    origin project. Each child starts only within the deadline."""
+    checkouts = {}
+    slugs = {}
+    for spelling in spellings:
+        for directory in lookup_directories(spelling):
+            try:
+                resolved = os.path.realpath(directory)
+                if resolved not in checkouts:
+                    checkouts[resolved] = checkout_of(
+                        git_bin, directory, bounded_timeout(deadline, child_timeout))
+                top = checkouts[resolved]
+                if top is None:
+                    continue
+                anchor = checkout_anchor(spelling, top)
+                if anchor is None:
+                    continue
+                if top not in slugs:
+                    slugs[top] = detect_repository(
+                        git_bin, top, bounded_timeout(deadline, child_timeout), strict=True)
+            except RepositoryLookupFailed as error:
+                return (f"the repository lookup {error} for a write to "
+                        f"`{shown_value(spelling)}`, which may be a key file of a declared "
+                        "project, so the guard cannot judge it")
+            slug = slugs[top]
+            production = (rows.get(slug) or {}).get("production")
+            if not production:
+                continue
+            relative = spelling[len(anchor):].lstrip("/")
+            for glob in production.get("key_files", []):
+                if fnmatch.fnmatchcase(relative, glob):
+                    return key_file_refusal_text(
+                        relative, slug, glob, production["release_profile"])
+    return None
+
+
+def judge_tool_call(payload, args, started):
+    """The verdict for a file-edit or MCP tool call (issue 1150): an exit status."""
+    tool_name = payload["tool_name"]
+    field = FILE_EDIT_TOOLS.get(tool_name)
+    value = None
+    if field is not None:
+        tool_input = payload.get("tool_input")
+        value = tool_input.get(field) if isinstance(tool_input, dict) else None
+        if not isinstance(value, str) or not value:
+            return block(f"invalid hook input: expected tool_input.{field} to be a non-empty "
+                         "string")
+    rows, _reason = load_compiled_policy(args.policy)
+    if field is None:
+        reason = mcp_tool_problem(tool_name, rows)
+        return block(reason) if reason is not None else 0
+    spellings = key_file_spellings(value, payload.get("cwd"))
+    if spellings is None or not key_file_candidate(spellings, rows):
+        return 0
+    base, reason = load_base_policy(args.base_policy)
+    if base is None:
+        return block(f"invalid policy: {reason}")
+    git_bin = args.git_bin or base.git_bin
+    try:
+        refusal = key_file_problem(
+            spellings, rows, git_bin, started + INVOCATION_DEADLINE_SECONDS,
+            args.child_timeout_seconds)
+    except DeadlineExhausted:
+        return block(DEADLINE_REFUSAL)
+    return block(refusal) if refusal is not None else 0
 
 
 
@@ -5914,8 +6374,12 @@ def main():
 
     if not isinstance(payload, dict):
         return block("invalid hook input: expected a JSON object")
+    tool_name = payload.get("tool_name")
+    if tool_name in FILE_EDIT_TOOLS or (
+            isinstance(tool_name, str) and tool_name.startswith(MCP_TOOL_PREFIX)):
+        return judge_tool_call(payload, args, started)
     tool_input = payload.get("tool_input")
-    if payload.get("tool_name") != "Bash" or not isinstance(tool_input, dict):
+    if tool_name != "Bash" or not isinstance(tool_input, dict):
         return block("invalid hook input: expected a Bash tool call")
     command = tool_input.get("command")
     if not isinstance(command, str):
