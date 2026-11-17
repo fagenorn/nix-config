@@ -284,6 +284,8 @@ class NamedLineTest(unittest.TestCase):
     NAMED = ('EXEMPT = ("docs/archive/", ".claude/", ".agents/artifacts/plans/", '
              '".agents/artifacts/specs/")\n')
     MISSING_ONE = 'EXEMPT = (".claude/", ".agents/artifacts/specs/")\n'
+    COMMENT_ONLY = ('EXEMPT = (".claude/", ".agents/artifacts/specs/")'
+                    '  # .agents/artifacts/plans/\n')
     MOVED_NAMED = ('SKIP = (".claude", ".agents/artifacts/plans", '
                    '".agents/artifacts/specs")\n')
 
@@ -301,6 +303,11 @@ class NamedLineTest(unittest.TestCase):
              for q in self.questions(self.MISSING_ONE)],
             [("path-reference", "tools/check.py:1:12", ["extend", "retain"])])
         self.assertEqual(len(self.questions(EXEMPT)), 1)
+
+    def test_an_addition_named_only_in_a_comment_still_raises_its_question(self):
+        self.assertEqual(
+            [(q["id"], q["subject"]) for q in self.questions(self.COMMENT_ONLY)],
+            [("path-reference", "tools/check.py:1:12")])
 
     def test_a_named_line_is_answered_by_retain_and_changes_nothing(self):
         (occurrence,) = found(self.NAMED)

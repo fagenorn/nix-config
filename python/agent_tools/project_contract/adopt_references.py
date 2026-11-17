@@ -712,9 +712,13 @@ def _shape(text: str, token: Token) -> str | None:
 
 def _line_names(text: str, token: Token, forms: tuple[str, ...]) -> bool:
     """Whether the token's line already holds every one of `forms` as an
-    element of its own, so `extend` would add nothing (#1234)."""
+    element of its own, so `extend` would add nothing (#1234). An element is a
+    quoted token of the `quoted` shape; the same text in a comment or in a
+    longer string is no element."""
     line_start, line_end = _line_bounds(text, token.start, token.end)
-    held = {other.text for other in tokens(text[line_start:line_end])}
+    held = {other.text for other in tokens(text)
+            if line_start <= other.start and other.end <= line_end
+            and _shape(text, other) == "quoted"}
     return all(form in held for form in forms)
 
 
