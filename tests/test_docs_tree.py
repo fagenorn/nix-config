@@ -2177,5 +2177,83 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, fences[0])
 
 
+    def test_the_test_job_proposal_keeps_every_test_and_the_required_check(self):
+        text = (REPO_ROOT / AWT_TIME_DOC).read_text(encoding="utf-8")
+        rows, summary, _members = awt_tables(text)
+        protection = json.loads((REPO_ROOT / ".github/branch-protection.json").read_text(encoding="utf-8"))
+        contexts = [c["context"] for c in protection["required_status_checks"]["checks"]]
+        proposal = land_queue_section(text, "Proposal")
+        alternatives = land_queue_section(text, "Alternatives considered")
+        maxima = ("Slots saving (min)", "Cache saving (min)")
+        tie_order = ("Cache saving (min)", "Order saving (min)", "Slots saving (min)")
+        m = re.search(
+            r"(?m)^\*\*Expected saving per run \((an estimate, not a bound|a maximum, not an estimate)\):\*\* "
+            r"(at most )?(\d+\.\d) min, the median of `([^`]+)`\.",
+            proposal,
+        )
+        best = max(tie_order, key=lambda f: float(summary[f][0]))
+        saving = next((p for p in proposal.split("\n\n") if p.startswith("**Expected saving per run")), "")
+        opening = proposal.split("**What changes.**")[0]
+        self.assertIn("\n## Proposal\n", text)
+        self.assertIn("\n## Alternatives considered\n", text)
+        self.assertGreater(text.index("\n## Proposal\n"), text.index("\n## Reproduce\n"))
+        self.assertIsNotNone(m)
+        self.assertEqual(m[4], best)
+        self.assertEqual(m[3], summary[best][0])
+        self.assertIn(
+            "The pick compares two maxima, `Slots saving (min)` and `Cache saving (min)`, with one estimate,"
+            " `Order saving (min)`: a maximum is the most a change could save, not what it will save.",
+            opening,
+        )
+        if best in maxima:
+            self.assertEqual(m[1], "a maximum, not an estimate")
+            self.assertEqual(m[2], "at most ")
+            if best == "Slots saving (min)":
+                self.assertIn("longest member", saving)
+                self.assertIn("4 vCPUs", saving)
+            else:
+                self.assertIn("restoring the cache takes no time", saving)
+        else:
+            self.assertEqual(m[1], "an estimate, not a bound")
+            self.assertIsNone(m[2])
+            self.assertIn("so it bounds nothing", saving)
+        self.assertEqual(len(contexts), 3)
+        for context in contexts:
+            self.assertIn(context, proposal)
+        for needle in (
+            "`strict`",
+            "`.github/branch-protection.json`",
+            "`.agents/knowledge/rejections/ungated-agent-merges.md`",
+            "This document only proposes it; adopting it is a later issue.",
+            f"Every one of the {rows[-1][9]} suite members still runs",
+        ):
+            self.assertIn(needle, proposal)
+        required = {
+            "Order saving (min)": ("`python/agent_tools/delivery/suite_timings.json`",),
+            "Slots saving (min)": (
+                "`.github/workflows/ci.yaml`",
+                "`SUITE_RUNNER_JOBS`",
+                "`docs/areas/delivery/adr/006-suite-members-run-in-parallel.md`",
+            ),
+            "Cache saving (min)": ("`.github/workflows/ci.yaml`",),
+        }[best]
+        for needle in required:
+            self.assertIn(needle, proposal)
+        bullets = [line for line in alternatives.splitlines() if line.startswith("- **")]
+        for candidate in tie_order:
+            if candidate == best:
+                continue
+            named = [line for line in bullets if f"`{candidate}`" in line]
+            self.assertEqual(len(named), 1, candidate)
+            if candidate in maxima:
+                self.assertIn(f"at most {summary[candidate][0]} min", named[0])
+            else:
+                self.assertIn(f"{summary[candidate][0]} min", named[0])
+                self.assertIn("estimate", named[0])
+        for needle in ("`Start-up (min)`", "larger runner", "ungated-agent-merges.md"):
+            self.assertIn(needle, alternatives)
+        self.assertGreaterEqual(len(re.findall(r"(?m)^- \*\*", alternatives)), 5)
+
+
 if __name__ == "__main__":
     unittest.main()
