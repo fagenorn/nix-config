@@ -50,6 +50,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
+    def test_the_module_contract_counts_the_screens_the_set_names(self) -> None:
+        self.assertIn("`STATES` names the twenty screens", shots.__doc__.replace("\n", " "))
+
     def test_a_shot_with_jargon_or_a_clamped_sentence_fails_the_command(self) -> None:
         def run(shot):
             out = StringIO()
