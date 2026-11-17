@@ -1090,7 +1090,7 @@ listing_failed <sprint_id> <reason>`; the wake is still sent and `ok` is its own
 `_refresh_settings` writes the sprint's settings file again with `manager.write_settings` from the stored
 secret (ADR-console-021), so a sprint started before that decision gets the isolation and permission members;
 the refresh writes the mode `permission.read` chooses for the sprint's project, read again off the lock
-before the write (ADR-console-057), and the row of that attempt (`sprint.nudged`, `notice.nudged` or
+before the write (ADR-console-059), and the row of that attempt (`sprint.nudged`, `notice.nudged` or
 `manager.woken`) carries it as `"permission"`; the write runs under the ingest lock so a withdrawal cannot fall inside it; a file that cannot be written, a
 missing secret and a sprint no longer open are each a failed wake (no wake is sent) with that reason. The full
 listing is read only on the wake routes, never for a relay or when the running listing shows the
@@ -5154,7 +5154,7 @@ class ConsoleService:
         """Write the sprint's manager settings file again before a wake (ADR-console-021); the mode it wrote.
 
         The content is what a launch writes, from the sprint's stored secret and the mode the project's
-        production rules choose now (ADR-console-057), read off the lock. The write runs under the ingest lock,
+        production rules choose now (ADR-console-059), read off the lock. The write runs under the ingest lock,
         as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
         and the write and leave a file holding the secret. `NudgeFailed` when the sprint is no longer open,
         when its secret is missing (the wake is not sent without the isolation and permission members) or when

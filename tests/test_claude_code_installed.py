@@ -114,7 +114,7 @@ class ClaudeSettingsInstalledTest(unittest.TestCase):
     def test_the_owners_default_mode_stays_auto(self):
         self.assertEqual(
             self.settings["permissions"]["defaultMode"], "auto",
-            "the owner's sessions keep auto; a manager's mode lives only in its own settings file (ADR-console-057)",
+            "the owner's sessions keep auto; a manager's mode lives only in its own settings file (ADR-console-059)",
         )
 
 
