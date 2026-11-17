@@ -232,6 +232,17 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertLess(seconds, 12)
 
+    def test_a_relay_cut_during_the_last_wake_gives_the_time_limit_as_the_reason(self):
+        world = WakeProofWorld(self)
+
+        code, report, _, _ = world.run("--time-limit", "14", "--teardown-reserve", "4",
+                                       env={"FAKE_CLIENT_RELAY_DELAY": "5"})
+
+        self.assertEqual(verdicts(report), ["delivered", "not_sent"])
+        self.assertEqual(report["outcome"], "failed")
+        self.assertEqual(report["reason"], bypass_proof.OUT_OF_TIME)
+        self.assertEqual(code, 1)
+
     def test_a_session_the_listing_cannot_name_is_found_in_the_registry(self):
         world = WakeProofWorld(self)
 

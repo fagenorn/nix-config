@@ -1062,7 +1062,7 @@ class _WakeRun:
             else:
                 self._send(row, inbox)
             self.rows.append(row)
-            if number < WAKE_COUNT and self.phase.left() <= 0:
+            if self.phase.left() <= 0:
                 raise OutOfTime()
 
     def _send(self, row, inbox):
