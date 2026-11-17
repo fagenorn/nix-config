@@ -679,7 +679,7 @@ class DocsTreeTest(unittest.TestCase):
         decided = next(
             line for line in (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md")
             .read_text().splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"), decided)
 
     def test_the_desk_spend_figure_decision_is_recorded(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -702,7 +702,7 @@ class DocsTreeTest(unittest.TestCase):
         status = next(line for line in lines if line.startswith("- **Status:**"))
         decided = next(line for line in lines if line.startswith("- **Decided in:**"))
         self.assertTrue(status.endswith("ADR-console-052, ADR-console-056, ADR-console-064"), status)
-        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"), decided)
         self.assertIn("ADR-console-056", desk)
         spend = self.doc("docs/areas/console/adr/052-the-spend-page-is-a-second-read-only-page-of-the-console.md")
         self.assertIn("- **Status:** accepted; amended by ADR-console-056", spend)
@@ -746,7 +746,7 @@ class DocsTreeTest(unittest.TestCase):
             "ADR-console-064, ADR-console-069")
         desk = adr_path + "002-the-desk-page-design-rules.md"
         self.assertTrue(head(desk, "- **Status:**").endswith("ADR-console-056, ADR-console-064"))
-        self.assertTrue(head(desk, "- **Decided in:**").endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226"))
+        self.assertTrue(head(desk, "- **Decided in:**").endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"))
         self.assertIn(
             "A manager that failed to start is a card of its own like a stall card: its headline, "
             "its reason in plain words, \"Retry\" as its primary and \"Drop the sprint\" "
@@ -1114,7 +1114,7 @@ class DocsTreeTest(unittest.TestCase):
         adr002 = (adr_dir / "002-the-desk-page-design-rules.md").read_text()
         decided = next(row for row in adr002.splitlines()
                        if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1179, #1182, #1226"))
+        self.assertTrue(decided.endswith("#1179, #1182, #1226, #1214"))
         self.assertIn("main column", " ".join(adr002.split()))
         self.assertIn("What it read and ran", adr002)
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text()
@@ -1930,7 +1930,7 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1137, #1177, #1178, #1179, #1182, #1226"), decided)
+        self.assertTrue(decided.endswith("#1137, #1177, #1178, #1179, #1182, #1226, #1214"), decided)
 
     def test_the_notices_fold_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
@@ -1938,7 +1938,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177, #1178, #1179, #1182, #1226"))
+        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"))
         self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
         self.assertIn('"Hand-off for you, from <title>"', adr)
         self.assertIn("its paths in the code style", adr)

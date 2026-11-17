@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twenty-five screens the sprint block, the finished list, the message life, the
+- `STATES` names the twenty-seven screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -20,7 +20,10 @@ Contract:
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show; `failed-start` is a sprint whose first launch was refused, with its
   card carrying the reason and the Retry and Drop the sprint buttons; `goal-open` is the sprint block of `tell-box-open` with the top
-  bar's goal field focused so its box is open; `inbox-card` is `owner/web`'s question card with
+  bar's goal field focused so its box is open; `goal-near` is `goal-open` with 1900
+  characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
+  typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
+  `inbox-card` is `owner/web`'s question card with
   two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
@@ -48,7 +51,7 @@ Contract:
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 50 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 54 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -122,10 +125,13 @@ from .console_test_support import hook_body, write_registry
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
-          "notice-post-open", "desk-spend", "failed-start", "goal-open", "inbox-card", "accounts-panel",
-          "ask-box", "questions-closed", "questions-open", "ask-goal", "question-read")
+          "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
+          "inbox-card", "accounts-panel", "ask-box", "questions-closed", "questions-open",
+          "ask-goal", "question-read")
 WIDTHS = (1440, 480)
 HEIGHT = 900
+GOAL_NEAR_CHARS = 1900
+GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
@@ -413,7 +419,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
-    elif state in ("tell-box-open", "goal-open"):
+    elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
@@ -858,9 +864,14 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.click('details[data-key^="notices:"] > summary')
             if state == "notice-post-open" and page.query_selector("button.notice-open"):
                 page.click("button.notice-open")
-        if state == "goal-open":
+        if state in ("goal-open", "goal-near", "goal-over"):
             page.focus("textarea.goal-text")
             page.wait_for_selector(".goal-box")
+            if state == "goal-near":
+                page.fill("textarea.goal-text", "x" * GOAL_NEAR_CHARS)
+            if state == "goal-over":
+                page.fill("textarea.goal-text", "x" * GOAL_OVER_CHARS)
+                page.wait_for_selector(".goal-hint:not(:empty)")
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")

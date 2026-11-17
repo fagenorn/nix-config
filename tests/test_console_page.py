@@ -4706,9 +4706,7 @@ class PageGoalTest(unittest.TestCase):
             {"click": "goal-send"}, {"snapshot": True},
         ])
         self.assertEqual(goal_fail(nothing), ["Could not send: choose a project"])
-        self.assertEqual(
-            goal_fail(long), ["Could not send: a goal is at most 2000 characters"]
-        )
+        self.assertEqual(goal_fail(long), [])  # over 2000, Send is unavailable and says nothing red (#1214)
         self.assertEqual(goals(nothing), [])
         self.assertEqual(goals(long), [])
 
