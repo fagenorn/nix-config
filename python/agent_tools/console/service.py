@@ -34,6 +34,7 @@ stream `Content-Length`):
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
     POST /api/register-cancel 204, a JSON body, the page cancels a registration that was not applied yet (below)
+    POST /api/project-question 204, a JSON body, the page asks a read-only question about a project (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -83,7 +84,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice` and `POST /api/owner-notice-withdraw`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw` and `POST /api/project-question`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -1282,6 +1283,34 @@ it. On any failure after the bind, what was opened is closed and the exception
 re-raised. `start()` serves on a daemon thread named `console-http` and starts the spend thread; `close()`
 sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
+
+`POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
+`question` (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
+`project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
+one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
+exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
+success is an empty `204`, sent once the question is accepted and its job handed to
+`project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
+once it is answered. `ask_project_question(project_id, text)` admits a question under the ingest
+lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
+yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
+question's own checks, and no account the console would start a session under
+(`_session_choice`); a refusal appends nothing and counts nothing. An accepted question appends one
+`project_question.asked` row (`question_id`, `question`, `profile`) and counts itself open in that
+same section. Its job reads the project's read-only routes (a contract that cannot be resolved is a
+`failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
+project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
+chosen profile's client-run count (`_client_run`), so an account removal waits for a running
+question and a question whose profile is being removed or already removed fails without starting a
+session (`claude-account` would otherwise recreate a removed profile directory). A job that finds
+the stop flag set answers `failed` without a session. Every accepted question records exactly one
+`project_question.answered` row (`question_id`, `outcome`, `answer` or `reason`) and releases its
+count on every path; an outcome other than `answered` is also one stderr line `console:
+project_question_unanswered <question_id> <reason>`, and a row that cannot be appended is one
+`console: project_question_unrecorded <question_id> <Type>: <message>`. `close()` waits, after
+the approval workers and before the server and the log close, until no accepted question is
+unanswered and then joins the question workers; the stop flag, set first, also cancels a running
+session. Nothing in this path reads the tracker or the forge.
 """
 
 import contextlib
@@ -1306,12 +1335,13 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    account_add, account_remove, activation, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    project_question, account_add, account_remove, activation, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, manager, movement, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
+    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
@@ -1387,13 +1417,15 @@ PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
 REGISTER_CANCEL_PATH = "/api/register-cancel"
+PROJECT_QUESTION_PATH = "/api/project-question"
+PROJECT_QUESTION_THREAD = "console-project-question"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH})
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1410,6 +1442,7 @@ SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
+MAX_PROJECT_QUESTION_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
 MAX_BRIEF_BYTES = 32768
 MAX_REPORT_BYTES = 65536
@@ -1729,6 +1762,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
             self._refuse(500, f"{name} failed")
+            return False
+        return True
+
+    def _project_question_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out a project question; False when it was refused."""
+        body = self._json_body(MAX_PROJECT_QUESTION_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, question = project_question.parse_request(body)
+        except ValueError:
+            self._refuse(400, "bad question")
+            return False
+        try:
+            console.ask_project_question(project_id, question)
+        except project_question.Refused as error:
+            print(f"console: project_question_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: project_question_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "question failed")
             return False
         return True
 
@@ -2620,6 +2675,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._goal_request(console, route):
                 return
+        elif route == PROJECT_QUESTION_PATH:
+            self.close_connection = True
+            if not self._project_question_request(console):
+                return
         elif route in (APPROVE_PATH, REPLY_PATH):
             self.close_connection = True
             if not self._decision_request(console, route):
@@ -2883,6 +2942,10 @@ class ConsoleService:
                  trust_at_start: bool = False,
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
+                 project_asker: Callable[[project_question.Ask, threading.Event | None],
+                                         project_question.Outcome] | None = None,
+                 project_routes: Callable[[str], tuple[project_question.Route, ...]] = project_question.routes_of,
+                 project_question_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None,
                  screenshot_dirs: Iterable[Path] = ()):
@@ -2926,6 +2989,13 @@ class ConsoleService:
         self._probe_sessions: OrderedDict[str, str] = OrderedDict()
         self._probe_live: dict[str, str] = {}
         self._probe_workers: list[threading.Thread] = []
+        self._project_asker = project_asker
+        self._project_routes = project_routes
+        self._project_question_dispatch = (
+            self._on_project_question_thread if project_question_dispatch is None
+            else project_question_dispatch)
+        self._project_questions_open = 0  # accepted questions whose answered row is not yet written
+        self._project_question_workers: list[threading.Thread] = []
         self._probe_thread: threading.Thread | None = None
         self._nudger = nudger
         self._full_listing = full_listing
@@ -3027,6 +3097,7 @@ class ConsoleService:
         self._storing = threading.Lock()
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
+        self._project_questions_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
         self._published = threading.Condition()
         self._view = b""
@@ -3381,6 +3452,122 @@ class ConsoleService:
             self._approval_workers = [w for w in self._approval_workers if w.is_alive()]
             self._approval_workers.append(worker)
         worker.start()
+
+    def _on_project_question_thread(self, job: Callable[[], None]) -> None:
+        """Run a question's job on a tracked daemon thread; `close` joins every one it started."""
+        worker = threading.Thread(target=job, name=PROJECT_QUESTION_THREAD, daemon=True)
+        with self._ingest:
+            # Started inside the lock and listed only once started: the list never holds an
+            # unstarted thread, which `close` could not join (and a failed start lists nothing).
+            self._project_question_workers = [
+                w for w in self._project_question_workers if w.is_alive()]
+            worker.start()
+            self._project_question_workers.append(worker)
+
+    def ask_project_question(self, project_id: str, text: str) -> str:
+        """Accept one question about a registered project and return its id (#1176, ADR-console-058).
+
+        Admission, the asked row and the open count are one section under the ingest lock; the
+        session runs on a job handed to `project_question_dispatch` outside it. Refusals are
+        `project_question.Refused` and append and count nothing.
+        """
+        with self._ingest:
+            if self._project_asker is None:
+                raise project_question.Refused(project_question.UNAVAILABLE_TEXT)
+            if self._stop.is_set():
+                raise project_question.Refused(project_question.STOPPING)
+            if project_id not in self._states:
+                raise project_question.Refused(project_question.UNREGISTERED)
+            text = project_question.checked_question(text)
+            profile = self._session_choice(self._read_profiles())
+            if profile is None:
+                raise project_question.Refused(project_question.NO_PROFILE)
+            root = self._states[project_id].root
+            question_id = project_question.new_question_id()
+            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, {
+                "question_id": question_id, "question": text, "profile": profile})])
+            self._apply(appended)
+            self._project_questions_open += 1
+        try:
+            self._project_question_dispatch(
+                lambda: self._run_project_question(question_id, project_id, root, text, profile))
+        except BaseException as error:
+            self._record_project_answer(question_id, project_id, project_question.Outcome(
+                project_question.FAILED, reason=f"{type(error).__name__}: {error}"))
+            raise
+        return question_id
+
+    def _run_project_question(self, question_id: str, project_id: str, root: str, text: str,
+                              profile: str) -> None:
+        """The job of one accepted question: stop check, routes, the session, then the one answer."""
+        outcome = None
+        try:
+            if self._stop.is_set():
+                outcome = project_question.Outcome(
+                    project_question.FAILED, reason=project_question.STOPPED_TEXT)
+            else:
+                try:
+                    routes = self._project_routes(root)
+                except Exception as error:
+                    print(f"console: project_question_contract_failed {question_id} "
+                          f"{type(error).__name__}: {error}", file=sys.stderr)
+                    outcome = project_question.Outcome(
+                        project_question.FAILED,
+                        reason=project_question.CONTRACT_UNREADABLE.format(
+                            detail=f"{type(error).__name__}: {error}"))
+                else:
+                    try:
+                        with self._client_run(profile):
+                            if profile not in self._read_profiles():
+                                outcome = project_question.Outcome(
+                                    project_question.FAILED,
+                                    reason=project_question.PROFILE_GONE.format(profile=profile))
+                            else:
+                                ask = project_question.new_ask(
+                                    question_id, project_id, root, text, profile, routes,
+                                    Path(self._store).with_name(project_question.SETTINGS_DIR))
+                                try:
+                                    outcome = self._project_asker(ask, self._stop)
+                                except Exception as error:
+                                    outcome = project_question.Outcome(
+                                        project_question.FAILED,
+                                        reason=f"{type(error).__name__}: {error}")
+                    except _ProfileRemoving as error:
+                        outcome = project_question.Outcome(project_question.FAILED, reason=str(error))
+        except Exception as error:
+            # Never raised on: a dispatch that runs the job inline would answer the question twice.
+            traceback.print_exc()
+            outcome = project_question.Outcome(
+                project_question.FAILED, reason=f"{type(error).__name__}: {error}")
+        finally:
+            if outcome is None:  # interrupted: the question is still answered once
+                outcome = project_question.Outcome(
+                    project_question.FAILED, reason=project_question.STOPPED_TEXT)
+            self._record_project_answer(question_id, project_id, outcome)
+
+    def _record_project_answer(self, question_id: str, project_id: str,
+                               outcome: "project_question.Outcome") -> None:
+        """Append the one answered row of an accepted question and release its open count."""
+        try:
+            if outcome.outcome != project_question.ANSWERED:
+                print(f"console: project_question_unanswered {question_id} {outcome.reason}",
+                      file=sys.stderr)
+            payload = {"question_id": question_id, "outcome": outcome.outcome}
+            if outcome.outcome == project_question.ANSWERED:
+                payload["answer"] = outcome.answer
+            else:
+                payload["reason"] = outcome.reason
+            try:
+                with self._ingest:
+                    self._apply(self.log.append(
+                        [(PROJECT_QUESTION_ANSWERED, project_id, payload)]))
+            except Exception as error:
+                print(f"console: project_question_unrecorded {question_id} "
+                      f"{type(error).__name__}: {error}", file=sys.stderr)
+        finally:
+            with self._ingest:
+                self._project_questions_open -= 1
+                self._project_questions_done.notify_all()
 
     def _probe_profile(self, session_id: str) -> str | None:
         """Under the ingest lock: the profile a pending, running or remembered probe session probed."""
@@ -6680,6 +6867,12 @@ class ConsoleService:
             worker.join()
         with self._ingest:
             workers = list(self._approval_workers)
+        for worker in workers:
+            worker.join()
+        with self._ingest:
+            while self._project_questions_open:
+                self._project_questions_done.wait()
+            workers = list(self._project_question_workers)
         for worker in workers:
             worker.join()
         if self._thread is not None:
