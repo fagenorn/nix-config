@@ -40,14 +40,17 @@ this order:
    `--format` only `=`-attached (git reads their value from the next word, even a dash word, so
    `git tag --format -l v9` creates the tag `v9`). A gh read (`_gh_read`)
    needs a repository: exactly `gh`, then a group of `GH_READ_GROUPS` and a verb of
-   `GH_READ_VERBS`, then the word right after the verb pins the project's repository, either
-   `--repo=<repo>` or `--repo <repo>` or `-R <repo>`. The position matters because gh parses its
-   flags with pflag: a string flag takes the next word as its value and `--` ends flag parsing, so
-   a `--repo` word further on could be a value or a positional while the repository stays whatever
-   `GH_REPO` or the default says; the word right after the verb is neither. Every later word is
-   refused when it is `--`, starts with `--repo`, is or starts with `--web`, is a single-dash
-   cluster holding `w` or `R`, or contains `/` (another repository, a URL or a path). With no
-   repository (`repo` is None) no gh read is admitted.
+   `GH_READ_VERBS`, then the repository selection, either `--repo=<repo>` or `--repo <repo>` or
+   `-R <repo>`, right after the verb or, for `view` only, right after one positional (the tag,
+   number or run id: `gh release view v1.2.0 --repo <repo>`). The position matters because gh
+   parses its flags with pflag: a string flag takes the next word as its value and `--` ends flag
+   parsing, so a `--repo` word further on could be a value or a positional while the repository
+   stays whatever `GH_REPO` or the default says; the word right after the verb or after that one
+   positional is neither. A `view` takes at most one positional in all (`_gh_positionals`: a word
+   that is not a flag and not the value of a `GH_VIEW_VALUE_FLAGS` flag), before or after the
+   selection. Every other word is refused when it is `--`, starts with `--repo`, is or starts with
+   `--web`, is a single-dash cluster holding `w` or `R`, or contains `/` (another repository, a URL
+   or a path). With no repository (`repo` is None) no gh read is admitted.
 9. A command whose first word, by basename, is `git` or `gh` and was not admitted: `reads_denied`.
 10. Anything else is `NO_COMMANDS` when `allowed` is empty and `COMMAND_DENIED` otherwise.
 
@@ -81,6 +84,7 @@ PLAIN_COMMAND = re.compile(r" *[A-Za-z0-9_./:@%+=,-]+(?: +[A-Za-z0-9_./:@%+=,-]+
 GIT_READS: tuple[str, ...] = ("log", "show", "diff", "status", "blame", "ls-files", "tag")
 GH_READ_GROUPS: tuple[str, ...] = ("pr", "release", "issue", "run")
 GH_READ_VERBS: tuple[str, ...] = ("list", "view")
+GH_VIEW_VALUE_FLAGS: tuple[str, ...] = ("--json", "--jq", "-q", "--template", "-t", "--job", "-j")
 GIT_DENIED_PREFIXES: tuple[str, ...] = ("--ou", "--ext")
 TAG_VALUE_OPTIONS: tuple[str, ...] = ("--sort", "--format")
 TAG_LIST_OPTIONS: tuple[str, ...] = (
@@ -117,8 +121,9 @@ READS_DENIED = (
     "{gh}, each alone with no pipe, redirect, ;, &&, subshell or substitution."
 )
 GH_WITH_REPO = (
-    "as pr, release, issue or run list or view with --repo {repo} right after list or view, "
-    "before any other word, and no --, no --web and no other repository"
+    "as pr, release, issue or run list or view with --repo {repo} right after list or view "
+    "(a view may name its tag or number just before --repo or just after it, never both), and no "
+    "--, no --web and no other repository"
 )
 GH_WITHOUT_REPO = "never: this project's contract names no GitHub repository"
 MALFORMED = "The question session's hook could not read this tool call, so it was refused."
@@ -207,15 +212,45 @@ def _gh_later_word_refused(word: str) -> bool:
     return "/" in word
 
 
+def _gh_repo_pair(words: Sequence[str], start: int, repo: str) -> int | None:
+    """The index after the repository selection at `words[start:]`, or None when it is not one."""
+    if start >= len(words):
+        return None
+    if words[start] == "--repo=" + repo:
+        return start + 1
+    if words[start] in ("--repo", "-R") and start + 1 < len(words) and words[start + 1] == repo:
+        return start + 2
+    return None
+
+
+def _gh_positionals(words: Sequence[str]) -> int:
+    """How many words are positionals: not a flag and not the value of a value-taking view flag."""
+    count, skip = 0, False
+    for word in words:
+        if skip:
+            skip = False
+        elif word.startswith("-"):
+            skip = "=" not in word and word in GH_VIEW_VALUE_FLAGS
+        else:
+            count += 1
+    return count
+
+
 def _gh_read(words: Sequence[str], repo: str | None) -> bool:
     if repo is None or len(words) < 4 or words[0] != "gh":
         return False
     if words[1] not in GH_READ_GROUPS or words[2] not in GH_READ_VERBS:
         return False
-    if words[3] == "--repo=" + repo:
-        rest = words[4:]
-    elif words[3] in ("--repo", "-R") and len(words) >= 5 and words[4] == repo:
-        rest = words[5:]
+    end = _gh_repo_pair(words, 3, repo)
+    if end is not None:
+        rest = words[end:]
+        if words[2] == "view" and _gh_positionals(rest) > 1:
+            return False
+    elif words[2] == "view" and not words[3].startswith("-"):
+        end = _gh_repo_pair(words, 4, repo)
+        if end is None or _gh_positionals(words[end:]) > 0:
+            return False
+        rest = (words[3], *words[end:])
     else:
         return False
     return not any(_gh_later_word_refused(word) for word in rest)

@@ -161,6 +161,10 @@ class HookTableTest(unittest.TestCase):
             "gh pr list --repo=owner/p01",
             "gh pr view --repo owner/p01 12 --comments",
             "gh pr view -R owner/p01 12",
+            "gh release view v1.2.0 --repo owner/p01", "gh pr view 12 --repo owner/p01",
+            "gh issue view 7 -R owner/p01", "gh run view 123 --repo=owner/p01 --log-failed",
+            "gh release view v1.2.0 --repo owner/p01 --json body", "gh pr view 12 --repo owner/p01 --comments",
+            "gh pr view --repo owner/p01 12 --json title", "gh release list --repo owner/p01 --limit 100",
             "gh release list --repo owner/p01",
             "gh release view --repo owner/p01 v1.2.0",
             "gh issue list --repo owner/p01 --state closed",
@@ -201,8 +205,22 @@ class HookTableTest(unittest.TestCase):
             "gh pr list --repo owner/p01 --head feature/x",
             "gh pr list --search --repo=owner/p01",
             "gh release view -- --repo=owner/p01",
-            "gh pr view 12 --repo owner/p01",
             "gh release view --repo owner/p01 -- v1",
+            "gh release view v1 -- --repo owner/p01", "gh release view v1 v2 --repo owner/p01",
+            "gh release view v1 --repo owner/p01 v2", "gh release view --repo owner/p01 v1 v2",
+            "gh pr view 12 --repo owner/p01 13", "gh pr view 12 --repo other/repo",
+            "gh pr view 12 --repo owner/p01x", "gh pr view 12 --repo", "gh pr view 12",
+            "gh pr view 12 --state open", "gh issue view 7 --repo owner/p01 --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 --repo other/repo", "gh pr view 12 -R owner/p01 -R other/repo",
+            "gh pr view 12/x --repo owner/p01", "gh pr view https://github.com/other/repo/pull/1 --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 --web", "gh pr view 12 --repo owner/p01 -w",
+            "gh pr list 12 --repo owner/p01", "gh pr view -- 12 --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 | cat", "gh pr view 12 --repo owner/p01; rm x",
+            "gh pr view 12 --repo owner/p01 && ls", "gh pr view 12 --repo owner/p01 > out",
+            "gh pr view 12 --repo owner/p01\nls", "gh pr view $(echo 12) --repo owner/p01",
+            "gh pr view 12 --repo owner/p01 `ls`",
+            "gh pr view 12 --repo owner/p01 &", "gh pr view 12 --repo owner/p01 || ls",
+            "gh pr view 12 --repo owner/p01 --jq .[0]",
             "gh pr list --repo owner/p01 --repo owner",
             "gh pr list --repo owner/p01 -R owner",
             "gh pr view --repo owner/p01 1 -cRowner",
@@ -221,7 +239,7 @@ class HookTableTest(unittest.TestCase):
             "gh pr list --repo owner/p01 | cat", "gh pr list --repo owner/p01 --jq .[0]",
         ):
             rows.append((command, REPO, reads))
-        for command in ("(git log)", "$(git log)", "`git log`", "FOO=1 git log"):
+        for command in ("(git log)", "(gh pr view 12 --repo owner/p01)", "$(git log)", "`git log`", "FOO=1 git log"):
             rows.append((command, REPO, undeclared))
         for command in ("gh pr merge 1 --repo owner/p01", "gh release create v1 --repo owner/p01",
                         "gh pr create --repo owner/p01 --title t", "git push"):
@@ -955,6 +973,10 @@ class AnswerRulesTest(unittest.TestCase):
             "production read, not from its decision records alone.",
             "If a command you run fails, say plainly in the answer which command failed and what "
             "it printed.",
+            "When the question covers a time window, count every release, pull request or deploy "
+            "dated inside it from the dates you read: raise the list limit (for example --limit) "
+            "until the oldest item you read is older than the window, never stop at a first page "
+            "or an arbitrary limit, and say in the answer where the count comes from.",
             'Format only with **bold**, list lines starting with "- ", `inline code` and fenced '
             "code blocks; use no headings, tables, links or HTML.",
         )
@@ -967,6 +989,8 @@ class AnswerRulesTest(unittest.TestCase):
         text = project_question.prompt("q", (), repo="owner/p01")
         examples = ("git log --since=7.days.ago --oneline", "git tag -l",
                     "gh pr list --repo owner/p01 --state merged --limit 30",
+                    "gh release list --repo owner/p01 --limit 100",
+                    "gh release view v1.2.0 --repo owner/p01",
                     "gh release list --repo owner/p01")
         for example in examples:
             self.assertIn(example, text)
