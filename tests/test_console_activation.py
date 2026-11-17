@@ -1047,10 +1047,9 @@ class ActivationRunTest(Trees):
             "console_activation": "nix-activate"})
         self.assertEqual(activation_run.activation_command(str(root)), (["just", "switch"], "."))
 
-    def test_this_repositorys_own_contract_names_no_console_activation_until_issue_1206(self):
+    def test_this_repositorys_own_contract_names_nix_activate_as_its_console_activation(self):
         self.manifest_home()
-        with self.assertRaises(Refused):
-            activation_run.activation_command(str(REPO_ROOT))
+        self.assertEqual(activation_run.activation_command(str(REPO_ROOT)), (["just", "switch"], "."))
 
     def test_a_contract_without_console_activation_names_no_command(self):
         self.manifest_home()
