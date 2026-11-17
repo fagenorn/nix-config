@@ -21,7 +21,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name != "holding"
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -95,8 +95,10 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_three_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 23)
+    def test_the_set_is_twenty_four_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 24)
+        self.assertEqual(shots.STATES.index("manager-cannot-hear"),
+                         shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES[-4:], ("ask-box", "questions-closed", "questions-open", "ask-goal"))
@@ -444,6 +446,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual([s["ball"] for s in running], ["nobody"])
                     self.assertEqual(running[0]["now_text"],
                                      "last seen building 1 of 2: the upload form")
+                elif state == "manager-cannot-hear":
+                    self.assertEqual([s["ball"] for s in running], ["owner"])
+                    self.assertEqual(
+                        running[0]["now_text"],
+                        "the manager cannot hear the console: bring it back or drop the sprint")
                 elif state == "tell-box-open":
                     self.assertEqual(len(running), 1)
                     self.assertEqual(running[0]["messages"], [])
