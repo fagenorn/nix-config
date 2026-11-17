@@ -1,0 +1,32 @@
+[
+  {
+    "ref": "refs/agent-locks/land/main",
+    "node_id": "REF_x",
+    "url": "https://api.github.com/x",
+    "object": {
+      "sha": "4040404040404040404040404040404040404040",
+      "type": "commit",
+      "url": "https://api.github.com/x"
+    }
+  },
+  {
+    "ref": "refs/agent-locks/land-beat/main",
+    "node_id": "REF_x",
+    "url": "https://api.github.com/x",
+    "object": {
+      "sha": "4141414141414141414141414141414141414141",
+      "type": "commit",
+      "url": "https://api.github.com/x"
+    }
+  },
+  {
+    "ref": "refs/agent-locks/land-wait/main/1794866567-41-1794866817",
+    "node_id": "REF_x",
+    "url": "https://api.github.com/x",
+    "object": {
+      "sha": "4141414141414141414141414141414141414141",
+      "type": "commit",
+      "url": "https://api.github.com/x"
+    }
+  }
+]

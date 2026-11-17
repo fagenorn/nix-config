@@ -10,7 +10,8 @@ import threading
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import capacity, manager, nudge, revive, service, sessions, sprints
+from agent_tools.console import (capacity, manager, nudge, permission, revive, service, sessions,
+                                 sprints)
 
 from . import console_test_support as support
 from .test_console_messages import GOAL_TEXT, PARTS
@@ -22,6 +23,9 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 T0 = 1_800_000_000.0
 FAR = 1_900_000_000
 GOAL = GOAL_TEXT
+LAUNCH_MODE = permission.Permission(permission.BYPASS, permission.NO_PRODUCTION)
+WAKE_MODE = permission.Permission(permission.AUTO, permission.NOT_ENFORCED)
+UNRESOLVED_MODE = {"mode": "auto", "reason": permission.UNRESOLVED}  # the real reader over /srv/p01
 
 
 class ReviveCase(Case):
@@ -149,7 +153,8 @@ class ReviveServiceTest(ReviveCase):
             sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
         self.assertEqual(nudge.nudge_command(self.revives()[0], "linux")[-1], nudge.RESTART_TEXT)
         self.assertEqual(self.rows("manager.woken"), [
-            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True}])
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True,
+             "permission": UNRESOLVED_MODE}])
         self.tick(svc, 121)
         self.tick(svc, 239)
         self.assertEqual(len(self.revives()), 1)
@@ -184,7 +189,8 @@ class ReviveServiceTest(ReviveCase):
         self.assertNotIn("--name", argv)
         self.assertNotIn("--settings", argv)
         self.assertEqual(self.rows("manager.woken"), [
-            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True}])
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True,
+             "permission": UNRESOLVED_MODE}])
         self.assertEqual(self.full_calls, [("work", "/srv/p01", False)])
 
     def test_a_wake_of_a_session_absent_from_the_full_listing_carries_the_sprints_name_and_settings(self):
@@ -196,7 +202,8 @@ class ReviveServiceTest(ReviveCase):
             nudge.nudge_command(self.revives()[0], "linux")[-6:],
             ["--bg", "--name", self.name(sid), "--settings", path, nudge.RESTART_TEXT])
         self.assertEqual(self.rows("manager.woken"), [
-            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True}])
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True,
+             "permission": UNRESOLVED_MODE}])
 
     def env_only(self, svc, sid):
         """A settings file as an earlier version wrote it: the environment and nothing else."""
@@ -217,17 +224,24 @@ class ReviveServiceTest(ReviveCase):
             written.append(path.read_text())
             self.nudger(sent)
 
-        svc = self.begin(full_listing=full, nudger=nudger)
+        modes = [LAUNCH_MODE]
+        svc = self.begin(full_listing=full, nudger=nudger,
+                         permission_reader=lambda project_id, root: modes[-1])
         sid = self.on_track(svc)
         path = self.env_only(svc, sid)
         self.tick(svc, 0)
         self.gone(svc)
+        modes.append(WAKE_MODE)
         self.tick(svc, 120)
         launch = manager.new_launch(
             sid, "owner/p01", GOAL, "/srv/p01", "work", self.secret(sid), svc._sprint_secrets)
         self.assertEqual(len(self.revives()), 1)
-        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env))])
+        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env, WAKE_MODE))])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        (woken,) = self.rows("manager.woken")
+        self.assertEqual(woken["permission"], {
+            "mode": "auto",
+            "reason": "production rules declared but not in the guard's policy"})
 
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
         self.assert_wake_rewrites_settings(frozenset({"s-1"}))
@@ -279,7 +293,7 @@ class ReviveServiceTest(ReviveCase):
                     sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
                 self.assertEqual(self.rows("manager.woken"), [
                     {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True,
-                     "listing_failed": reason}])
+                     "listing_failed": reason, "permission": UNRESOLVED_MODE}])
                 self.assertIn(f"console: listing_failed {sid} {reason}", self.stderr.getvalue())
 
     def test_the_full_listing_is_not_read_when_the_running_listing_shows_the_manager(self):
@@ -404,7 +418,8 @@ class ReviveServiceTest(ReviveCase):
         self.gone(svc)
         self.tick(svc, 120)
         self.assertEqual(self.rows("manager.woken"), [
-            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True, "back": True}])
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True, "back": True,
+             "permission": UNRESOLVED_MODE}])
         self.assertTrue(svc._sprints[sid].revivals[-1].back)
         for seconds in (240, 360):
             self.gone(svc)

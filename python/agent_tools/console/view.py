@@ -395,6 +395,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
                                        | "stalled" | "unavailable",
                       "manager_until": "<time>" | null, "retry": <bool>,
+                      "permission_text": "<bypass|auto>: <reason>" | null,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
                       "status": "<status line>" | null, "status_at": "<report time>" | null,
@@ -418,7 +419,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "movement": {"sessions": [{"session_id", "manager": <bool>,
                                                  "read_at": "<ISO time>" | null}, ...],
                                    "nudged_at": "<time>" | null, "base_at": "<ISO time>",
-                                   "waits": {"ci_at", "commit_at", "release_at": "<ISO time>" | null}}}
+                                   "issues": [<int>],
+                                   "waits": {"ci_at", "commit_at", "release_at", "lock_at":
+                                             "<ISO time>" | null}}}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
@@ -493,8 +496,9 @@ time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms`
 report, approval or wait signal still moves the sprint whatever its order against the failure); with
 nothing else left it reads quiet at once. The wait signals are the last time CI ran on a pull
 request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
-(`commit_ms`) and the last time a release was in progress (`release_ms`), each read from the
-project's `ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
+(`commit_ms`), the last time a release was in progress (`release_ms`) and the last time a delivery
+of the sprint held or waited for the land lock (`lock_ms`, #1184), each read from the project's
+`ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
 pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
 numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
 signal moves the sprint for `QUIET_AFTER_MS` after its time. Two session signals (#1185) join the
@@ -527,8 +531,8 @@ a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owne
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
 wait, `NOW_QUOTA_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
-(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT` whose
-signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
+whose signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
 `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
 (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
@@ -554,7 +558,9 @@ reads them from its `pending` argument (default none).
 `manager_state`, `manager_text` and `retry` are all `sprints.manager_status` (its docstring holds
 the rules, so the view and the service's retry agree) over the sprint, whether it has a listed
 session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
-null. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
+null. `permission_text` (always present) is the mode the manager's settings file was last written
+with and its reason (`SprintState.permission`, ADR-console-060), null when the sprint has none
+logged. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
 `unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
 (default true).
 A listed session of the sprint's project whose name is `manager.session_name(project_id,
@@ -697,6 +703,7 @@ from agent_tools.console.sprints import (
     NOW_COMMITTING_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
+    NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
     NOW_PERMISSION_TEXT,
     NOW_QUESTION_TEXT,
@@ -1145,10 +1152,11 @@ def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
 
 @dataclass(frozen=True)
 class WaitSignals:
-    """The last time each wait of #1110 was seen for one sprint, None when never."""
+    """The last time each wait of #1110 and #1184 was seen for one sprint, None when never."""
     ci_ms: int | None = None
     commit_ms: int | None = None
     release_ms: int | None = None
+    lock_ms: int | None = None
     output_ms: int | None = None
     check_ms: int | None = None
 
@@ -1212,23 +1220,30 @@ def sprint_nudge_replies(project_id: str, sprints: Iterable[SprintState],
     return {sid: tuple(sorted(pairs)) for sid, pairs in found.items()}
 
 
+def sprint_issue_numbers(state: SprintState) -> set[int]:
+    """The sprint's issues as the movement reads them: the report's issue numbers united with its
+    `inbox` numbers (none without a report)."""
+    report = state.report
+    return (set() if report is None
+            else {issue for issue, _ in report.issues} | set(report.inbox))
+
+
 def wait_signals(state: SprintState, movement: ProjectMovement | None,
                  manager_ids: Collection[str] = ()) -> WaitSignals:
     """The sprint's wait signals out of its project's movement. The sprint's issues are the
     report's issue numbers united with its `inbox` numbers (none without a report); a pull request
-    belongs when its issues meet them, a branch when its issue is one of them, and the release
-    whatever the issues. The session signals are the newest transcript write and the newest
+    belongs when its issues meet them, a branch when its issue is one of them, a land lock time
+    when its issue is one of them, and the release whatever the issues. The session signals are the newest transcript write and the newest
     running check among the associations of this sprint; a manager session's time inside the reply
     window of an idle nudge (`NUDGE_REPLY_MS` from `idle_nudged_at`) is left out."""
     if movement is None:
         return NO_WAITS
-    report = state.report
-    issues = (set() if report is None
-              else {issue for issue, _ in report.issues} | set(report.inbox))
+    issues = sprint_issue_numbers(state)
     pulls = [pull for pull in movement.pulls if issues & pull.issues]
     running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
     commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
     commits += [moved for issue, moved in movement.branches if issue in issues]
+    locks = [moved for issue, moved in movement.locks if issue in issues]
     nudged = None if state.idle_nudged_at is None else _millis(state.idle_nudged_at)
 
     def counted(own: SessionMovement, ms: int | None) -> int | None:
@@ -1241,7 +1256,8 @@ def wait_signals(state: SprintState, movement: ProjectMovement | None,
     outputs = [ms for own in mine if (ms := counted(own, own.output_ms)) is not None]
     checks = [ms for own in mine if (ms := counted(own, own.check_ms)) is not None]
     return WaitSignals(max(running, default=None), max(commits, default=None),
-                       movement.release_ms, max(outputs, default=None), max(checks, default=None))
+                       movement.release_ms, max(locks, default=None), max(outputs, default=None),
+                       max(checks, default=None))
 
 
 def _utc(ms: int) -> str:
@@ -1290,8 +1306,8 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
         signals.append(_millis(report.at))
     if state.moved_ms is not None:
         signals.append(state.moved_ms)
-    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms, waits.output_ms,
-                              waits.check_ms) if ms is not None]
+    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms, waits.lock_ms,
+                              waits.output_ms, waits.check_ms) if ms is not None]
     failed = state.manager is not None and state.manager.state == FAILED and not listed
     if not failed:
         signals.append(_millis(state.stated_at))
@@ -1306,14 +1322,15 @@ def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
     """The wait sentence of #1110, or None. It names the wait only when the wait signals alone
     move the sprint (the session signals are part of the base reading and never name a wait): with
     no clock, or when something else moves it, or when it is quiet whatever
-    the waits say, it is None. Else the first of CI, a committing delivery and a release step whose
-    signal is inside `QUIET_AFTER_MS`."""
+    the waits say, it is None. Else the first of CI, a committing delivery, a release step and the
+    land lock whose signal is inside `QUIET_AFTER_MS`."""
     base = WaitSignals(output_ms=waits.output_ms, check_ms=waits.check_ms)
     if (now_ms is None or sprint_quiet_for(state, now_ms, listed, base) is None
             or sprint_quiet_for(state, now_ms, listed, waits) is not None):
         return None
     for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
-                     (waits.release_ms, NOW_RELEASE_TEXT)):
+                     (waits.release_ms, NOW_RELEASE_TEXT),
+                     (waits.lock_ms, NOW_LOCK_TEXT)):
         if ms is not None and now_ms - ms < QUIET_AFTER_MS:
             return text
     return None
@@ -1544,6 +1561,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
         "manager_state": manager_state,
+        "permission_text": None if state.permission is None else state.permission.text,
         "manager_until": (state.manager.until
                           if manager_state == WAITING and state.manager is not None else None),
         "retry": retry,
@@ -1584,9 +1602,11 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                           "read_at": None if m.read_ms is None else _utc(m.read_ms)}
                          for m in own],
             "nudged_at": state.idle_nudged_at,
+            "issues": sorted(sprint_issue_numbers(state)),
             "waits": {"ci_at": None if waits.ci_ms is None else _utc(waits.ci_ms),
                       "commit_at": None if waits.commit_ms is None else _utc(waits.commit_ms),
-                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms)},
+                      "release_at": None if waits.release_ms is None else _utc(waits.release_ms),
+                      "lock_at": None if waits.lock_ms is None else _utc(waits.lock_ms)},
             "base_at": _utc(_base_ms(state)),
         },
     }

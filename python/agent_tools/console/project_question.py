@@ -69,7 +69,7 @@ answer; an empty part is None, and so is a part other than the answer that is `n
 trailing `.` ignored): an answer of `None.` is an answer and keeps its text; a text
 ending with `NO_PRODUCTION_LINE` carries that line as `production` and in no other part.
 
-Threads (#1178, ADR-console-060). A `Turn` is one earlier question with the answer the session
+Threads (#1178, ADR-console-062). A `Turn` is one earlier question with the answer the session
 gave. An `Ask` carries a `thread` of turns, oldest first, and a thread changes only the prompt:
 `thread_text(thread)` is `""` for none, else `THREAD_LEAD` and each turn as `EARLIER_QUESTION`,
 `EARLIER_ANSWER`; `prompt` puts it between the routes paragraph and `QUESTION_MARK`, so with no

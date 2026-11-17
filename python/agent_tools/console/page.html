@@ -683,6 +683,10 @@ function trackerLink(sprint) {
   link.href = sprint.tracker_url;
   return link;
 }
+function permissionNote(sprint) {
+  if (typeof sprint.permission_text !== "string") return null;
+  return el("p", "permission", "Permission mode " + sprint.permission_text);
+}
 function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
@@ -692,6 +696,8 @@ function sprintDetail(sprint) {
   fold.appendChild(el("summary", "", reported || closed ? "Show the report" : "Show the goal"));
   if (reported) fold.appendChild(el("p", "report-status", sprint.status));
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
+  const mode = permissionNote(sprint);
+  if (mode !== null) fold.appendChild(mode);
   if (typeof sprint.progress_text === "string") {
     fold.appendChild(el("p", "progress", sprint.progress_text));
   }
@@ -4255,7 +4261,12 @@ function closingReport(sprint) {
   const closing = sprint.closing;
   if (closing === null || typeof closing !== "object") {
     box.appendChild(el("p", "closing-none", "No closing report."));
-    if (typeof sprint.status === "string") box.appendChild(sprintDetail(sprint));
+    if (typeof sprint.status === "string") {
+      box.appendChild(sprintDetail(sprint));
+    } else {
+      const mode = permissionNote(sprint);
+      if (mode !== null) box.appendChild(mode);
+    }
     return box;
   }
   if (typeof closing.summary === "string") box.appendChild(el("p", "closing-summary", closing.summary));
@@ -4269,6 +4280,8 @@ function closingReport(sprint) {
       box.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
     }
   }
+  const mode = permissionNote(sprint);
+  if (mode !== null) box.appendChild(mode);
   const tracker = trackerLink(sprint);
   if (tracker !== null) box.appendChild(tracker);
   return box;

@@ -1,4 +1,4 @@
-# ADR-console-060 — A follow-up carries its thread in its prompt and continues only an answered thread
+# ADR-console-062 — A follow-up carries its thread in its prompt and continues only an answered thread
 
 - **Status:** accepted
 - **Decided in:** #1178
