@@ -1931,6 +1931,9 @@ class CommitOutputTest(ApplyTestCase):
             [name for name in self.worktree_names()
              if name.startswith("commit-trace-")], [])
         fresh = apply_repo(self.home)
+        # Both repositories are built from identical content, so within one
+        # second their base commits share a hash and so would their plan id.
+        git(fresh, "commit", "--allow-empty", "-q", "-m", "a distinct base")
         git(fresh, "config", "core.hooksPath", str(Path(tempfile.mkdtemp())))
         fresh_plan = self.ready_plan(fresh)["plan"]["plan_id"]
         self.succeed(fresh, fresh_plan)
