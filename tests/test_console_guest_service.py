@@ -25,6 +25,7 @@ from .console_test_support import PIXEL, WIDE
 from .test_console_stream import next_frame
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
+ROOT = Path(__file__).resolve().parents[1]
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
@@ -50,7 +51,8 @@ TABLE = {
     "/api/register-confirm": "owner", "/api/trust-check": "owner",
     "/api/register-cancel": "owner", "/api/owner-notice": "owner",
     "/api/owner-notice-withdraw": "owner", "/api/project-question": "owner",
-    "/api/activate": "owner",
+    "/api/activate": "owner", "/api/share-tailnet": "owner", "/api/share-colleague": "owner",
+    "/api/share-remove": "owner",
     "/api/brief": "owner", "/api/report": "owner", "/api/close": "owner", "/api/inbox": "owner",
     "/api/message-reply": "owner", "/api/recap": "owner", "/api/ask": "owner",
     "/api/withdraw-question": "owner", "/api/notice": "owner", "/api/notices": "owner",
@@ -438,6 +440,154 @@ class DoorTest(GuestCase):
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("console: cannot listen on 127.0.0.1:"))
         self.assertIn(str(number), lines[0])
+
+
+class AccessWriteTest(GuestCase):
+    """The owner's three page writes that keep the guest access list (#1237)."""
+
+    def write(self, svc, route, body, headers=None):
+        headers = {"Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": self.owner_token(), **JSON} if headers is None else headers
+        return support.post_page(svc.address, route, headers, json.dumps(body).encode())
+
+    def kinds(self):
+        return [(kind, json.loads(payload))
+                for _, _, kind, _, payload in support.log_rows(self.store)
+                if kind.startswith("sharing.")]
+
+    def guest_state(self, svc):
+        return self.guest(svc, "GET", "/api/state")
+
+    def open_stream(self, svc):
+        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
+        self.addCleanup(connection.close)
+        connection.putrequest("GET", "/api/stream", skip_host=True)
+        connection.putheader("Host", TAILNET)
+        connection.putheader("Tailscale-User-Login", COLLEAGUE)
+        connection.endheaders()
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        return response
+
+    def test_add_replace_and_remove_a_colleague_then_their_next_request(self):
+        svc = self.start()
+        status, _, body = self.write(svc, "/api/share-tailnet", {"tailnet": TAILNET})
+        self.assertEqual((status, body), (204, b""))
+        status, _, body = self.guest_state(svc)
+        self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
+        status, _, body = self.write(
+            svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p01"]})
+        self.assertEqual((status, body), (204, b""))
+        status, _, state = self.guest_state(svc)
+        self.assertEqual(status, 200)
+        self.assertIn(b"owner/p01", state)
+        self.assertNotIn(b"owner/p00", state)
+        mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
+        self.assertEqual(mine["sharing"], {
+            "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
+            "state": "unchecked"})
+        status, _, body = self.write(
+            svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]})
+        self.assertEqual((status, body), (204, b""))
+        status, _, state = self.guest_state(svc)
+        self.assertEqual(status, 200)
+        self.assertIn(b"owner/p00", state)
+        self.assertNotIn(b"owner/p01", state)
+        status, _, body = self.write(svc, "/api/share-remove", {"login": COLLEAGUE})
+        self.assertEqual((status, body), (204, b""))
+        status, _, body = self.guest_state(svc)
+        self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
+        self.assertEqual(self.kinds(), [
+            ("sharing.tailnet", {"tailnet": TAILNET}),
+            ("sharing.colleague", {"login": COLLEAGUE, "projects": ["owner/p01"]}),
+            ("sharing.colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]}),
+            ("sharing.removed", {"login": COLLEAGUE})])
+
+    def test_an_open_guest_stream_is_readmitted_on_every_change(self):
+        rows = (("removed", lambda svc: svc.remove_colleague(COLLEAGUE)),
+                ("sharing off", lambda svc: svc.set_tailnet(None)),
+                ("tailnet moved", lambda svc: svc.set_tailnet(OTHER_HOST)))
+        for name, action in rows:
+            with self.subTest(change=name), tempfile.TemporaryDirectory() as tmp:
+                self.store = Path(tmp) / "state/console/events.sqlite3"
+                self.registry = Path(tmp) / "state/fleet/registry.json"
+                self.seed()
+                svc = self.start()
+                response = self.open_stream(svc)
+                self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
+                action(svc)
+                lines = []
+                while True:
+                    line = response.readline()
+                    if line == b"":
+                        break
+                    lines.append(line)
+                self.assertEqual([line for line in lines if line.startswith(b"event: view")], [])
+                svc.close()
+        self.store = self.root / "state/console/events.sqlite3"
+        self.registry = self.root / "state/fleet/registry.json"
+        self.seed()
+        svc = self.start()
+        response = self.open_stream(svc)
+        self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
+        svc.set_colleague(COLLEAGUE, ("owner/p00",))
+        frame = next_frame(response)
+        self.assertIn(b"owner/p00", frame)
+        self.assertNotIn(b"owner/p01", frame)
+        svc.set_colleague(COLLEAGUE, ("owner/p01",))
+        frame = next_frame(response)
+        self.assertIn(b"owner/p01", frame)
+        self.assertNotIn(b"owner/p00", frame)
+
+    def test_bad_bodies_and_refusals_append_nothing(self):
+        self.seed()
+        svc = self.start()
+        rows = (
+            ("/api/share-tailnet", {"tailnet": "desk.example.com"}, 400, "bad tailnet"),
+            ("/api/share-colleague", {"login": "no-at-sign", "projects": ["owner/p01"]},
+             400, "bad colleague"),
+            ("/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p99"]},
+             409, "that project is not registered"),
+            ("/api/share-remove", {"login": STRANGER}, 409, "that colleague is not listed"),
+            ("/api/share-remove", {}, 400, "bad removal"))
+        for route, body, status, text in rows:
+            with self.subTest(route=route, body=body):
+                got = self.unchanged(svc, lambda: self.write(svc, route, body))
+                self.assertEqual((got[0], got[2]), (status, text.encode() + b"\n"))
+        valid = {"/api/share-tailnet": {"tailnet": TAILNET},
+                 "/api/share-colleague": {"login": COLLEAGUE, "projects": ["owner/p01"]},
+                 "/api/share-remove": {"login": COLLEAGUE}}
+        origin = {"Origin": f"http://127.0.0.1:{svc.address[1]}", **JSON}
+        for route, body in valid.items():
+            for label, headers in (
+                    ("no token", origin),
+                    ("guest token", {**origin, "X-Console-Token": self.guest_token()})):
+                with self.subTest(route=route, token=label):
+                    got = self.unchanged(svc, lambda: self.write(svc, route, body, headers))
+                    self.assertEqual((got[0], got[2]), (403, b"token refused\n"))
+
+    def test_clearing_the_tailnet_turns_sharing_off(self):
+        self.seed()
+        svc = self.start()
+        self.assertEqual(self.guest_state(svc)[0], 200)
+        status, _, body = self.write(svc, "/api/share-tailnet", {"tailnet": None})
+        self.assertEqual((status, body), (204, b""))
+        status, _, body = self.guest_state(svc)
+        self.assertEqual((status, body), (403, guest.SHARING_OFF_TEXT.encode() + b"\n"))
+        sharing = json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+        self.assertEqual(sharing["state"], "off")
+        self.assertEqual(sharing["colleagues"], [{"login": COLLEAGUE, "projects": ["owner/p01"]}])
+
+    def test_adr_008_lists_the_access_list_writes(self):
+        adr = (ROOT / "docs/areas/console/adr/"
+               "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
+        text = " ".join(adr.split())
+        for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
+                       "POST /api/share-remove", "#1237", "bad colleague"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
+        self.assertTrue(decided.endswith("#1193, #1237"))
 
 
 class ConnectionTest(GuestCase):

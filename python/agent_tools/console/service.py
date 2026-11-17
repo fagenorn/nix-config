@@ -86,6 +86,23 @@ read is `405` `Allow: GET`. The owner's port refuses, on every route, a request 
 The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
 a different token, refused on every owner route, as the page token is on the guest picture read.
 
+The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
+/api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
+`SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
+(4096; 411, 415, 411, 413 as every JSON page write). Their bodies are the exactly-keyed objects
+`guest.parse_tailnet` (`{"tailnet": "<host>.<tailnet>.ts.net" or null}`), `guest.parse_colleague`
+(`{"login", "projects"}`) and `guest.parse_removal` (`{"login"}`) read; a body they refuse is `400`
+`bad tailnet`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
+a project that is not registered, a login that is not listed) is one stderr line `console:
+share_refused <reason>` and `409` with the reason; any other failure is `console: share_failed
+<Type>: <message>` and `500` `share failed`; no stderr line carries a login or a tailnet name.
+Success appends one row under the console's ingest lock, applies it and answers an empty `204`:
+`ConsoleService.set_tailnet` a `sharing.tailnet` row, `set_colleague` a `sharing.colleague` row
+that replaces the login's whole project list, `remove_colleague` a `sharing.removed` row. A
+refusal appends nothing and publishes nothing. Each write publishes, and the guest stream
+re-admits on every publish, so a removed colleague's open stream, a cleared tailnet's and a
+moved tailnet's end before any further frame, and the next guest request is `403`.
+
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
 `capacity.reading` and `capacity.stop` (see `capacity.py`). The hook route's checks run in this
@@ -110,7 +127,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question` and `POST /api/activate`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
+`POST /api/share-tailnet`, `POST /api/share-colleague` and `POST /api/share-remove`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -1421,6 +1439,7 @@ from agent_tools.console.event_log import (
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
+    SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
@@ -1503,13 +1522,18 @@ TRUST_CHECK_PATH = "/api/trust-check"
 REGISTER_CANCEL_PATH = "/api/register-cancel"
 PROJECT_QUESTION_PATH = "/api/project-question"
 PROJECT_QUESTION_THREAD = "console-project-question"
+SHARE_TAILNET_PATH = "/api/share-tailnet"
+SHARE_COLLEAGUE_PATH = "/api/share-colleague"
+SHARE_REMOVE_PATH = "/api/share-remove"
+MAX_SHARE_BYTES = 4096
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH})
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
+    SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -2545,6 +2569,35 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _share_request(self, console: "ConsoleService", route: str) -> bool:
+        """Read and carry out one of the owner's access-list writes; False when it was refused."""
+        body = self._json_body(MAX_SHARE_BYTES)
+        if body is None:
+            return False
+        if route == SHARE_TAILNET_PATH:
+            bad, parse, write = "bad tailnet", guest.parse_tailnet, console.set_tailnet
+        elif route == SHARE_COLLEAGUE_PATH:
+            bad, parse = "bad colleague", guest.parse_colleague
+            write = lambda parsed: console.set_colleague(*parsed)
+        else:
+            bad, parse, write = "bad removal", guest.parse_removal, console.remove_colleague
+        try:
+            action = parse(body)
+        except ValueError:
+            self._refuse(400, bad)
+            return False
+        try:
+            write(action)
+        except guest.Refused as error:
+            print(f"console: share_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: share_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "share failed")
+            return False
+        return True
+
     def _owner_notice_request(self, console: "ConsoleService") -> bool:
         """Read and carry out the owner's heads-up for a project; False when it was refused."""
         body = self._json_body(MAX_OWNER_NOTICE_BYTES)
@@ -2875,6 +2928,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == ACTIVATE_PATH:
             self.close_connection = True
             if not self._activate_request(console):
+                return
+        elif route in (SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH):
+            self.close_connection = True
+            if not self._share_request(console, route):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -6284,6 +6341,26 @@ class ConsoleService:
         for sprint_id in reserved:
             self._dispatch_notice_nudge(sprint_id)
         return seq
+
+    def set_tailnet(self, tailnet: str | None) -> None:
+        """Append one `sharing.tailnet` row: the guest door's tailnet name, or None for off."""
+        with self._ingest:
+            self._apply(self.log.append([(SHARING_TAILNET, None, {"tailnet": tailnet})]))
+
+    def set_colleague(self, login: str, projects: tuple[str, ...]) -> None:
+        """Append one `sharing.colleague` row: the login's whole project list (it replaces)."""
+        with self._ingest:
+            if any(project not in self._states for project in projects):
+                raise guest.Refused("that project is not registered")
+            self._apply(self.log.append([(SHARING_COLLEAGUE, None, {
+                "login": login, "projects": list(projects)})]))
+
+    def remove_colleague(self, login: str) -> None:
+        """Append one `sharing.removed` row for a listed colleague."""
+        with self._ingest:
+            if login not in self._access.colleagues:
+                raise guest.Refused("that colleague is not listed")
+            self._apply(self.log.append([(SHARING_REMOVED, None, {"login": login})]))
 
     def withdraw_owner_notice(self, project_id: str, notice_id: int) -> int:
         """Append one owner `notice.withdrawn` event for an open owner notice; the notice's id."""
