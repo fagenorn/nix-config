@@ -74,7 +74,7 @@ SHARED_SKILL_MACHINE_TEXT = {
 # JSON fields DIFF-REVIEW.md reads. No guidance sentence is pinned.
 CODEX_COLLABORATION_MACHINE_TEXT = {
     COLLABORATION: (
-        "bindings.commands[review_id].argv", "--model gpt-6-astra", "--effort xhigh",
+        "bindings.commands[review_id].argv", "--model gpt-6.2-astra", "--effort xhigh",
         "--cwd <absolute-worktree> --json", "`error`",
     ),
     DIFF_REVIEW: (
@@ -522,7 +522,7 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
             self.assertNotIn(forbidden, corpus)
         for required in (
             "ResolvedProject", "bindings.workflow.review.code",
-            "bindings.commands", "gpt-6-astra", "--effort xhigh",
+            "bindings.commands", "gpt-6.2-astra", "--effort xhigh",
             "runtime.reasoningEffort", "rawOutput",
         ):
             self.assertIn(required, corpus)
@@ -727,7 +727,7 @@ class WorkflowSkillContractsTest(unittest.TestCase):
         blocks = re.findall(r"```text\n(.*?)```", self.collaboration, re.S)
         self.assertEqual(blocks, [
             "bindings.commands[review_id].argv \\\n"
-            "  --model gpt-6-astra --effort xhigh \\\n"
+            "  --model gpt-6.2-astra --effort xhigh \\\n"
             "  --cwd <absolute-worktree> --json\n",
         ])
 
