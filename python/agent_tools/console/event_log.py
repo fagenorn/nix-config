@@ -89,7 +89,7 @@ for exactly that payload (`plan_id` null for a registration with none, a failed 
 `ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
 `KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
 #1030) is not in `KEPT_KINDS`.
-`TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved, #1078, `folder_trust.granted_row`)
+`TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved or per registered project at the console's start, #1078, `folder_trust.granted_row`)
 is not in `KEPT_KINDS`.
 `PICTURE_STORED` (`picture.stored`, one per picture a manager sent that the console accepted, #1089)
 is not in `KEPT_KINDS`.

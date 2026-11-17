@@ -63,7 +63,8 @@ through the same protocol and returns `REMOVED`, `ABSENT` (no file, or no entry:
 
 Row. `granted_row(cause, project, root, results)` is `("trust.granted", None, {"by": "owner",
 "cause": cause, "project": project, "root": root, "profiles": [{"profile", "result"}, ...]})`,
-one per grant the owner approved; `ValueError` unless `cause` is in `CAUSES`, `project` and `root`
+one per grant the owner approved, or per registered project at the console's start (cause
+`console-start`, #1183); `ValueError` unless `cause` is in `CAUSES`, `project` and `root`
 are non-empty strings, every result is in `RESULTS` and every profile is `default` or accepted by
 `account_add.refusal`. The kind is not in `KEPT_KINDS`. No file content is logged.
 `failures(events, state=None)` folds a copy of `state`: for each valid row (re-validated with
@@ -103,6 +104,19 @@ read` and exits 1. For each project in order the key is `trust_key(root)` (None 
 write), else `grant` runs; stdout gets one `<project_id>: <result>` line and, for `failed`, a second
 line `  Run this in a terminal: <command(key or root, name)>, then accept the prompt and type
 /exit.` The exit status is 1 when any result is `failed`, else 0.
+
+Check. `folder-trust check-registered` (no options) reads, and never writes, whether every registered
+project is trusted everywhere. The targets are `targets(Path($HOME), <each directory under
+CLAUDE_ACCOUNTS_DIR/profiles>)`: `default` first, then each account profile. A pair is missing when
+the project's `trust_key` is None, or its file is absent, unreadable, not a JSON object, or has
+`projects[key].hasTrustDialogAccepted` other than exactly `true`. Stdout is one JSON line,
+`{"status": "met" | "not_met" | "registry_unreadable" | "profiles_unreadable", "projects": <n>, "missing": [{"project": <id>,
+"profile": <name>}, ...]}` (keys sorted), `missing` in registry then target order. The exit status is
+0 only for `met`; `not_met`, `registry_unreadable` (a registry that is absent or invalid: a
+vacuous pass would hide a broken host) and `profiles_unreadable` (the profiles directory exists but
+cannot be listed, so some profile files went unexamined; `missing` is empty and `projects` the registry
+count) are 1. An absent profiles directory is no profiles, not a failure. No file is written, created or renamed, and no file
+content reaches stdout or stderr.
 """
 
 from __future__ import annotations
@@ -132,7 +146,8 @@ REMOVED = "removed"
 ABSENT = "absent"
 ATTEMPTS = 5
 GIT_TIMEOUT = 10
-CAUSES = ("apply", "register", "account", "check")
+START_CAUSE = "console-start"
+CAUSES = ("apply", "register", "account", "check", START_CAUSE)
 KEPT_PREFIX = ".claude.json.trust-kept-"
 TEMP_PREFIX = ".claude.json.trust-"
 CHECK_OPTION = "Check again"
@@ -596,13 +611,71 @@ def _grant_registered(name: str) -> int:
     return status
 
 
+def _trusted_in(path: Path, key: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            document = json.loads(handle.read())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(document, dict):
+        return False
+    projects = document.get("projects")
+    entry = projects.get(key) if isinstance(projects, dict) else None
+    return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+
+
+def _profile_dirs() -> list[Path]:
+    """Each directory under the profiles directory, sorted; an absent profiles directory is none.
+
+    Any other failure to list it raises OSError: a listing that cannot be read is not an empty one.
+    """
+    root = _accounts_dir() / "profiles"
+    try:
+        with os.scandir(root) as entries:
+            found = [Path(entry.path) for entry in entries if entry.is_dir()]
+    except FileNotFoundError:
+        return []
+    return sorted(found)
+
+
+def _check_registered() -> int:
+    def report(status: str, count: int, missing: list[dict]) -> int:
+        print(json.dumps({"status": status, "projects": count, "missing": missing},
+                         sort_keys=True))
+        return 0 if status == "met" else 1
+
+    try:
+        if not os.path.lexists(agent_platform.registry_path()):
+            return report("registry_unreadable", 0, [])
+        projects = agent_platform.read_registry()
+    except (agent_platform.PlatformManifestError, OSError, RuntimeError, KeyError):
+        return report("registry_unreadable", 0, [])
+    try:
+        profiles = _profile_dirs()
+    except OSError:
+        return report("profiles_unreadable", len(projects), [])
+    where = targets(Path(os.environ["HOME"]), profiles)
+    missing = []
+    for entry in projects:
+        key = trust_key(entry["root"])
+        for name, path in where:
+            if key is None or not _trusted_in(path, key):
+                missing.append({"project": entry["project_id"], "profile": name})
+    return report("not_met" if missing else "met", len(projects), missing)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="folder-trust", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     registered = commands.add_parser(
         "grant-registered", help="grant every registered project's folder trust in one profile")
     registered.add_argument("--profile", required=True, metavar="NAME")
+    commands.add_parser(
+        "check-registered",
+        help="check that every registered project's folder trust reads true in every profile")
     arguments = parser.parse_args(argv)
+    if arguments.command == "check-registered":
+        return _check_registered()
     return _grant_registered(arguments.profile)
 
 
