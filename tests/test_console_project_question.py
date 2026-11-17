@@ -21,7 +21,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints)
+    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints,
+    view)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -538,6 +539,92 @@ class QuestionFoldTest(unittest.TestCase):
         self.assertEqual(first, before)
 
 
+def _registered(seq, project):
+    return _row(seq, "project.registered", project, {"root": "/srv/" + project.split("/")[1]})
+
+
+def _project_entries(shown):
+    return [project for entry in shown["entries"]
+            for project in (entry["projects"] if entry["type"] == "quiet_group" else [entry])]
+
+
+QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
+                 "read_text", "ran_text", "unknown_text", "back_text", "production_text"}
+
+
+class QuestionViewTest(unittest.TestCase):
+    P1 = "owner/p01"
+
+    def test_a_projects_view_carries_each_question_state_and_adds_nothing_to_the_count(self):
+        events = [
+            _registered(1, self.P1),
+            _asked(2, self.P1, "q1", "what does the build check?"),
+            _answered(3, self.P1, "q1", outcome="answered", answer=(
+                "Answer: It builds the hosts.\nRead: flake.nix\nRan: just build\n"
+                "Could not find out: which host is deployed\nQuestion for you: none")),
+            _asked(4, self.P1, "q2"),
+            _answered(5, self.P1, "q2", outcome="timed_out",
+                      reason="the session did not answer within 300 s"),
+            _asked(6, self.P1, "q3"),
+            _answered(7, self.P1, "q3", outcome="failed", reason="claude-account is not installed"),
+            _asked(8, self.P1, "q4", "where is the retry decided?"),
+        ]
+        states = view.project_states(events).values()
+        shown = view.derive_view(states, project_questions=project_question.asked_questions(events))
+        bare = view.derive_view(view.project_states(events).values())
+        self.assertEqual(shown["statement"], bare["statement"])
+        self.assertEqual(shown["inbox"], bare["inbox"])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        entry = shown["entries"][0]
+        questions = entry["questions"]
+        self.assertEqual([q["id"] for q in questions], ["q4", "q3", "q2", "q1"])
+        self.assertEqual([q["state"] for q in questions],
+                         ["working", "failed", "timed_out", "answered"])
+        q4, q3, q2, q1 = questions
+        self.assertEqual(q1["answer"], "It builds the hosts.")
+        self.assertEqual(q1["read_text"], "Read: flake.nix")
+        self.assertEqual(q1["ran_text"], "Ran: just build")
+        self.assertEqual(q1["unknown_text"], "Could not find out: which host is deployed")
+        self.assertIsNone(q1["back_text"])
+        self.assertIsNone(q1["production_text"])
+        self.assertEqual(q1["state_text"], "Answered")
+        self.assertEqual(q1["answered_at"], events[2].at)
+        self.assertEqual(q2["state_text"], "Timed out: the session did not answer within 300 s")
+        self.assertIsNone(q2["answer"])
+        self.assertEqual(q3["state_text"], "Could not answer: claude-account is not installed")
+        self.assertEqual(q4["state_text"], "Working on it")
+        self.assertIsNone(q4["answered_at"])
+        self.assertEqual(q4["question"], "where is the retry decided?")
+        self.assertEqual(q4["asked_at"], events[7].at)
+        for question in questions:
+            self.assertEqual(set(question), QUESTION_KEYS)
+        self.assertIs(entry["quiet"], True)
+        self.assertEqual(bare["entries"][0]["questions"], [])
+
+    def test_a_question_back_and_the_production_line_read_as_their_own_lines(self):
+        answer = project_question.answer_text(
+            "Answer: I cannot read the bill.\nQuestion for you: May I run the paid billing export?", ())
+        events = [_registered(1, self.P1), _asked(2, self.P1, "q1"),
+                  _answered(3, self.P1, "q1", outcome="answered", answer=answer)]
+        shown = view.derive_view(view.project_states(events).values(),
+                                 project_questions=project_question.asked_questions(events))
+        question = shown["entries"][0]["questions"][0]
+        self.assertEqual(question["back_text"],
+                         "Question for you: May I run the paid billing export?")
+        self.assertEqual(question["production_text"], project_question.NO_PRODUCTION_LINE)
+        self.assertEqual(question["answer"], "I cannot read the bill.")
+
+    def test_a_project_in_a_quiet_group_carries_its_questions(self):
+        events = [_registered(n, f"owner/p0{n}") for n in range(1, 6)]
+        events.append(_asked(6, "owner/p03", "q1"))
+        shown = view.derive_view(view.project_states(events).values(),
+                                 project_questions=project_question.asked_questions(events))
+        self.assertEqual([e["type"] for e in shown["entries"]], ["quiet_group"])
+        by_id = {p["project_id"]: p["questions"] for p in _project_entries(shown)}
+        self.assertEqual([q["state"] for q in by_id.pop("owner/p03")], ["working"])
+        self.assertEqual(list(by_id.values()), [[]] * 4)
+
+
 class QuestionCase(Case):
     """A service whose question session is a stub: the asker records each call and returns an outcome."""
 
@@ -725,6 +812,35 @@ class QuestionServiceTest(QuestionCase):
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
         self.assertEqual(event_log.SCHEMA_VERSION, 10)
+
+    def shown(self, svc):
+        return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
+
+    def test_the_published_view_shows_the_question_working_then_answered(self):
+        held = []
+        svc = self.start(project_question_dispatch=held.append)
+        try:
+            before = json.loads(svc.view_bytes)["statement"]
+            svc.ask_project_question(WHY, "what does the build check?")
+            (question,) = self.shown(svc)["questions"]
+            self.assertEqual((question["state"], question["question"]),
+                             ("working", "what does the build check?"))
+            self.assertEqual(json.loads(svc.view_bytes)["statement"], before)
+            held.pop()()
+            (question,) = self.shown(svc)["questions"]
+            self.assertEqual((question["state"], question["answer"]), ("answered", "it builds."))
+            self.assertEqual(json.loads(svc.view_bytes)["statement"], before)
+        finally:
+            while held:
+                held.pop()()
+
+    def test_questions_survive_a_restart(self):
+        svc = self.start()
+        svc.ask_project_question(WHY, "what does the build check?")
+        svc.close()
+        again = self.start()
+        (question,) = self.shown(again)["questions"]
+        self.assertEqual(question["state"], "answered")
 
 
 def question_threads():
