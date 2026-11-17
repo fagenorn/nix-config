@@ -30,10 +30,12 @@ The rules, read in this order, each printing one line:
    `host` a string or null, a string when `host_form` is `exact` or `with_port`; `host_form` one of
    `guest.HOST_FORMS`; `reason` null or one of `guest.REASON_CODES`): `bad_reading`, exit 1;
 5. `forwarded_for` is false, a local request and not one through Serve: `not_through_serve`, 75;
-6. `host_form` is `exact` or `with_port` and the kept `Host`, lowercased, is neither the current
-   tailnet name nor that name followed by `:443`: `stale`, 75. The reading's `host_form` was judged
-   against the name in force when the request arrived and the owner may have changed it since, so the
-   check compares the kept `Host` with the current name and waits for a request at it;
+6. the reading's kept `Host` is a string and its `host_form` disagrees with the current tailnet
+   name: `host_form` is `exact` or `with_port` and the `Host`, lowercased, is neither the current
+   name nor that name followed by `:443`, or `host_form` is `other` and it is one of them: `stale`,
+   75. The reading's `host_form` was judged against the name in force when the request arrived (no
+   name set, or an older one, reads `other`) and the owner may have changed it since, so the check
+   compares the kept `Host` with the current name and waits for a request at it;
 7. `host_form` is not `exact`, or `hosts` or `login_headers` is not 1: `not_met`, exit 1;
 8. `probe_login_arrived` is true, the prescribed forged login reached the service as a login whatever
    probe header came with it: `not_met`, 1;
@@ -123,8 +125,8 @@ def main(argv: list[str] | None = None, *,
     tailnet = sharing["tailnet"].lower()
     if not reading["forwarded_for"]:
         status, code = "not_through_serve", NOT_YET
-    elif form in ("exact", "with_port") and reading["host"].lower() not in (
-            tailnet, tailnet + ":443"):
+    elif isinstance(reading["host"], str) and (
+            reading["host"].lower() in (tailnet, tailnet + ":443")) != (form != "other"):
         status, code = "stale", NOT_YET
     elif form != "exact" or reading["hosts"] != 1 or reading["login_headers"] != 1:
         status, code = "not_met", 1
