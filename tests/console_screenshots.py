@@ -13,7 +13,8 @@ Contract:
   that has no such control it is the same fold, which is how the before pictures are made;
   `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
   lock, served through a stand-in forge reader, with a live delivery run of issue 12 in its `pr`
-  step (a run that is not live is no holder of the sprint's);
+  step (a run that is not live is no holder of the sprint's), whose run line reads
+  "waiting its turn to merge", not quiet;
   `manager-cannot-hear` is a running sprint whose manager session (listed, named for the sprint)
   has a transcript whose last peer-message record is one the client held and did not deliver
   (#1229), read once through the movement poll, so its line reads that the manager cannot hear

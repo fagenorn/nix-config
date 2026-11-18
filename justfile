@@ -220,6 +220,7 @@ agent-workflow-tests *args:
     tests/test_console_plan_questions.py \
     tests/test_console_project_question.py \
     tests/test_console_contract_draft.py \
+    tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
     tests/test_console_register_service.py \
     tests/test_console_register_check.py \
@@ -238,6 +239,7 @@ agent-workflow-tests *args:
     tests/test_console_cleanup_check.py \
     tests/test_console_lock_wait_check.py \
     tests/test_console_serve_probe_check.py \
+    tests/test_console_run_line_check.py \
     tests/test_console_look_check.py \
     tests/test_console_look_kept_check.py \
     tests/test_console_page.py \

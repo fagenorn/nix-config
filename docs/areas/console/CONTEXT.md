@@ -110,7 +110,7 @@ _Avoid_: last seen, last visit
 _Avoid_: activity feed, changelog
 
 **Delivery run**:
-One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005). The run reads as one sentence of counts by stage, its issues and stages shown when its line is opened.
+One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005); a run of a running sprint's issue reads its sprint's movement for that issue and, while only a wait moves it, ends with that wait (ADR-console-069). The run reads as one sentence of counts by stage, its issues and stages shown when its line is opened.
 _Avoid_: sprint, job
 
 **Spend**:
@@ -158,7 +158,7 @@ The user service that runs the console on each host. On Linux the systemd unit r
 _Avoid_: daemon
 
 **Registration**:
-The owner's request, from the page, that the console plan a repository's adoption and, when it is already adopted, record it in the fleet registry; the page shows its result in plain lines (ADR-console-028).
+The owner's request, from the page, that the console plan a repository's adoption and, when it is already adopted, record it in the fleet registry; the page shows its result in plain lines (ADR-console-028). Before it plans, the console compares the checkout with its remote and offers to update a checkout that is behind (ADR-console-070).
 _Avoid_: import, onboarding
 
 **Plan question**:

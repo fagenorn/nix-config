@@ -277,7 +277,11 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 `register.refusal` rejects (not a full path, not a directory, not the top of a checkout, already
 registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
-adopter's plan. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
+adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
+ADR-console-070): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
+and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
+run and carries `remote` (`register.unread`) on its row, and each plan-answer row after it; no origin or no default branch runs today's
+run. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
 with no report (#1078, ADR-console-034), and the Register card waits for the owner (below). One
 `registration.ended` row (also for a failed child) is appended, unless the
 service is closed, in the same ingest section that clears the running mark, so the view's
@@ -299,6 +303,13 @@ writes no trust and runs no child, and answers `204`. `try_again` takes the same
 `POST /api/register-project` (the fleet read, `register.refusal`, the running mark, the plan, and for a
 `no_change` plan the Register card as today), with the shown row re-checked by its `at` under the ingest
 lock before the mark is set; it grants no folder trust and never runs the register child directly.
+`update` answers the behind card the same way (#1233, ADR-console-070): `checkout_updater` runs first,
+`register.update_failed` is the row when it returns a reason (nothing else runs), and otherwise the
+run is a fresh one that compares again; it grants no trust. `not_now` sets the behind card aside.
+Both seams (`checkout_reader`, `checkout_updater`) are called as `(root, cancel=stop)` with the event
+`close()` sets, so nothing starts after a shutdown; a failure either returns is logged as
+`console: registration_error` with verb `compare` or `update`, its `step` and git's own words as
+`detail`, and never reaches the page.
 `register` also refuses an unreadable registry
 and a root the registry already holds, as the first write does, and otherwise answers `204` at once
 and dispatches the run: the folder's trust is granted in every profile (`_grant_trust`, cause
@@ -1443,7 +1454,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    project_question, account_add, account_remove, activation, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
     folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -3259,6 +3270,8 @@ class ConsoleService:
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
                  draft_reader: Callable[[str], dict] = contract_draft.read,
+                 checkout_reader: Callable[..., checkout_remote.Comparison] = checkout_remote.compare,
+                 checkout_updater: Callable[..., checkout_remote.Updated] = checkout_remote.update,
                  forge=None,
                  pusher: Callable[..., None] = approve.push,
                  trust_home: Path | None = None,
@@ -3288,6 +3301,8 @@ class ConsoleService:
         self._account_remover = account_remover
         self._adopter = adopter
         self._draft_reader = draft_reader
+        self._checkout_reader = checkout_reader
+        self._checkout_updater = checkout_updater
         self._forge = forge
         self._pusher = pusher
         self._trust_home = None if trust_home is None else Path(trust_home)
@@ -4347,16 +4362,18 @@ class ConsoleService:
             self._registering = root
             self._publish()
 
+        remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
+
         def run() -> None:
-            if choice == register.TRY_VALUE:
-                self._run_registration(root, entries)
+            if choice in (register.TRY_VALUE, register.UPDATE_VALUE):
+                self._run_registration(root, entries, update=choice == register.UPDATE_VALUE)
                 return
             try:
                 self._grant_trust("register", root, project)
             except Exception as error:
                 print(f"console: trust_grant_failed {type(error).__name__}", file=sys.stderr)
             self._run_registration(root, entries, confirmed=True,
-                                   answers=latest["answered"], draft=latest["draft"])
+                                   answers=latest["answered"], draft=latest["draft"], remote=remote)
 
         try:
             self._dispatch(run)
@@ -4430,7 +4447,8 @@ class ConsoleService:
     def _check_answerable(self, root: str, choice: str) -> dict:
         """The registration row `choice` answers for `root`, held under the ingest lock.
 
-        `register` answers the waiting row, `try_again` the failing one and `not_now` either.
+        `register` answers the waiting row, `try_again` the failing one, `update` the behind row and
+        `not_now` the waiting, the failing or the behind one.
         """
         if self._registering is not None:
             raise sprints.Refused(register.running(register.name_of(self._registering)))
@@ -4438,38 +4456,66 @@ class ConsoleService:
         if latest is None or latest["root"] != root:
             raise sprints.Refused(register.NOT_WAITING)
         asks = ((choice in (register.CONFIRM_VALUE, register.LATER_VALUE) and register.waiting(latest))
-                or (choice in (register.TRY_VALUE, register.LATER_VALUE) and register.failing(latest)))
+                or (choice in (register.TRY_VALUE, register.LATER_VALUE) and register.failing(latest))
+                or (choice in (register.UPDATE_VALUE, register.LATER_VALUE)
+                    and register.behind_waiting(latest)))
         if not asks:
             raise sprints.Refused(register.NOT_WAITING)
         return latest
 
     def _run_registration(self, root: str, entries: list[dict], *, confirmed: bool = False,
-                          answers: list[dict] | None = None, draft: list[dict] | None = None) -> None:
+                          answers: list[dict] | None = None, draft: list[dict] | None = None,
+                          update: bool = False, remote: str | None = None) -> None:
         """Plan and, when confirmed, register; a confirmed run plans with the waiting row's answers.
+
+        A fresh run compares the checkout with its remote first (#1233, ADR-console-070): a checkout
+        behind a remote that has a contract is one `behind` row and nothing else runs; `update` moves
+        the checkout forward first. A confirmed run and an answer run never compare; a confirmed run
+        keeps the waiting row's `remote` sentence, as an answer run does, because it still uses the
+        checkout that was never compared.
 
         The Register card can follow an answer run, and a plan without those answers goes back to
         `reconcile` (a `retain` answer adds no operation), so `register` would never run.
         """
         verb = "plan"
+        unread = False
         try:
             left = self._discard_left(root)
             if left is not None:
                 self._log_registration_error({"root": root, "verb": "discard",
                                               "error": left["error"]})
                 payload = register.summary(root, left)
-            elif not os.path.lexists(os.path.join(root, ".agents/project.json")):
-                reading = self._draft_reader(root)
-                fields = contract_draft.draft(root, reading, entries=entries)
-                payload = self._plan_draft(root, fields, [])
             else:
-                plan = (self._plan_with(root, draft, answers) if answers or draft
-                        else self._adopter.plan(root, cancel=self._stop))
-                report = None
-                if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
-                    verb = "register"
-                    report = self._adopter.register(root, cancel=self._stop)
-                self._log_registration_failure(root, plan, report)
-                payload = register.summary(root, plan, report)
+                done = None
+                if update:
+                    done = self._checkout_updater(root, cancel=self._stop)
+                    self._log_checkout(root, "update", done.failure)
+                    if self._stop.is_set():
+                        raise register.RunFailed("cancelled")
+                if done is not None and done.reason is not None:
+                    payload = register.update_failed(root, done.reason)
+                else:
+                    seen = None if confirmed else self._checkout_reader(root, cancel=self._stop)
+                    if seen is not None:
+                        self._log_checkout(root, "compare", seen.failure)
+                    if self._stop.is_set():
+                        raise register.RunFailed("cancelled")
+                    unread = seen is not None and seen.state == checkout_remote.UNREADABLE
+                    if seen is not None and seen.state == checkout_remote.BEHIND:
+                        payload = register.behind(root, seen.behind, seen.contract)
+                    elif not os.path.lexists(os.path.join(root, ".agents/project.json")):
+                        reading = self._draft_reader(root)
+                        fields = contract_draft.draft(root, reading, entries=entries)
+                        payload = self._plan_draft(root, fields, [])
+                    else:
+                        plan = (self._plan_with(root, draft, answers) if answers or draft
+                                else self._adopter.plan(root, cancel=self._stop))
+                        report = None
+                        if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
+                            verb = "register"
+                            report = self._adopter.register(root, cancel=self._stop)
+                        self._log_registration_failure(root, plan, report)
+                        payload = register.summary(root, plan, report)
         except register.RunFailed as error:
             self._log_registration_error({"root": root, "verb": verb, "failure": error.kind,
                                           "cause": repr(error.__cause__)})
@@ -4480,6 +4526,10 @@ class ConsoleService:
                                           "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
             payload = register.failed(root, type(error).__name__, verb)
+        if unread:
+            payload = register.unread(payload)
+        elif remote is not None:
+            payload = {**payload, "remote": remote}
         with self._ingest:
             if not self._closed:
                 self._fold(self.log.append([register.ended(payload)]))
@@ -4493,6 +4543,12 @@ class ConsoleService:
     @staticmethod
     def _log_registration_error(record: dict) -> None:
         print(f"console: registration_error {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+
+    def _log_checkout(self, root: str, verb: str, failure: checkout_remote.Failure | None) -> None:
+        """Git's own words of a failed comparison or update, before the page shows plain ones."""
+        if failure is not None:
+            self._log_registration_error({"root": root, "verb": verb, "step": failure.step,
+                                          "detail": failure.detail})
 
     def _log_registration_failure(self, root: str, plan: Mapping, report: Mapping | None) -> None:
         """The child's own words of a failed plan or registration, before the page shows plain ones."""
@@ -4530,12 +4586,13 @@ class ConsoleService:
                 answers = [*latest["answered"], {"id": question, "subject": subject, "value": value}]
             asked = {"id": question, "subject": subject}
             draft = latest["draft"]
+            remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
             self._registering = root
             self._answering = True
             self._answer_refusal = None
             self._publish()
         try:
-            self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed))
+            self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed, remote))
         except BaseException:
             with self._ingest:
                 self._registering = None
@@ -4616,7 +4673,13 @@ class ConsoleService:
         return register.summary(root, plan, None, draft=fields)
 
     def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,
-                    draft: list[dict] | None = None, changed: list[dict] | None = None) -> None:
+                    draft: list[dict] | None = None, changed: list[dict] | None = None,
+                    remote: str | None = None) -> None:
+        """Plan again with one more answer; the row keeps the shown row's `remote` sentence (#1233).
+
+        The sentence says the registration used a checkout whose remote was never read, which stays
+        true of every later plan of that run.
+        """
         payload = None
         text = None
         try:
@@ -4640,7 +4703,7 @@ class ConsoleService:
                     self._log_answer_error({"root": root, "error": result["error"]})
                     text = plan_questions.refusal_text(result["error"])
                 else:
-                    payload = result
+                    payload = result if remote is None else {**result, "remote": remote}
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
