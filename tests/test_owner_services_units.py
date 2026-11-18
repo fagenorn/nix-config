@@ -33,12 +33,13 @@ echo "launchctl $*" >> "$CALLS"
 case "$1" in
   print)
     case "$2" in
-      gui/502) [ "$HAS_DOMAIN" = 1 ] && exit 0; echo "Could not find domain" >&2; exit 125 ;;
+      gui/502) [ "$HAS_DOMAIN" = 1 ] && exit 0; echo "Could not find domain" >&2; exit "${PROBE_RC:-125}" ;;
       gui/502/*) grep -qxF "${2#gui/502/}" "$LOADED_FILE" && exit 0; exit 113 ;;
     esac ;;
   bootout)
     label="${2#gui/502/}"
     [ "$label" = "$STUCK" ] && exit 5
+    [ "$label" = "$SLOW" ] && exit 0
     grep -vxF "$label" "$LOADED_FILE" > "$LOADED_FILE.new"; mv "$LOADED_FILE.new" "$LOADED_FILE"
     exit 0 ;;
 esac
@@ -51,6 +52,14 @@ exec "$@"
 """
 ID = """#!/bin/bash
 echo 502
+"""
+# A clock that does not wait: each second "passes" at once, and a SLOW label finishes unloading by then.
+SLEEP = """#!/bin/bash
+echo "sleep $*" >> "$CALLS"
+if [ -n "$SLOW" ]; then
+  grep -vxF "$SLOW" "$LOADED_FILE" > "$LOADED_FILE.new"; mv "$LOADED_FILE.new" "$LOADED_FILE"
+fi
+exit 0
 """
 
 
@@ -89,13 +98,14 @@ class OwnerServices(unittest.TestCase):
         self.assertEqual(text.count(END), 1, text)
         return text[text.index(BEGIN):text.index(END) + len(END)]
 
-    def run_segment(self, got, *, has_domain, loaded, stuck="", root=None, drop=()):
+    def run_segment(self, got, *, has_domain, loaded, stuck="", slow="", probe_rc=125, block_logs=False,
+                    root=None, drop=()):
         if root is None:
             scratch = tempfile.TemporaryDirectory()
             self.addCleanup(scratch.cleanup)
             root = Path(os.path.realpath(scratch.name))
             (root / "bin").mkdir()
-            for name, body in (("launchctl", LAUNCHCTL), ("sudo", SUDO), ("id", ID)):
+            for name, body in (("launchctl", LAUNCHCTL), ("sudo", SUDO), ("id", ID), ("sleep", SLEEP)):
                 fake = root / "bin" / name
                 fake.write_text(body)
                 fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
@@ -106,11 +116,14 @@ class OwnerServices(unittest.TestCase):
             (agents / "org.example.keep.plist").write_text("keep")
             (root / "home/Library/Logs").mkdir()
             (root / "calls").write_text("")
+            if block_logs:
+                (root / "home/Library/Logs/SopsNix").write_text("a file, not a directory")
         for label in drop:
             (root / f"home/Library/LaunchAgents/{label}.plist").unlink()
         (root / "loaded").write_text("".join(f"{label}\n" for label in loaded))
         env = {"PATH": f"{root / 'bin'}:/usr/bin:/bin", "CALLS": str(root / "calls"), "LOADED_FILE": str(root / "loaded"),
-               "HAS_DOMAIN": "1" if has_domain else "0", "STUCK": stuck, "FAKEHOME": str(root / "home")}
+               "HAS_DOMAIN": "1" if has_domain else "0", "STUCK": stuck, "SLOW": slow,
+               "PROBE_RC": str(probe_rc), "FAKEHOME": str(root / "home")}
         script = "set -e\n" + self.segment(got).replace(f"~{self.user}", "$FAKEHOME") + "\necho finished"
         done = subprocess.run(["/bin/bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
         calls = (root / "calls").read_text().splitlines()
@@ -207,6 +220,44 @@ class OwnerServices(unittest.TestCase):
                 self.assertNotIn("finished", done.stdout)
                 self.assertIn("org.nixos.agent-console is still loaded", done.stderr)
                 self.assertIn("org.nixos.agent-console.plist", remaining)
+
+    def test_an_agent_that_takes_a_moment_to_exit_is_waited_for(self):
+        for host in units.DarwinHosts.BOOT_HOSTS:
+            with self.subTest(host=host):
+                done, calls, remaining, _ = self.run_segment(
+                    self.got[host], has_domain=True, loaded=LABELS, slow="org.nix-community.home.claude-cache-proxy")
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(done.stdout.splitlines()[-1], "finished")
+                self.assertIn("sleep 1", calls)
+                self.assertEqual(remaining, ["org.example.keep.plist"])
+
+    def test_a_gui_domain_that_cannot_be_read_is_not_a_logout(self):
+        for host in units.DarwinHosts.BOOT_HOSTS:
+            for rc in (1, 64, 134):
+                with self.subTest(host=host, rc=rc):
+                    done, calls, remaining, _ = self.run_segment(
+                        self.got[host], has_domain=False, loaded=LABELS, probe_rc=rc)
+                    self.assertNotEqual(done.returncode, 0)
+                    self.assertNotIn("finished", done.stdout)
+                    self.assertFalse([c for c in calls if " bootout " in c], calls)
+                    self.assertNotIn("the owner has no login session", done.stderr)
+                    self.assertEqual(len(remaining), len(LABELS) + 1)
+            for rc in (112, 113, 125):
+                with self.subTest(host=host, missing=rc):
+                    done, _, _, _ = self.run_segment(
+                        self.got[host], has_domain=False, loaded=[], probe_rc=rc)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    self.assertIn("the owner has no login session", done.stderr)
+
+    def test_a_log_directory_that_cannot_be_made_stops_the_activation_before_any_agent_is_removed(self):
+        for host in units.DarwinHosts.BOOT_HOSTS:
+            with self.subTest(host=host):
+                done, calls, remaining, _ = self.run_segment(
+                    self.got[host], has_domain=True, loaded=LABELS, block_logs=True)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertNotIn("finished", done.stdout)
+                self.assertFalse([c for c in calls if " bootout " in c], calls)
+                self.assertEqual(len(remaining), len(LABELS) + 1)
 
     def test_a_login_host_runs_no_legacy_cleanup(self):
         for host in units.DarwinHosts.LOGIN_HOSTS:

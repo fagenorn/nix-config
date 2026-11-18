@@ -154,7 +154,9 @@ answer; it reads only that endpoint.
 (`verify_checks.owner_services`, issue 1290) is met when the owner's services run at boot on a Mac with nobody
 logged in at its screen. It only reads, every child's output is captured (the runner publishes the check's output
 in an issue comment), and a child that cannot start or times out reads as a failed reading. It reads the owner's
-login session (`launchctl print gui/UID` exits 0: a session now), each boot daemon `org.nixos.agent-console`,
+login session (`launchctl print gui/UID` exits 0: a session now; exit 112, 113 or 125: no domain; any other exit,
+a timeout or a missing tool is `gui_unread`, not met, so an unreadable domain is never taken for a logout), each
+boot daemon `org.nixos.agent-console`,
 `org.nixos.claude-cache-proxy`, `org.nixos.sops-nix` and `org.nixos.verify-pending` (`launchctl print
 system/LABEL` exits 0: loaded), the console (its state endpoint answers, as `console-state`) and the cache proxy
 (`GET /_proxy/health` is 2xx with a JSON object whose `service` is `cache-proxy`), each owned (its daemon has a
@@ -162,7 +164,9 @@ system/LABEL` exits 0: loaded), the console (its state endpoint answers, as `con
 failed to bind does not count), the owner's `~/.ssh/id_ed25519` resolving to a file, and the activation record
 of `~/.agents/state/console` (`activation.result` and `activation.log`). The record is read only when it is a
 qualifying activation: the result is a JSON object with a 40 hex `commit`, an integer `exit` of 0 and no `error`;
-`merge` is an ancestor of that commit (`git merge-base --is-ancestor`); the log reads, is no newer than the
+`merge` is an ancestor of that commit (`git merge-base --is-ancestor`); the console's newest `activation.finished` row in
+`events.sqlite3` beside them is `ok` for that same commit (the command's exit 0 is not the console's verdict: it
+then checks the revision the host runs); the log reads, is no newer than the
 result, and the result is unchanged when read again (a new activation unlinks it before it truncates the log).
 Otherwise it is `unread`. A read record is `logged_in` when a log line holds `ownerServices: the owner has a login
 session`, else `unmarked` when no line holds `ownerServices: the owner has no login session` (the lines the
@@ -251,6 +255,7 @@ import re
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -1546,6 +1551,29 @@ DOMAIN_LINE = "Domain does not support specified action"
 NO_SESSION_LINE = "ownerServices: the owner has no login session"
 SESSION_LINE = "ownerServices: the owner has a login session"
 _JOB_PID = re.compile(r"^\s*pid = (\d+)\s*$", re.MULTILINE)
+# `launchctl print gui/UID` exits with one of these when the domain is not there (no session): 112 no such
+# domain, 113 no such service, 125 "Domain does not support specified action". Any other exit is unreadable.
+NO_DOMAIN_EXITS = (112, 113, 125)
+
+
+def _finished_outcome(store: Path) -> tuple[str, bool] | None:
+    """The console's newest `activation.finished` row as (commit, ok), or None when it cannot be read."""
+    try:
+        connection = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        row = connection.execute("SELECT payload FROM events WHERE kind = 'activation.finished' "
+                                 "ORDER BY seq DESC LIMIT 1").fetchone()
+        payload = json.loads(row[0]) if row else None
+    except (sqlite3.Error, ValueError, TypeError):
+        return None
+    finally:
+        connection.close()
+    if not isinstance(payload, dict) or not isinstance(payload.get("commit"), str):
+        return None
+    return payload["commit"], payload.get("ok") is True
 
 
 def _activation_state(home: Path, merge: str, repo_root: Path, run) -> str:
@@ -1564,6 +1592,9 @@ def _activation_state(home: Path, merge: str, repo_root: Path, run) -> str:
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         return "unread"
     if isinstance(code, bool) or not isinstance(code, int) or code != 0 or "error" in record:
+        return "unread"
+    outcome = _finished_outcome(state / "events.sqlite3")
+    if outcome != (commit, True):
         return "unread"
     try:
         ancestor = run(["git", "-C", str(repo_root), "merge-base", "--is-ancestor", merge, commit])
@@ -1639,7 +1670,9 @@ def owner_services(*, console_port: int, proxy_port: int, merge: str, home: Path
         return pid is not None and listeners(port) == {pid}
 
     gui = read([launchctl, "print", f"gui/{uid}"])
-    session = gui is not None and gui.returncode == 0
+    if gui is None or (gui.returncode != 0 and gui.returncode not in NO_DOMAIN_EXITS):
+        return 1, {"met": False, "verdict": "gui_unread"}
+    session = gui.returncode == 0
     jobs = {label: loaded(label) for label in OWNER_SERVICE_LABELS}
     console_pid = jobs["org.nixos.agent-console"][1]
     proxy_pid = jobs["org.nixos.claude-cache-proxy"][1]

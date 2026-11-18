@@ -9,6 +9,7 @@ import os
 import pwd
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -2996,6 +2997,8 @@ class OwnerServicesWorld(unittest.TestCase):
         self.log = self.state / "activation.log"
         self.write_activation({"commit": self.commit, "exit": 0},
                               f"building\n{NO_SESSION}\ndone\n")
+        self.store = self.state / "events.sqlite3"
+        self.finish(self.commit, ok=True)
         self.proxy_handler = type("Proxy", (ProxyHandler,), {})
         self.console_server = loopback_server(ConsoleHandler)
         self.proxy_server = loopback_server(self.proxy_handler)
@@ -3008,6 +3011,19 @@ class OwnerServicesWorld(unittest.TestCase):
     def stop(server):
         server.shutdown()
         server.server_close()
+
+    def finish(self, commit, *, ok):
+        """Append one `activation.finished` row, as the console does when it settles a run."""
+        connection = sqlite3.connect(self.store)
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+                               " at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT NOT NULL)")
+            connection.execute("INSERT INTO events (at, kind, project, payload) VALUES (?, ?, NULL, ?)",
+                               ("2026-11-18T00:00:00Z", "activation.finished",
+                                json.dumps({"root": "r", "commit": commit, "ok": ok})))
+            connection.commit()
+        finally:
+            connection.close()
 
     def write_activation(self, result, log):
         if result is not None:
@@ -3151,6 +3167,45 @@ class OwnerServicesTest(OwnerServicesWorld):
                 code, report = self.check()
                 self.assertEqual((code, report["verdict"], report["activation"]),
                                  (75, "not_yet", "unread"))
+
+    def test_an_activation_the_console_did_not_record_as_succeeded_is_not_yet(self):
+        """The result's exit 0 is the command's; the console may then find the host on another revision."""
+        for name, rows in (("no row", []), ("failed", [("b" * 40, False)]),
+                           ("another commit", [("c" * 40, True)]),
+                           ("a failure after a success", [("b" * 40, True), ("b" * 40, False)])):
+            with self.subTest(name):
+                self.store.unlink()
+                if not rows:
+                    sqlite3.connect(self.store).close()
+                for commit, ok in rows:
+                    self.finish(commit, ok=ok)
+                code, report = self.check()
+                self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+        with self.subTest("no store"):
+            self.store.unlink()
+            code, report = self.check()
+            self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_a_success_after_a_failure_of_the_same_commit_is_met(self):
+        self.finish(self.commit, ok=False)
+        self.finish(self.commit, ok=True)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_a_gui_domain_that_cannot_be_read_is_not_a_logout(self):
+        for name, answer in (("exit 1", (1, "")), ("exit 64", (64, "")),
+                             ("timeout", subprocess.TimeoutExpired(["launchctl"], 5)),
+                             ("no tool", FileNotFoundError("launchctl"))):
+            with self.subTest(name):
+                self.table[("print", "gui/502")] = answer
+                code, report = self.check()
+                self.assertEqual((code, report["verdict"]), (1, "gui_unread"))
+                self.assertFalse(report["met"])
+
+    def test_every_missing_domain_answer_reads_as_no_session(self):
+        for status in (112, 113, 125):
+            with self.subTest(status=status):
+                self.table[("print", "gui/502")] = (status, "")
+                self.assertEqual(self.check()[1]["verdict"], "met")
 
     def test_a_log_newer_than_its_result_is_not_yet(self):
         self.age_log(-10)

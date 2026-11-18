@@ -28,7 +28,10 @@
 # must not touch the owner's services. It prints which of the two cases it found (the
 # owner has or has no login session) to stderr, for the verification that reads the
 # activation log. It also creates the one-shot decryption's log directory as the owner,
-# because launchd creates the log files and not their directory.
+# because launchd creates the log files and not their directory, and stops when it cannot.
+# A gui probe that fails for any reason but a missing domain stops it too (it proves nothing
+# about a logout), and a bootout that has not finished is waited for, up to 20 seconds,
+# before the agent counts as stuck.
 {
   config,
   lib,
@@ -98,21 +101,41 @@ in
     system.activationScripts.launchd.text = lib.mkBefore ''
       # ownerServices legacy login agents: begin
       uid=$(id -u -- ${username})
-      sudo -u ${username} -- /bin/mkdir -p ~${username}/Library/Logs/SopsNix || true
-      if launchctl print "gui/$uid" >/dev/null 2>&1; then
-        session=1
-        echo "ownerServices: the owner has a login session" >&2
-      else
-        session=0
-        echo "ownerServices: the owner has no login session" >&2
+      if ! sudo -u ${username} -- /bin/mkdir -p ~${username}/Library/Logs/SopsNix; then
+        echo "ownerServices: cannot create ~${username}/Library/Logs/SopsNix, which the secrets decryption logs to" >&2
+        exit 1
       fi
+      # Exit 112, 113 and 125 are launchd saying the domain is not there (no session); any other
+      # exit means the probe itself failed, which proves nothing about a logout.
+      probe=0
+      launchctl print "gui/$uid" >/dev/null 2>&1 || probe=$?
+      case "$probe" in
+        0)
+          session=1
+          echo "ownerServices: the owner has a login session" >&2
+          ;;
+        112 | 113 | 125)
+          session=0
+          echo "ownerServices: the owner has no login session" >&2
+          ;;
+        *)
+          echo "ownerServices: launchctl could not read gui/$uid (exit $probe); activate again" >&2
+          exit 1
+          ;;
+      esac
       for label in ${lib.concatStringsSep " " legacyLabels}; do
         if [ "$session" = 1 ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
           launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
-          if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
-            echo "ownerServices: $label is still loaded in gui/$uid; boot it out by hand and activate again" >&2
-            exit 1
-          fi
+          # A bootout can return before the agent has finished exiting, so wait for it to go.
+          waited=0
+          while launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+            if [ "$waited" -ge 20 ]; then
+              echo "ownerServices: $label is still loaded in gui/$uid 20 seconds after its bootout; boot it out by hand and activate again" >&2
+              exit 1
+            fi
+            waited=$((waited + 1))
+            sleep 1
+          done
         fi
         rm -f ~${username}/Library/LaunchAgents/"$label".plist
       done
