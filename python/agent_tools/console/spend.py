@@ -57,7 +57,9 @@ The view: `spend_view(snapshot, today, project_of, profiles, questions)` is the 
 `{"approximate": <bool>, "days": [<day>, ...]}`, `WINDOW_DAYS` days, `today` and the days before it
 (UTC), oldest first. A day is `{"day", "total", <dimension>: {<key>: <tokens>}}` for each of
 `DIMENSIONS`, every `<tokens>` a `Tokens.wire()`, plus `"sprint_phase": {<sprint id>: {<phase>:
-<tokens>}}` and `"run_phase": {<run id>: {<phase>: <tokens>}}`, always present; a day with nothing
+<tokens>}}`, `"run_phase": {<run id>: {<phase>: <tokens>}}` and `"project_items": {<project id>:
+{"run": {<run id>: {<phase>: <tokens>}}, "sprint": {<sprint id>: {<phase>: <tokens>}}}}` (#1271,
+ADR-console-074), always present; a day with nothing
 has a zero `total` and empty maps, and a key dated outside the days is ignored. Each message has
 one key in `session`, `project`, `account` and `aspect`, so the sums over each equal `total`.
 `approximate` is true when any message counted is, per day in `total` and for the view. The keys,
@@ -89,6 +91,14 @@ label) and, for a key with no `phase` (a session's own or subagent transcript, o
 `sprint_phase`), `MANAGER_PHASE`; an `UNATTRIBUTED` item has no entry. Per day and item the
 phase tokens sum to the item's entry in `sprint` or `run` (every count field; dollars to
 rounding, since each `Tokens.wire()` rounds on its own).
+
+`project_items` splits the same items by project, because a run id is unique only within a project
+(two projects' runs may share one, and `run_phase` sums them): an item is counted under
+`project_items[p][kind]` exactly when it is counted under `<kind>_phase` and the key's `project`
+is `p`, not `UNATTRIBUTED`, with the same phase rule (`MANAGER_PHASE` for a sprint item with no
+phase). So per kind, item and phase the sum over projects is at most the `<kind>_phase` figure,
+and equal when every key is attributed. A project or kind with no item has no entry, an
+`UNATTRIBUTED` project, run or sprint never has one, and a day with nothing has `{}`.
 
 The check (`python -m agent_tools.console.spend check-shares`): reads the transcripts under each
 `--projects` directory (default `~/.claude/projects`) from `--from` (default `2026-11-09`, the
@@ -532,6 +542,8 @@ def spend_view(
         day: {dimension: {} for dimension in DIMENSIONS} for day in days}
     items: dict[str, dict[str, dict[str, dict[str, Tokens]]]] = {
         day: {kind: {} for kind in ITEM_PHASES} for day in days}
+    by_project: dict[str, dict[str, dict[str, dict[str, dict[str, Tokens]]]]] = {
+        day: {} for day in days}
     for key, tokens in snapshot.totals.items():
         if key.day not in totals:
             continue
@@ -549,6 +561,11 @@ def spend_view(
                 continue
             bucket = items[key.day][kind].setdefault(item, {})
             bucket[phase] = bucket.get(phase, Tokens()) + tokens
+            project = named["project"]
+            if project != UNATTRIBUTED:
+                kinds = by_project[key.day].setdefault(project, {})
+                bucket = kinds.setdefault(kind, {}).setdefault(item, {})
+                bucket[phase] = bucket.get(phase, Tokens()) + tokens
     return {
         "approximate": any(total.approximate for total in totals.values()),
         "days": [{"day": day, "total": totals[day].wire(),
@@ -558,7 +575,13 @@ def spend_view(
                   **{kind + "_phase": {
                       item: {phase: tokens.wire() for phase, tokens in phases.items()}
                       for item, phases in items[day][kind].items()}
-                     for kind in ITEM_PHASES}}
+                     for kind in ITEM_PHASES},
+                  "project_items": {
+                      project: {kind: {item: {phase: tokens.wire()
+                                              for phase, tokens in phases.items()}
+                                       for item, phases in by_item.items()}
+                                for kind, by_item in kinds.items()}
+                      for project, kinds in by_project[day].items()}}
                  for day in days],
     }
 

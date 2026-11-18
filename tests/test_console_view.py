@@ -421,7 +421,8 @@ class SpendViewWireTest(unittest.TestCase):
         self.assertEqual(len(shown["spend"]["days"]), 30)
         for day in shown["spend"]["days"]:
             self.assertEqual(set(day), {"day", "total", "session", "project", "sprint", "run",
-                                        "phase", "account", "aspect", "sprint_phase", "run_phase"})
+                                        "phase", "account", "aspect", "sprint_phase", "run_phase",
+                                        "project_items"})
         self.assertEqual(shown["spend"]["days"][-1]["project"]["p00"]["input"], 1330)
 
     def test_view_without_spend_is_null(self):
