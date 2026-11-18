@@ -196,6 +196,7 @@ RECORDS_TEXT = (
     "it under Read when you use it. The console wrote it for this project when this question "
     "started; its spend is null until the console's first spend read. The console's other files "
     "are not readable from this session.\n\n")
+RECORDS_FAILED = "the console's records could not be gathered: {detail}"
 CONTRACT_UNREADABLE = "the project's contract could not be resolved, so no session was started: {detail}"
 UNAVAILABLE_TEXT = "questions are not available on this host yet"
 UNREGISTERED = "this project is not registered"

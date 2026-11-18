@@ -1129,7 +1129,7 @@ class DocsTreeTest(unittest.TestCase):
                         "## Consequences"):
             self.assertIn(section, adr)
         adr065 = next((adr_dir).glob("065-*.md")).read_text().splitlines()
-        self.assertIn("- **Status:** accepted; amended by ADR-console-067", adr065)
+        self.assertIn("- **Status:** accepted; amended by ADR-console-067, ADR-console-075", adr065)
         adr002 = (adr_dir / "002-the-desk-page-design-rules.md").read_text()
         decided = next(row for row in adr002.splitlines()
                        if row.startswith("- **Decided in:**"))
@@ -1165,7 +1165,7 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         amended = (
             ("058-a-question-about-a-project-is-answered-by-a-read-only-session.md",
-             "accepted; amended by ADR-console-059, ADR-console-065", "**D2.", "**D3.",
+             "accepted; amended by ADR-console-059, ADR-console-065, ADR-console-075", "**D2.", "**D3.",
              ("--session-id",)),
             ("049-spend-is-read-from-transcripts-into-memory-and-never-logged.md",
              "accepted; amended by ADR-console-059", "**D3.", "**D4.",

@@ -1437,7 +1437,10 @@ the turns `follow_up` returned at admission in its prompt and nothing else chang
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
-project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
+project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
+records (`question_records.project_records`, ADR-console-075) after the reach and before the
+session; a gathering that raises is a `failed` answer with one stderr line `console:
+project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
 question and a question whose profile is being removed or already removed fails without starting a
 session (`claude-account` would otherwise recreate a removed profile directory). A job that finds
@@ -1474,7 +1477,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, question_records, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -4035,25 +4038,36 @@ class ConsoleService:
                             detail=f"{type(error).__name__}: {error}"))
                 else:
                     try:
-                        with self._client_run(profile):
-                            if profile not in self._read_profiles():
-                                outcome = project_question.Outcome(
-                                    project_question.FAILED,
-                                    reason=project_question.PROFILE_GONE.format(profile=profile))
-                            else:
-                                ask = project_question.new_ask(
-                                    question_id, project_id, root, text, profile, reach.routes,
-                                    Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id, thread=thread, repo=reach.repo,
-                                    unset=reach.unset)
-                                try:
-                                    outcome = self._project_asker(ask, self._stop)
-                                except Exception as error:
+                        records = self._question_records(project_id, root)
+                    except Exception as error:
+                        print(f"console: project_question_records_failed {question_id} "
+                              f"{type(error).__name__}: {error}", file=sys.stderr)
+                        outcome = project_question.Outcome(
+                            project_question.FAILED,
+                            reason=project_question.RECORDS_FAILED.format(
+                                detail=f"{type(error).__name__}: {error}"))
+                    else:
+                        try:
+                            with self._client_run(profile):
+                                if profile not in self._read_profiles():
                                     outcome = project_question.Outcome(
                                         project_question.FAILED,
-                                        reason=f"{type(error).__name__}: {error}")
-                    except _ProfileRemoving as error:
-                        outcome = project_question.Outcome(project_question.FAILED, reason=str(error))
+                                        reason=project_question.PROFILE_GONE.format(profile=profile))
+                                else:
+                                    ask = project_question.new_ask(
+                                        question_id, project_id, root, text, profile, reach.routes,
+                                        Path(self._store).with_name(project_question.SETTINGS_DIR),
+                                        session_id=session_id, thread=thread, repo=reach.repo,
+                                        unset=reach.unset, records=records)
+                                    try:
+                                        outcome = self._project_asker(ask, self._stop)
+                                    except Exception as error:
+                                        outcome = project_question.Outcome(
+                                            project_question.FAILED,
+                                            reason=f"{type(error).__name__}: {error}")
+                        except _ProfileRemoving as error:
+                            outcome = project_question.Outcome(
+                                project_question.FAILED, reason=str(error))
         except Exception as error:
             # Never raised on: a dispatch that runs the job inline would answer the question twice.
             traceback.print_exc()
@@ -4064,6 +4078,20 @@ class ConsoleService:
                 outcome = project_question.Outcome(
                     project_question.FAILED, reason=project_question.STOPPED_TEXT)
             self._record_project_answer(question_id, project_id, outcome)
+
+    def _question_records(self, project_id: str, root: str) -> str:
+        """The encoded document of the console's own records of one project (ADR-console-075)."""
+        events = self.log.events()
+        with self._ingest:
+            spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
+            live_runs = {
+                key for key in self._deliveries
+                if (held := self._sessions.get(key[0])) is not None and held.state != sessions.ENDED
+                and held.repo is not None and project_for(held.repo, self._states) == project_id}
+        return question_records.encode(question_records.project_records(
+            project_id, root=root, events=events, spend=spend_view, live_runs=live_runs,
+            sprint_states=sprint_states, inbox=inbox,
+            written_at=self._now().isoformat(timespec="seconds")))
 
     def _record_project_answer(self, question_id: str, project_id: str,
                                outcome: "project_question.Outcome") -> None:

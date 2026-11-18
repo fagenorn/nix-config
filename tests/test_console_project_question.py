@@ -5,7 +5,9 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import io
 import json
 import os
 import shlex
@@ -22,8 +24,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints,
-    view)
+    account_remove, deliveries, event_log, project_question, project_question_hook as hook, service, sessions,
+    signin, spend, sprints, view)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -1835,6 +1837,128 @@ def question_threads():
     return [t for t in threading.enumerate() if t.name == service.PROJECT_QUESTION_THREAD]
 
 
+class QuestionRecordsServiceTest(QuestionCase):
+    """The job gathers the asked project's own records once per accepted question (ADR-console-075)."""
+
+    def seed(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        run = {"session_id": "s-1", "run_id": "wf_a", "moved_ms": 1700000000000,
+               "issues": [{"issue": 7, "stage": "building", "task": 2, "tasks": 3, "locking": False}]}
+        other = {"session_id": "s-0", "run_id": "wf_b", "moved_ms": 1700000000000,
+                 "issues": [{"issue": 9, "stage": "queued", "task": None, "tasks": None,
+                             "locking": False}]}
+        entries = [(deliveries.DELIVERY_SEEN, "owner/p01", run),
+                   (deliveries.DELIVERY_SEEN, "owner/p00", other)]
+        for root, commit in (("/srv/p01", "c" * 40), ("/srv/p00", "d" * 40)):
+            entries.append((event_log.ACTIVATION_STARTED, None,
+                            {"root": root, "commit": commit, "tree": "group:1"}))
+            entries.append((event_log.ACTIVATION_FINISHED, None,
+                            {"root": root, "commit": commit, "ok": False, "reason": "it exited 1",
+                             "next_step": None}))
+        log.append(entries)
+        log.close()
+
+    def arrange(self, with_spend=True, **kwargs):
+        self.seed()
+        svc = self.start(**kwargs)
+
+        def sprint(sprint_id, project, goal, seq):
+            return sprints.SprintState(sprint_id, project, goal, seq, f"2026-11-17T08:00:0{seq}+00:00")
+
+        def held(project, issue):
+            return view.InboxRecord(
+                {"key": f"{project}#{issue}/1", "issue": issue, "reason": "verify-ask", "kind": "ask",
+                 "question": "q", "detail": ""}, "2026-11-17T08:00:00+00:00", "2026-11-17T08:00:00+00:00")
+
+        svc._sprints = {"1111111111111111": sprint("1111111111111111", "owner/p01", "g1. More.", 1),
+                        "0000000000000000": sprint("0000000000000000", "owner/p00", "g0. More.", 2)}
+        svc._inbox = {("owner/p01", "owner/p01#7/1"): held("owner/p01", 7),
+                      ("owner/p00", "owner/p00#9/1"): held("owner/p00", 9)}
+        if with_spend:
+            tokens = lambda n: spend.Tokens(input=n).wire()
+            svc._spend_view = {"approximate": False, "days": [{
+                "day": "2026-11-17",
+                "project": {"owner/p01": tokens(13), "owner/p00": tokens(905)},
+                "project_items": {
+                    "owner/p01": {"run": {"wf_a": {"implement": tokens(10)}},
+                                  "sprint": {"1111111111111111": {"manager": tokens(3)}}},
+                    "owner/p00": {"run": {"wf_a": {"plan": tokens(900)}, "wf_b": {"plan": tokens(5)}}}}}]}
+        return svc
+
+    def records_of(self, svc):
+        before = len(self.asked)
+        svc.ask_project_question(WHY, "what costs the most tokens per issue?")
+        ask, _cancel = self.asked[before]
+        return ask, json.loads(ask.records)
+
+    def test_a_questions_session_reads_only_its_own_projects_records(self):
+        svc = self.arrange()
+        (rows_before) = len(self.question_rows())
+        ask, records = self.records_of(svc)
+        self.assertEqual(records["project_id"], WHY)
+        self.assertEqual([d["run_id"] for d in records["deliveries"]], ["wf_a"])
+        self.assertIs(records["deliveries"][0]["live"], False)
+        self.assertEqual([(r["run_id"], r["tokens"]) for r in records["spend"]["runs"]], [("wf_a", 10)])
+        self.assertEqual([i["issue"] for i in records["spend"]["issues"]], [7])
+        self.assertEqual([s["sprint_id"] for s in records["sprints"]], ["1111111111111111"])
+        self.assertEqual([s["sprint_id"] for s in records["spend"]["sprints"]], ["1111111111111111"])
+        self.assertEqual([a["commit"] for a in records["activations"]], ["c" * 40])
+        self.assertEqual([h["issue"] for h in records["held_checks"]], [7])
+        for other in ("owner/p00", "wf_b", "0000000000000000", "/srv/p00", "d" * 40, "s-0"):
+            self.assertNotIn(other, ask.records)
+        self.assertEqual([r[0] for r in self.question_rows()][rows_before:], [ASKED, ANSWERED_KIND])
+        self.assertEqual(len(self.question_rows()), rows_before + 2)
+
+    def test_a_run_is_live_only_while_its_session_is_open_in_this_project(self):
+        svc = self.arrange()
+        open_session = sessions.SessionState(
+            "s-1", "/srv/p01", "/srv/p01", sessions.WORKING, None, 1, "2026-11-17T08:00:01+00:00", None)
+        svc._sessions = {"s-1": open_session}
+        _ask, records = self.records_of(svc)
+        self.assertIs(records["deliveries"][0]["live"], True)
+        for name, change in (("ended", {"state": sessions.ENDED}),
+                             ("moved to another project", {"repo": "/srv/p00"}),
+                             ("no repository", {"repo": None})):
+            with self.subTest(name):
+                svc._sessions = {"s-1": dataclasses.replace(open_session, **change)}
+                _ask, records = self.records_of(svc)
+                self.assertIs(records["deliveries"][0]["live"], False)
+
+    def test_before_the_first_spend_read_the_records_hold_null_spend(self):
+        svc = self.arrange(with_spend=False)
+        _ask, records = self.records_of(svc)
+        self.assertIsNone(records["spend"])
+        self.assertTrue(records["deliveries"])
+
+    def test_records_that_cannot_be_gathered_answer_failed_without_a_session(self):
+        svc = self.arrange()
+        stderr = io.StringIO()
+        with mock.patch("agent_tools.console.question_records.project_records",
+                        side_effect=RuntimeError("boom")), contextlib.redirect_stderr(stderr):
+            qid = svc.ask_project_question(WHY, "why?")
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows()[-1][2], {
+            "question_id": qid, "outcome": "failed",
+            "reason": "the console's records could not be gathered: RuntimeError: boom"})
+        self.assertIn("console: project_question_records_failed " + qid, stderr.getvalue())
+        self.assertEqual(svc._project_questions_open, 0)
+
+    def test_a_contract_that_cannot_be_resolved_gathers_no_records(self):
+        def unreadable(root):
+            raise ValueError("bad")
+
+        svc = self.arrange(project_reach=unreadable)
+        gather = mock.Mock()
+        with mock.patch("agent_tools.console.question_records.project_records", gather), \
+                contextlib.redirect_stderr(io.StringIO()):
+            svc.ask_project_question(WHY, "why?")
+        gather.assert_not_called()
+        self.assertEqual(self.asked, [])
+        self.assertTrue(self.question_rows()[-1][2]["reason"].startswith(
+            "the project's contract could not be resolved"))
+
+
 class QuestionLifecycleTest(QuestionCase):
     def test_an_orderly_stop_records_the_running_questions_answer_once(self):
         entered = threading.Event()
@@ -2028,7 +2152,8 @@ class QuestionThreadServiceTest(QuestionCase):
                             ("--setting-sources", "")):
             self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
         self.assertEqual(follow_argv[-1], project_question.prompt(
-            "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01"))
+            "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01",
+            records=str(project_question.records_path(follow_ask))))
         self.assertIn("Earlier question: what does the build check?\n"
                       "Earlier answer: Answer: it builds.\n", follow_argv[-1])
         self.assertEqual(_thread_ids(svc), [[first, follow]])

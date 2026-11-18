@@ -59,7 +59,7 @@ The view: `spend_view(snapshot, today, project_of, profiles, questions)` is the 
 `DIMENSIONS`, every `<tokens>` a `Tokens.wire()`, plus `"sprint_phase": {<sprint id>: {<phase>:
 <tokens>}}`, `"run_phase": {<run id>: {<phase>: <tokens>}}` and `"project_items": {<project id>:
 {"run": {<run id>: {<phase>: <tokens>}}, "sprint": {<sprint id>: {<phase>: <tokens>}}}}` (#1271,
-ADR-console-074), always present; a day with nothing
+ADR-console-075), always present; a day with nothing
 has a zero `total` and empty maps, and a key dated outside the days is ignored. Each message has
 one key in `session`, `project`, `account` and `aspect`, so the sums over each equal `total`.
 `approximate` is true when any message counted is, per day in `total` and for the view. The keys,
