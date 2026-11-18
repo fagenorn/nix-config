@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty-two screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -62,8 +62,12 @@ Contract:
   `HEAD_ASK`: the field shown, the working question's line, the panel's Read line), `ask-goal`
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
+  `sharing-panel` is the owner's Sharing panel opened over one invented colleague of `owner/web`
+  after one admitted guest request; `guest-page` is that colleague's read-only page through a
+  stand-in Serve that adds the tailnet Host and login header, refused when the captured page is
+  not the guest page.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 60 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 64 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -118,17 +122,20 @@ Contract:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent_tools.console import capacity, event_log, manager, sessions, signin
-from agent_tools.console.event_log import EventLog
+from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
@@ -140,7 +147,8 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "accounts-panel", "ask-box",
-          "questions-closed", "questions-open", "ask-goal", "question-read")
+          "questions-closed", "questions-open", "ask-goal", "question-read", "sharing-panel",
+          "guest-page")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -148,6 +156,9 @@ GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
+TAILNET = "desk.invented-tailnet.ts.net"
+COLLEAGUE = "colleague@example.invalid"
+SHARING_STATES = ("sharing-panel", "guest-page")
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -469,6 +480,11 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
+    elif state in SHARING_STATES:
+        seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
+        seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -719,7 +735,8 @@ def _seed_lock_run(service: ConsoleService, fixture: Fixture, now_s: float) -> N
     service.poll_deliveries()
 
 
-def start_service(fixture: Fixture, now_s: float, launches: list | None = None) -> ConsoleService:
+def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
+                  guest: bool = False) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
             launches.append(launch)
@@ -737,7 +754,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         activity=lambda root: None,
         slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
-        dispatch=lambda job: job(),
+        dispatch=lambda job: job(), guest_port=0 if guest else None,
         repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
     service.start()
     service.poll_spend()
@@ -747,6 +764,67 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
     elif fixture.deaf:
         service.poll_movement()
     return service
+
+
+def _guest_get(address: tuple[str, int], path: str = "/", *, host: str | None = TAILNET,
+               login: str | None = COLLEAGUE) -> http.client.HTTPResponse:
+    """One GET to `address` carrying the tailnet Host and the colleague's login header."""
+    headers = {}
+    if host is not None:
+        headers["Host"] = host
+    if login is not None:
+        headers["Tailscale-User-Login"] = login
+    connection = http.client.HTTPConnection(*address, timeout=10)
+    connection.request("GET", path, headers=headers)
+    return connection.getresponse()
+
+
+class _Serve:
+    """A loopback stand-in for Tailscale Serve in front of the guest port.
+
+    Each GET is forwarded to `guest_address` with `Host: TAILNET` and `Tailscale-User-Login:
+    COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For` and `Host` dropped; the status and
+    headers are copied and the body is streamed until EOF, each chunk flushed (the view stream
+    is event-stream). `.address` is where a browser reads it; `.close()` stops it.
+    """
+
+    def __init__(self, guest_address: tuple[str, int]):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                kept = {name: value for name, value in self.headers.items()
+                        if not name.lower().startswith("tailscale-")
+                        and name.lower() not in ("x-forwarded-for", "host")}
+                connection = http.client.HTTPConnection(*guest_address, timeout=3600)
+                try:
+                    connection.request("GET", self.path, headers={
+                        **kept, "Host": TAILNET, "Tailscale-User-Login": COLLEAGUE})
+                    response = connection.getresponse()
+                    self.send_response_only(response.status)
+                    for name, value in response.getheaders():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    while chunk := response.read1(65536):
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+                    self.close_connection = True
+
+            def log_message(self, format: str, *args) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.address: tuple[str, int] = self._server.server_address[:2]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
@@ -768,15 +846,24 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                 with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp:
                     now_s = datetime.now(timezone.utc).timestamp()
                     service = start_service(
-                        build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s)
+                        build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
+                        guest=state in SHARING_STATES)
+                    serve = None
                     try:
                         host, port = service.address
+                        if state == "sharing-panel":
+                            _guest_get(service.guest_address).read()
+                        elif state == "guest-page":
+                            serve = _Serve(service.guest_address)
+                            host, port = serve.address
                         for width in widths:
                             path = "spend" if state == "spend-page" else ""
                             taken.append(
                                 _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
                                       question=read[0]))
                     finally:
+                        if serve is not None:
+                            serve.close()
                         service.close()
         finally:
             browser.close()
@@ -924,6 +1011,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
+        if state == "guest-page":
+            page.wait_for_selector("#top-who:not([hidden])")
+            if page.query_selector("#capacity") is not None:
+                raise RuntimeError("the guest shot is not the guest page")
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')
@@ -944,6 +1035,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")
+        if state == "sharing-panel":
+            page.click("#sharing-open")
+            page.wait_for_selector("#sharing:not([hidden])")
         tell = None
         if state == "tell-box-open":
             page.click("button.tell-open")

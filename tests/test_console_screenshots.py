@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import dataclasses
+import http.client
 import json
 import os
 import pwd
@@ -14,6 +15,8 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
+
+from agent_tools.console import service
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
@@ -107,8 +110,9 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 30)
+    def test_the_set_is_thirty_two_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 32)
+        self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
@@ -117,7 +121,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-12:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-14:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read"))
@@ -127,7 +131,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty"}
+                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty", 31: "thirty-one",
+                 32: "thirty-two"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -646,6 +651,93 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertLess(before.index(fill), before.index(hint))
                 else:
                     self.assertNotIn(hint, calls)
+
+    def test_the_guest_shot_goes_through_a_stand_in_serve(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp).resolve(), "guest-page", now_s)
+            svc = shots.start_service(fixture, now_s, guest=True)
+            serve = None
+            try:
+                serve = shots._Serve(svc.guest_address)
+
+                def get(address, path):
+                    connection = http.client.HTTPConnection(*address, timeout=5)
+                    try:
+                        connection.request("GET", path)
+                        response = connection.getresponse()
+                        return response.status, response.read()
+                    finally:
+                        connection.close()
+
+                status, body = get(serve.address, "/api/state")
+                self.assertEqual(status, 200)
+                state = json.loads(body)
+                self.assertNotIn("sharing", state)
+                self.assertIn("owner/web", body.decode())
+                self.assertNotIn("owner/api", body.decode())
+                status, body = get(serve.address, "/")
+                self.assertEqual(status, 200)
+                self.assertIn(service.DOOR_GUEST, body)
+                status, body = get(svc.address, "/api/state")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["sharing"]["colleagues"],
+                                 [{"login": shots.COLLEAGUE, "projects": ["owner/web"]}])
+            finally:
+                if serve is not None:
+                    serve.close()
+                svc.close()
+
+    def test_the_sharing_shot_opens_the_panel(self) -> None:
+        calls: list[tuple[str, tuple]] = []
+
+        class Page:
+            def goto(self, url):
+                calls.append(("goto", (url,)))
+
+            def wait_for_selector(self, selector):
+                calls.append(("wait_for_selector", (selector,)))
+
+            def query_selector(self, selector):
+                return None
+
+            def click(self, selector):
+                calls.append(("click", (selector,)))
+
+            def evaluate(self, expression, arg=None):
+                if expression == shots.SCROLL_Y:
+                    return 0.0
+                if expression == "document.documentElement.scrollWidth":
+                    return 480
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                    return []
+                return 0
+
+            def screenshot(self, path, full_page):
+                pass
+
+            def close(self):
+                pass
+
+        class Browser:
+            def new_page(self, viewport):
+                return Page()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shots._shoot(Browser(), "http://console.test/", "sharing-panel", 480, Path(tmp))
+        click = calls.index(("click", ("#sharing-open",)))
+        self.assertLess(click, calls.index(("wait_for_selector", ("#sharing:not([hidden])",))))
+
+    def test_the_guest_shot_refuses_the_owner_page(self) -> None:
+        for present, refused in (({"#capacity"}, True), (set(), False)):
+            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                if refused:
+                    with self.assertRaisesRegex(RuntimeError, "the guest shot is not the guest page"):
+                        shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+                else:
+                    shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+                self.assertIn("#top-who:not([hidden])", page.waits)
 
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
