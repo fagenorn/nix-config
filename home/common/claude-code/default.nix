@@ -362,6 +362,12 @@ let
     skipDangerousModePermissionPrompt = true;
     skipWorkflowUsageWarning = true;
 
+    # Keep session transcripts (~/.claude/projects/**/*.jsonl) for 180 days, not the 30-day
+    # default (#1275). Every account profile links ~/.claude/settings.json (ADR-hosts-005),
+    # so this one value covers every account on every host. Codex needs no setting: it never
+    # prunes ~/.codex/sessions, and Nix writes nothing under ~/.codex (ADR-delivery-001).
+    cleanupPeriodDays = 180;
+
     # No Co-Authored-By trailer, PR line or session link in any project (#619).
     attribution = {
       commit = "";
