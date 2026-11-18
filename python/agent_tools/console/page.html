@@ -553,7 +553,6 @@ function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
 }
-// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
 function pathWords(node, text) {
   const value = String(text);
   if (!value.includes("/")) {
@@ -579,7 +578,6 @@ function pathWords(node, text) {
   flush();
   return node;
 }
-// A run of LONG_WORD characters or more with no space is one cut span carrying its whole text in its title (#1133).
 const LONG_WORD = 24;
 function cutWords(node, text) {
   let plain = "";
@@ -618,7 +616,6 @@ function runSummary(run) {
   const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
   return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
 }
-// The spend figure: tokens and estimated dollars summed over every day of the view's window (ADR-console-056).
 let spendNow = { sprint: new Map(), run: new Map() };
 function spendIndex(spend) {
   const index = { sprint: new Map(), run: new Map() };
@@ -806,7 +803,6 @@ const followPosts = new Map();
 const followSent = new Map();
 const followLatest = new Map();
 const askReveal = new Set();
-// The thread open in the reading panel ({ project, thread }) and the one a sent question asks it to open once its row arrives (#1226, D4).
 let reading = null;
 let readingReveal = null;
 let sprintRedraw = 0;
@@ -1476,9 +1472,6 @@ function pinControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
-// The Remove confirmation (#1030). Its typed name lives in removeDrafts, never in the inbox's
-// drafts (renderInbox drops every drafts key that is not an open item), and renderAccounts itself
-// keeps its focus and selection across a redraw.
 const removeOpen = new Set();
 const removeDrafts = new Map();
 const removePosts = new Map();
@@ -1818,7 +1811,6 @@ function projectLine(entry) {
   }
   line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
-  // The Ask button sits on the same row as Give it a goal (#1178, ADR-console-002); an open box takes its place.
   const acts = el("span", "line-acts");
   let buttons = 0;
   if (entry.quiet) {
@@ -1832,7 +1824,6 @@ function projectLine(entry) {
   if (buttons > 0) line.appendChild(acts);
   return line;
 }
-// A not-due owner check (#1129, ADR-console-055): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
 function waitLine(wait, tag) {
   const line = el(tag, "wait");
   if (typeof wait.until === "string") {
@@ -1922,7 +1913,6 @@ async function postNotice(projectId) {
   }
   redrawNotices();
 }
-// The owner's Activate click (ADR-console-043): posts the commit the line shows and is disabled only while sending. The refusal stays on the line until a frame brings a different line.
 let activationPost = null;
 async function postActivation(commit, key) {
   if (activationPost !== null && activationPost.key === key && activationPost.refused === null) return;
@@ -2070,7 +2060,6 @@ function noticeFold(entry, afterLine) {
   item.appendChild(fold);
   return item;
 }
-// A project's Ask box (#1177, ADR-console-002): a quiet button that opens a field in place, and under it the project's questions as its view carries them.
 function askField(projectId) {
   return Array.from(document.querySelectorAll("textarea.ask-text")).find((area) => area.dataset.askDraft === projectId);
 }
@@ -2088,7 +2077,6 @@ function cancelAsk(projectId) {
   if (post !== undefined && post.phase !== "sending") askPosts.delete(projectId);
   redrawNotices();
 }
-// The threads a project's view carries (#1178, ADR-console-059 D4), newest first, and every question of them.
 function askThreads(entry) {
   const folded = entry !== undefined && entry.questions !== null && typeof entry.questions === "object" ? entry.questions : null;
   return folded !== null && Array.isArray(folded.threads) ? folded.threads.filter((thread) => Array.isArray(thread.questions) && thread.questions.length > 0) : [];
@@ -2211,7 +2199,6 @@ function askBox(projectId, entry) {
   box.appendChild(reason);
   return box;
 }
-// An answer's text as block nodes (#1226, D6): fenced code, bullet and numbered lists and paragraphs, built with el() only. A fence runs to the closing fence or the end; every other markup stays text.
 function answerBlocks(text) {
   const lines = String(text).split("\n").map((line) => line.replace(/\r$/, ""));
   const blocks = [];
@@ -2259,7 +2246,6 @@ function answerBlocks(text) {
   endPara();
   return blocks;
 }
-// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong, and its text may span inline code; the rest is span text, an unmatched marker included.
 function inlineNodes(text) {
   const value = String(text);
   const spans = [];
@@ -2297,7 +2283,6 @@ function inlineNodes(text) {
   emit(push, at, value.length);
   return nodes;
 }
-// One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, the closed sources fold, Make it a goal, then the call-out, which is last.
 function askRow(projectId, question, first, last, thread) {
   const row = el("li", "ask");
   if (!first) row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
@@ -2369,7 +2354,6 @@ function askBlock(entry, afterLine, lined) {
   }
   return item;
 }
-// A thread's follow-up box (#1178, ADR-console-002): the Ask box's draft, refusal and pending rules for one thread, keyed by its project and its id.
 function followKey(projectId, threadId) {
   return projectId + "\n" + threadId;
 }
@@ -2503,7 +2487,6 @@ function revealed(key) {
   askReveal.delete(key);
   return true;
 }
-// A thread's line in the Questions fold: a button opening it in the reading panel, or closing it when it is the open one (#1226, D4).
 function isReading(projectId, thread) {
   return reading !== null && reading.project === projectId && reading.thread === thread.id;
 }
@@ -2569,7 +2552,6 @@ function closeReading() {
   const opener = Array.from(document.querySelectorAll("button.thread-open")).find((button) => button.dataset.key === key);
   if (opener !== undefined) opener.focus();
 }
-// The reading panel in the main column: the open thread's heading, rows, outstanding follow-ups and follow-up box, or hidden and empty when no thread is open or the open one has left the view (#1226, D4). A thread a sent question asked to open is opened once, without moving focus.
 function renderReading(view) {
   const section = document.getElementById("reading");
   if (readingReveal !== null) {
@@ -2612,7 +2594,6 @@ function renderReading(view) {
     twin.focus({ preventScroll: true });
   }
 }
-// One closed fold of a project's question threads, newest first, each a closed line opening to its questions and answers in order (#1178, ADR-console-059 D4); null when the project has none. It counts in nothing.
 function questionsFold(entry, afterLine) {
   const threads = askThreads(entry);
   if (threads.length === 0) return null;
@@ -2700,9 +2681,6 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
-// A frame is drawn when it arrives, and a reset can pass after that (#1045): a profile whose next reset
-// (its out_until when out) has gone by reads as reset, with the figures and the time from before it dropped,
-// until a frame says more.
 function lapsedReset(p) {
   const stamp = p.state === "out" ? p.out_until : p.next_reset;
   if (stamp === null || stamp === undefined) return false;
@@ -2811,8 +2789,6 @@ function renderCapacity(view) {
   }
   box.replaceChildren(...nodes);
 }
-// The accounts panel (#1039): one row per capacity profile with its details and the exclude, pin
-// and remove controls. It draws only while open and holds nothing while closed.
 let accountsOpen = false;
 let accountsReturn = null;
 function accountRow(shown, view) {
@@ -3051,7 +3027,6 @@ function beforeFirst(pictures) {
   }
   return out;
 }
-// An owner check's pictures (ADR-console-045) reuse the shared gallery and viewer of ADR-console-038.
 function checkPictures(node, item) {
   const gallery = pictureGallery(itemId(item), beforeFirst(item.pictures), pictureCaption);
   if (gallery !== null) node.appendChild(gallery);
@@ -3061,7 +3036,6 @@ function checkPictures(node, item) {
 function readingLine(item) {
   return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
 }
-// ADR-console-047: the reading is the first thing under the question, before the pictures that illustrate it and the answer box.
 function checkHead(node, item) {
   const reading = readingLine(item);
   if (reading !== null) node.appendChild(reading);
@@ -3153,7 +3127,6 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
-// The shared gallery for any card (ADR-console-038), also drawn by the brief card and the report (ADR-console-041): each picture is fetched once with the page token and shown from an object URL.
 const pictureCache = new Map();
 function pictureSequence(pictures) {
   if (!Array.isArray(pictures)) return [];
@@ -3168,7 +3141,6 @@ function pictureSequence(pictures) {
   }
   return out;
 }
-// An owner check thumbnail reads a caption made from its file name, never the name itself (ADR-console-047): a before or after word leads, a trailing width reads in px, any other name is sentence case.
 function pictureCaption(name) {
   const base = String(name).split(/[\\/]/).pop().replace(/\.png$/i, "");
   const words = base.split(/[\s._-]+/).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")).filter((w) => w !== "");
@@ -3251,7 +3223,6 @@ function holdPictures(draw) {
   }
   prunePictures();
 }
-// The open viewer stays only while its card still draws the same pictures in the same order (ADR-console-038).
 function viewerStillShown() {
   const shown = [...document.querySelectorAll("button.pic-thumb")].filter((n) => n.dataset.key.startsWith(viewer.key + "/"));
   if (shown.length !== viewer.sequence.length) return false;
@@ -3297,7 +3268,6 @@ function pictureGallery(key, pictures, caption) {
   }
   return gallery;
 }
-// The shared modal viewer (ADR-console-038): one picture at a time in the card's order, a pair side by side. While it is open the rest of the body is inert and its own keys are the only ones that act.
 let viewer = null;
 function viewerFigure(picture, label, current) {
   const figure = el("figure", current ? "viewer-pic current" : "viewer-pic");
@@ -3405,27 +3375,21 @@ function viewerKey(event) {
   }
   return true;
 }
-// A refused registration waiting for its Retry (ADR-console-028 D10): a question card whose one option runs the registration again.
 function isRetry(item) {
   return item.reason === "register_retry";
 }
-// A ready or failed adoption waiting to be applied (ADR-console-030 D9): a question card whose first option applies it and whose second sets it aside.
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-070): a question card whose first option grants its folder trust and registers it, or updates the checkout, and whose second sets it aside; both post to /api/register-confirm.
 function isConfirm(item) {
   return item.reason === "register_confirm" || item.reason === "register_behind";
 }
-// A profile whose folder trust could not be read back (ADR-console-034): a question card that shows the terminal command and whose one option checks again.
 function isTrust(item) {
   return item.reason === "trust_failed";
 }
-// A registration that failed (ADR-console-035): a question card whose first option registers again and whose second sets it aside; the page shows its headline, why and options verbatim.
 function isFailure(item) {
   return item.reason === "register_failed";
 }
-// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9), the Register card (ADR-console-034) or a failed registration's card (ADR-console-035): a card like a manager question.
 function isRegister(item) {
   return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item) || isFailure(item) || isTrust(item);
 }
@@ -3450,7 +3414,6 @@ function recommendedIndex(q) {
   if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
   return q.options.indexOf(q.recommended);
 }
-// An adoption question the plan answers one way (ADR-console-033): no list to choose from, so the option is the card's action and starts picked.
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
@@ -4251,7 +4214,6 @@ function leadItem(item) {
 function itemLine(item) {
   const line = el("li", "row");
   if (isRegister(item)) {
-    // A register row reads like its lead card: title, then the ask (ADR-console-030 D5).
     line.appendChild(headLine(item));
     line.appendChild(pathWords(el("p", "q reg"), item.headline));
   } else {
@@ -4658,7 +4620,6 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
-// The activation line (#1114, #1193, ADR-console-043): the one sentence at the head of the Work column about activating this host, drawn with pathWords so a path breaks after a slash. While Activate is offered the line ends with its button; a refusal of the click shows beside it until a frame brings a different line.
 function activationLine(view) {
   const found = view.activation;
   if (found === null || typeof found !== "object") {
@@ -4900,7 +4861,6 @@ function goalChars(text) {
 }
 const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "", rev: 0 };
 let goalUi = null;
-// #1214, ADR-console-002: the count sits at the field's corner and reads only near the limit; over it, Send is aria-disabled and the hint beside it says how much to cut. Nothing here changes a size.
 const goalCount = el("span", "goal-count");
 function showGoalLimit() {
   const n = goalChars(draft.text);
@@ -5229,7 +5189,6 @@ function renderAccountAdd(view) {
   if (accountReason.textContent !== reason) accountReason.textContent = reason;
 }
 renderAccountAdd(null);
-// The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
 const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
@@ -5571,7 +5530,6 @@ function openGoalFor(projectId) {
   refreshGoalList();
   goalText.focus();
 }
-// #1179, ADR-console-059 D5: the goal field gets the question and its plain-words answer only, and nothing is stated until the owner sends it.
 function goalFromAnswer(projectId, question) {
   const text = question.question + "\n\n" + question.answer;
   draft.text = text;
