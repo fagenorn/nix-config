@@ -2823,6 +2823,15 @@ class LookCardTest(unittest.TestCase):
                 {"questions": [dict(LOOK_QUESTION, look={**LOOK, "approve": "Approve it"})]})
         self.assertEqual(str(caught.exception), sprints.LOOK_APPROVE.format(n=1))
 
+    def test_a_look_card_whose_approving_option_needs_words_is_refused(self):
+        for needs in (["Approve this head"], [" Approve this head ", "Ask for changes"]):
+            with self.subTest(needs=needs), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_round({"questions": [dict(LOOK_QUESTION, needs_words=needs)]})
+            self.assertEqual(str(caught.exception), sprints.LOOK_APPROVE_WORDS.format(n=1))
+        kept = sprints.checked_round({"questions": [
+            dict(LOOK_QUESTION, needs_words=["Ask for changes"])]})
+        self.assertEqual(kept["questions"][0]["needs_words"], ["Ask for changes"])
+
     def test_a_look_card_without_its_before_and_after_pictures_is_refused(self):
         bare = {key: value for key, value in LOOK_QUESTION.items() if key != "pictures"}
         for name, pictures in {"none": None, "empty": [],
@@ -2920,8 +2929,29 @@ class LookCardTest(unittest.TestCase):
         self.assertEqual((question.look_state, question.look_found, question.look_found_state),
                          ("moved", "b" * 40, "open"))
         self.assertEqual(sprints.open_questions(state), (question,))
+        (notice,) = sprints.unread(state)
+        self.assertEqual((notice.message_id, notice.kind, notice.text), (6, sprints.MESSAGE_LOOK_MOVED,
+            sprints.LOOK_MOVED_OPEN.format(round=5, index=0, head=LOOK["head"], pr=LOOK["pr"],
+                                           found="b" * 40)))
+        self.assertEqual(sprints.inbox_entry(notice)["kind"], "look-moved")
         state = self.state(look_record(6, "moved", found="b" * 40, state="open"), look_answer(7))
         self.assertEqual(self.look_question(state).look_state, "posting")
+
+    def test_a_moved_head_tells_the_manager_once_until_it_reads_and_says_when_the_pull_request_ended(self):
+        again = self.state(look_record(6, "moved", found="b" * 40, state="open"),
+                           look_record(7, "moved", found="b" * 40, state="open"))
+        self.assertEqual([m.message_id for m in sprints.unread(again)], [6])
+        other = self.state(look_record(6, "moved", found="b" * 40, state="open"),
+                           look_record(7, "moved", found="c" * 40, state="open"))
+        self.assertEqual([m.message_id for m in sprints.unread(other)], [6, 7])
+        read = self.state(look_record(6, "moved", found="b" * 40, state="open"),
+                          row(7, event_log.SPRINT_READ, {"through": 6}),
+                          look_record(8, "moved", found="b" * 40, state="open"))
+        self.assertEqual([m.message_id for m in sprints.unread(read)], [8])
+        closed = self.state(look_record(6, "moved", found="b" * 40, state="merged"))
+        (notice,) = sprints.unread(closed)
+        self.assertEqual(notice.text, sprints.LOOK_MOVED_ENDED.format(
+            round=5, index=0, head=LOOK["head"], pr=LOOK["pr"], state="merged"))
 
     def test_a_moved_head_found_after_the_answer_takes_it_back_and_opens_the_question(self):
         failed = look_record(7, "failed", message=6, reason="GitHub had a problem")
@@ -2937,7 +2967,8 @@ class LookCardTest(unittest.TestCase):
                 self.assertEqual(sprints.open_questions(state), (question,))
                 self.assertEqual(sprints.pending_looks(state), ())
                 self.assertEqual([m.message_id for m in state.messages if m.kind == "answer"], [])
-                self.assertEqual(sprints.unread(state), ())
+                self.assertEqual([(m.message_id, m.kind) for m in sprints.unread(state)],
+                                 [(8, sprints.MESSAGE_LOOK_MOVED)])
                 again = self.state(look_answer(6), *before, moved, look_answer(9))
                 self.assertEqual(self.look_question(again).look_state, "posting")
 

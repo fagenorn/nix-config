@@ -151,7 +151,7 @@ member of the closing report: the console decides, in one place.
 not read, in id order, each once, and exit 0. An answer to one of the manager's questions (kind
 `answer`) also carries `"question"` (the question's text), `"round"` (the round id) and `"chosen"`
 (the option's text, or null for the owner's own words) and `"words"` (the owner's words, or null for
-an option alone). An inbox with nothing unread is
+an option alone). A notice from the console that a look card is stale (kind `look-moved`, #1260) carries its text only. An inbox with nothing unread is
 `{"messages": []}`. Before the inbox request the command sends `POST /api/notices` with the same body
 and, after the JSON line, prints `sprints.notice_block` of that answer: the open notices of the
 project's other sprints, the head line and then one line each, and nothing when there are none, so

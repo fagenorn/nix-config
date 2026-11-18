@@ -58,7 +58,10 @@ returns its comment id. It lists the issue's trusted markers (`look_marker.TRUST
 so a retry after a lost reply posts no second marker, and one a trusted end marker withdrew is settled too: the
 retry never undoes a withdrawal. Otherwise it reads the pull request once more (`look_head`): one that is not open
 (`LookMoved`, a `Refused` carrying `LOOK_CLOSED`) or not at `head` (`LookMoved` carrying `LOOK_MOVED`; `state` and
-`found` are what it is) is not approved, so no attempt posts a stale approval. Then it posts `look_marker.approval_body(issue, pr, head,
+`found` are what it is) is not approved, so no attempt posts a stale approval. `end_look(slug, issue, comment_id)` ends a
+look approval the console posted for a head that then moved: it lists the trusted markers and, when `comment_id` is
+one of them and still live, posts the trusted `end` marker (`reason=head-moved`) naming it, so no later head can pass the
+merge guard on that approval; an approval already ended is left alone. Then it posts `look_marker.approval_body(issue, pr, head,
 "approved", message)` and lists the trusted markers again: the new comment must be among them, else
 `Refused(LOOK_UNTRUSTED)` (GitHub took it, but not as the owner or a member, so the merge would not count it).
 
@@ -164,6 +167,7 @@ LOOK_UNTRUSTED = ("GitHub took the approval, but not as the repository's owner o
 LOOK_INTERRUPTED = "The console stopped before it recorded the approval. Retry to record it."
 LOOK_NO_REPOSITORY = ("The console cannot tell this project's GitHub repository, so nothing was "
                       "recorded.")
+LOOK_ENDED_REASON = "head-moved"
 LOOK_SENDING = "this approval is already being recorded"
 LOOK_NOT_PENDING = "this approval is not waiting to be recorded"
 
@@ -322,6 +326,18 @@ def record_look(slug: str, issue: int, pr: int, head: str, message: str) -> int:
     if not any(marker.comment_id == posted for marker in fm.list_markers(slug, issue, look_marker.TRUSTED)):
         raise Refused(LOOK_UNTRUSTED)
     return posted
+
+
+def end_look(slug: str, issue: int, comment_id: int) -> None:
+    """End the look approval `comment_id` with a trusted `end` marker, unless it is already ended.
+
+    The tracker offers no way to read the head and post the approval in one step, so an approval
+    posted for a head that then moved is withdrawn here: no later head that keeps the approved
+    changes can pass the merge guard on it (#1260)."""
+    markers = fm.list_markers(slug, issue, look_marker.TRUSTED)
+    target = next((marker for marker in markers if marker.comment_id == comment_id), None)
+    if target is not None and fm.is_live(target, markers):
+        fm.end(slug, issue, comment_id, LOOK_ENDED_REASON)
 
 
 def review_note_body(slug: str, issue: int, index: int, note: str) -> str:

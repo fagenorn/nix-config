@@ -199,7 +199,7 @@ from the post is 502 with the plain reason recorded for it (`tracker_words`, or 
 exception is `console: look_retry_failed <Type>: <message>` and 500 `look retry failed`; success is an empty
 `204`.
 
-Approving a look card (#1260, ADR-console-073). An answer that chooses the `look.approve` option of a question
+Approving a look card (#1260, ADR-console-074). An answer that chooses the `look.approve` option of a question
 that carries a `look` and carries no words of the owner's (`text` absent: an option picked with words typed beside
 it is an ordinary answer that reaches the manager as it is, because those words may ask for a fix) is recorded by
 the console on the issue itself, in this order. The project's repository
@@ -230,8 +230,15 @@ manager to replace, so the answer or the retry is a 409 with `LOOK_MOVED` or `LO
 request (`look_reader`, retried the same way): a pull request that moved or closed between the read before the
 post and the post is recorded as `moved` the same way, and a failed final read is recorded `failed` (a retry finds
 the marker and reads again), so the answer is released to the manager only for a head still the card's at the last
-read. The tracker cannot make the read and the post one step, so a push landing after that last read still leaves
-a marker that names the head the owner looked at, which the merge guard judges against the head it then sees. `retry_look` also refuses `ENDED` once the sprint
+read. A pull request found moved or closed at that last read has the approval already on the issue, so the console
+ends it with a trusted `end` marker (`answer.end_look` through `look_ender`, retried the same way) before it records
+`moved`: no later head that keeps the approved changes can pass the merge guard on it; an end that fails is a failed
+post with Retry, whose attempt finds the marker, reads the head again and ends it. The tracker cannot make the read and
+the post one step, so a push landing after that last read still leaves a marker that names the head the owner looked at,
+which the merge guard judges against the head it then sees. Every attempt of a post, an automatic retry after a backoff
+included, first finds the sprint still taking questions, else it posts nothing and records `failed` with `ENDED`.
+Every `look.recorded moved` row, first read or last, reserves a nudge, so an idle manager is told by the sprint's
+`look-moved` message (`sprints.MESSAGE_LOOK_MOVED`) that its card is stale. `retry_look` also refuses `ENDED` once the sprint
 has ended or stopped, and posts nothing. The manager's answer message is
 held until `posted`. At `start()`, before the threads, each approval left `posting` by a stopped console gets
 `look.recorded failed` with `LOOK_INTERRUPTED`. An answer that does not approve a look card is unchanged. `POST /api/signin`, `POST /api/signin-code` and
@@ -3369,6 +3376,7 @@ class ConsoleService:
                  monotonic: Callable[[], float] = time.monotonic,
                  look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
                  look_recorder: Callable[[str, int, int, str, str], int] = answer.record_look,
+                 look_ender: Callable[[str, int, int], None] = answer.end_look,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
@@ -3562,6 +3570,7 @@ class ConsoleService:
         self._monotonic = monotonic
         self._look_reader = look_reader
         self._look_recorder = look_recorder
+        self._look_ender = look_ender
         self._look_sending: set[tuple[str, int, int]] = set()
         self._watcher: threading.Thread | None = None
         self._signature = None
@@ -6779,18 +6788,25 @@ class ConsoleService:
             raise
         with self._ingest:
             sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
-            if state != "open" or head != look.head:
+            moved = state != "open" or head != look.head
+            if moved:
                 appended = self.log.append([(LOOK_RECORDED, project_id, {
                     "sprint_id": sprint_id, "round": round_id, "index": index,
                     "outcome": sprints.LOOK_MOVED, "found": head, "state": state})])
                 self._apply(appended)
-                raise sprints.Refused(
-                    answer.LOOK_CLOSED.format(state=state) if state != "open"
-                    else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
-            appended = self.log.append([self._answered_row(
-                project_id, sprint, asked, look.approve, said,
-                look={"issue": look.issue, "pr": look.pr, "head": look.head, "repo": slug}, **extra)])
-            self._apply(appended)
+                reserved = self._reserve_nudge(sprint_id)
+            else:
+                appended = self.log.append([self._answered_row(
+                    project_id, sprint, asked, look.approve, said,
+                    look={"issue": look.issue, "pr": look.pr, "head": look.head, "repo": slug}, **extra)])
+                self._apply(appended)
+        if moved:
+            # The manager is told the card is stale (an idle one would never ask), outside the lock.
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            raise sprints.Refused(
+                answer.LOOK_CLOSED.format(state=state) if state != "open"
+                else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
         seq = appended[-1].seq
         try:
             self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
@@ -6812,25 +6828,43 @@ class ConsoleService:
             print(f"console: look_post_retry {key} {attempt} {error.code}: "
                   f"{' '.join(error.detail.split())}", file=sys.stderr)
 
+        def record() -> int:
+            # Every attempt, an automatic retry after a backoff included, finds the sprint still taking
+            # questions: a sprint the manager closed meanwhile posts nothing.
+            with self._ingest:
+                current = self._sprints.get(sprint_id)
+                if current is None or not sprints.takes_questions(current):
+                    raise answer.Refused(sprints.ENDED)
+            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq))
+
         try:
             comment = answer.with_retries(
-                lambda: self._look_recorder(slug, look.issue, look.pr, look.head, str(seq)),
-                clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
+                record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
             # The tracker offers no way to make the read and the post one step, so the pull request is
-            # read once more before the answer is declared recorded (ADR-console-073 D10).
+            # read once more before the answer is declared recorded (ADR-console-074 D10).
             state, found = answer.with_retries(
                 lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
                 sleep=self._write_sleep, on_retry=on_retry)
             if state != "open" or found != look.head:
+                # The marker is already on the issue: end it, so a later head that keeps the approved
+                # changes cannot pass the merge guard on it. A failed end is a failed post with Retry,
+                # whose next attempt finds the marker, reads the head again and ends it.
+                answer.with_retries(
+                    lambda: self._look_ender(slug, look.issue, comment), clock=self._monotonic,
+                    sleep=self._write_sleep, on_retry=on_retry)
                 raise answer.LookMoved(state, found, look.head)
         except answer.LookMoved as error:
             print(f"console: look_post_moved {key}: {error}", file=sys.stderr)
+            reserved = False
             with self._ingest:
                 if not self._stop.is_set():
                     self._apply(self.log.append([(LOOK_RECORDED, project_id, {
                         "sprint_id": sprint_id, "round": round_id, "index": index,
                         "outcome": sprints.LOOK_MOVED, "message": seq, "found": error.found,
                         "state": error.state})]))
+                    reserved = self._reserve_nudge(sprint_id)
+            if reserved:
+                self._dispatch_nudge(sprint_id)
             raise
         except (ForgeError, answer.Refused) as error:
             if isinstance(error, ForgeError):

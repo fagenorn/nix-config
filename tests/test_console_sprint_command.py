@@ -1053,7 +1053,9 @@ class ManagerContractTest(unittest.TestCase):
                        "whenever the head of a pull request changes while its look card is open",
                        "replace that card at once with `replaces`",
                        "A look card you opened without a `look` member",
-                       "a fresh look card for the same head that carries `look`"):
+                       "a fresh look card for the same head that carries `look`",
+                       "a `look-moved` message in `sprint inbox`", "with no `replaces`",
+                       "never one of the `needs_words` options"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)

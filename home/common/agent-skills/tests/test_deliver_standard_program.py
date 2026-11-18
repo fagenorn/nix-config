@@ -10400,6 +10400,14 @@ class LookResumeTest(unittest.TestCase):
             self.assertNotIn("--message", prompt(named, "look-read"))
             self.assertNotIn("look-post", labels(named))
 
+    def test_the_awaiting_look_stop_tells_the_owner_an_approve_lands_on_a_recorded_approval(self):
+        result, _ = run(patch={"setup": {"look": MARKED}})
+        ways = result["ways"]
+        approve = ways[:ways.index("or look {answer: fix")]
+        self.assertIn("to land on the approval recorded for that head", approve)
+        self.assertIn("this program never posts one", approve)
+        self.assertNotIn("to approve that head,", approve)
+
     def test_a_resume_after_a_console_recorded_approval_reads_it_and_posts_nothing(self):
         result, calls = self.approve(replies={"look-read": {"verdict": "approved", "kept_from": None}})
         self.assertEqual(result["stage"], "done")

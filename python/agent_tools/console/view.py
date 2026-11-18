@@ -559,7 +559,8 @@ where a run's `done` reads `closed out` and any other run stage is that stage wi
 never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
-report's issues or its `inbox` numbers, plus the sprint's open questions. An open owner check (a
+report's issues or its `inbox` numbers, plus the sprint's open questions and its answered look cards whose approval is
+not yet on the tracker (`pending_looks`, #1260). An open owner check (a
 verification prompt or a held-issue review card, ADR-console-051, ADR-console-054) whose `blocking`
 list meets none of the sprint's open issues (report issues not landed, held, dropped or closed
 out) is not counted and is listed in `checks`
@@ -592,7 +593,7 @@ decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
-the report's phase is `done` and no question is open, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
+the report's phase is `done` and no question is open and no look approval is still to be recorded, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
 the movement reading is quiet, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
@@ -651,7 +652,7 @@ a session waiting for an answer or a permission reads "waiting for an answer" or
 permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`)
 and every older one whose reply is `new`, oldest first (so a reply to an old message is never
-cut); a look approval the console still holds (`Message.held`, #1260) and an approval the manager picked up without a reply are left out and take no slot, while one
+cut); a look approval the console still holds (`Message.held`, #1260), the manager's `look-moved` notice (#1260) and an approval the manager picked up without a reply are left out and take no slot, while one
 it replied to stays, its reply `new` until a later look and listed in `new_replies`. `approval` is the sprint's earliest approval message as one `messages` entry (same members), whether or not `messages` shows it, else null: the read receipt the verify check reads, which the presentation filter must not hide. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
 sent, else `sent`; a nudge never changes it. The pick-up is the minute form (`PICKUP_MINUTE_TEXT`)
 exactly when `derive_view(..., nudges=True)` (default; the service passes whether it has a nudger)
@@ -777,6 +778,7 @@ from agent_tools.console.sprints import (
     MAX_OPTION_CHARS,
     MAX_PICTURE_LINE_CHARS,
     MESSAGE_APPROVED,
+    MESSAGE_LOOK_MOVED,
     NO_PROGRESS_TEXT,
     NUDGE_ACTION_TEXT,
     NONE,
@@ -1256,10 +1258,11 @@ def sprint_checks(state: SprintState, records: Iterable[InboxRecord]) -> list[In
 
 def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
     """How many open items wait on the sprint: `records` naming an issue its report names, minus
-    its check lines (`sprint_checks`), plus its open questions."""
+    its check lines (`sprint_checks`), plus its open questions and its answered look cards whose approval
+    is not yet on the tracker (`pending_looks`, #1260: a failed post waits on the owner's Retry)."""
     named = _sprint_named(state, records)
     checks = sprint_checks(state, named)
-    return len(named) - len(checks) + len(open_questions(state))
+    return len(named) - len(checks) + len(open_questions(state)) + len(pending_looks(state))
 
 
 @dataclass(frozen=True)
@@ -1532,7 +1535,8 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
         return DONE, DONE_TEXT
     if brief is None or brief.decision != APPROVED:
         return DRAFTING, DRAFTING_TEXT
-    if report is not None and report.phase == DONE and not open_questions(state):
+    if (report is not None and report.phase == DONE and not open_questions(state)
+            and not pending_looks(state)):
         return DONE, DONE_TEXT
     if waiting:
         return WAITING, WAITING_TEXT.format(n=waiting)
@@ -1653,7 +1657,7 @@ def _shown_messages(messages: Sequence[Message], looked: str | None) -> list[Mes
     every approval the manager picked up without a reply is left out: it takes no slot. A held look
     approval (#1260) is left out too: it was never offered to the manager, so it is neither sent nor
     unpicked-up until it is released."""
-    kept = [m for m in messages if not m.held
+    kept = [m for m in messages if not m.held and m.kind != MESSAGE_LOOK_MOVED
             and not (m.kind == MESSAGE_APPROVED and m.read_at is not None and m.reply is None)]
     first = len(kept) - SHOWN_MESSAGES
     return [m for i, m in enumerate(kept) if i >= first or _is_new(m, looked)]

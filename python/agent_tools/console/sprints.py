@@ -349,7 +349,8 @@ over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `
 at least 1, `head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE` (`approve`
 whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
-option, each named once), then `REPLACES_SHAPE`
+option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
+records the approval and takes no words, so the owner could never approve), then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -443,7 +444,11 @@ answer replaces it with `"posting"`) and, with a `message` that is the held answ
 question while its `look_state` is `"posting"` or `"failed"`: the console found the pull request moved or ended
 after it kept the answer and before it posted it, so the answer is taken back (`answer`, `chosen`,
 `answered_at`, `look_message` and `look_repo` cleared, its held message removed and never offered to the manager)
-and the question is open again, replaceable or withdrawable by the manager, in the `"moved"` state; any other `look.recorded` row,
+and the question is open again, replaceable or withdrawable by the manager, in the `"moved"` state. Either `moved` row also
+adds one `MESSAGE_LOOK_MOVED` message (id the row's `seq`, `text` `LOOK_MOVED_OPEN` naming the head now found, or
+`LOOK_MOVED_ENDED` when the pull request is closed or merged, `round_id` the card's) so an idle manager is told the card
+is stale: a repeat of the first kind while an identical notice is unread adds none. The owner's panel never shows it
+(`view._shown_messages`); any other `look.recorded` row,
 an unknown `outcome` or a malformed member changes nothing. `pending_looks(state)` is the
 answered questions whose `look_state` is `"posting"` or `"failed"` in `(round_id, index)` order,
 none once the sprint has `stopped_at` or a `closing`. A second
@@ -799,6 +804,8 @@ QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, o
                   "recommended, pictures, look and replaces")
 LOOK_SHAPE = "question {n}'s look is not an object of issue, pr, head and approve"
 LOOK_APPROVE = "question {n}'s look approve is not one of its options"
+LOOK_APPROVE_WORDS = ("question {n}'s look approve is also in its needs_words: choosing it records the "
+                      "approval and takes no words, so no answer could approve")
 LOOK_PAIR = ('question {n} is a look card and needs a picture marked "pair": "before" and one '
              'marked "pair": "after": attach the pictures with pictures')
 REPLACES_SHAPE = "question {n}'s replaces is not an object of round and index"
@@ -883,6 +890,13 @@ LOOK_MOVED, LOOK_POSTING, LOOK_POSTED, LOOK_FAILED = "moved", "posting", "posted
 LOOK_FOUND_STATES = ("open", "closed", "merged")
 MESSAGE_ANSWER = "answer"
 MESSAGE_STOP = "stop"
+MESSAGE_LOOK_MOVED = "look-moved"
+LOOK_MOVED_OPEN = ("The owner chose to approve your look card (round {round}, question {index}) for head {head} "
+                   "of pull request {pr}, but the pull request is now at {found}. Nothing was recorded and "
+                   "the card is open again: replace it with pictures of {found}.")
+LOOK_MOVED_ENDED = ("The owner chose to approve your look card (round {round}, question {index}) for head "
+                    "{head} of pull request {pr}, but the pull request is {state}. Nothing was recorded and "
+                    "the card is open again: withdraw it.")
 SENT = "sent"
 PICKED_UP = "picked_up"
 REPLIED = "replied"
@@ -1493,6 +1507,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
                 or len(kept) != len(needs_words) or len(set(kept)) != len(kept)
                 or not set(kept) <= set(stripped)):
             raise Refused(NEEDS_WORDS_SHAPE.format(n=n))
+        if "look" in question and look["approve"].strip() in kept:
+            raise Refused(LOOK_APPROVE_WORDS.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -2166,12 +2182,18 @@ def _folded_look(state: SprintState, event: Event) -> SprintState:
                 or not (found is None or isinstance(found, str) and HEAD.fullmatch(found))
                 or found_state not in LOOK_FOUND_STATES):
             return state
+        notice = Message(event.seq, MESSAGE_LOOK_MOVED, event.at, None, _look_moved_text(
+            question, found, found_state), round_id=round_id)
         if message is None:
             if question.answer is not None:
                 return state
             changed = replace(question, look_state=LOOK_MOVED, look_found=found,
                               look_found_state=found_state)
-            return replace(state, questions=_swapped(state.questions, position, changed))
+            moved = replace(state, questions=_swapped(state.questions, position, changed))
+            # An owner who approves a stale card again before the manager read the first notice adds none.
+            return moved if any(item.kind == MESSAGE_LOOK_MOVED and item.read_at is None
+                                and item.text == notice.text for item in state.messages) \
+                else _with_message(moved, notice)
         # The head moved after the answer was kept and before it was posted: the answer is taken
         # back, the held message with it, and the question is open again for the manager to replace.
         if (not _id(message) or question.answer is None
@@ -2181,9 +2203,10 @@ def _folded_look(state: SprintState, event: Event) -> SprintState:
         reopened = replace(question, answer=None, chosen=None, differs=None, answered_at=None,
                            look_state=LOOK_MOVED, look_found=found, look_found_state=found_state,
                            look_reason=None, look_message=None, look_repo=None)
-        return replace(state, questions=_swapped(state.questions, position, reopened),
-                       messages=tuple(item for item in state.messages
-                                      if item.message_id != message))
+        return _with_message(
+            replace(state, questions=_swapped(state.questions, position, reopened),
+                    messages=tuple(item for item in state.messages if item.message_id != message)),
+            notice)
     message = payload.get("message")
     if (outcome not in (LOOK_POSTED, LOOK_FAILED) or not _id(message)
             or question.look_state not in (LOOK_POSTING, LOOK_FAILED)
@@ -2203,6 +2226,16 @@ def _folded_look(state: SprintState, event: Event) -> SprintState:
         return state
     changed = replace(question, look_state=LOOK_FAILED, look_reason=reason)
     return replace(state, questions=_swapped(state.questions, position, changed))
+
+
+def _look_moved_text(question: Question, found: str | None, found_state: str | None) -> str:
+    """What the manager is told when the owner's approval of a look card found its head gone."""
+    look = question.look
+    if found_state == "open" and found is not None:
+        return LOOK_MOVED_OPEN.format(round=question.round_id, index=question.index, head=look.head,
+                                      pr=look.pr, found=found)
+    return LOOK_MOVED_ENDED.format(round=question.round_id, index=question.index, head=look.head,
+                                   pr=look.pr, state=found_state)
 
 
 def _swapped(questions: tuple[Question, ...], position: int, question: Question

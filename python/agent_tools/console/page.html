@@ -562,6 +562,7 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+// Marks a control busy while its own post is held: aria-busy only. The caller keeps its disabling line, so busy never decides disabled or aria-disabled.
 function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
@@ -1591,6 +1592,7 @@ const signinLinks = new Map();
 const signinPosts = new Map();
 // The profile the header's Add account continuation is for, or null.
 let accountSignin = null;
+// The attempt the add started, whether a frame has shown it running, the link the continuation holds itself, and the outcome the box shows once the run ended.
 let accountAttempt = null;
 let accountConfirmed = false;
 let accountLink = null;
@@ -1633,6 +1635,7 @@ function holdSigninLink(profile, answer, added = false) {
   if (answer.attempt < knownSigninAttempt(profile)) return;
   signinLinks.set(profile, { link, attempt: answer.attempt, added });
 }
+// One ask per profile and attempt, kept after a refusal or a null link: a page that holds no link for a running sign-in asks the console for it once.
 const signinAsked = new Set();
 // The newest view alone says whether the asked attempt still runs.
 function signinStillRunning(profile, attempt) {
@@ -2053,6 +2056,7 @@ function noticeLine(notice, projectId) {
   if (withdrawal !== undefined && withdrawal.phase === "failed") item.appendChild(el("p", "notice-reason", withdrawal.reason));
   return item;
 }
+// One closed fold of a project's open notices, in the view's order and words, with the owner's post control at its foot while the project offers one; null when it has neither.
 function noticeFold(entry, afterLine) {
   const notices = Array.isArray(entry.notices) ? entry.notices : [];
   const post = !guestDoor && entry.notice_post === true;
@@ -2324,6 +2328,7 @@ function askRow(projectId, question, first, last, thread) {
   if (typeof question.back_text === "string") row.appendChild(askCallout(projectId, question, last, thread));
   return row;
 }
+// The question back to the owner: its text, then its choices as buttons only on the thread's last question while answered and with no follow-up outstanding, then the reason a refused choice gives.
 function askCallout(projectId, question, last, thread) {
   const callout = el("div", "ask-callout");
   callout.setAttribute("role", "group");
@@ -2538,6 +2543,7 @@ function inReadingPanel(target) {
   for (let node = target; node; node = node.parentNode) if (node === panel) return true;
   return false;
 }
+// The child-index path from the reading panel to a node inside it, with the node's tag and class, or null when the node is not in the panel.
 function panelPath(section, node) {
   if (node === null || node === section) return null;
   const path = [];
@@ -3208,6 +3214,7 @@ function checkLabel(item) {
 function isOwnerCheck(item) {
   return typeof item.check_id === "string";
 }
+// A Before picture reads ahead of the After picture of the same width, whatever order the files are named in; every other order is kept.
 function beforeFirst(pictures) {
   if (!Array.isArray(pictures)) return pictures;
   const lead = (p) => /^(Before|After)(?:, (\d+) px)?$/.exec(pictureCaption(p.line));
@@ -3326,19 +3333,21 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
-function lookLine(item) {
-  if (!isQuestion(item) || item.look === null || typeof item.look !== "object" || typeof item.look.line !== "string") return null;
-  return el("p", "look-line", item.look.line);
+function lookOf(item) {
+  return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
+}
+function lookLine(node, item) {
+  const look = lookOf(item);
+  if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
 }
 function isLookCard(item) {
-  return isQuestion(item) && item.answered === true && item.look !== null && typeof item.look === "object";
+  return item.answered === true && lookOf(item) !== null;
 }
 function lookCard(item) {
   const card = el("article", "card look-card");
   card.appendChild(headLine(item));
   card.appendChild(pathWords(el("h2", "q"), item.headline));
-  const line = lookLine(item);
-  if (line !== null) card.appendChild(line);
+  lookLine(card, item);
   if (item.look.state === "failed") {
     const again = stallPosts.get("look-retry\n" + itemId(item));
     const sending = again !== undefined && again.phase === "sending";
@@ -3647,8 +3656,8 @@ function soleOption(item) {
 }
 // A look card's approving option (#1260) never starts picked: an approval is the owner's own choice.
 function approvingIndex(item) {
-  const look = isQuestion(item) ? item.look : null;
-  return look && Number.isInteger(look.approve_index) ? look.approve_index : -1;
+  const look = lookOf(item);
+  return look !== null && Number.isInteger(look.approve_index) ? look.approve_index : -1;
 }
 function startPicks(item) {
   if (soleOption(item)) return [0];
@@ -3744,6 +3753,7 @@ function begin(item, state, pending) {
 function roundBody(item, answer) {
   return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
 }
+// A plan's answer replans it and replaces every one of its questions, so one answer at a time stands for a plan until a frame shows its outcome.
 function planBusy(item, state) {
   if (!isRegister(item)) return false;
   for (const other of answers.values()) {
@@ -4183,8 +4193,8 @@ function statusLine(act, state, item) {
     act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") {
-      const said = isQuestion(item) && item.look !== null && typeof item.look === "object" && item.look.state === "moved" && item.look.line === state.reason;
-      if (!said) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+      const look = lookOf(item);
+      if (look === null || look.state !== "moved" || look.line !== state.reason) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
         act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
       }
@@ -4426,8 +4436,7 @@ function leadItem(item) {
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
-  const lookWords = lookLine(item);
-  if (lookWords !== null) card.appendChild(lookWords);
+  lookLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -4469,8 +4478,7 @@ function itemLine(item) {
   }
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
-  const lookWords = lookLine(item);
-  if (lookWords !== null) line.appendChild(lookWords);
+  lookLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);
@@ -4759,6 +4767,7 @@ function renderDigest(view) {
   fold.appendChild(more);
   section.appendChild(fold);
 }
+// Every sprint of every project, in view order: running ones drawn as blocks (each with its project's entry), ended ones as lines of the finished list.
 function collectSprints(view) {
   const running = [];
   const ended = [];
@@ -5631,6 +5640,7 @@ function drawDraft(registration) {
   }
   return parts;
 }
+// Cancel registration: one post at a time; the refusal's text is the console's own and lasts as long as the registration it answered.
 const registerWithdraw = { key: null, posting: false, failure: "" };
 async function withdrawRegistration(registration) {
   if (registerWithdraw.posting) return;

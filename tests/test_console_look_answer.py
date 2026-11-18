@@ -97,10 +97,14 @@ class LookAnswerTest(QuestionRoutes):
     def approve(self, svc, sid, round_id):
         return self.reply(svc, self.answer_body(sid, round_id, 0, choice=0))
 
-    def answers(self, svc, sid):
+    def read(self, svc, sid):
+        """Every unread message of the sprint, the stale-card notices (#1260) included."""
         status, _, body = self.inbox(svc, sid)
         self.assertEqual(status, 200)
         return json.loads(body)["messages"]
+
+    def answers(self, svc, sid):
+        return [m for m in self.read(svc, sid) if m["kind"] != "look-moved"]
 
     def retry(self, svc, sid, round_id):
         body = json.dumps({"project_id": "owner/p01", "sprint_id": sid, "round": round_id,
@@ -451,10 +455,93 @@ class LookAnswerTest(QuestionRoutes):
         (moved,) = self.rows("look.recorded")
         self.assertEqual((moved["outcome"], moved["message"], moved["found"], moved["state"]),
                          ("moved", answered["seq"], MOVED, "open"))
-        (marker,) = self.world.stored()
+        marker, ended = self.world.stored()
         self.assertEqual(marker["body"], self.marker_for(answered["seq"]))
-        self.assertEqual(self.answers(svc, sid), [])
+        self.assertEqual(ended["body"], forge_markers.end_body(marker["id"], answer.LOOK_ENDED_REASON))
+        facts = look_marker.IssueFacts(ISSUE, MARKED_BODY, tuple(self.world.stored()))
+        self.assertIs(look_marker.judge(PR, HEAD, [facts]).admit, False)
+        (notice,) = self.read(svc, sid)
+        self.assertEqual((notice["kind"], notice["text"]), ("look-moved", sprints.LOOK_MOVED_OPEN.format(
+            round=round_id, index=0, head=HEAD, pr=PR, found=MOVED)))
+        self.assertEqual(notice["id"], self.rows("look.recorded")[-1]["seq"])
         self.assertIs(self.entry(svc, sid)["answered"], False)
+
+    def test_a_stale_card_tells_the_manager_once_and_never_shows_on_the_owners_panel(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull(sha=MOVED)
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 409)
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 409)
+        self.assertEqual(len(self.rows("look.recorded")), 2)
+        svc.refresh()
+        sprint = next(s for e in view_of(svc)["entries"] for s in e["sprints"]
+                      if s["sprint_id"] == sid)
+        self.assertEqual([m["kind"] for m in sprint["messages"] if m["kind"] != "approved"], [])
+        (notice,) = self.read(svc, sid)
+        self.assertEqual((notice["kind"], notice["text"]), ("look-moved", sprints.LOOK_MOVED_OPEN.format(
+            round=round_id, index=0, head=HEAD, pr=PR, found=MOVED)))
+        self.pull(state="closed")
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 409)
+        (ended,) = self.read(svc, sid)
+        self.assertEqual(ended["text"], sprints.LOOK_MOVED_ENDED.format(
+            round=round_id, index=0, head=HEAD, pr=PR, state="closed"))
+
+    def test_an_approval_that_could_not_be_ended_is_a_failed_post_and_retry_ends_it(self):
+        reads = iter([("open", HEAD), ("open", MOVED), ("open", MOVED)])
+        ends = []
+
+        def ender(slug, issue, comment):
+            ends.append(comment)
+            if len(ends) == 1:
+                raise ForgeError("gh_failed", "gh: Server Error (HTTP 502)", transient=False)
+            answer.end_look(slug, issue, comment)
+
+        svc = self.open(look_reader=lambda slug, pr: next(reads), look_ender=ender)
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed"])
+        (marker,) = self.world.stored()
+        self.assertEqual(self.answers(svc, sid), [])
+        line = answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7])
+        with contextlib.redirect_stderr(io.StringIO()):
+            status, _, body = self.retry(svc, sid, round_id)
+        self.assertEqual((status, body), (409, line.encode() + b"\n"))
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "moved"])
+        self.assertEqual(len(self.world.stored()), 2)
+        self.assertEqual(ends, [marker["id"], marker["id"]])
+        facts = look_marker.IssueFacts(ISSUE, MARKED_BODY, tuple(self.world.stored()))
+        self.assertIs(look_marker.judge(PR, HEAD, [facts]).admit, False)
+
+    def test_a_sprint_closed_during_the_backoff_posts_nothing(self):
+        calls, closing = [], []
+
+        def recorder(slug, issue, pr, head, message):
+            calls.append(message)
+            raise ForgeError("gh_failed", "gh: Bad Gateway (HTTP 502)", transient=True)
+
+        def sleep(seconds):
+            sid, svc = closing
+            svc.send_closing(sid, self.secret(sid), {
+                "summary": "Stopped early", "issues": [], "differently": "ask sooner"})
+            return False
+
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(slug_of=lambda root: SLUG, write_sleep=sleep, look_recorder=recorder)
+        sid, round_id = self.asked(svc)
+        closing.extend([sid, svc])
+        self.store_comments()
+        self.pull()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.world.stored(), [])
+        self.assertEqual(posts(self.world), [])
+        (failed,) = self.rows("look.recorded")
+        self.assertEqual((failed["outcome"], failed["reason"]), ("failed", sprints.ENDED))
 
     def test_a_failed_final_read_keeps_the_answer_held_with_retry(self):
         calls = []
@@ -489,10 +576,18 @@ class LookAnswerTest(QuestionRoutes):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
         self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed"])
+        svc.refresh()
+        sprint = next(s for e in view_of(svc)["entries"] for s in e["sprints"]
+                      if s["sprint_id"] == sid)
+        self.assertEqual((sprint["state"], sprint["waiting"]), ("waiting", 1))
         self.store_comments()
         self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
         self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "posted"])
         self.assertEqual(len(self.world.stored()), 1)
+        svc.refresh()
+        sprint = next(s for e in view_of(svc)["entries"] for s in e["sprints"]
+                      if s["sprint_id"] == sid)
+        self.assertEqual((sprint["state"], sprint["waiting"]), ("done", 0))
 
     def test_a_changes_answer_posts_nothing_and_reaches_the_manager(self):
         svc = self.open()
@@ -635,6 +730,39 @@ class LookNudgeTest(QuestionRoutes):
     def nudged(self):
         return [json.loads(row[4]) for row in support.log_rows(self.store)
                 if row[2] == "sprint.nudged"]
+
+    def idle_sprint(self, nudger):
+        """A started sprint with an idle manager and a look card open; its service, id and round."""
+        support.sign_in(self.store, "work")
+        svc = self.start(
+            launcher=support.Launches(), profile_dirs=[support.profile_dir(self.store, "work")],
+            dispatch=self.queued, nudger=nudger, listing=lambda: dict(self.listed),
+            slug_of=lambda root: SLUG, write_sleep=lambda seconds: False,
+            clock=lambda: 1_800_000_000.0, session_poll_seconds=3600)
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.queued.run_next()
+        name = manager.session_name("owner/p01", sid)
+        self.listed["s-1"] = sessions.Observation("s-1", "/srv/p01", 1, "idle", None, name, None)
+        svc.send_brief(sid, self.secret(sid), PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        self.queued.run_next()
+        round_id, _ = svc.ask_questions(sid, self.secret(sid), {"questions": [with_pictures(svc, sid, self.secret(sid))]})
+        return svc, sid, round_id
+
+    def test_an_idle_manager_is_nudged_when_the_owner_approves_a_stale_card(self):
+        svc, sid, round_id = self.idle_sprint(self.nudges.append)
+        self.world.comment_store(SLUG, ISSUE, [], labels=[])
+        self.world.respond_json("gh", PULL, {"number": PR, "state": "open", "merged": False,
+                                             "head": {"sha": MOVED}})
+        settled = len(self.nudges)
+        with self.assertRaises(sprints.Refused):
+            svc.answer_question("owner/p01", sid, round_id, 0, 0, None)
+        (moved,) = self.rows("look.recorded")
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.queued.run_next()
+        self.assertEqual(len(self.nudges), settled + 1)
+        self.assertIn(moved["seq"], self.nudged()[-1]["covers"])
+        self.assertEqual(self.world.stored(), [])
 
     def test_an_approval_released_during_a_nudge_gets_its_own_nudge(self):
         support.sign_in(self.store, "work")
