@@ -1,6 +1,6 @@
 # ADR-console-033 — The drafted contract and the question cards read plainly and fit the screen
 
-- **Status:** accepted
+- **Status:** accepted; D1 amended by ADR-console-074
 - **Decided in:** #1079
 
 ## Context
