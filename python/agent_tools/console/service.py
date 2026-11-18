@@ -52,6 +52,7 @@ stream `Content-Length`):
     GET /api/picture/<id> 200 image/png, the page reads a stored picture (below)
     GET /api/profile 200 application/json, the profile a new session should use (below)
     GET /api/excluded 200 application/json, the profiles the owner excluded (below)
+    GET /api/whoami 200 application/json, what the guest port received (guest port only; 404 on the owner's port)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
@@ -59,6 +60,58 @@ stream `Content-Length`):
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/notice`, `/api/notices`, `/api/withdraw-notice`,
                     `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
+
+Guest door (#1237, ADR-console-066). With `guest_port` (`console --guest-port`, default
+`DEFAULT_GUEST_PORT`, loopback only) the service binds a second server on `127.0.0.1`, served by
+`GuestHandler` on its own thread, for Tailscale Serve to proxy to; without it there is no second
+server, no `guest-token` file and `guest_address` is None. A guest request is admitted by
+`guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
+nothing appended (the one thing a guest-port request may publish is the reading below): sharing
+off (no tailnet name), a `Host` that is not exactly the configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
+`GET /api/whoami` is answered to any request before admission: it reports the `Host` it saw, how
+many `Host` and login headers arrived, whether `X-Forwarded-For` did, and whether the login named
+by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
+owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
+`/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
+its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
+scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the page carrying the guest token, `GET
+/api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
+stream of it, which re-admits on every publish and ends when the colleague, the tailnet name or the
+sharing is gone, and a picture read needs the guest token, an `Origin` (when sent) of `https://<tailnet>`
+and an id on the colleague's own view, else `404` `this picture is not known`. Every guest response closes
+its connection, so a body or a second request sent on it is never parsed. `ROUTES` registers every
+route: a handler compares `route` only with registered names, and a method other than GET on a guest
+read is `405` `Allow: GET`. The owner's port refuses, on every route, a request carrying a
+`Tailscale-*` header or `X-Forwarded-For` with `403` `guest.OWNER_PORT_TEXT`, after the `Host` check.
+With `serve_reader` (`console --tailscale PATH`, `guest.serve_reader`) a daemon thread `SERVE_THREAD`
+calls `poll_serve` at once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads the Windows
+Tailscale client's `serve status --json` outside the ingest lock, keeps the reading in memory only (never
+in the log) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve proxies
+the tailnet name to the bound guest port. A reader that raises is one stderr line `console:
+serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); without a reader no
+thread starts and the state stays `unchecked`.
+The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
+a different token, refused on every owner route, as the page token is on the guest picture read.
+The service keeps the last guest-port request's `guest.reading` (every request the port parses,
+whatever its method) in memory only (never logged, null after a restart) as the owner's
+`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it.
+
+The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
+/api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
+`SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
+(4096; 411, 415, 411, 413 as every JSON page write). Their bodies are the exactly-keyed objects
+`guest.parse_tailnet` (`{"tailnet": "<host>.<tailnet>.ts.net" or null}`), `guest.parse_colleague`
+(`{"login", "projects"}`) and `guest.parse_removal` (`{"login"}`) read; a body they refuse is `400`
+`bad tailnet`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
+a project that is not registered, a login that is not listed) is one stderr line `console:
+share_refused <reason>` and `409` with the reason; any other failure is `console: share_failed
+<Type>: <message>` and `500` `share failed`; no stderr line carries a login or a tailnet name.
+Success appends one row under the console's ingest lock, applies it and answers an empty `204`:
+`ConsoleService.set_tailnet` a `sharing.tailnet` row, `set_colleague` a `sharing.colleague` row
+that replaces the login's whole project list, `remove_colleague` a `sharing.removed` row. A
+refusal appends nothing and publishes nothing. Each write publishes, and the guest stream
+re-admits on every publish, so a removed colleague's open stream, a cleared tailnet's and a
+moved tailnet's end before any further frame, and the next guest request is `403`.
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -84,7 +137,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
-`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question` and `POST /api/activate`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
+`POST /api/share-tailnet`, `POST /api/share-colleague` and `POST /api/share-remove`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -1409,13 +1463,14 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
     PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
+    SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
@@ -1436,6 +1491,7 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
+DEFAULT_GUEST_PORT = 27185
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
@@ -1497,13 +1553,18 @@ TRUST_CHECK_PATH = "/api/trust-check"
 REGISTER_CANCEL_PATH = "/api/register-cancel"
 PROJECT_QUESTION_PATH = "/api/project-question"
 PROJECT_QUESTION_THREAD = "console-project-question"
+SHARE_TAILNET_PATH = "/api/share-tailnet"
+SHARE_COLLEAGUE_PATH = "/api/share-colleague"
+SHARE_REMOVE_PATH = "/api/share-remove"
+MAX_SHARE_BYTES = 4096
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
-    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH})
+    REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
+    SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1560,6 +1621,14 @@ MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
 POST_LIMITS = {HOOK_PATH: MAX_HOOK_BYTES, READINGS_PATH: MAX_READING_BYTES}
+PAGE_PATH = "/"
+STATE_PATH = "/api/state"
+STREAM_PATH = "/api/stream"
+WHOAMI_PATH = "/api/whoami"
+OWNER_READS: frozenset[str] = frozenset({SPEND_PAGE_PATH, STATUS_PATH, PROFILE_PATH, EXCLUDED_PATH})
+GUEST_READS: frozenset[str] = frozenset({PAGE_PATH, STATE_PATH, STREAM_PATH, WHOAMI_PATH})
+OWNER_ONLY: frozenset[str] = (PAGE_WRITES | MANAGER_WRITES | frozenset(POST_LIMITS) | OWNER_READS)
+ROUTES: frozenset[str] = OWNER_ONLY | GUEST_READS | {PICTURE_PREFIX}
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
@@ -1577,6 +1646,8 @@ DIGEST_SECONDS = 60.0
 DIGEST_THREAD = "console-digest"
 SPEND_SECONDS = 60.0
 SPEND_THREAD = "console-spend"
+SERVE_SECONDS = 60.0
+SERVE_THREAD = "console-serve-poll"
 MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
@@ -1645,17 +1716,6 @@ def _unreadable(reason: str) -> None:
     return None
 
 
-class ConsoleServer(socketserver.ThreadingTCPServer):
-    # Not http.server.HTTPServer, whose server_bind does a reverse lookup.
-    daemon_threads = True
-    allow_reuse_address = True
-    request_queue_size = BACKLOG
-
-    def __init__(self, port: int, console: "ConsoleService"):
-        self.console = console
-        super().__init__((HOST, port), ConsoleHandler)
-
-
 class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1676,11 +1736,15 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
     def _loopback(self) -> bool:
         port = self.server.server_address[1]
-        if self.headers.get("Host") in (f"{HOST}:{port}", f"localhost:{port}"):
-            return True
-        self.close_connection = True
-        self._send(403, "text/plain", b"loopback only\n", ("Connection", "close"))
-        return False
+        if self.headers.get("Host") not in (f"{HOST}:{port}", f"localhost:{port}"):
+            self.close_connection = True
+            self._send(403, "text/plain", b"loopback only\n", ("Connection", "close"))
+            return False
+        text = guest.owner_port_refusal(self.headers.keys())
+        if text is not None:
+            self._refuse(403, text)
+            return False
+        return True
 
     def _refuse(self, status: int, text: str):
         self.close_connection = True
@@ -2538,6 +2602,35 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _share_request(self, console: "ConsoleService", route: str) -> bool:
+        """Read and carry out one of the owner's access-list writes; False when it was refused."""
+        body = self._json_body(MAX_SHARE_BYTES)
+        if body is None:
+            return False
+        if route == SHARE_TAILNET_PATH:
+            bad, parse, write = "bad tailnet", guest.parse_tailnet, console.set_tailnet
+        elif route == SHARE_COLLEAGUE_PATH:
+            bad, parse = "bad colleague", guest.parse_colleague
+            write = lambda parsed: console.set_colleague(*parsed)
+        else:
+            bad, parse, write = "bad removal", guest.parse_removal, console.remove_colleague
+        try:
+            action = parse(body)
+        except ValueError:
+            self._refuse(400, bad)
+            return False
+        try:
+            write(action)
+        except guest.Refused as error:
+            print(f"console: share_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: share_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "share failed")
+            return False
+        return True
+
     def _owner_notice_request(self, console: "ConsoleService") -> bool:
         """Read and carry out the owner's heads-up for a project; False when it was refused."""
         body = self._json_body(MAX_OWNER_NOTICE_BYTES)
@@ -2869,6 +2962,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._activate_request(console):
                 return
+        elif route in (SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH):
+            self.close_connection = True
+            if not self._share_request(console, route):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2893,16 +2990,18 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         route = self.path.split("?", 1)[0]
-        if route == "/":
+        if route == PAGE_PATH:
             self._send(200, "text/html; charset=utf-8", self.server.console.page_bytes,
                        ("Content-Security-Policy", CSP))
         elif route == SPEND_PAGE_PATH:
             self._send(200, "text/html; charset=utf-8", SPEND_PAGE,
                        ("Content-Security-Policy", CSP))
-        elif route == "/api/state":
+        elif route == STATE_PATH:
             self._send(200, "application/json", self.server.console.view_bytes)
-        elif route == "/api/stream":
-            self._stream()
+        elif route == STREAM_PATH:
+            console = self.server.console
+            self._stream(lambda seen: console.wait_for_change(seen, KEEPALIVE_SECONDS),
+                         console.delivered)
         elif route == STATUS_PATH:
             self._status_request()
         elif route == PROFILE_PATH:
@@ -2931,15 +3030,24 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         picture_id = route[len(PICTURE_PREFIX):]
         if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
             return self._refuse(400, "bad picture id")
+        self._send_picture(picture_id)
+
+    def _send_picture(self, picture_id: str):
         try:
-            data = pictures.read(console.pictures_dir, picture_id)
+            data = pictures.read(self.server.console.pictures_dir, picture_id)
         except OSError:
             data = None
         if data is None:
             return self._refuse(404, "this picture is not known")
         self._send(200, "image/png", data, cache="private")
 
-    def _stream(self):
+    def _stream(self, wait: Callable[[int], tuple[int, bytes | None] | None],
+                delivered: Callable[[int], None] | None = None):
+        """Write views as they publish; `delivered` hears each version once written.
+
+        Only the owner's stream passes it: a guest view never carries the evidence card, so a frame
+        written to a colleague shows the owner nothing (ADR-console-071 D4).
+        """
         console = self.server.console
         self.close_connection = True
         self.send_response(200)
@@ -2951,15 +3059,18 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         seen = -1
         try:
             while not console.closing:
-                change = console.wait_for_change(seen, KEEPALIVE_SECONDS)
+                change = wait(seen)
                 if change is None:
                     if console.closing:
                         return
                     self.wfile.write(b": keepalive\n\n")
                     continue
                 seen, view = change
+                if view is None:
+                    return
                 self.wfile.write(b"event: view\ndata: " + view + b"\n\n")
-                console.delivered(seen)
+                if delivered is not None:
+                    delivered(seen)
         except OSError:
             return
 
@@ -2974,6 +3085,138 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                    ("Allow", allow), ("Connection", "close"))
 
     do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _refuse_method
+
+    def __getattr__(self, name: str):
+        """Any other method (TRACE, CONNECT, an unknown one) is refused like the listed ones, never 501."""
+        if name.startswith("do_"):
+            return self._refuse_method
+        raise AttributeError(name)
+
+
+class GuestHandler(ConsoleHandler):
+    """The guest port's one handler (#1237); it never calls the owner's route methods."""
+
+    def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
+              cache: str = "no-store"):
+        self.close_connection = True
+        if not any(name.lower() == "connection" for name, _ in headers):
+            headers = (*headers, ("Connection", "close"))
+        super()._send(status, content_type, body, *headers, cache=cache)
+
+    def _guest_request(self):
+        console = self.server.console
+        route = self.path.split("?", 1)[0]
+        hosts = self.headers.get_all("Host") or []
+        logins = self.headers.get_all(guest.LOGIN_HEADER) or []
+        if self.command == "GET" and route == WHOAMI_PATH:
+            body = json.dumps(
+                guest.whoami(hosts, logins, self.headers.get_all("X-Forwarded-For") or [],
+                             self.headers.get_all(guest.PROBE_HEADER) or []),
+                sort_keys=True, separators=(",", ":"))
+            return self._send(200, "application/json", body.encode())
+        access = console.access
+        login, text = guest.admit(access, hosts, logins)
+        if text is not None:
+            return self._refuse(403, text)
+        if route in OWNER_ONLY:
+            return self._refuse(403, guest.OWNER_ONLY_TEXT)
+        if self.command != "GET":
+            if route in GUEST_READS or route.startswith(PICTURE_PREFIX):
+                return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "GET"))
+            return self._refuse(404, "not found")
+        if route == PAGE_PATH:
+            self._send(200, "text/html; charset=utf-8", console.guest_page_bytes,
+                       ("Content-Security-Policy", CSP))
+        elif route == STATE_PATH:
+            view = console.guest_view_bytes(login)
+            if view is None:
+                return self._refuse(403, guest.NOT_SHARED_TEXT)
+            self._send(200, "application/json", view)
+        elif route == STREAM_PATH:
+            self._stream(self._readmitting(login, hosts, logins))
+        elif route.startswith(PICTURE_PREFIX):
+            self._guest_picture(route, access, login)
+        else:
+            self._refuse(404, "not found")
+
+    def _readmitting(self, login: str, hosts: list[str], logins: list[str]):
+        console = self.server.console
+        last: list[bytes | None] = [None]
+
+        def wait(seen: int):
+            deadline = time.monotonic() + KEEPALIVE_SECONDS
+            while True:
+                remaining = deadline - time.monotonic()
+                change = None if remaining <= 0 else console.wait_for_guest_change(
+                    login, seen, remaining)
+                if change is None:
+                    return None
+                version, access, view = change
+                if guest.admit(access, hosts, logins) != (login, None) or view is None:
+                    return version, None
+                if view == last[0]:
+                    seen = version
+                    continue
+                last[0] = view
+                return version, view
+
+        return wait
+
+    def _guest_picture(self, route: str, access: "guest.Access", login: str):
+        console = self.server.console
+        refusal = write_guard.read_refusal(
+            access.tailnet, self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.FETCH_SITE_HEADER) or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
+            scheme="https")
+        if refusal is not None:
+            return self._refuse(*refusal)
+        picture_id = route[len(PICTURE_PREFIX):]
+        if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
+            return self._refuse(400, "bad picture id")
+        if picture_id not in console.guest_pictures(login):
+            return self._refuse(404, "this picture is not known")
+        self._send_picture(picture_id)
+
+    def parse_request(self) -> bool:
+        """Read every request the guest port parses, whatever its method, for the owner's state."""
+        ok = super().parse_request()
+        if ok:
+            headers = self.headers
+            console = self.server.console
+            console.record_guest_request(guest.reading(
+                console.access, headers.get_all("Host") or [],
+                headers.get_all(guest.LOGIN_HEADER) or [],
+                headers.get_all("X-Forwarded-For") or [],
+                headers.get_all(guest.PROBE_HEADER) or []))
+        return ok
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
+
+    def __getattr__(self, name: str):
+        """Any other method takes the same admission and owner-only refusals, never the 501."""
+        if name.startswith("do_"):
+            return self._guest_request
+        raise AttributeError(name)
+
+
+class GuestPortError(OSError):
+    """The guest port could not be bound; `port` is the one that failed."""
+
+    def __init__(self, port: int, error: OSError):
+        super().__init__(error.errno, error.strerror)
+        self.port = port
+
+
+class ConsoleServer(socketserver.ThreadingTCPServer):
+    # Not http.server.HTTPServer, whose server_bind does a reverse lookup.
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = BACKLOG
+
+    def __init__(self, port: int, console: "ConsoleService", handler=ConsoleHandler):
+        self.console = console
+        super().__init__((HOST, port), handler)
 
 
 class _ProfileRemoving(Exception):
@@ -3059,7 +3302,11 @@ class ConsoleService:
                  project_question_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None,
-                 screenshot_dirs: Iterable[Path] = ()):
+                 screenshot_dirs: Iterable[Path] = (),
+                 guest_port: int | None = None,
+                 guest_token_path: Path | None = None,
+                 serve_reader: Callable[[], object | None] | None = None,
+                 serve_seconds: float = SERVE_SECONDS):
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
@@ -3197,6 +3444,11 @@ class ConsoleService:
         self._retention_seconds = retention_seconds
         self._digest_seconds = digest_seconds
         self._spend_seconds = spend_seconds
+        self._serve_reader = serve_reader
+        self._serve_seconds = serve_seconds
+        self._serve_status: object | None = None
+        self._guest_reading: dict | None = None
+        self._serve_thread: threading.Thread | None = None
         self._ping_log = ping_log
         self._retention_thread: threading.Thread | None = None
         self._digest_thread: threading.Thread | None = None
@@ -3226,12 +3478,33 @@ class ConsoleService:
         self._evidence_card: tuple[str, int] | None = None
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._access = guest.NO_ACCESS
+        self._published_access = guest.NO_ACCESS
+        self._guest_views: dict[str, bytes] = {}
+        self._guest_pictures: dict[str, frozenset[str]] = {}
+        self._guest_token: str | None = None
+        self._guest_page: bytes | None = None
+        self._guest_server: ConsoleServer | None = None
+        self._guest_thread: threading.Thread | None = None
+        self._guest_port_number: int | None = None
         self._server = ConsoleServer(port, self)
         try:
+            if guest_port is not None:
+                try:
+                    self._guest_server = ConsoleServer(guest_port, self, GuestHandler)
+                except OSError as error:
+                    raise GuestPortError(guest_port, error) from error
+                self._guest_port_number = self._guest_server.server_address[1]
             self._token = write_guard.load_token(
                 Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
                 else token_path)
             self._page = PAGE.replace(write_guard.TOKEN_SLOT, self._token.encode("ascii"))
+            if self._guest_server is not None:
+                self._guest_token = write_guard.load_token(
+                    Path(store).with_name(write_guard.GUEST_TOKEN_FILE)
+                    if guest_token_path is None else guest_token_path)
+                self._guest_page = PAGE.replace(
+                    write_guard.TOKEN_SLOT, self._guest_token.encode("ascii"))
             self.log = EventLog(store, clock=log_clock)
             self.log.retain()
             events = self.log.events()
@@ -3263,6 +3536,7 @@ class ConsoleService:
             self._project_questions = project_question.asked_questions(events)
             self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
+            self._access = guest.access_list(events)
             self._settle_stops()
             self._publish()
             self._signature = signature(self.registry)
@@ -3273,6 +3547,8 @@ class ConsoleService:
             if self.log is not None:
                 self.log.close()
             self._server.server_close()
+            if self._guest_server is not None:
+                self._guest_server.server_close()
             raise
 
     @property
@@ -3283,6 +3559,32 @@ class ConsoleService:
     @property
     def address(self) -> tuple[str, int]:
         return self._server.server_address[:2]
+
+    @property
+    def guest_address(self) -> tuple[str, int] | None:
+        return None if self._guest_server is None else self._guest_server.server_address[:2]
+
+    @property
+    def guest_token(self) -> str | None:
+        return self._guest_token
+
+    @property
+    def access(self) -> "guest.Access":
+        return self._access
+
+    @property
+    def guest_page_bytes(self) -> bytes | None:
+        return self._guest_page
+
+    def guest_view_bytes(self, login: str) -> bytes | None:
+        """The login's guest view; None when the login is not listed or sharing is off."""
+        with self._published:
+            return self._guest_views.get(login)
+
+    def guest_pictures(self, login: str) -> frozenset[str]:
+        """The pictures on the login's guest view."""
+        with self._published:
+            return self._guest_pictures.get(login, frozenset())
 
     @property
     def view_bytes(self) -> bytes:
@@ -3317,6 +3619,15 @@ class ConsoleService:
             if self._closing or self._version <= seen:
                 return None
             return self._version, self._view
+
+    def wait_for_guest_change(self, login: str, seen: int, timeout: float
+                              ) -> tuple[int, "guest.Access", bytes | None] | None:
+        """Like `wait_for_change`, with the access list and the login's view of that publish."""
+        with self._published:
+            self._published.wait_for(lambda: self._version > seen or self._closing, timeout)
+            if self._closing or self._version <= seen:
+                return None
+            return self._version, self._published_access, self._guest_views.get(login)
 
     def delivered(self, version: int) -> None:
         """Record that the view of `version` was written to a page stream (ADR-console-071)."""
@@ -3354,7 +3665,20 @@ class ConsoleService:
         return entry, action, approve.apply_items(
             latest, found, entry, action, deferred=self._deferred)
 
-    def _publish(self) -> None:
+    def record_guest_request(self, reading: Mapping) -> None:
+        """Keep the latest guest-port request's reading for the owner; see the module docstring."""
+        with self._ingest:
+            if reading == self._guest_reading:
+                return
+            self._guest_reading = dict(reading)
+            self._publish(guests=False)
+
+    def _publish(self, *, guests: bool = True) -> None:
+        """Derive and publish the views; `guests=False` publishes the owner's view alone.
+
+        A guest view is derived from the clock (a sprint's age text), so recomputing it for a
+        guest-port reading would change a guest's bytes: the cached guest views are kept.
+        """
         adoption, action, apply_items = self._approval_view()
         latest = self._registration
         cancel = (self._registering is None and latest is not None
@@ -3362,9 +3686,9 @@ class ConsoleService:
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
-        view = encode_view(derive_view(
-            self._states.values(), self._inbox, self._health,
-            sessions=self._sessions.values(), deliveries=self._deliveries,
+        inputs = dict(
+            states=list(self._states.values()), records=self._inbox, health=self._health,
+            sessions=list(self._sessions.values()), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             owner_notices=self._owner_notices,
             project_questions=self._project_questions,
@@ -3388,20 +3712,46 @@ class ConsoleService:
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None, looked=self._looked, movement=self._movement))
+            nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
+        access = self._access
+        view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
+            access, guest.serve_state(self._serve_status, access.tailnet, self._guest_port_number),
+            self._guest_reading)))
         found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
         evidence_key = None
         if found is not None and found["step"] == "apply_failed" and found.get("evidence") is not None:
             evidence_key = next((item["key"] for item in apply_items), None)
-        with self._published:
-            if view != self._view:
+        if not guests:
+            with self._published:
+                if view != self._view:
+                    self._version += 1
                 self._view = view
+                self._track_evidence_card(evidence_key)
+                self._published.notify_all()
+            return
+        views: dict[str, bytes] = {}
+        seen_pictures: dict[str, frozenset[str]] = {}
+        if self._guest_server is not None and access.tailnet is not None:
+            for login, projects in access.colleagues.items():
+                derived = guest.scrub(derive_view(**guest.scoped(inputs, projects)))
+                views[login] = encode_view(derived)
+                seen_pictures[login] = guest.picture_ids(derived)
+        with self._published:
+            if view != self._view or views != self._guest_views:
                 self._version += 1
-            if evidence_key is None:
-                self._evidence_card = None
-            elif self._evidence_card is None or self._evidence_card[0] != evidence_key:
-                self._evidence_card = (evidence_key, self._version)
+            self._view = view
+            self._published_access = access
+            self._guest_views = views
+            self._guest_pictures = seen_pictures
+            self._track_evidence_card(evidence_key)
             self._published.notify_all()
+
+    def _track_evidence_card(self, evidence_key: str | None) -> None:
+        """Remember the version at which the evidence card appeared (call under `_published`)."""
+        if evidence_key is None:
+            self._evidence_card = None
+        elif self._evidence_card is None or self._evidence_card[0] != evidence_key:
+            self._evidence_card = (evidence_key, self._version)
 
     def refresh(self) -> list[Event]:
         """Append the difference between the registry and the log, and publish."""
@@ -6185,6 +6535,26 @@ class ConsoleService:
             self._dispatch_notice_nudge(sprint_id)
         return seq
 
+    def set_tailnet(self, tailnet: str | None) -> None:
+        """Append one `sharing.tailnet` row: the guest door's tailnet name, or None for off."""
+        with self._ingest:
+            self._apply(self.log.append([(SHARING_TAILNET, None, {"tailnet": tailnet})]))
+
+    def set_colleague(self, login: str, projects: tuple[str, ...]) -> None:
+        """Append one `sharing.colleague` row: the login's whole project list (it replaces)."""
+        with self._ingest:
+            if any(project not in self._states for project in projects):
+                raise guest.Refused("that project is not registered")
+            self._apply(self.log.append([(SHARING_COLLEAGUE, None, {
+                "login": login, "projects": list(projects)})]))
+
+    def remove_colleague(self, login: str) -> None:
+        """Append one `sharing.removed` row for a listed colleague."""
+        with self._ingest:
+            if login not in self._access.colleagues:
+                raise guest.Refused("that colleague is not listed")
+            self._apply(self.log.append([(SHARING_REMOVED, None, {"login": login})]))
+
     def withdraw_owner_notice(self, project_id: str, notice_id: int) -> int:
         """Append one owner `notice.withdrawn` event for an open owner notice; the notice's id."""
         with self._ingest:
@@ -6584,6 +6954,7 @@ class ConsoleService:
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
+        self._access = guest.access_list(appended, self._access)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
@@ -6733,6 +7104,19 @@ class ConsoleService:
             if found != self._activation:
                 self._activation = found
                 self._publish()
+
+    def poll_serve(self) -> None:
+        """One reading of Tailscale Serve's status; see the module docstring (guest door)."""
+        if self._serve_reader is None:
+            return
+        try:
+            found = self._serve_reader()
+        except Exception as error:
+            print(f"console: serve_status_failed {type(error).__name__}: {error}", file=sys.stderr)
+            found = None
+        with self._ingest:
+            self._serve_status = found
+            self._publish()
 
     def activate(self, commit: str) -> None:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
@@ -7131,6 +7515,12 @@ class ConsoleService:
             if self._stop.wait(self._tracker_seconds):
                 return
 
+    def _serve_loop(self) -> None:
+        while True:
+            self.poll_serve()
+            if self._stop.wait(self._serve_seconds):
+                return
+
     def _activate(self) -> None:
         while True:
             try:
@@ -7200,6 +7590,14 @@ class ConsoleService:
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
+        if self._guest_server is not None:
+            self._guest_thread = threading.Thread(
+                target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
+            self._guest_thread.start()
+        if self._serve_reader is not None:
+            self._serve_thread = threading.Thread(
+                target=self._serve_loop, name=SERVE_THREAD, daemon=True)
+            self._serve_thread.start()
 
     def close(self) -> None:
         if self._closed:
@@ -7229,6 +7627,8 @@ class ConsoleService:
             self._digest_thread.join()
         if self._spend_thread is not None:
             self._spend_thread.join()
+        if self._serve_thread is not None:
+            self._serve_thread.join()
         if self._probe_thread is not None:
             self._probe_thread.join()
         if self._signin_thread is not None:
@@ -7254,6 +7654,10 @@ class ConsoleService:
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()
+        if self._guest_server is not None:
+            if self._guest_thread is not None:
+                self._guest_server.shutdown()
+            self._guest_server.server_close()
         with self._ingest:
             while self._grants_running:
                 self._grants_done.wait()

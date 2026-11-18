@@ -63,7 +63,15 @@ Wire format, one object:
      "profile_sessions": {"<profile>": <int>, ...},
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
      "activation": <activation line> | null,
-     "spend": <spend view> | null}
+     "spend": <spend view> | null,
+     "sharing": {"tailnet": <name> | null, "colleagues": [{"login", "projects"}, ...],
+                 "state": "off" | "unchecked" | "not_proxying" | "serving",
+                 "last_request": <guest-port reading> | null}}
+
+`sharing` is the owner's access list for the guest door and its Serve state (#1237,
+`guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
+(`guest.scrub`). `last_request` is the last guest-port request's `guest.reading` (counts and flags,
+never a login), null before the first one.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
@@ -692,6 +700,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
+from types import MappingProxyType
 
 from agent_tools.console import contract_draft, inbox, project_question
 from agent_tools.console.activation import Activation
@@ -919,6 +928,8 @@ ACTIVATED_TEXT = "Activated this host at {commit}."
 ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {next_step}"
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
+SHARING_OFF = MappingProxyType({
+    "tailnet": None, "colleagues": [], "state": "off", "last_request": None})
 
 
 @dataclass(frozen=True)
@@ -2090,6 +2101,7 @@ def derive_view(
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
     spend: Mapping | None = None,
     project_questions: Mapping[str, Sequence[project_question.AskedQuestion]] | None = None,
+    sharing: Mapping | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -2345,7 +2357,14 @@ def derive_view(
                 key=lambda p: (p.failed_at, p.sprint_id))],
         "activation": _activation_line(activation, activation_run, now_ms),
         "spend": dict(spend) if spend is not None else None,
+        "sharing": _sharing_copy(SHARING_OFF if sharing is None else sharing),
     }
+
+
+def _sharing_copy(sharing: Mapping) -> dict:
+    last = sharing["last_request"]
+    return {**sharing, "colleagues": list(sharing["colleagues"]),
+            "last_request": None if last is None else dict(last)}
 
 
 def _activation_line(activation: Activation | None, run: LastRun | None, now_ms: int | None) -> dict | None:

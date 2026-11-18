@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 """
 import plistlib
 import re
+import shlex
 import unittest
 
 from agent_tools.console import manager, service
@@ -13,17 +14,23 @@ from . import test_verify_pending_units as units
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
+GUEST_PORT = 27185
 LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-tools-console$")
 
 
-def check_command(case, command):
-    words = command.split(" ")
-    case.assertEqual(len(words), 5, command)
+def check_command(case, command, tailscale=None):
+    """The command's words; `tailscale` is the Windows client path a host reads Serve status from (#1237)."""
+    words = shlex.split(command)
     case.assertRegex(words[0], LAUNCHER)
-    case.assertEqual(words[1:3], ["--port", str(PORT)])
+    case.assertEqual(words[1:5], ["--port", str(PORT), "--guest-port", str(GUEST_PORT)])
+    rest = words[5:]
+    if tailscale is not None:
+        case.assertEqual(rest[:2], ["--tailscale", tailscale], command)
+        rest = rest[2:]
+    case.assertEqual(len(rest), 2, command)
     # The one default screenshot folder a manual check's pictures may come from (issue 1112).
-    case.assertEqual(words[3], "--screenshots")
-    case.assertRegex(words[4], r"^/(home|Users)/[^/ ]+/tmp/clarity-screenshots$")
+    case.assertEqual(rest[0], "--screenshots")
+    case.assertRegex(rest[1], r"^/(home|Users)/[^/ ]+/tmp/clarity-screenshots$")
 
 
 class LinuxUnit(unittest.TestCase):
@@ -46,7 +53,7 @@ class LinuxUnit(unittest.TestCase):
 
     def test_the_port_is_the_consoles_fixed_port(self):
         self.assertEqual(PORT, service.DEFAULT_PORT)
-        check_command(self, self.got["command"])
+        check_command(self, self.got["command"], "/mnt/c/Program Files/Tailscale/tailscale.exe")
 
     def test_the_service_runs_the_console_command_and_restarts_it_on_exit(self):
         # home-manager 25.11 normalizes ExecStart and Environment to lists.

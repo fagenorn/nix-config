@@ -29,6 +29,10 @@
 # restart during the switch (`KillMode=control-group`) does not end it, and the restarted
 # console resumes waiting for its recorded exit. `systemd-run` and `systemctl` are reached
 # through `/run/current-system/sw/bin`, already on the path.
+#
+# The command also names the guest port Tailscale Serve proxies to (`--guest-port`, #1237)
+# and, when `agentConsole.tailscale` is set, the Windows Tailscale client the console reads
+# `serve status --json` from to show whether Serve proxies the tailnet name to that port.
 {
   config,
   lib,
@@ -38,9 +42,13 @@
 }:
 let
   consolePort = 27184;
+  guestPort = 27185;
 
   command =
-    "${agentTools.launchers.console} --port ${toString consolePort}"
+    "${agentTools.launchers.console} --port ${toString consolePort} --guest-port ${toString guestPort}"
+    + lib.optionalString (
+      config.agentConsole.tailscale != null
+    ) " --tailscale ${lib.escapeShellArg config.agentConsole.tailscale}"
     + lib.concatMapStrings (
       d: " --screenshots ${lib.escapeShellArg d}"
     ) config.agentConsole.screenshotDirs;
@@ -64,6 +72,11 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ "${config.home.homeDirectory}/tmp/clarity-screenshots" ];
       description = "Folders whose PNGs a manual check may show on the console (issue 1112), beside the project's own checkout.";
+    };
+    tailscale = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Path of the Windows Tailscale client the console reads `serve status --json` from (#1237); null reads nothing.";
     };
     command = lib.mkOption {
       type = lib.types.str;

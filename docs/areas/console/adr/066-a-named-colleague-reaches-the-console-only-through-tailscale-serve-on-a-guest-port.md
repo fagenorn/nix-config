@@ -1,7 +1,7 @@
 # ADR-console-066 — A named colleague reaches the console only through Tailscale Serve on a guest port
 
 - **Status:** accepted
-- **Decided in:** #1235
+- **Decided in:** #1235, #1237
 
 ## Context
 
@@ -17,7 +17,7 @@ The console answers only a loopback `Host` and places one write token in its pag
 - Every request on the guest port is a guest request or is refused. It is a guest only when its `Host` is the tailnet name the owner configured on the page (`<host>.<tailnet>.ts.net`) and it carries exactly one login header naming a listed colleague (`<colleague-login>`).
 - The owner's port stays as it is today. It also refuses any request carrying a Tailscale identity header or `X-Forwarded-For`, so a Serve misconfigured onto it never makes a guest the owner.
 - A guest page carries a guest token of its own, never the owner's.
-- Serve's exact `Host` and header-stripping behaviour is confirmed by a read-only probe through Serve in a later slice. The refusal rule above follows that probe's result and is amended by it if the two differ.
+- Serve on the Windows host refuses connections from its own machine, so the read-only probe of #1237 could not run before that slice merged. By the owner's decision of 17 Nov it merged with the strict rule: a guest-port request is admitted only when its `Host` is exactly the configured tailnet name, with no port form, and exactly one `Tailscale-User-Login` header names a listed colleague; anything else is refused. The console keeps one diagnostics reading of the last request on the guest port: the `Host` it carried, how many login headers arrived, whether it came through Serve (`X-Forwarded-For`), whether it carried the probe header, and whether it was admitted or refused and why, never a login value. Only the owner's state carries it, never a guest's. The first real request from another tailnet node settles the rule after merge: the held check `home/common/verify-pending/checks/console-guest-door` reads that reading on the owner's loopback port (expiry 30 days), met when the `Host` is exactly the tailnet name in force, Serve sent one login header of its own and a client-sent `forged-probe@example.invalid` did not arrive. A reading that shows otherwise goes to the owner, who decides how the rule above changes.
 
 **D3. What stays owner-only.** Confirming a release or any card marked production or paid; spend; accounts and sign-in; host activation; project registration; the access list itself; stopping or dropping a sprint; every manager route, which keeps its sprint secret. A guest sees only their listed projects' sprints, cards and notices, may state a goal there, and on sprints they started may approve the brief, answer questions and message the manager. Every guest action records who did it.
 
@@ -44,5 +44,5 @@ The page is then at `https://<host>.<tailnet>.ts.net/`. The only step left to th
 ## Consequences
 
 - A guest is only as trusted as Serve's header: the guest port's rule is a second line, not a defence against a local process.
-- The owner's port gains a refusal of identity headers, which a probe through Serve may refine.
+- The owner's port gains a refusal of identity headers, which a probe through Serve may refine. The held check of #1237 reads the guest port only, so that refusal stays as written: every `Tailscale-` header and `X-Forwarded-For`.
 - Related: ADR-console-008.
