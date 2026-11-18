@@ -299,6 +299,7 @@ the project in its project column):
     questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>, "pictures"?: [<id>],
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "needs_words"?: [<option text>],
+                                      "owner_only"?: true,
                                       "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "replaces"?: {"round": <int>, "index": <int>}}]}
@@ -329,8 +330,8 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended, needs_words, pictures,
-replaces`),
+a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
+pictures, replaces`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -340,7 +341,8 @@ stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option 
 over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION`
 (`recommended` not a string whose strip equals one stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
-option, each named once), then `REPLACES_SHAPE` (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
+option, each named once), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
+then `REPLACES_SHAPE` (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
 `picture, line, pair`, or `picture` or `line` missing), `PICTURE_MEMBER` for `picture` (not a string
@@ -368,7 +370,8 @@ order. With
 picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
 text stripped, a question carrying `"context"` only when the round gave one, `"needs_words"` (the
-stripped option texts, in the given order) only when it gave one, and `"pictures"`
+stripped option texts, in the given order) only when it gave one, `"owner_only"` (`true`) only when it
+gave it, and `"pictures"`
 (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
 (`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
 question's `replaces` names in a checked round, in question order.
@@ -386,7 +389,9 @@ index)`. A `questions.asked` row changes a sprint only when it is open, its brie
 (`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
 (absent: false), so a logged round over a limit folds whole and renders cut; each
 checked question is then added with `round_id` the row's `seq`, its `index` and `at`, and its
-`needs_words` (`Question.needs_words`, `()` when the round gave none). Each checked
+`needs_words` (`Question.needs_words`, `()` when the round gave none) and `owner_only`
+(`Question.owner_only`, false unless the round marked it: a question only the console's owner
+answers, #1263). Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -791,6 +796,7 @@ OPTION_COUNT = "question {n} needs two to four options"
 OPTION_TWICE = "question {n} offers one option twice"
 NO_RECOMMENDATION = "question {n} recommends none of its options"
 NEEDS_WORDS_SHAPE = "question {n}'s needs_words must list some of its options, each once"
+OWNER_ONLY_SHAPE = "question {n}'s owner_only must be true when given"
 WORDS_NEEDED = "say what to change"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
@@ -989,6 +995,7 @@ class Question:
     needs_words: tuple[str, ...] = ()
     words: str | None = None
     answered_by: str | None = None
+    owner_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1379,8 +1386,8 @@ LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/
 def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
-                                                                "needs_words", "pictures",
-                                                                "replaces"}:
+                                                                "needs_words", "owner_only",
+                                                                "pictures", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1422,6 +1429,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
                 or len(kept) != len(needs_words) or len(set(kept)) != len(kept)
                 or not set(kept) <= set(stripped)):
             raise Refused(NEEDS_WORDS_SHAPE.format(n=n))
+    if "owner_only" in question and question["owner_only"] is not True:
+        raise Refused(OWNER_ONLY_SHAPE.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1435,6 +1444,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         checked["context"] = context.strip()
     if "needs_words" in question:
         checked["needs_words"] = kept
+    if "owner_only" in question:
+        checked["owner_only"] = True
     if pictures:
         checked["pictures"] = pictures
     if "replaces" in question:
@@ -2006,6 +2017,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                row["blocks"], tuple(row["options"]), row["recommended"],
                                context=row.get("context"),
                                needs_words=tuple(row.get("needs_words", ())),
+                               owner_only=row.get("owner_only", False) is True,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))

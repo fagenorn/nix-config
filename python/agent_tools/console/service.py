@@ -106,7 +106,8 @@ the owner's body helper for the route with a `guest.GuestActor` (`411`, `415`, `
 <name>`); then, under the ingest lock and before anything is appended, the write-time re-check of the
 tailnet the request was admitted under, the access list, the project, the starter (`409`
 `guest.NOT_YOUR_SPRINT_TEXT` unless the colleague started the sprint) and the look rule (`409`
-`guest.OWNER_LOOK_TEXT` for a question carrying a before-and-after pair); success is an empty `204`.
+`guest.OWNER_LOOK_TEXT` for a question carrying a before-and-after pair, `guest.OWNER_ONLY_TEXT` for a
+question marked `owner_only`); success is an empty `204`.
 A guest's row carries `"by": <login>`, an owner's carries none; no refusal body or stderr line names a login.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
@@ -6714,6 +6715,8 @@ class ConsoleService:
                 raise sprints.Refused(sprints.UNKNOWN_QUESTION)
             if by is not None and guest.is_look(p.pair for p in asked.pictures):
                 raise sprints.Refused(guest.OWNER_LOOK_TEXT)
+            if by is not None and asked.owner_only:
+                raise sprints.Refused(guest.OWNER_ONLY_TEXT)
             if asked.answer is not None:
                 raise sprints.Refused(sprints.ANSWERED_ALREADY)
             words = None

@@ -63,6 +63,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .btn-primary:disabled, .btn-primary[aria-disabled="true"] { background: var(--s1); border-color: var(--s2); color: var(--sub0); }
 .btn-option[aria-pressed="true"] { background: rgba(183, 189, 248, .10); }
 .btn-option[aria-pressed="true"] kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
+.btn-option.keyless { grid-template-columns: minmax(0, 1fr) auto; }
 /* end controls: desk */
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
@@ -968,6 +969,15 @@ function steersHere(sprint) {
   return guestDoor && sprint.steer === true && lastView !== null && lastView.inbox !== undefined
     && lastView.inbox.open.some((open) => open.steer === true && open.sprint_id === sprint.sprint_id);
 }
+// The card the sprint's `now_text` speaks of: its brief, or its first open question (the order the view reads).
+function nowSteers(sprint) {
+  if (!guestDoor || sprint.steer !== true || lastView === null || lastView.inbox === undefined) return false;
+  const cards = lastView.inbox.open.filter((open) => open.sprint_id === sprint.sprint_id
+    && (open.reason === "brief" || open.reason === "question"));
+  cards.sort((a, b) => (a.round === undefined ? -1 : a.round) - (b.round === undefined ? -1 : b.round)
+    || (a.index === undefined ? -1 : a.index) - (b.index === undefined ? -1 : b.index));
+  return cards.length > 0 && cards[0].steer === true;
+}
 const YOURS_NOW = ["waiting for your approval of the brief", "waiting for your answer: "];
 function nowWords(text, acts) {
   return acts && typeof text === "string" && YOURS_NOW.some((lead) => text.startsWith(lead)) ? text : ownerWords(text);
@@ -1012,8 +1022,9 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
     head.appendChild(prog);
   }
-  const now = el("p", "sp-now", nowWords(sprint.now_text, yours));
-  now.setAttribute("title", nowWords(sprint.now_text, yours));
+  const nowYours = nowSteers(sprint);
+  const now = el("p", "sp-now", nowWords(sprint.now_text, nowYours));
+  now.setAttribute("title", nowWords(sprint.now_text, nowYours));
   head.appendChild(now);
   const words = el("p", "sp-status");
   words.appendChild(el("span", "sprint-ball " + look.tone, ballWords(sprint.ball_text, yours)));
@@ -4384,7 +4395,7 @@ function answerBox(item, state, lead) {
     if (soleOption(item)) return;
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
-      const button = el("button", "opt btn-option");
+      const button = el("button", guestDoor ? "opt btn-option keyless" : "opt btn-option");
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
       markBusy(button, state.phase === "sending");

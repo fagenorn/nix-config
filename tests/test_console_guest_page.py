@@ -720,6 +720,35 @@ class GuestSteerPageTest(unittest.TestCase):
         keys = [n for n in nodes(snap["page"]) if n["tag"] == "kbd" or (n["tag"] == "p" and has_class(n, "keys"))]
         self.assertEqual(keys, [])
 
+    def test_a_mixed_round_names_the_owner_for_an_owner_only_first_question(self) -> None:
+        mine = {**OWNER_SPRINT, "sprint_id": "a" * 16, "title": "Mine", "steer": True,
+                "started_by": COLLEAGUE, "now_text": "waiting for your answer: Which store?"}
+        first = question(0, "Which store?", ["sqlite", "files"], "files", project_id="owner/p01",
+                         sprint_id="a" * 16, steer=False, started_by=COLLEAGUE, owner_only=True)
+        later = question(1, "May the reader change?", ["yes", "no"], "no", project_id="owner/p01",
+                         sprint_id="a" * 16, steer=True, started_by=COLLEAGUE)
+        frame = owner_frame_with([mine], inbox={"open": [first, later], "answered": []})
+        text = full(sprint_of(page_of(GUEST, [START, {"frame": frame}]), "Mine"))
+        self.assertIn("waiting for the owner's answer: Which store?", text)
+        self.assertNotIn("waiting for your answer", text)
+        reversed_ = owner_frame_with([mine], inbox={"open": [{**first, "steer": True}, {**later, "steer": False}],
+                                                    "answered": []})
+        text = full(sprint_of(page_of(GUEST, [START, {"frame": reversed_}]), "Mine"))
+        self.assertIn("waiting for your answer: Which store?", text)
+
+    def test_a_guest_answer_option_has_no_badge_column(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True)
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        options = named(snap["inbox"], "opt")
+        self.assertEqual(len(options), 2)
+        for option in options:
+            self.assertTrue(has_class(option, "keyless"), option["cls"])
+        owner = harness([START, {"frame": {**OWNER_FRAME, "inbox": {"open": [
+            question(0, "Which store?", ["sqlite", "files"], "files")], "answered": []}}},
+            {"snapshot": "page"}])[-1]
+        for option in named(owner["inbox"], "opt"):
+            self.assertFalse(has_class(option, "keyless"))
+
     def test_the_guest_goal_box_offers_only_their_projects(self) -> None:
         self.assertEqual(SCOPED["recent_projects"], ["owner/p01"])
         typed, sent = harness([

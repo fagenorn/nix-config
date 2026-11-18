@@ -71,6 +71,7 @@ round is
                     "options": ["<one line, at most 80 characters>", ...],
                     "recommended": "<exact text of one option>",
                     "needs_words": ["<exact text of an option>", ...],
+                    "owner_only": true,
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
                     "replaces": {"round": <id>, "index": <n>}}, ...],
@@ -79,6 +80,9 @@ round is
 `needs_words` is optional and holds the exact text of each option that needs the owner's own words:
 the page refuses that option until the owner writes what to change, the console checks it
 (`NEEDS_WORDS_SHAPE`) and the command sends it as given.
+
+`owner_only` is optional and, when given, must be `true`: it marks a question only the console's owner
+answers, never a colleague who started the sprint (`OWNER_ONLY_SHAPE`); the command sends it as given.
 
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that

@@ -1128,6 +1128,12 @@ class BriefViewTest(unittest.TestCase):
                          ["brief/" + b, "brief/" + a, "k1"])
         self.assertEqual(view["statement"]["inbox_items"], 3)
 
+    def test_a_brief_of_a_sprint_with_a_stop_requested_is_no_item(self):
+        sid = "a" * 16
+        stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
+        view = derive_view([state("p00", 1)], sprints={sid: stopping})
+        self.assertEqual(view["inbox"]["open"], [])
+
     def test_a_decided_or_unregistered_brief_is_no_item(self):
         a, b, c = "a" * 16, "b" * 16, "c" * 16
         view = derive_view([state("p00", 1)], sprints={
@@ -1789,6 +1795,15 @@ class QuestionViewTest(unittest.TestCase):
             state_, questions=(dataclasses.replace(first, needs_words=("files",)), *rest))
         shown = derive_view([state("p00", 1)], sprints={A: state_})
         self.assertEqual(shown["inbox"]["open"][0]["questions"][0]["needs_words_index"], [1])
+
+    def test_an_owner_only_question_says_so_and_others_say_nothing(self):
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(
+            state_, questions=(dataclasses.replace(first, owner_only=True), *rest))
+        entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        self.assertIs(entries[0]["owner_only"], True)
+        self.assertNotIn("owner_only", entries[1])
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
@@ -2551,7 +2566,7 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(project["outside_sprints"]["sessions"], [])
         self.assertIs(project["quiet"], True)
         waiting = stopped(briefed(started(A)), C, C + MIN)
-        self.assertEqual(len(line(waiting, C + MIN + DAY - 1)["inbox"]["open"]), 1)
+        self.assertEqual(line(waiting, C + MIN + DAY - 1)["inbox"]["open"], [])
         gone = line(waiting, C + MIN + DAY)
         self.assertEqual(gone["inbox"]["open"], [])
         self.assertEqual(gone["statement"]["inbox_items"], 0)

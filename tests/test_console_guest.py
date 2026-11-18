@@ -416,7 +416,7 @@ class GuestWriteRuleTest(unittest.TestCase):
                 self.assertEqual(guest.write_refusal(rule, actor, project), expected)
         for text in (guest.NOT_YOUR_PROJECT_TEXT, guest.NOT_YOUR_SPRINT_TEXT,
                      guest.OWNER_LOOK_TEXT, guest.SHARING_OFF_TEXT, guest.HOST_TEXT,
-                     guest.NOT_SHARED_TEXT):
+                     guest.NOT_SHARED_TEXT, guest.OWNER_ONLY_TEXT):
             with self.subTest(text=text):
                 self.assertNotIn("@", text)
                 self.assertNotIn("owner/", text)
@@ -440,6 +440,7 @@ class GuestWriteRuleTest(unittest.TestCase):
                 question(started_by=c, pictures=[{"id": "p1", "line": "one", "pair": None}]),
                 question(started_by=c, pictures=[{"id": "p1", "pair": "before"},
                                                  {"id": "p2", "pair": "after"}]),
+                question(started_by=c, owner_only=True),
                 {"reason": "verify-approve", "kind": "approval", "confirm": "owner/p01#12",
                  "started_by": c},
                 {"reason": "verify-approve", "kind": "paid-approval", "paid": True}],
@@ -461,7 +462,7 @@ class GuestWriteRuleTest(unittest.TestCase):
         walk(result["projects"])
         self.assertEqual(found, {"a": True, "b": False, "q": True})
         self.assertEqual([item["steer"] for item in result["inbox"]["open"]],
-                         [True, False, True, False, False, False])
+                         [True, False, True, False, False, False, False])
         self.assertEqual(result["inbox"]["answered"], [])
         self.assertFalse(guest.is_look([None, None]))
         self.assertFalse(guest.is_look([None, "after"]))

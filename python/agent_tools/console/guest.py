@@ -75,13 +75,14 @@ in force is not the one the request was admitted under, because the owner rename
 login's list (`NOT_YOUR_PROJECT_TEXT`); otherwise None. `steer_refusal(login, started_by)` is None
 exactly when the sprint was started by that login (`NOT_YOUR_SPRINT_TEXT`; a sprint with no starter
 is the owner's). A question that carries a before-and-after pair is a look before merge and stays
-the owner's (`is_look`, `OWNER_LOOK_TEXT`); tracker items (release confirmations, paid approvals,
+the owner's (`is_look`, `OWNER_LOOK_TEXT`), as does a question the manager marked `owner_only`
+(`OWNER_ONLY_TEXT`); tracker items (release confirmations, paid approvals,
 production holds) are never steerable. The service answers a write refused on these merits as
 `409`. No text names a project or a login.
 
 `mark_steer(view, login)` returns a copy of a scrubbed guest view in which every sprint mapping
 gains `steer` (started by that login) and every `inbox.open` and `inbox.answered` item gains `steer`
-(a brief or a question started by that login that is not a look). The marks are the server's and
+(a brief or a question started by that login that is neither a look nor `owner_only`). The marks are the server's and
 are applied to a scrubbed guest view only; it adds the login nowhere and never mutates its argument.
 
 `parse_tailnet`, `parse_colleague` and `parse_removal` read the owner's write bodies as strict
@@ -363,7 +364,8 @@ def mark_steer(view: Mapping, login: str) -> dict:
         reason = item.get("reason")
         return (reason in ("brief", "question") and item.get("started_by") == login
                 and not (reason == "question"
-                         and is_look(picture.get("pair") for picture in item.get("pictures", []))))
+                         and (item.get("owner_only") is True
+                              or is_look(picture.get("pair") for picture in item.get("pictures", [])))))
 
     def copy(node: object) -> object:
         if isinstance(node, Mapping):

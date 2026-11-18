@@ -300,7 +300,8 @@ then that entry's `out_until` (null when unknown), else null. Digest and bring-b
 state without the quota. `view` reads no clock.
 
 `BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
-what the page offers. An approved or changes-asked brief is no inbox item; only registered
+what the page offers. An approved or changes-asked brief, or one of a sprint with a stop requested (the console
+refuses its decision), is no inbox item; only registered
 projects' briefs appear, as for sprints.
 
 Each open question of a shown sprint (`sprints.open_questions`; a registered project, as briefs) is
@@ -316,7 +317,10 @@ is none. Its entry is
                     "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>",
-     "started_by": "<login>" | null}
+     "started_by": "<login>" | null, "owner_only"?: true}
+
+`owner_only` is present, and true, only on a question the manager marked for the owner alone
+(#1263); a colleague never answers it.
 
 The texts are shown cut, never refused, though a round logged before the limits can exceed them
 (ADR-console-027): the ask and the headline to `MAX_ASK_CHARS` (140), `context` to
@@ -1982,7 +1986,7 @@ def _brief_entry(sprint: SprintState) -> dict:
 def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
-    return {"type": "inbox_item", "reason": "question",
+    entry = {"type": "inbox_item", "reason": "question",
             "key": f"question/{sprint.sprint_id}/{question.round_id}/{question.index}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint),
@@ -2000,6 +2004,9 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
             "pictures": _picture_entries(question.pictures),
             "items": [], "answers": [], "answered": False, "waiting_since": question.at,
             "started_by": sprint.started_by}
+    if question.owner_only:
+        entry["owner_only"] = True
+    return entry
 
 
 def _stall_entry(sprint: SprintState) -> dict:
@@ -2154,7 +2161,7 @@ def derive_view(
             kept.setdefault(sprint.project_id, []).append(sprint)
 
     briefs = sorted((s for group in drafted.values() for s in group
-                     if s.brief is not None and s.brief.decision == NONE),
+                     if s.brief is not None and s.brief.decision == NONE and s.stop_at is None),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
                     for q in open_questions(s)),

@@ -106,8 +106,10 @@ class GuestWriteCase(GuestCase):
         self.assertEqual(status, 200, answer)
         return json.loads(answer)["picture"]
 
-    def ask(self, svc, sid, pictures=()):
+    def ask(self, svc, sid, pictures=(), owner_only=False):
         question = dict(QUESTION)
+        if owner_only:
+            question["owner_only"] = True
         if pictures:
             question["pictures"] = [
                 {"picture": self.picture(svc, sid, data), "line": f"the card {pair}", "pair": pair}
@@ -123,10 +125,10 @@ class GuestWriteCase(GuestCase):
         self.brief(svc, sid, 1)
         return sid
 
-    def asking(self, svc, project_id, by, pictures=()):
+    def asking(self, svc, project_id, by, pictures=(), owner_only=False):
         sid = self.waiting(svc, project_id, by)
         svc.approve_brief(project_id, sid, 1)
-        self.ask(svc, sid, pictures)
+        self.ask(svc, sid, pictures, owner_only)
         svc.read_inbox(sid, self.secret(sid))
         return sid
 
@@ -229,6 +231,32 @@ class GuestActionsTest(GuestWriteCase):
         view = json.loads(svc.guest_view_bytes(COLLEAGUE))
         self.assertIs(inbox_item(view, f"question/{look}/{self.rounds[look]}/0")["steer"],
                       False)
+
+
+    def test_an_owner_only_question_is_the_owner_s_to_answer(self):
+        self.seed()
+        svc = self.start()
+        sid = self.asking(svc, "owner/p01", ACTOR, owner_only=True)
+        view = json.loads(svc.guest_view_bytes(COLLEAGUE))
+        self.assertIs(inbox_item(view, f"question/{sid}/{self.rounds[sid]}/0")["steer"], False)
+        body = self.bodies(sid, sid)["/api/round-answer"]
+        status, text = self.still(svc, lambda: self.guest_post(svc, "/api/round-answer", body))
+        self.assertEqual((status, text), (409, guest.OWNER_ONLY_TEXT.encode() + b"\n"))
+        self.assertEqual(self.rows("question.answered"), [])
+        svc.answer_question("owner/p01", sid, self.rounds[sid], 0, 0, None)
+        (row,) = self.rows("question.answered")
+        self.assertNotIn("by", row)
+
+    def test_a_stopped_sprint_s_brief_is_no_card_on_the_guest_page(self):
+        self.seed()
+        svc = self.start()
+        sid = self.waiting(svc, "owner/p01", ACTOR)
+        view = json.loads(svc.guest_view_bytes(COLLEAGUE))
+        self.assertEqual([i["key"] for i in view["inbox"]["open"]], [f"brief/{sid}"])
+        svc.stop_sprint("owner/p01", sid)
+        view = json.loads(svc.guest_view_bytes(COLLEAGUE))
+        self.assertEqual(view["inbox"]["open"], [])
+        self.assertEqual(json.loads(svc.view_bytes)["inbox"]["open"], [])
 
 
 class GuestWriteTableTest(GuestWriteCase):

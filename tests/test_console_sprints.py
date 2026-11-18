@@ -2202,6 +2202,22 @@ class NeedsWordsTest(unittest.TestCase):
             self.assertEqual(str(raised.exception), sprints.NEEDS_WORDS_SHAPE.format(n=1))
 
 
+class OwnerOnlyTest(unittest.TestCase):
+    def test_a_question_may_be_marked_for_the_owner_alone(self):
+        checked = sprints.checked_round({"questions": [{**QUESTION, "owner_only": True}]})
+        self.assertIs(checked["questions"][0]["owner_only"], True)
+        self.assertNotIn("owner_only",
+                         sprints.checked_round({"questions": [QUESTION]})["questions"][0])
+        for value in (False, "yes", 1, None, []):
+            with self.subTest(value=value), self.assertRaises(sprints.Refused) as raised:
+                sprints.checked_round({"questions": [{**QUESTION, "owner_only": value}]})
+            self.assertEqual(str(raised.exception), sprints.OWNER_ONLY_SHAPE.format(n=1))
+
+    def test_the_mark_folds_onto_the_question(self):
+        state = question_state([asked(41, SID, [{**QUESTION, "owner_only": True}, QUESTION])])
+        self.assertEqual([q.owner_only for q in state.questions], [True, False])
+
+
 class QuestionFoldTest(unittest.TestCase):
     def test_a_logged_round_over_the_limits_still_folds_whole(self):
         long = {**QUESTION, "question": "q" * 600, "context": "c" * 900,
