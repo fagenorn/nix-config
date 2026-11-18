@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import dataclasses
+import http.client
 import json
 import os
 import pwd
@@ -15,13 +16,15 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import service
+
 from . import accounts_sandbox
 from . import console_screenshots as shots
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -78,6 +81,9 @@ def fake_browser(present):
             if expression == shots.GOAL_READING:
                 self.reads += 1
                 return list(shots.FILLED_GOAL)
+            if expression == shots.ACTIVATION_READING:
+                self.reads += 1
+                return list(shots.ACTIVATION_SHOWN["activation-tooling"])
             if expression == shots.CARD_READING:
                 self.reads += 1
                 return list(self.card)
@@ -107,8 +113,9 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_three_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 33)
+    def test_the_set_is_thirty_seven_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 37)
+        self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
@@ -117,19 +124,21 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-15:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-19:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
-                                              "questions-open", "ask-goal", "question-read"))
+                                              "questions-open", "ask-goal", "question-read",
+                                              "activation-tooling", "activation-host"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine",
-                 30: "thirty", 31: "thirty-one", 32: "thirty-two", 33: "thirty-three"}
+                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
+                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
+                 35: "thirty-five", 36: "thirty-six", 37: "thirty-seven"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -213,6 +222,60 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(shot.ask, ask)
                 self.assertEqual(page.reads, 1 if ask else 0)
                 self.assertEqual(field in page.waits, bool(clicks))
+
+    def test_an_activation_shot_without_its_line_and_button_fails_the_command(self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        self.assertEqual(shots.ACTIVATION_SHOWN, {
+            "activation-tooling": (
+                "A change to the agent tooling merged at 125812581258 and is not active on this "
+                "host.", 1),
+            "activation-host": (
+                "A change to the host configuration merged at 125812581258 and is not active on "
+                "this host.", 1)})
+        phrase = "does not show the activation line with its Activate button"
+        for state, shown_ in shots.ACTIVATION_SHOWN.items():
+            other = next(v for k, v in shots.ACTIVATION_SHOWN.items() if k != state)
+            for line in ((None, 1), (shown_[0], 0), (shown_[0], 2), other,
+                         ("A console change merged at 125812581258 is not active on this host.", 1)):
+                with self.subTest(state=state, line=line):
+                    code, text = run(lambda path: shots.Shot(state, 480, path, 480, activation=line))
+                    self.assertEqual(code, 1)
+                    self.assertIn(phrase, text)
+            code, text = run(lambda path: shots.Shot(state, 480, path, 480, activation=shown_))
+            self.assertEqual(code, 0)
+            self.assertNotIn(phrase, text)
+            self.assertEqual(shots.ACTIVATION_BASE, (None, 0))
+            self.assertIs(shots.reads_other(), True)
+            code, text = run(lambda path: shots.Shot(state, 480, path, 480,
+                                                     activation=shots.ACTIVATION_BASE))
+            self.assertEqual(code, 1)
+            self.assertIn(phrase, text)
+            with mock.patch.object(shots, "reads_other", return_value=False):
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480,
+                                                         activation=shots.ACTIVATION_BASE))
+                self.assertEqual(code, 0)
+                self.assertNotIn(phrase, text)
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480, activation=shown_))
+                self.assertEqual(code, 0)
+        code, text = run(lambda path: shots.Shot("live-several", 480, path, 480,
+                                                 activation=(None, 1)))
+        self.assertEqual(code, 0)
+
+    def test_the_activation_shots_read_the_line_only_in_their_own_states(self) -> None:
+        for state, reads in (("activation-tooling", 1), ("activation-host", 1), ("live-several", 0)):
+            with self.subTest(state), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(set())
+                shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                self.assertEqual(page.reads, reads)
+                self.assertEqual(shot.activation, tuple(
+                    shots.ACTIVATION_SHOWN["activation-tooling"]) if reads else None)
 
     def test_an_ask_goal_shot_without_the_filled_box_fails_the_command(self) -> None:
         def run(shot):
@@ -649,6 +712,109 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 else:
                     self.assertNotIn(hint, calls)
 
+    def test_the_guest_shot_goes_through_a_stand_in_serve(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp).resolve(), "guest-page", now_s)
+            svc = shots.start_service(fixture, now_s, guest=True)
+            serve = None
+            try:
+                serve = shots._Serve(svc.guest_address)
+
+                def get(address, path):
+                    connection = http.client.HTTPConnection(*address, timeout=5)
+                    try:
+                        connection.request("GET", path)
+                        response = connection.getresponse()
+                        return response.status, response.read()
+                    finally:
+                        connection.close()
+
+                status, body = get(serve.address, "/api/state")
+                self.assertEqual(status, 200)
+                state = json.loads(body)
+                self.assertNotIn("sharing", state)
+                self.assertIn("owner/web", body.decode())
+                self.assertNotIn("owner/api", body.decode())
+                status, body = get(serve.address, "/")
+                self.assertEqual(status, 200)
+                self.assertIn(service.DOOR_GUEST, body)
+                status, body = get(svc.address, "/api/state")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["sharing"]["colleagues"],
+                                 [{"login": shots.COLLEAGUE, "projects": ["owner/web"]}])
+            finally:
+                if serve is not None:
+                    serve.close()
+                svc.close()
+
+    def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
+        for present, opens in (({"#sharing-open"}, True), (set(), False)):
+            with self.subTest(opens=opens):
+                self.check_sharing_shot(present, opens)
+
+    def check_sharing_shot(self, present: set, opens: bool) -> None:
+        calls: list[tuple[str, tuple]] = []
+
+        class Page:
+            def goto(self, url):
+                calls.append(("goto", (url,)))
+
+            def wait_for_selector(self, selector):
+                calls.append(("wait_for_selector", (selector,)))
+
+            def query_selector(self, selector):
+                return object() if selector in present else None
+
+            def click(self, selector):
+                calls.append(("click", (selector,)))
+
+            def evaluate(self, expression, arg=None):
+                if expression == shots.SCROLL_Y:
+                    return 0.0
+                if expression == "document.documentElement.scrollWidth":
+                    return 480
+                if expression in (shots.SHORT_CONTROLS, shots.ACTS_ROW):
+                    return []
+                return 0
+
+            def screenshot(self, path, full_page):
+                pass
+
+            def close(self):
+                pass
+
+        class Browser:
+            def new_page(self, viewport):
+                return Page()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shots._shoot(Browser(), "http://console.test/", "sharing-panel", 480, Path(tmp))
+        if not opens:
+            self.assertNotIn(("click", ("#sharing-open",)), calls)
+            self.assertNotIn(("wait_for_selector", ("#sharing:not([hidden])",)), calls)
+            return
+        click = calls.index(("click", ("#sharing-open",)))
+        self.assertLess(click, calls.index(("wait_for_selector", ("#sharing:not([hidden])",))))
+
+    def test_the_guest_shot_refuses_the_owner_page(self) -> None:
+        door = "#console-door"
+        for present, refused in (({door, "#capacity"}, True), ({door}, False)):
+            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                if refused:
+                    with self.assertRaisesRegex(RuntimeError, "the guest shot is not the guest page"):
+                        shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+                else:
+                    shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+                self.assertIn("#top-who:not([hidden])", page.waits)
+
+    def test_the_guest_shot_on_the_base_page_waits_for_no_guest_part(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            browser, page = fake_browser({"#capacity"})
+            shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+        self.assertNotIn("#top-who:not([hidden])", page.waits)
+
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         real_registry = real_home / ".agents" / "state" / "fleet" / "registry.json"
@@ -820,6 +986,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         again.close()
                 elif state == "inbox-card":
                     self.assertEqual(len(view["inbox"]["open"][0]["questions"][0]["options"]), 2)
+                elif state in ("activation-tooling", "activation-host"):
+                    self.assertEqual(running, [])
+                    self.assertEqual(view["activation"], {
+                        "text": shots.ACTIVATION_SHOWN[state][0],
+                        "state": "pending", "commit": "1258" * 10,
+                        "root": str(fixture.projects[1]), "activate": True})  # sorted: api
+                    self.assertEqual(view["statement"]["inbox_items"], 0)
                 elif state in ("question-words", "question-refused"):
                     (asked,) = view["inbox"]["open"]
                     (look,) = asked["questions"]
@@ -1105,6 +1278,22 @@ class ScreenshotReadingTest(unittest.TestCase):
             [True, None, True],
             list(shots.BASE_THREAD),
             [False, None, False]])
+
+    def test_the_activation_reading_reads_the_line_and_its_visible_buttons(self) -> None:
+        shown_ = shots.ACTIVATION_SHOWN["activation-host"]
+        text_ = shown_[0]
+
+        def work(*, style="", buttons=1, line=True):
+            body = ('<p class="activation"' + (f' style="{style}"' if style else "") + '><span><span>'
+                    + text_ + '</span></span>' + '<button class="activate btn-quiet">Activate</button>'
+                    * buttons + '</p>') if line else "<p>nothing</p>"
+            return '<section id="projects">' + body + '</section>'
+
+        found = self.read_pages(
+            [work(), work(buttons=0), work(buttons=2), work(style="display:none"), work(line=False)],
+            shots.ACTIVATION_READING)
+        self.assertEqual(found, [
+            list(shown_), [text_, 0], [text_, 2], [None, 0], [None, 0]])
 
     def test_the_goal_reading_reads_the_filled_box(self) -> None:
         filled = shots.FILLED_GOAL[1]

@@ -2316,6 +2316,57 @@ class RequiredChecksTest(ResolverTestCase):
                          ["/bindings/vcs/merge/required_check"])
 
 
+class CommitEnvironmentTest(ResolverTestCase):
+    """Issue 1249 (ADR-project-contract-008): the optional bindings.vcs.commit.environment member."""
+
+    POINTER = "/bindings/vcs/commit/environment"
+
+    def contract_with(self, **members):
+        contract = source_contract()
+        contract["bindings"]["vcs"]["commit"].update(members)
+        return contract
+
+    def test_a_commit_environment_naming_a_command_resolves_verbatim(self):
+        root = self.make_root(self.contract_with(environment="nix-build"))
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["vcs"]["commit"],
+                         {"co_authored_by": True, "signed": True,
+                          "environment": "nix-build"})
+
+    def test_a_contract_without_one_resolves_with_none_inserted(self):
+        root = self.make_root(source_contract())
+        code, snap, err = self.resolve(root)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(snap["bindings"]["vcs"]["commit"],
+                         {"co_authored_by": True, "signed": True})
+
+    def test_a_commit_environment_naming_no_command_is_refused(self):
+        root = self.make_root(self.contract_with(environment="dev-shell"))
+        code, payload, _ = self.resolve(root)
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]], [self.POINTER])
+        self.assertEqual(error["repair_id"], "contract.vcs.unknown_command_id")
+
+    def test_a_commit_environment_that_is_not_a_non_empty_string_is_refused(self):
+        for value in (1, "", None, ["nix-build"]):
+            with self.subTest(value=value):
+                root = self.make_root(self.contract_with(environment=value))
+                code, payload, _ = self.resolve(root)
+                error = self.assert_refusal(code, payload, "invalid_contract")
+                self.assertEqual([v["pointer"] for v in error["violations"]],
+                                 [self.POINTER])
+                self.assertEqual(error["repair_id"], "contract.vcs.not_string")
+
+    def test_any_other_commit_member_is_still_unexpected(self):
+        root = self.make_root(self.contract_with(hooks="nix-build"))
+        code, payload, _ = self.resolve(root)
+        error = self.assert_refusal(code, payload, "invalid_contract")
+        self.assertEqual([v["pointer"] for v in error["violations"]],
+                         ["/bindings/vcs/commit/hooks"])
+        self.assertEqual(error["repair_id"], "contract.vcs.member_unexpected")
+
+
 class ProductionRulesTest(ResolverTestCase):
     """#1148: the optional `production` member and the snapshot's derived one."""
 

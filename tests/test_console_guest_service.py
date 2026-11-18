@@ -275,8 +275,14 @@ class RouteTableTest(GuestCase):
         svc = self.start()
         status, headers, body = self.guest(svc, "GET", "/")
         self.assertEqual(status, 200)
-        self.assertEqual(body, service.PAGE.replace(
+        self.assertEqual(body, service.GUEST_PAGE.replace(
             write_guard.TOKEN_SLOT, svc.guest_token.encode()))
+        self.assertIn(service.DOOR_GUEST, body)
+        self.assertEqual(service.PAGE.count(service.DOOR_OWNER), 1)
+        self.assertEqual(service.GUEST_PAGE.count(service.DOOR_GUEST), 1)
+        _, _, owned = self.owner(svc, "GET", "/")
+        self.assertIn(service.DOOR_OWNER, owned)
+        self.assertNotIn(service.DOOR_GUEST, owned)
         self.assertNotIn(svc.page_token.encode(), body)
         self.assertEqual(headers["Content-Security-Policy"], service.CSP)
         status, headers, body = self.guest(svc, "GET", "/api/state")

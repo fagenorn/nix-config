@@ -17,6 +17,7 @@ from .test_console_page import (
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
     look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints)
+from .test_console_guest_page import OTHER_TAILNET, SHARED_FRAME
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -25,7 +26,8 @@ SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
 KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
          "field-code")
 TREES = ("inbox", "statement", "projects", "unmanaged", "digest", "goal", "capacity", "account_add",
-         "register", "accounts", "accounts_body", "promoted", "viewer", "reading")
+         "register", "accounts", "accounts_body", "promoted", "viewer", "reading", "sharing_open",
+         "sharing_body")
 BUTTON_FOLDS = ("sprint-more", "item-detail")
 QUIET_ONLY = frozenset({"btn-quiet"})
 PRIMARY_OR_QUIET = frozenset({"btn-primary", "btn-quiet"})
@@ -47,7 +49,7 @@ DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
     **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
-             "acct-remove", "acct-remove-send"),
+             "acct-remove", "acct-remove-send", "share-off", "share-remove"),
     **_roles(OPTION_ONLY, "opt"),
     **_roles(
         QUIET_ONLY, "tell-open", "tell-send", "retry", "stop", "stop-confirm", "stop-cancel",
@@ -59,11 +61,14 @@ DESK_CONTROLS: dict = {
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
-        "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate"),
+        "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate",
+        "share-open", "share-close", "share-tailnet-save", "share-edit", "share-project",
+        "share-add"),
     **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
-             "notice-text", "register-path", "goal-filter", "goal-text"),
+             "notice-text", "register-path", "goal-filter", "goal-text", "share-tailnet",
+             "share-login"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
 }
 SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
@@ -264,6 +269,7 @@ def desk_scenarios() -> list:
         [START, {"frame": frame([ANSWERABLE])}, {"click": "opt"}, {"click": "send"},
          posting, snapshot],
         [START, {"frame": frame([manual])}, {"click": "ans-passed"}, snapshot],
+        [*OPEN, {"click": "share-edit"}, snapshot],
     ]
 
 
@@ -578,7 +584,8 @@ BUSY_ROLES = frozenset({
     "register-withdraw", "send", "retry", "withdraw", "stop-confirm", "stop-cancel", "try-again",
     "stall-withdraw", "start-retry", "start-withdraw", "continue", "progress-withdraw",
     "signin-start", "signin-send", "look-retry",
-    "signin-cancel", "notice-withdraw", "ans-draft", "opt", "words-text", "draft-text"})
+    "signin-cancel", "notice-withdraw", "ans-draft", "opt", "words-text", "draft-text",
+    "share-tailnet-save", "share-off", "share-add", "share-remove"})
 
 
 def refusal(text: str) -> dict:
@@ -629,6 +636,8 @@ CANCELLABLE = cards([FAILED_ITEM], {**FAILED_REGISTRATION, "cancel": True})
 REGISTER_REFUSED = "only a registration that was not applied yet can be cancelled"
 TYPED_WORDS = {"type": {"class": "words-text", "text": "use the reader"}}
 SPRINT_STOPPABLE = {**SPRINT, "stoppable": True}
+
+OPEN = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
 
 BUSY_SCENARIOS = [
     busy_row("tell-send", [START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
@@ -713,6 +722,13 @@ BUSY_SCENARIOS = [
     busy_row("ans-draft", [START, {"frame": cards([T0])},
                            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}}],
              held("ans-draft", {"clock": 5000}), refusal("no"), {"ans-draft", "draft-text"}),
+    busy_row("share-tailnet-save",
+             [*OPEN, {"type": {"class": "share-tailnet", "text": OTHER_TAILNET}}],
+             held("share-tailnet-save"), NO_REPLY, exceptions={"share-off"}),
+    busy_row("share-off", OPEN, held("share-off"), NO_REPLY, exceptions={"share-tailnet-save"}),
+    busy_row("share-add", [*OPEN, {"click": "share-edit"}], held("share-add"), NO_REPLY,
+             exceptions={"share-remove"}),
+    busy_row("share-remove", OPEN, held("share-remove"), NO_REPLY),
 ]
 
 

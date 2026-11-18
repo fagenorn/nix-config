@@ -35,6 +35,12 @@ changing and a read-only route. The snapshot always carries a derived
 (plus `console_activation` exactly when authored), with ids and globs returned as authored (they are not bindings, so no glob is
 made absolute). An absent section is not the same as declaring no production.
 
+`bindings.vcs.commit` may carry `environment`, the id of one `bindings.commands`
+entry through which `adopt-project apply` runs its commit (ADR-project-contract-008);
+it must be a non-empty string naming a commands entry (`contract.vcs.not_string`,
+`contract.vcs.unknown_command_id`), is returned as authored, and is never inserted
+when absent.
+
 `check-projections` judges each declared target against its source and
 refuses on drift; `resolve` runs the same check before it builds anything, so
 a hand-edited target is a structural refusal rather than a stale snapshot
@@ -214,6 +220,11 @@ MERGE_MEMBERS = ("strategy", "delete_branch")
 # absent both mean the project declares no required checks, and the resolver
 # never inserts it.
 MERGE_OPTIONAL_MEMBERS = ("required_checks",)
+COMMIT_MEMBERS = ("co_authored_by", "signed")
+# Issue 1249 / ADR-project-contract-008: the id of the `bindings.commands`
+# entry the adoption commit runs through. Absent means the commit runs git
+# alone, and the resolver never inserts it.
+COMMIT_OPTIONAL_MEMBERS = ("environment",)
 TRACKER_MEMBERS = ("kind", "cli", "repo_slug", "credential_env")
 PATHS_LIST_MEMBERS = (
     "context",
@@ -697,7 +708,7 @@ def validate_project(source: dict, violations: list[dict]) -> None:
             check_string(value[name], f"/project/{name}", "project", violations)
 
 
-def validate_vcs(vcs: dict, violations: list[dict]) -> None:
+def validate_vcs(vcs: dict, commands: dict | None, violations: list[dict]) -> None:
     check_exact_members(vcs, "/bindings/vcs", VCS_MEMBERS, "vcs", violations)
     for name in ("kind", "default_branch", "integration_branch", "branch_pattern"):
         if name in vcs:
@@ -717,12 +728,16 @@ def validate_vcs(vcs: dict, violations: list[dict]) -> None:
             vcs["commit"], "/bindings/vcs/commit", "vcs", violations):
         commit = vcs["commit"]
         check_exact_members(
-            commit, "/bindings/vcs/commit", ("co_authored_by", "signed"),
-            "vcs", violations)
-        for name in ("co_authored_by", "signed"):
+            commit, "/bindings/vcs/commit", COMMIT_MEMBERS, "vcs", violations,
+            optional=COMMIT_OPTIONAL_MEMBERS)
+        for name in COMMIT_MEMBERS:
             if name in commit:
                 check_boolean(
                     commit[name], f"/bindings/vcs/commit/{name}", "vcs", violations)
+        if "environment" in commit:
+            check_command_id(
+                commit["environment"], "/bindings/vcs/commit/environment",
+                commands, violations, section="vcs")
     if "merge" in vcs and check_object(
             vcs["merge"], "/bindings/vcs/merge", "vcs", violations):
         merge = vcs["merge"]
@@ -969,7 +984,7 @@ def validate_bindings(source: dict, violations: list[dict]) -> None:
             present[namespace] = bindings[namespace]
     commands = present.get("commands")
     if "vcs" in present:
-        validate_vcs(present["vcs"], violations)
+        validate_vcs(present["vcs"], commands, violations)
     if "tracker" in present:
         validate_tracker(present["tracker"], violations)
     if "paths" in present:

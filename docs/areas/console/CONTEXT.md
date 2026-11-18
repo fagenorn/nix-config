@@ -34,7 +34,7 @@ A registered project with no open work, no live session and no open sprint. It r
 _Avoid_: dormant project, idle project
 
 **Guest**:
-A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest port of its own and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066).
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest port of its own and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); the guest page is the desk page read-only.
 _Avoid_: user, viewer
 
 **Goal**:
@@ -138,7 +138,7 @@ The one place that holds every account control and detail: opened from the capac
 _Avoid_: settings page, account menu
 
 **Activation line**:
-The one line at the head of the Work column when origin's integration branch carries a console change this host does not run. It names the commit and carries Activate, which has the console run this host's activation for that commit; it then reads the run's outcome in plain words. It is not an inbox item and is not counted in the statement (ADR-console-043, ADR-system-004).
+The one line at the head of the Work column when origin's integration branch carries a merged change this host is built from and does not run, in console wording for a console change and in plain words otherwise. It names the commit and carries Activate, which has the console run this host's activation for that commit; it then reads the run's outcome in plain words. It is not an inbox item and is not counted in the statement (ADR-console-043, ADR-system-004, ADR-console-073).
 _Avoid_: deploy banner, update notice
 
 **Sign-in state**:

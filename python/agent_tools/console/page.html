@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="console-token" id="console-token" content="__CONSOLE_TOKEN__">
+<meta name="console-door" id="console-door" content="owner">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="data:,">
 <title>Console</title>
@@ -66,6 +67,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 56px; }
+.top-in > [hidden] { display: none; }
+.top-who { color: var(--sub0); font-size: .8125rem; }
+.guest-items { list-style: none; display: grid; gap: 10px; margin-top: 10px; }
+.guest-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--sub0); }
+.guest-kind { display: inline-flex; gap: 7px; font-weight: 600; color: var(--lav); }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
 .nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; }
@@ -99,6 +105,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-open { flex: 0 0 auto; }
+.share-line, .share-last, .share-none { margin-top: 6px; }
+.share-tailnet-row, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-people { list-style: none; }
+.share-person { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--hair); }
+.share-who { color: var(--sub1); overflow-wrap: anywhere; }
+.share-refused { color: var(--sub0); }
 .acct-pin-note { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); font-size: .8125rem; color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
@@ -511,7 +524,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/spend">Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><span class="top-who" id="top-who" hidden></span><a class="nav" id="spend-link" href="/spend" hidden>Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal" hidden></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)" hidden></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false" hidden>Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -549,12 +562,10 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-// Marks a control busy while its own post is held: aria-busy only. The caller keeps its disabling line, so busy never decides disabled or aria-disabled.
 function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
 }
-// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037): a word holding a slash is one span.seg per segment with a wbr between.
 function pathWords(node, text) {
   const value = String(text);
   if (!value.includes("/")) {
@@ -580,7 +591,6 @@ function pathWords(node, text) {
   flush();
   return node;
 }
-// A run of LONG_WORD characters or more with no space is one cut span carrying its whole text in its title (#1133).
 const LONG_WORD = 24;
 function cutWords(node, text) {
   let plain = "";
@@ -619,7 +629,6 @@ function runSummary(run) {
   const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
   return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
 }
-// The spend figure: tokens and estimated dollars summed over every day of the view's window (ADR-console-056).
 let spendNow = { sprint: new Map(), run: new Map() };
 function spendIndex(spend) {
   const index = { sprint: new Map(), run: new Map() };
@@ -780,7 +789,7 @@ const BALL_LOOKS = new Map([
 function ballLook(sprint) {
   const look = BALL_LOOKS.get(sprint.ball);
   if (look === undefined) throw new Error("unknown sprint ball " + JSON.stringify(sprint.ball));
-  return look;
+  return guestDoor && look.tone === "needs" ? { ...look, tone: "st-wait" } : look;
 }
 function pipGroup(stage) {
   return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery";
@@ -807,7 +816,6 @@ const followPosts = new Map();
 const followSent = new Map();
 const followLatest = new Map();
 const askReveal = new Set();
-// The thread open in the reading panel ({ project, thread }) and the one a sent question asks it to open once its row arrives (#1226, D4).
 let reading = null;
 let readingReveal = null;
 let sprintRedraw = 0;
@@ -827,7 +835,7 @@ function messageList(messages) {
       continue;
     }
     const row = el("li", "message");
-    row.appendChild(el("span", "message-text", "You: " + messageLabel(message)));
+    row.appendChild(el("span", "message-text", ownerSays("You") + ": " + messageLabel(message)));
     row.appendChild(el("span", "message-state", message.state_text));
     if (message.new === true) row.appendChild(el("span", "message-new", "new"));
     if (typeof message.action_text === "string") {
@@ -984,11 +992,11 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
     head.appendChild(prog);
   }
-  const now = el("p", "sp-now", sprint.now_text);
-  now.setAttribute("title", sprint.now_text);
+  const now = el("p", "sp-now", ownerWords(sprint.now_text));
+  now.setAttribute("title", ownerWords(sprint.now_text));
   head.appendChild(now);
   const words = el("p", "sp-status");
-  words.appendChild(el("span", "sprint-ball " + look.tone, sprint.ball_text));
+  words.appendChild(el("span", "sprint-ball " + look.tone, ownerWords(sprint.ball_text)));
   if (typeof sprint.state_until === "string") {
     words.appendChild(timeEl("weekday", sprint.state_until, "until"));
   }
@@ -1009,7 +1017,7 @@ function drawSprint(item, entry, sprint) {
     const list = el("ul", "sprint-checks");
     for (const check of checks) {
       const line = el("li", "");
-      line.appendChild(actionButton("sprint-check btn-quiet btn-bare", check.text, () => openCheckCard(check)));
+      line.appendChild(actionButton("sprint-check btn-quiet btn-bare", ownerWords(check.text), () => openCheckCard(check)));
       list.appendChild(line);
     }
     for (const wait of waits) list.appendChild(waitLine(wait, "li"));
@@ -1031,7 +1039,7 @@ function drawSprint(item, entry, sprint) {
   if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
-  const stopButton = sprint.stoppable === true ? stopControls(item, entry, sprint) : null;
+  const stopButton = sprint.stoppable === true && !guestDoor ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
   }
@@ -1045,6 +1053,7 @@ function drawSprint(item, entry, sprint) {
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
+  if (guestDoor) return;
   const controls = el("div", "sprint-acts");
   controls.appendChild(tellBox(item, entry, sprint));
   const more = el("details", "sprint-more");
@@ -1477,9 +1486,6 @@ function pinControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
-// The Remove confirmation (#1030). Its typed name lives in removeDrafts, never in the inbox's
-// drafts (renderInbox drops every drafts key that is not an open item), and renderAccounts itself
-// keeps its focus and selection across a redraw.
 const removeOpen = new Set();
 const removeDrafts = new Map();
 const removePosts = new Map();
@@ -1585,7 +1591,6 @@ const signinLinks = new Map();
 const signinPosts = new Map();
 // The profile the header's Add account continuation is for, or null.
 let accountSignin = null;
-// The attempt the add started, whether a frame has shown it running, the link the continuation holds itself, and the outcome the box shows once the run ended.
 let accountAttempt = null;
 let accountConfirmed = false;
 let accountLink = null;
@@ -1628,7 +1633,6 @@ function holdSigninLink(profile, answer, added = false) {
   if (answer.attempt < knownSigninAttempt(profile)) return;
   signinLinks.set(profile, { link, attempt: answer.attempt, added });
 }
-// One ask per profile and attempt, kept after a refusal or a null link: a page that holds no link for a running sign-in asks the console for it once.
 const signinAsked = new Set();
 // The newest view alone says whether the asked attempt still runs.
 function signinStillRunning(profile, attempt) {
@@ -1819,7 +1823,6 @@ function projectLine(entry) {
   }
   line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
-  // The Ask button sits on the same row as Give it a goal (#1178, ADR-console-002); an open box takes its place.
   const acts = el("span", "line-acts");
   let buttons = 0;
   if (entry.quiet) {
@@ -1833,7 +1836,6 @@ function projectLine(entry) {
   if (buttons > 0) line.appendChild(acts);
   return line;
 }
-// A not-due owner check (#1129, ADR-console-055): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment.
 function waitLine(wait, tag) {
   const line = el(tag, "wait");
   if (typeof wait.until === "string") {
@@ -1841,7 +1843,7 @@ function waitLine(wait, tag) {
     line.appendChild(timeEl("day", wait.until, ""));
     line.appendChild(el("span", "", ": " + wait.text + " "));
   } else {
-    line.appendChild(el("span", "", wait.text + " "));
+    line.appendChild(el("span", "", ownerWords(wait.text, true) + " "));
   }
   if (isHttps(wait.url)) {
     const link = el("a", "wait-issue", "#" + wait.issue);
@@ -1862,6 +1864,10 @@ function noticeField(projectId) {
 // A redraw of the Work column that keeps every open fold open, as `render` does around its own redraw.
 function redrawNotices() {
   if (lastView === null) return;
+  if (guestDoor) {
+    renderGuest(lastView);
+    return;
+  }
   holdPictures(() => {
     const wasOpen = new Set();
     for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
@@ -1923,7 +1929,6 @@ async function postNotice(projectId) {
   }
   redrawNotices();
 }
-// The owner's Activate click (ADR-console-043): posts the commit the line shows and is disabled only while sending. The refusal stays on the line until a frame brings a different line.
 let activationPost = null;
 async function postActivation(commit, key) {
   if (activationPost !== null && activationPost.key === key && activationPost.refused === null) return;
@@ -2004,9 +2009,9 @@ function noticeLine(notice, projectId) {
   const item = el("li", "notice");
   const head = el("p", "notice-head");
   const who = el("span", "notice-who");
-  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + notice.to_text : notice.kind_text;
+  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + ownerSays(notice.to_text) : notice.kind_text;
   who.appendChild(cutWords(el("b", "notice-label"), label));
-  who.appendChild(cutWords(el("span", "notice-from"), ", from " + notice.poster));
+  who.appendChild(cutWords(el("span", "notice-from"), ", from " + (notice.sprint_id === null ? ownerSays(notice.poster) : notice.poster)));
   head.appendChild(who);
   const owned = notice.owner === true;
   const withdrawal = owned ? noticeWithdrawals.get(noticeKey(projectId, notice.id)) : undefined;
@@ -2048,10 +2053,9 @@ function noticeLine(notice, projectId) {
   if (withdrawal !== undefined && withdrawal.phase === "failed") item.appendChild(el("p", "notice-reason", withdrawal.reason));
   return item;
 }
-// One closed fold of a project's open notices, in the view's order and words, with the owner's post control at its foot while the project offers one; null when it has neither.
 function noticeFold(entry, afterLine) {
   const notices = Array.isArray(entry.notices) ? entry.notices : [];
-  const post = entry.notice_post === true;
+  const post = !guestDoor && entry.notice_post === true;
   if (notices.length === 0 && !post) return null;
   const item = el("li", afterLine ? "line notices after-line" : "line notices");
   const fold = el("details");
@@ -2071,7 +2075,6 @@ function noticeFold(entry, afterLine) {
   item.appendChild(fold);
   return item;
 }
-// A project's Ask box (#1177, ADR-console-002): a quiet button that opens a field in place, and under it the project's questions as its view carries them.
 function askField(projectId) {
   return Array.from(document.querySelectorAll("textarea.ask-text")).find((area) => area.dataset.askDraft === projectId);
 }
@@ -2089,7 +2092,6 @@ function cancelAsk(projectId) {
   if (post !== undefined && post.phase !== "sending") askPosts.delete(projectId);
   redrawNotices();
 }
-// The threads a project's view carries (#1178, ADR-console-059 D4), newest first, and every question of them.
 function askThreads(entry) {
   const folded = entry !== undefined && entry.questions !== null && typeof entry.questions === "object" ? entry.questions : null;
   return folded !== null && Array.isArray(folded.threads) ? folded.threads.filter((thread) => Array.isArray(thread.questions) && thread.questions.length > 0) : [];
@@ -2102,7 +2104,6 @@ function askRows(entry) {
 function askIds(entry) {
   return askRows(entry).map((question) => question.id);
 }
-// Every submission still outstanding, oldest first, each matched to its own fresh row with the same (stripped) question text, the oldest to the oldest, so one question's row never stands for another.
 function matchSent(sent, post, fresh) {
   const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
   const taken = new Map();
@@ -2127,7 +2128,6 @@ function askOutstanding(projectId, entry) {
   const { submissions, taken } = askMatches(projectId, entry);
   return submissions.filter((submission) => !taken.has(submission));
 }
-// Drops the accepted submissions the view now shows and counts their rows as held; a question revealed while its send is in flight appears once, and a fold the owner closed since stays closed.
 function askReconcile(projectId, entry) {
   const sent = askSent.get(projectId);
   if (sent === undefined) return;
@@ -2212,7 +2212,6 @@ function askBox(projectId, entry) {
   box.appendChild(reason);
   return box;
 }
-// An answer's text as block nodes (#1226, D6): fenced code, lists and paragraphs, built with el() only; every other markup stays text.
 function answerBlocks(text) {
   const lines = String(text).split("\n").map((line) => line.replace(/\r$/, ""));
   const blocks = [];
@@ -2260,7 +2259,6 @@ function answerBlocks(text) {
   endPara();
   return blocks;
 }
-// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong; the rest is span text.
 function inlineNodes(text) {
   const value = String(text);
   const spans = [];
@@ -2298,7 +2296,6 @@ function inlineNodes(text) {
   emit(push, at, value.length);
   return nodes;
 }
-// One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, sources fold, Make it a goal, call-out.
 function askRow(projectId, question, first, last, thread) {
   const row = el("li", "ask");
   if (!first) row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
@@ -2327,7 +2324,6 @@ function askRow(projectId, question, first, last, thread) {
   if (typeof question.back_text === "string") row.appendChild(askCallout(projectId, question, last, thread));
   return row;
 }
-// The question back to the owner: its text, then its choices as buttons only on the thread's last question while answered with no follow-up outstanding, then the reason a refused choice gives.
 function askCallout(projectId, question, last, thread) {
   const callout = el("div", "ask-callout");
   callout.setAttribute("role", "group");
@@ -2353,8 +2349,8 @@ function pendingRow(post) {
   row.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending\u2026" : "Working on it"));
   return row;
 }
-// A project's Ask block: the open box and the submissions the view does not carry yet, newest first; a project whose line is drawn has its button there and no block while it has nothing to hold.
 function askBlock(entry, afterLine, lined) {
+  if (guestDoor) return null;
   const id = entry.project_id;
   const pending = askOutstanding(id, entry).reverse();
   if (lined && !askOpen.has(id) && pending.length === 0) return null;
@@ -2370,7 +2366,6 @@ function askBlock(entry, afterLine, lined) {
   }
   return item;
 }
-// A thread's follow-up box (#1178, ADR-console-002): the Ask box's draft, refusal and pending rules for one thread, keyed by its project and its id.
 function followKey(projectId, threadId) {
   return projectId + "\n" + threadId;
 }
@@ -2504,7 +2499,6 @@ function revealed(key) {
   askReveal.delete(key);
   return true;
 }
-// A thread's line in the Questions fold: a button opening it in the reading panel, or closing it when it is the open one (#1226, D4).
 function isReading(projectId, thread) {
   return reading !== null && reading.project === projectId && reading.thread === thread.id;
 }
@@ -2544,7 +2538,6 @@ function inReadingPanel(target) {
   for (let node = target; node; node = node.parentNode) if (node === panel) return true;
   return false;
 }
-// The child-index path from the reading panel to a node inside it, with the node's tag and class, or null when the node is not in the panel.
 function panelPath(section, node) {
   if (node === null || node === section) return null;
   const path = [];
@@ -2570,7 +2563,6 @@ function closeReading() {
   const opener = Array.from(document.querySelectorAll("button.thread-open")).find((button) => button.dataset.key === key);
   if (opener !== undefined) opener.focus();
 }
-// The reading panel in the main column: the open thread's heading, rows and follow-up box, hidden and empty when no thread is open (#1226, D4). A thread a sent question asked to open is opened once, without moving focus.
 function renderReading(view) {
   const section = document.getElementById("reading");
   if (readingReveal !== null) {
@@ -2588,7 +2580,6 @@ function renderReading(view) {
   }
   const projectId = reading.project;
   const key = followKey(projectId, thread.id);
-  // Every frame rebuilds the panel, which detaches whatever control holds focus: focus returns to its twin in the new panel, or to the heading when that control is gone, so the inbox answer keys never see BODY.
   const heldPath = panelPath(section, document.activeElement);
   section.hidden = false;
   const head = el("div", "reading-head");
@@ -2613,8 +2604,8 @@ function renderReading(view) {
     twin.focus({ preventScroll: true });
   }
 }
-// One closed fold of a project's question threads, newest first, each a closed line opening to its questions and answers in order (#1178, ADR-console-059 D4); null when the project has none. It counts in nothing.
 function questionsFold(entry, afterLine) {
+  if (guestDoor) return null;
   const threads = askThreads(entry);
   if (threads.length === 0) return null;
   const item = el("li", afterLine ? "line questions after-line" : "line questions");
@@ -2701,9 +2692,6 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
-// A frame is drawn when it arrives, and a reset can pass after that (#1045): a profile whose next reset
-// (its out_until when out) has gone by reads as reset, with the figures and the time from before it dropped,
-// until a frame says more.
 function lapsedReset(p) {
   const stamp = p.state === "out" ? p.out_until : p.next_reset;
   if (stamp === null || stamp === undefined) return false;
@@ -2714,8 +2702,6 @@ function settled(p) {
   return lapsedReset(p)
     ? {...p, state: "reset", week_left: null, five_hour_left: null, next_reset: null, out_until: null} : p;
 }
-// The capacity as the page's clock reads it: lapsed profiles settled and, when an out one lapsed, the
-// aggregates the server computed over them (tight, all_out, resumes_at) worked out again the way it does.
 function settledCapacity(source) {
   const cap = {...(source || {profiles: []})};
   const lapsedOut = cap.profiles.some((p) => p.state === "out" && lapsedReset(p));
@@ -2812,8 +2798,6 @@ function renderCapacity(view) {
   }
   box.replaceChildren(...nodes);
 }
-// The accounts panel (#1039): one row per capacity profile with its details and the exclude, pin
-// and remove controls. It draws only while open and holds nothing while closed.
 let accountsOpen = false;
 let accountsReturn = null;
 function accountRow(shown, view) {
@@ -2953,6 +2937,7 @@ function anySigninLive() {
 }
 function openAccounts() {
   if (lastView === null) return;
+  if (sharingOpen) closeSharing();
   accountsReturn = document.activeElement;
   accountsOpen = true;
   if (anySigninLive()) renderInbox(lastView);
@@ -2979,6 +2964,196 @@ function closeAccounts() {
 document.getElementById("capacity").addEventListener("click", () => {
   if (accountsOpen) closeAccounts();
   else openAccounts();
+});
+let sharingOpen = false;
+let sharingReturn = null;
+let tailnetDraft = null;
+let loginDraft = "";
+const sharePicks = new Set();
+const sharePosts = new Map();
+const SHARE_LINES = new Map([
+  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest port."],
+  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest port."],
+  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest port."],
+]);
+const SHARE_WHY = new Map([
+  ["sharing_off", "sharing is off"], ["host", "the Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+function shareLine(sharing) {
+  const words = SHARE_LINES.get(sharing.state);
+  return sharing.tailnet === null || words === undefined ? "Sharing is off: no tailnet name is set." : words(sharing.tailnet);
+}
+function shareLast(r) {
+  if (r === null || typeof r !== "object") return "No request has come to the guest port yet.";
+  const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
+  const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
+  const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
+  return "Last request on the guest port: " + host + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
+}
+function shareTailnet(tailnet) {
+  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ tailnet }) });
+}
+async function postShare(key, send, done, cls) {
+  const current = sharePosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", cls };
+  sharePosts.set(key, state);
+  renderSharing(lastView);
+  let reason;
+  try {
+    reason = await ownerAnswer(await send());
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (sharePosts.get(key) !== state) return;
+  if (reason === null) {
+    sharePosts.delete(key);
+    done();
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  renderSharing(lastView);
+}
+function shareAct(parent, key, cls, label, onClick, off) {
+  const state = sharePosts.get(key);
+  const button = actionButton(cls, label, onClick);
+  const sending = state !== undefined && state.phase === "sending";
+  button.disabled = off;
+  // aria-disabled: a disabled button cannot take the restored focus.
+  if (sending) button.setAttribute("aria-disabled", "true");
+  markBusy(button, sending && state.cls === cls.split(" ")[0]);
+  parent.appendChild(button);
+  if (state !== undefined && state.phase === "failed" && state.cls === cls.split(" ")[0]) {
+    parent.appendChild(el("span", "share-refused", "The console refused: " + state.reason + "."));
+  }
+}
+function findShare(node, row, login, cls, project) {
+  const here = node.dataset !== undefined && node.dataset.login !== undefined ? node.dataset.login : row;
+  const own = node.dataset !== undefined && node.dataset.project !== undefined ? node.dataset.project : "";
+  if (node.className === cls && here === login && own === project) return node;
+  for (const child of node.children || []) {
+    const found = findShare(child, here, login, cls, project);
+    if (found !== null) return found;
+  }
+  return null;
+}
+function renderSharing(view) {
+  const body = document.getElementById("sharing-body");
+  document.getElementById("sharing").hidden = !sharingOpen;
+  document.getElementById("sharing-open").setAttribute("aria-expanded", sharingOpen ? "true" : "false");
+  if (!sharingOpen) {
+    body.replaceChildren();
+    return;
+  }
+  const sharing = view.sharing || { tailnet: null, colleagues: [], state: "off", last_request: null };
+  const projects = view.recent_projects || [];
+  for (const id of [...sharePicks]) if (!projects.includes(id)) sharePicks.delete(id);
+  let kept = null;
+  for (let n = document.activeElement; n; n = n.parentNode) {
+    if (n !== body) continue;
+    const at = document.activeElement;
+    kept = { cls: at.className, login: "", project: at.dataset.project || "", start: at.selectionStart, end: at.selectionEnd };
+    for (let m = at; m !== body; m = m.parentNode) if (m.dataset !== undefined && m.dataset.login !== undefined) kept.login = m.dataset.login;
+    break;
+  }
+  const head = el("div", "acct-head");
+  head.appendChild(el("h2", "sec-h", "Sharing"));
+  head.appendChild(actionButton("share-close btn-quiet", "Close", closeSharing));
+  const row = el("div", "share-tailnet-row");
+  const tailnet = accountField("share-tailnet field-line", "Tailnet name", "<host>.<tailnet>.ts.net");
+  const typed = tailnetDraft === null ? sharing.tailnet || "" : tailnetDraft;
+  tailnet.value = typed;
+  tailnet.addEventListener("input", () => {
+    tailnetDraft = tailnet.value;
+    renderSharing(lastView);
+  });
+  row.appendChild(tailnet);
+  shareAct(row, "tailnet", "share-tailnet-save btn-quiet", "Save", () => postShare("tailnet", () => shareTailnet(typed.trim()), () => { if (tailnetDraft === typed) tailnetDraft = null; }, "share-tailnet-save"), typed.trim() === "");
+  if (sharing.tailnet !== null) {
+    shareAct(row, "tailnet", "share-off btn-danger", "Turn sharing off", () => postShare("tailnet", () => shareTailnet(null), () => {}, "share-off"), false);
+  }
+  const parts = [head, el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row];
+  if (sharing.colleagues.length === 0) parts.push(el("p", "share-none", "No colleague has access."));
+  else {
+    const list = el("ul", "share-people");
+    for (const c of sharing.colleagues) {
+      const item = el("li", "share-person");
+      item.dataset.login = c.login;
+      item.appendChild(el("b", "share-who", c.login));
+      item.appendChild(el("span", "share-projects", c.projects.join(", ")));
+      item.appendChild(actionButton("share-edit btn-quiet", "Change projects", () => {
+        loginDraft = c.login;
+        sharePicks.clear();
+        for (const id of c.projects) sharePicks.add(id);
+        renderSharing(lastView);
+        const field = findShare(body, "", "", "share-login field-line", "");
+        if (field !== null) field.focus({ preventScroll: true });
+      }));
+      shareAct(item, "login\n" + c.login, "share-remove btn-danger", "Remove", () => postShare("login\n" + c.login, () => fetch("/api/share-remove", {
+        method: "POST", headers: ownerHeaders(), body: JSON.stringify({ login: c.login }),
+      }), () => {}, "share-remove"), false);
+      list.appendChild(item);
+    }
+    parts.push(list);
+  }
+  const form = el("div", "share-form");
+  const login = accountField("share-login field-line", "Colleague's Tailscale login", "name@example.com");
+  login.value = loginDraft;
+  login.addEventListener("input", () => {
+    loginDraft = login.value;
+    renderSharing(lastView);
+  });
+  form.appendChild(login);
+  for (const id of projects) {
+    const pick = actionButton("share-project btn-quiet", id, () => {
+      if (!sharePicks.delete(id)) sharePicks.add(id);
+      renderSharing(lastView);
+    });
+    pick.dataset.project = id;
+    pick.setAttribute("aria-pressed", sharePicks.has(id) ? "true" : "false");
+    form.appendChild(pick);
+  }
+  const name = loginDraft.trim().toLowerCase();
+  const listed = sharing.colleagues.some((c) => c.login === name);
+  shareAct(form, "login\n" + name, "share-add btn-quiet", listed ? "Save projects" : "Add", () => {
+    const sent = loginDraft;
+    const picks = [...sharePicks].sort();
+    postShare("login\n" + name, () => fetch("/api/share-colleague", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ login: sent.trim(), projects: picks }),
+    }), () => {
+      if (loginDraft === sent && [...sharePicks].sort().join("\n") === picks.join("\n")) {
+        loginDraft = "";
+        sharePicks.clear();
+      }
+    }, "share-add");
+  }, name === "" || sharePicks.size === 0);
+  parts.push(form);
+  body.replaceChildren(...parts);
+  const again = kept === null ? null : findShare(body, "", kept.login, kept.cls, kept.project);
+  if (again !== null) {
+    again.focus({ preventScroll: true });
+    if (again.tagName === "INPUT") again.setSelectionRange(kept.start, kept.end);
+  }
+}
+function openSharing() {
+  if (lastView === null) return;
+  if (accountsOpen) closeAccounts();
+  sharingReturn = document.activeElement;
+  sharingOpen = true;
+  renderSharing(lastView);
+  document.getElementById("sharing").focus();
+}
+function closeSharing() {
+  sharingOpen = false;
+  if (lastView !== null) renderSharing(lastView);
+  const back = sharingReturn;
+  sharingReturn = null;
+  (back !== null && back.isConnected ? back : document.getElementById("sharing-open")).focus();
+}
+document.getElementById("sharing-open").addEventListener("click", () => {
+  if (sharingOpen) closeSharing();
+  else openSharing();
 });
 function renderPromoted(view) {
   const box = document.getElementById("promoted");
@@ -3033,7 +3208,6 @@ function checkLabel(item) {
 function isOwnerCheck(item) {
   return typeof item.check_id === "string";
 }
-// A Before picture reads ahead of the After picture of the same width, whatever order the files are named in; every other order is kept.
 function beforeFirst(pictures) {
   if (!Array.isArray(pictures)) return pictures;
   const lead = (p) => /^(Before|After)(?:, (\d+) px)?$/.exec(pictureCaption(p.line));
@@ -3052,7 +3226,6 @@ function beforeFirst(pictures) {
   }
   return out;
 }
-// An owner check's pictures (ADR-console-045) reuse the shared gallery and viewer of ADR-console-038.
 function checkPictures(node, item) {
   const gallery = pictureGallery(itemId(item), beforeFirst(item.pictures), pictureCaption);
   if (gallery !== null) node.appendChild(gallery);
@@ -3062,7 +3235,6 @@ function checkPictures(node, item) {
 function readingLine(item) {
   return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
 }
-// ADR-console-047: the reading is the first thing under the question, before the pictures that illustrate it and the answer box.
 function checkHead(node, item) {
   const reading = readingLine(item);
   if (reading !== null) node.appendChild(reading);
@@ -3183,7 +3355,6 @@ function lookCard(item) {
   }
   return card;
 }
-// The shared gallery for any card (ADR-console-038), also drawn by the brief card and the report (ADR-console-041): each picture is fetched once with the page token and shown from an object URL.
 const pictureCache = new Map();
 function pictureSequence(pictures) {
   if (!Array.isArray(pictures)) return [];
@@ -3198,7 +3369,6 @@ function pictureSequence(pictures) {
   }
   return out;
 }
-// An owner check thumbnail reads a caption made from its file name, never the name itself (ADR-console-047): a before or after word leads, a trailing width reads in px, any other name is sentence case.
 function pictureCaption(name) {
   const base = String(name).split(/[\\/]/).pop().replace(/\.png$/i, "");
   const words = base.split(/[\s._-]+/).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")).filter((w) => w !== "");
@@ -3281,7 +3451,6 @@ function holdPictures(draw) {
   }
   prunePictures();
 }
-// The open viewer stays only while its card still draws the same pictures in the same order (ADR-console-038).
 function viewerStillShown() {
   const shown = [...document.querySelectorAll("button.pic-thumb")].filter((n) => n.dataset.key.startsWith(viewer.key + "/"));
   if (shown.length !== viewer.sequence.length) return false;
@@ -3327,7 +3496,6 @@ function pictureGallery(key, pictures, caption) {
   }
   return gallery;
 }
-// The shared modal viewer (ADR-console-038): one picture at a time in the card's order, a pair side by side. While it is open the rest of the body is inert and its own keys are the only ones that act.
 let viewer = null;
 function viewerFigure(picture, label, current) {
   const figure = el("figure", current ? "viewer-pic current" : "viewer-pic");
@@ -3435,27 +3603,21 @@ function viewerKey(event) {
   }
   return true;
 }
-// A refused registration waiting for its Retry (ADR-console-028 D10): a question card whose one option runs the registration again.
 function isRetry(item) {
   return item.reason === "register_retry";
 }
-// A ready or failed adoption waiting to be applied (ADR-console-030 D9): a question card whose first option applies it and whose second sets it aside.
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-070): a question card whose first option registers or updates it and whose second sets it aside.
 function isConfirm(item) {
   return item.reason === "register_confirm" || item.reason === "register_behind";
 }
-// A profile whose folder trust could not be read back (ADR-console-034): a question card that shows the terminal command and whose one option checks again.
 function isTrust(item) {
   return item.reason === "trust_failed";
 }
-// A registration that failed (ADR-console-035): a question card whose first option registers again and whose second sets it aside; the page shows its headline, why and options verbatim.
 function isFailure(item) {
   return item.reason === "register_failed";
 }
-// An open question of an adoption plan (ADR-console-029 D10), a failed registration (ADR-console-028 D10, -035), the apply card (ADR-console-030 D9) or the Register card (ADR-console-034): a card like a manager question.
 function isRegister(item) {
   return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item) || isFailure(item) || isTrust(item);
 }
@@ -3480,7 +3642,6 @@ function recommendedIndex(q) {
   if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
   return q.options.indexOf(q.recommended);
 }
-// An adoption question the plan answers one way (ADR-console-033): no list to choose from, so the option is the card's action and starts picked.
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
@@ -3558,7 +3719,8 @@ function picksComplete(item, state) {
   return item.questions.every((_, i) => typeof state.picks[i] === "number");
 }
 function redraw() {
-  if (lastView !== null) {
+  if (guestDoor && lastView !== null) renderGuest(lastView);
+  else if (lastView !== null) {
     renderInbox(lastView);
     renderAccounts(lastView);
   }
@@ -3582,7 +3744,6 @@ function begin(item, state, pending) {
 function roundBody(item, answer) {
   return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
 }
-// A plan's answer replans it and replaces every one of its questions, so one answer at a time stands for a plan until a frame shows its outcome.
 function planBusy(item, state) {
   if (!isRegister(item)) return false;
   for (const other of answers.values()) {
@@ -4289,7 +4450,6 @@ function leadItem(item) {
 function itemLine(item) {
   const line = el("li", "row");
   if (isRegister(item)) {
-    // A register row reads like its lead card: title, then the ask (ADR-console-030 D5).
     line.appendChild(headLine(item));
     line.appendChild(pathWords(el("p", "q reg"), item.headline));
   } else {
@@ -4418,7 +4578,6 @@ function drawInbox(view) {
   const progress = open.filter(isProgress);
   const signins = open.filter(isSignin);
   const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
-  // A running sign-in with no inbox item (its status read failed) is recovered from the view's runs alone, so a page opened later still shows its link and code field; the add box keeps the profile it added.
   for (const [profile, run] of Object.entries(signinRuns)) {
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     if (profile === accountSignin || signins.some((item) => item.profile === profile)) continue;
@@ -4600,7 +4759,6 @@ function renderDigest(view) {
   fold.appendChild(more);
   section.appendChild(fold);
 }
-// Every sprint of every project, in view order: running ones drawn as blocks (each with its project's entry), ended ones as lines of the finished list.
 function collectSprints(view) {
   const running = [];
   const ended = [];
@@ -4668,7 +4826,7 @@ function finishedLine(sprint) {
   summary.appendChild(el("span", "title-line", sprint.title));
   const closing = sprint.closing;
   const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
-  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : sprint.state_text));
+  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
   fold.appendChild(summary);
@@ -4700,7 +4858,6 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
-// The activation line (#1114, #1193, ADR-console-043): one sentence at the head of the Work column, ending with its Activate button while it is offered; a refusal shows beside it until a frame brings a different line.
 function activationLine(view) {
   const found = view.activation;
   if (found === null || typeof found !== "object") {
@@ -4746,7 +4903,7 @@ function drawProjects(view) {
     ? { id: active.dataset.followDraft, start: active.selectionStart, end: active.selectionEnd }
     : null;
   section.replaceChildren(heading);
-  const activation = activationLine(view);
+  const activation = guestDoor ? null : activationLine(view);
   if (activation !== null) section.appendChild(activation);
   const offering = new Set();
   const listed = new Set();
@@ -4942,7 +5099,6 @@ function goalChars(text) {
 }
 const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "", rev: 0 };
 let goalUi = null;
-// #1214, ADR-console-002: the count sits at the field's corner and reads only near the limit; over it, Send is aria-disabled and the hint beside it says how much to cut. Nothing here changes a size.
 const goalCount = el("span", "goal-count");
 function showGoalLimit() {
   const n = goalChars(draft.text);
@@ -5271,7 +5427,6 @@ function renderAccountAdd(view) {
   if (accountReason.textContent !== reason) accountReason.textContent = reason;
 }
 renderAccountAdd(null);
-// The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
 const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
@@ -5476,7 +5631,6 @@ function drawDraft(registration) {
   }
   return parts;
 }
-// Cancel registration: one post at a time; the refusal's text is the console's own and lasts as long as the registration it answered.
 const registerWithdraw = { key: null, posting: false, failure: "" };
 async function withdrawRegistration(registration) {
   if (registerWithdraw.posting) return;
@@ -5613,7 +5767,6 @@ function openGoalFor(projectId) {
   refreshGoalList();
   goalText.focus();
 }
-// #1179, ADR-console-059 D5: the goal field gets the question and its plain-words answer only, and nothing is stated until the owner sends it.
 function goalFromAnswer(projectId, question) {
   const text = question.question + "\n\n" + question.answer;
   draft.text = text;
@@ -5636,6 +5789,10 @@ function renderGoal() {
 // The register's fold keeps its own state per repository (registerMore), so the key-wide restore below leaves it out.
 const draftMoreKey = "draft-more";
 function render(view) {
+  if (guestDoor) {
+    renderGuest(view);
+    return;
+  }
   holdPictures(() => {
     spendNow = spendIndex(view.spend);
     const wasOpen = new Set();
@@ -5650,6 +5807,7 @@ function render(view) {
     renderAccountAdd(view);
     renderInbox(view);
     renderAccounts(view);
+    renderSharing(view);
     renderDigest(view);
     renderProjects(view);
     renderUnmanaged(view);
@@ -5664,21 +5822,110 @@ function tick() {
   const lapsed = lapsedNow(lastView);
   if (lapsed !== lapsedDrawn) {
     lapsedDrawn = lapsed;
-    renderStatement(lastView);
-    renderPromoted(lastView);
-    redrawAccounts();
+    if (guestDoor) renderGuest(lastView);
+    else {
+      renderStatement(lastView);
+      renderPromoted(lastView);
+      redrawAccounts();
+    }
   }
   setTimeout(tick, TICK_MS);
 }
 setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
+const GUEST_TOP = "The owner's console, shared with you to read";
+const STALE_LEAD = "The tracker could not be read for ";
+const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check"]);
+const OWNER_PARTS = ["spend-link", "goal", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
+  "sharing", "sharing-body", "promoted", "digest", "unmanaged", "register"];
+const guestDoor = document.getElementById("console-door").content !== "owner";
+if (guestDoor) {
+  for (const id of OWNER_PARTS) {
+    const part = document.getElementById(id);
+    if (part !== null) part.remove();
+  }
+  const who = document.getElementById("top-who");
+  who.textContent = GUEST_TOP;
+  who.hidden = false;
+} else {
+  for (const id of ["spend-link", "goal", "capacity", "sharing-open"]) document.getElementById(id).hidden = false;
+}
+function ownerSays(text) {
+  return guestDoor ? text.replace(/^You$/, "The owner").replace(/^for you$/, "for the owner") : text;
+}
+function ownerWords(text, whole) {
+  if (!guestDoor) return text;
+  const [lead, ...rest] = whole ? [text] : text.split(": ");
+  return [lead.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner"), ...rest].join(": ");
+}
+function renderGuestStatement(view) {
+  const n = view.statement.inbox_items;
+  const sentence = view.statement.sentence;
+  const stale = typeof sentence === "string" && sentence.startsWith(STALE_LEAD);
+  const none = "Nothing " + (stale || view.statement.stale === true ? "known " : "") + "waits on the owner";
+  const nodes = [el("h1", "", n === 0 ? none : n === 1 ? "1 thing waits on the owner" : n + " things wait on the owner")];
+  if (stale) nodes.push(el("p", "sub", ownerWords(sentence)));
+  document.getElementById("statement").replaceChildren(...nodes);
+}
+function renderGuestInbox(view) {
+  const cards = new Map();
+  const nodes = [];
+  if (view.inbox.open.length > 0) {
+    const list = el("ul", "guest-items");
+    for (const item of view.inbox.open) {
+      const row = el("li", "guest-item");
+      const [word, id] = kindOf(item);
+      const kind = el("span", "guest-kind");
+      kind.appendChild(icon(id));
+      kind.appendChild(el("span", "", word));
+      row.appendChild(kind);
+      if (typeof item.project_id === "string") row.appendChild(pathWords(el("span", "proj"), item.project_id));
+      row.appendChild(el("b", "guest-head", isBrief(item) ? item.title : item.headline));
+      row.appendChild(Number.isFinite(Date.parse(item.waiting_since))
+        ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
+        : el("span", "guest-wait", "Waiting on the owner"));
+      if (item.stale) row.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+      cards.set(stateId(item), row);
+      list.appendChild(row);
+    }
+    nodes.push(list);
+  }
+  inboxCards = cards;
+  document.getElementById("inbox").replaceChildren(...nodes);
+}
+function sweepGuest() {
+  for (const id of ["statement", "inbox", "projects"]) {
+    for (const tag of ["button", "input", "textarea", "select"]) {
+      for (const node of document.querySelectorAll("#" + id + " " + tag)) {
+        if (!GUEST_KEEPS.has(node.className.split(" ")[0])) node.remove();
+      }
+    }
+    for (const link of document.querySelectorAll("#" + id + " a")) {
+      if (!String(link.href).startsWith("https:")) link.remove();
+    }
+  }
+}
+function renderGuest(view) {
+  holdPictures(() => {
+    const wasOpen = new Set();
+    for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
+    lastView = view;
+    renderGuestStatement(view);
+    renderGuestInbox(view);
+    renderProjects(view);
+    for (const fold of document.querySelectorAll("details")) {
+      if (wasOpen.has(fold.dataset.key)) fold.open = true;
+    }
+    sweepGuest();
+  });
+}
 const LOOK_MS = 5000;
 let heldSince = document.hasFocus() ? Date.now() : null;
 function endHold() {
   if (heldSince === null) return;
   const held = Date.now() - heldSince;
   heldSince = null;
-  if (held > LOOK_MS) {
+  if (held > LOOK_MS && !guestDoor) {
     fetch("/api/looked", { method: "POST", headers: { "X-Console-Token": token }, keepalive: true }).catch(() => {});
   }
 }
@@ -5689,10 +5936,18 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;
   if (viewerKey(event)) return;
+  if (guestDoor) return;
   if (accountsOpen) {
     if (event.key === "Escape") {
       event.preventDefault();
       closeAccounts();
+    }
+    return;
+  }
+  if (sharingOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSharing();
     }
     return;
   }

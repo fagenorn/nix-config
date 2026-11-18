@@ -51,7 +51,10 @@ FILES = {
     "python/agent_tools/verification/__init__.py": "",
     "python/agent_tools/verification/other.py": "Y = 1\n",
     "docs/notes.md": "notes\n",
+    "home/common/agent-skills/skills/demo/SKILL.md": "demo v1\n",
+    "hosts/common/demo.nix": "{ }\n",
 }
+SKILL = "home/common/agent-skills/skills/demo/SKILL.md"
 
 
 def git(path, *arguments):
@@ -99,6 +102,7 @@ class Trees(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.checkout = repository(self.tmp, "checkout", FILES)
+        self.built = self.origin_commit()
         self.package_root = self.tmp / "pkg"
         shutil.copytree(self.checkout / "python", self.package_root)
         cache = self.package_root / "agent_tools/console/__pycache__"
@@ -124,6 +128,7 @@ class Trees(unittest.TestCase):
 
     def read(self, roots=None, **seams):
         seams.setdefault("branch_of", lambda root: "main")
+        seams.setdefault("revision", lambda: self.built)
         return reading([str(self.checkout)] if roots is None else roots, self.running, **seams)
 
 
@@ -178,9 +183,97 @@ class ActivationReadingTest(Trees):
         with mock.patch.object(activation, "integration_branch", lambda root: None):
             self.assertIsNone(activation.origin_tip(str(self.checkout)))
 
-    def test_a_change_outside_the_console_files_is_not_named(self):
+    def test_a_change_outside_the_console_files_is_another_change(self):
         self.advance({"docs/notes.md": "more\n", "python/agent_tools/verification/other.py": "Y = 2\n"})
-        self.assertEqual(self.read().changed, ())
+        self.assertEqual(self.read(), Activation(
+            str(self.checkout), (), self.origin_commit(), ("python/agent_tools/verification/other.py",)))
+
+    def test_pending_is_any_change(self):
+        self.assertIs(Activation("/r", (), C).pending, False)
+        self.assertIs(Activation("/r", ("x",), C).pending, True)
+        self.assertIs(Activation("/r", (), C, ("y",)).pending, True)
+
+    def test_only_documentation_paths_are_not_host_built(self):
+        for path in ("docs/notes.md", "tests/test_x.py", ".github/workflows/ci.yaml", ".agents/project.json",
+                     "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
+                     "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
+                     "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md",
+                     "home/common/agent-skills/evals/README.md", "home/common/agent-skills/evals/run-eval.sh",
+                     "home/common/agent-skills/tests/test_x.py", "home/common/agent-skills/tests/fixtures/f.json",
+                     "lib/omlx-check.nix"):
+            with self.subTest(path=path):
+                self.assertFalse(activation.host_built(path))
+        for path in (SKILL, "home/common/agent-skills/skills/grill-with-docs/ADR-FORMAT.md",
+                     "home/common/agent-skills/standards/README.md",
+                     "home/common/claude-code/skills/deliver-standard/SKILL.md",
+                     "patches/agent-plugins/codex-plugin-cc.patch", "hosts/common/common-packages.nix",
+                     "flake.lock", "flake.nix", "secrets/secrets.yaml", "data/zshrc/common/50-aliases",
+                     "python/README.md", "home/common/claude-code/README.md.orig", "newdir/README.md",
+                     "home/common/agent-skills/evals-notes.md", "home/common/agent-skills/tests-notes.md",
+                     "lib/omlx-check.nix.orig", "lib/agent-tools.nix", "newdir/file"):
+            with self.subTest(path=path):
+                self.assertTrue(activation.host_built(path))
+
+    def test_a_skill_change_is_another_change(self):
+        self.advance({SKILL: "demo v2\n"})
+        self.assertEqual(self.read(), Activation(str(self.checkout), (), self.origin_commit(), (SKILL,)))
+
+    def test_a_documentation_only_change_names_nothing(self):
+        self.advance({"docs/notes.md": "more\n", "README.md": "r\n", "CLAUDE.md": "c\n", "AGENTS.md": "a\n",
+                      "justfile": "j\n", ".gitignore": "g\n", ".sops.yaml": "s\n", "tests/test_x.py": "T = 1\n",
+                      ".github/workflows/x.yaml": "x\n", ".agents/project.json": "{}\n"})
+        result = self.read()
+        self.assertEqual(result, Activation(str(self.checkout), (), self.origin_commit()))
+        self.assertIs(result.pending, False)
+
+    def test_a_module_readme_only_change_names_nothing(self):
+        self.advance({"home/common/claude-code/README.md": "r\n", "home/common/agent-skills/README.md": "r\n",
+                      "home/linux/claude-local/README.md": "r\n", "hosts/darwin/eleven-m5/README.md": "r\n",
+                      "home/common/agent-skills/evals/README.md": "r\n"})
+        result = self.read()
+        self.assertEqual(result.other, ())
+        self.assertIs(result.pending, False)
+        self.advance({"home/common/agent-skills/standards/README.md": "s\n"})
+        self.assertEqual(self.read().other, ("home/common/agent-skills/standards/README.md",))
+
+    def test_a_change_only_a_flake_check_reads_names_nothing(self):
+        self.advance({"lib/omlx-check.nix": "{ }\n", "home/common/agent-skills/tests/test_x.py": "T = 1\n"})
+        result = self.read()
+        self.assertEqual(result, Activation(str(self.checkout), (), self.origin_commit()))
+        self.assertIs(result.pending, False)
+
+    def test_a_console_change_is_not_also_another_change(self):
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n",
+                      "python/agent_tools/system/util.py": "X = 2\n"})
+        self.assertEqual(self.read().changed, (f"{CONSOLE}/view.py", "python/agent_tools/system/util.py"))
+        self.assertEqual(self.read().other, ())
+
+    def test_a_deleted_host_file_is_another_change(self):
+        self.advance({"hosts/common/demo.nix": None})
+        self.assertEqual(self.read().other, ("hosts/common/demo.nix",))
+
+    def test_the_comparison_starts_at_the_hosts_revision(self):
+        self.advance({SKILL: "demo v2\n"})
+        tip = self.origin_commit()
+        self.assertEqual(self.read(revision=lambda: tip).other, ())
+        self.assertEqual(self.read(revision=lambda: tip + "-dirty").other, ())
+        self.assertEqual(self.read(revision=lambda: self.built + "-dirty").other, (SKILL,))
+
+    def test_an_unreadable_revision_or_an_unknown_commit_is_a_failed_read(self):
+        with self.assertRaises(activation.ReadFailed):
+            self.read(revision=lambda: None)
+        with self.assertRaises(activation.ReadFailed):
+            self.read(revision=lambda: "f" * 40)
+        plain = repository(self.tmp, "a-plain", {"README.md": "x\n"})
+        self.assertIsNone(self.read([str(plain)], revision=lambda: None))
+
+    def test_reader_for_reads_the_host_revision_on_every_call(self):
+        self.advance({SKILL: "demo v2\n"})
+        revisions = iter([self.built, self.origin_commit()])
+        reader = reader_for(self.package_root, revision=lambda: next(revisions))
+        with mock.patch.object(activation, "integration_branch", lambda root: "main"):
+            self.assertEqual(reader([str(self.checkout)]).other, (SKILL,))
+            self.assertEqual(reader([str(self.checkout)]).other, ())
 
     def test_a_console_file_added_or_removed_on_origin_is_named(self):
         self.advance({f"{CONSOLE}/added.py": "Z = 1\n", f"{CONSOLE}/manager-contract.md": None})
@@ -237,7 +330,7 @@ class ActivationReadingTest(Trees):
                 activation.integration_branch(str(REPO_ROOT))
 
     def test_reader_for_reads_the_running_files_once(self):
-        reader = reader_for(self.package_root)
+        reader = reader_for(self.package_root, revision=lambda: self.built)
         (self.package_root / "agent_tools/console/view.py").write_text("VALUE = 9\n")
         with mock.patch.object(activation, "integration_branch", lambda root: "main"):
             self.assertEqual(reader([str(self.checkout)]).changed, ())
@@ -252,7 +345,8 @@ NEXT = "Its output is in /s/activation.log; press Activate again once the cause 
 
 class ActivationViewTest(Trees):
     def read(self):
-        return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main")
+        return reading([str(self.checkout)], console_files(self.package_root), branch_of=lambda r: "main",
+                       revision=lambda: self.built)
 
     def test_a_pending_change_offers_activate_for_its_commit(self):
         self.assertEqual(view.derive_view([], activation=READ)["activation"], {
@@ -277,6 +371,98 @@ class ActivationViewTest(Trees):
         self.assertEqual(line["text"], f"Activating this host at {C[:12]} failed: {FAILURE}. {NEXT}")
         self.assertEqual((line["state"], line["activate"]), ("failed", True))
 
+    def test_another_change_offers_activate_in_plain_words(self):
+        line = view.derive_view([], activation=Activation("/srv/cfg", (), C, (SKILL,)))["activation"]
+        self.assertEqual(line, {
+            "text": f"A change to the agent tooling merged at {C[:12]} and is not active on this host.",
+            "state": "pending", "commit": C, "root": "/srv/cfg", "activate": True})
+
+    def test_a_change_beyond_the_agent_tooling_reads_as_the_host_configuration(self):
+        reading_ = Activation("/srv/cfg", (), C, ("hosts/common/common-packages.nix", SKILL))
+        self.assertEqual(
+            view.derive_view([], activation=reading_)["activation"]["text"],
+            f"A change to the host configuration merged at {C[:12]} and is not active on this host.")
+
+    def test_agent_tooling_is_the_agent_paths(self):
+        tooling = (
+            "python/agent_tools/verification/other.py", SKILL, "home/common/agent-guidance/AGENTS.md",
+            "home/common/agent-tools/default.nix", "home/common/claude-code/default.nix",
+            "home/common/codex/default.nix", "patches/agent-plugins/codex-plugin-cc.patch",
+            "lib/agent-tools.nix", "lib/agent-plugins.nix")
+        configuration = (
+            "hosts/common/common-packages.nix", "home/common/console/default.nix", "lib/helpers.nix",
+            "flake.lock", "data/zshrc/common/50-aliases")
+        for kind, paths in (("agent tooling", tooling), ("host configuration", configuration)):
+            for path in paths:
+                with self.subTest(path=path):
+                    line = view.derive_view([], activation=Activation("/srv/cfg", (), C, (path,)))["activation"]
+                    self.assertEqual(
+                        line["text"], f"A change to the {kind} merged at {C[:12]} and is not active on this host.")
+
+    def test_a_console_change_keeps_the_console_wording_beside_another_change(self):
+        line = view.derive_view([], activation=Activation(
+            "/srv/cfg", ("python/agent_tools/console/view.py",), C, (SKILL,)))["activation"]
+        self.assertEqual(line["text"], f"A console change merged at {C[:12]} is not active on this host.")
+
+    def test_a_failed_run_for_another_change_offers_activate_again(self):
+        run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
+        line = view.derive_view(
+            [], activation=Activation("/srv/cfg", (), C, (SKILL,)), activation_run=run, now_ms=NOW)["activation"]
+        self.assertEqual((line["state"], line["activate"]), ("failed", True))
+
+    def test_a_failed_run_for_the_shown_commit_stays_retryable_with_nothing_pending(self):
+        run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
+        for now in (NOW, NOW + view.OUTCOME_MS - 1001):
+            with self.subTest(now=now):
+                line = view.derive_view(
+                    [], activation=Activation("/srv/cfg", (), C), activation_run=run, now_ms=now)["activation"]
+                self.assertEqual((line["state"], line["commit"], line["activate"]), ("failed", C, True))
+
+    def test_a_failed_run_for_the_shown_commit_clears_a_day_after_it_finished_with_nothing_pending(self):
+        run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
+        for now in (NOW + view.OUTCOME_MS - 1000, NOW + 10 * 24 * 3600 * 1000):
+            with self.subTest(now=now):
+                self.assertIsNone(view.derive_view(
+                    [], activation=Activation("/srv/cfg", (), C), activation_run=run,
+                    now_ms=now)["activation"])
+
+    def test_a_pending_change_after_an_activated_run_for_its_commit_is_pending_again(self):
+        run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
+        for reading_ in (Activation("/srv/cfg", (), C, (SKILL,)), READ):
+            with self.subTest(reading=reading_):
+                line = view.derive_view([], activation=reading_, activation_run=run, now_ms=NOW)["activation"]
+                self.assertEqual((line["state"], line["commit"], line["activate"]), ("pending", C, True))
+
+    def test_an_activated_run_with_nothing_pending_offers_nothing(self):
+        run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
+        line = view.derive_view(
+            [], activation=Activation("/srv/cfg", (), C), activation_run=run, now_ms=NOW)["activation"]
+        self.assertEqual((line["state"], line["activate"]), ("activated", False))
+        self.assertIsNone(view.derive_view(
+            [], activation=Activation("/srv/cfg", (), C), activation_run=run,
+            now_ms=NOW + view.OUTCOME_MS)["activation"])
+
+    def test_offers_activate_is_a_pending_change_or_a_fresh_failed_run_for_the_shown_commit(self):
+        none = Activation("/srv/cfg", (), C)
+
+        def failed(commit):
+            return LastRun(commit, "/srv/cfg", "failed", FAILURE, NEXT, NOW)
+
+        table = (
+            (None, None, False), (None, failed(C), False), (none, None, False), (READ, None, True),
+            (Activation("/srv/cfg", (), C, (SKILL,)), None, True), (none, failed(C), True),
+            (none, failed("d" * 40), False),
+            (none, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - view.OUTCOME_MS + 1), True),
+            (none, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - view.OUTCOME_MS), False),
+            (none, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, None), False),
+            (READ, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - view.OUTCOME_MS), True),
+            (none, LastRun(C, "/srv/cfg", "activated", None, None, NOW), False),
+            (none, LastRun(C, "/srv/cfg", "running", None, None, None), False))
+        for index, (reading_, run, expected) in enumerate(table):
+            with self.subTest(row=index):
+                self.assertIs(view.offers_activate(reading_, run, NOW), expected)
+        self.assertIs(view.offers_activate(none, failed(C), None), False)
+
     def test_a_newer_pending_commit_replaces_an_old_outcome(self):
         run = LastRun("d" * 40, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
         line = view.derive_view([], activation=READ, activation_run=run, now_ms=NOW)["activation"]
@@ -291,9 +477,27 @@ class ActivationViewTest(Trees):
     def test_a_matching_tree_shows_no_line(self):
         self.assertIsNone(view.derive_view([], activation=self.read())["activation"])
 
-    def test_a_difference_outside_the_console_files_shows_no_line(self):
-        self.advance({"docs/notes.md": "more\n", "python/agent_tools/verification/other.py": "Y = 2\n"})
+    def test_a_documentation_only_difference_shows_no_line(self):
+        self.advance({"docs/notes.md": "more\n", "README.md": "r\n"})
         self.assertIsNone(view.derive_view([], activation=self.read())["activation"])
+
+    def test_a_module_readme_only_difference_shows_no_line(self):
+        self.advance({"home/common/claude-code/README.md": "r\n", "home/linux/claude-local/README.md": "r\n"})
+        self.assertIsNone(view.derive_view([], activation=self.read())["activation"])
+
+    def test_a_skill_merged_on_origin_shows_the_agent_tooling_line(self):
+        self.advance({SKILL: "demo v2\n"})
+        tip = self.origin_commit()
+        self.assertEqual(view.derive_view([], activation=self.read())["activation"], {
+            "text": f"A change to the agent tooling merged at {tip[:12]} and is not active on this host.",
+            "state": "pending", "commit": tip, "root": str(self.checkout), "activate": True})
+
+    def test_a_nix_module_merged_on_origin_shows_the_host_configuration_line(self):
+        self.advance({"hosts/common/demo.nix": "{ x = 1; }\n"})
+        tip = self.origin_commit()
+        self.assertEqual(
+            view.derive_view([], activation=self.read())["activation"]["text"],
+            f"A change to the host configuration merged at {tip[:12]} and is not active on this host.")
 
     def test_no_reading_shows_no_line(self):
         self.assertIsNone(view.derive_view([])["activation"])
@@ -332,6 +536,9 @@ class Fake:
         if isinstance(step, BaseException):
             raise step
         return step
+
+
+ReadError = object()
 
 
 def shown(svc):
@@ -413,6 +620,43 @@ class ActivationServiceTest(Trees):
             console.main(["--port", "0"])
         self.assertTrue(callable(recorded["activation_reader"]))
 
+    def test_a_failed_revision_read_keeps_the_line(self):
+        for patcher in (mock.patch.object(activation, "integration_branch", lambda root: "main"),
+                        mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        support.write_registry(self.registry, [{"project_id": "owner/cfg", "root": str(self.checkout)}])
+        self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
+        revisions = iter([self.built, None])
+        svc = self.opened(reader_for(self.package_root, revision=lambda: next(revisions)))
+        svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], str(self.checkout))
+        version = svc.version
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc.poll_activation()
+        self.assertEqual(shown(svc)["root"], str(self.checkout))
+        self.assertEqual(svc.version, version)
+        lines = captured.getvalue().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("console: activation_failed ReadFailed: "), lines[0])
+
+    def test_console_main_gives_the_reader_the_hosts_revision(self):
+        recorded = {}
+
+        def reader(*args, **kwargs):
+            recorded.update(kwargs)
+            return lambda roots: None
+
+        def stop(*args, **kwargs):
+            raise OSError("stop here")
+
+        with mock.patch.object(console.activation, "reader_for", reader), \
+                mock.patch.object(console.service, "ConsoleService", stop), \
+                contextlib.redirect_stderr(io.StringIO()):
+            console.main(["--port", "0"])
+        self.assertIs(recorded["revision"], activation_run.host_revision)
+
     def test_a_failed_production_read_keeps_the_line(self):
         for patcher in (mock.patch.object(activation, "integration_branch", lambda root: "main"),
                         mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)})):
@@ -420,7 +664,7 @@ class ActivationServiceTest(Trees):
             self.addCleanup(patcher.stop)
         support.write_registry(self.registry, [{"project_id": "owner/cfg", "root": str(self.checkout)}])
         self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n"})
-        svc = self.opened(reader_for(self.package_root))
+        svc = self.opened(reader_for(self.package_root, revision=lambda: self.built))
         svc.poll_activation()
         self.assertEqual(shown(svc)["root"], str(self.checkout))
         version = svc.version
@@ -512,6 +756,163 @@ class ActivatePageWriteTest(Trees):
         while not path.exists():
             self.assertLess(time.monotonic(), deadline, f"{path} never appeared")
             time.sleep(0.05)
+
+    def test_an_activation_for_another_change_is_admitted(self):
+        svc = self.open(reader=Fake(Activation(str(self.checkout), (), self.commit, (SKILL,))))
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body), (204, b""))
+        self.release.touch()
+        self.await_finished()
+        self.assertEqual(self.ran.read_text().splitlines(), [self.commit])
+
+    def test_a_rollback_after_an_activated_run_offers_activate_again(self):
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        current = [pending]
+        svc = self.open(reader=lambda roots: current[0])
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+        self.assertEqual(self.post(svc)[0], 204)
+        current[0] = None
+        self.release.touch()
+        self.await_finished()
+        deadline = time.monotonic() + 20
+        while shown(svc) is None or shown(svc)["state"] != "activated":
+            self.assertLess(time.monotonic(), deadline, shown(svc))
+            time.sleep(0.05)
+        self.assertIs(shown(svc)["activate"], False)
+        current[0] = pending
+        svc.poll_activation()
+        line = shown(svc)
+        self.assertEqual((line["state"], line["commit"], line["activate"]), ("pending", self.commit, True))
+
+    def await_state(self, svc, state):
+        deadline = time.monotonic() + 20
+        while shown(svc) is None or shown(svc)["state"] != state:
+            self.assertLess(time.monotonic(), deadline, shown(svc))
+            time.sleep(0.05)
+
+    def refused_nothing(self, svc):
+        deadline = time.monotonic() + 20
+        while True:
+            status, _, body = self.post(svc)
+            if body.strip() != b"an activation is already running":
+                return status, body.strip()
+            self.assertLess(time.monotonic(), deadline, "the run's claim was never released")
+            time.sleep(0.05)
+
+    def test_a_failed_completion_read_does_not_offer_activate_again_for_the_same_commit(self):
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        steps = [pending]
+        svc = self.open(reader=lambda roots: steps[0] if steps[0] is not ReadError else self.raise_read())
+        self.assertEqual(self.post(svc)[0], 204)
+        steps[0] = ReadError
+        self.release.touch()
+        self.await_finished()
+        self.await_state(svc, "activated")
+        self.assertIs(shown(svc)["activate"], False)
+        self.assertEqual(self.refused_nothing(svc), (409, b"nothing to activate"))
+        svc.poll_activation()
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("activated", False))
+        steps[0] = None
+        svc.poll_activation()
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("activated", False))
+        steps[0] = pending
+        svc.poll_activation()
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+        self.assertEqual(len(self.payloads("activation.started")), 1)
+
+    def raise_read(self):
+        raise activation.ReadFailed("the revision could not be read")
+
+    def test_a_poll_begun_before_completion_does_not_overwrite_the_refresh(self):
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        entered, gate, slow_calls = threading.Event(), threading.Event(), []
+        refreshed = [False]
+
+        def reader(roots):
+            if threading.current_thread().name == "slow-poll":
+                slow_calls.append(1)
+                entered.set()
+                self.assertTrue(gate.wait(20))
+                return pending
+            return None if refreshed[0] else pending
+
+        svc = self.open(reader=reader)
+        self.assertEqual(self.post(svc)[0], 204)
+        slow = threading.Thread(target=svc.poll_activation, name="slow-poll")
+        slow.start()
+        self.addCleanup(slow.join)
+        self.addCleanup(gate.set)
+        self.assertTrue(entered.wait(20))
+        refreshed[0] = True
+        self.release.touch()
+        self.await_finished()
+        self.await_state(svc, "activated")
+        gate.set()
+        slow.join()
+        self.assertEqual(len(slow_calls), 1)
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("activated", False))
+        self.assertEqual(self.refused_nothing(svc), (409, b"nothing to activate"))
+
+    def test_a_failed_run_stays_retryable_after_the_hosts_revision_reached_the_tip(self):
+        before = self.commit
+        self.advance({SKILL: "demo v2\n"})
+        self.commit = self.origin_commit()
+        running_root = self.tmp / "pkg-tip"
+        shutil.copytree(self.second_clone() / "python", running_root)
+        host = [before]
+        with mock.patch.object(activation, "integration_branch", lambda root: "main"):
+            real = activation.reader_for(running_root, revision=lambda: host[0])
+            svc = self.open(reader=lambda roots: real([str(self.checkout)]),
+                            activator=self.activator("raise SystemExit(4)\n"))
+            self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+            status, _, body = self.post(svc)
+            self.assertEqual((status, body.strip()), (204, b""))
+            self.await_finished()
+            (finished,) = self.payloads("activation.finished")
+            self.assertIs(finished["ok"], False)
+            host[0] = self.commit
+            svc.poll_activation()
+            self.assertIs(real([str(self.checkout)]).pending, False)
+            line = shown(svc)
+            self.assertEqual((line["state"], line["commit"], line["activate"]), ("failed", self.commit, True))
+            deadline = time.monotonic() + 20
+            while True:
+                status, _, body = self.post(svc)
+                if body.strip() != b"an activation is already running":
+                    break
+                self.assertLess(time.monotonic(), deadline, "the first run's claim was never released")
+                time.sleep(0.05)
+            self.assertEqual((status, body), (204, b""))
+            self.await_finished(2)
+
+    def test_a_failed_run_is_no_longer_retryable_a_day_after_it_finished_once_the_host_runs_the_commit(self):
+        skew = [0.0]
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        host = [pending]
+        svc = self.open(reader=lambda roots: host[0],
+                        activator=self.activator("raise SystemExit(4)\n"),
+                        clock=lambda: time.time() + skew[0])
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body.strip()), (204, b""))
+        self.await_finished()
+        host[0] = Activation(str(self.checkout), (), self.commit)
+        svc.poll_activation()
+        line = shown(svc)
+        self.assertEqual((line["state"], line["activate"]), ("failed", True))
+        skew[0] = 10 * 24 * 3600
+        svc.poll_activation()
+        svc._publish()
+        self.assertIsNone(shown(svc))
+        deadline = time.monotonic() + 20
+        while True:
+            status, _, body = self.post(svc)
+            if body.strip() != b"an activation is already running":
+                break
+            self.assertLess(time.monotonic(), deadline, "the first run's claim was never released")
+            time.sleep(0.05)
+        self.assertEqual((status, body.strip()), (409, b"nothing to activate"))
+        self.assertEqual(len(self.payloads("activation.started")), 1)
 
     def test_an_approved_activation_runs_the_stand_in_once_for_the_shown_commit(self):
         svc = self.open()

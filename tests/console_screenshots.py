@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty-three screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty-seven screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -63,13 +63,27 @@ Contract:
   question back with three choices; on a page with the reading panel (`READING_PANEL`) the
   Questions fold and the thread's line are clicked, so the answer reads in the main column, and
   on a page without it the fold and the thread's summary are clicked, which is the before
-  picture, its reading None). On a page with the reading panel the other ask states click
+  picture, its reading None). `activation-tooling` and `activation-host` are the desk with no sprint and an
+  activation reading of merged changes this host is built from, none a console file: the first
+  changes only agent tooling (a `python/` file and a skill), so its one line reads the
+  agent-tooling wording; the second also changes the host configuration, so its line reads the
+  host-configuration wording (the page draws one activation line, so each picture shows one
+  wording, and `ACTIVATION_SHOWN` holds the line and the one Activate button each reads); each is
+  shot with a stand-in reading, no run and no activator. Only a page whose `Activation` cannot
+  read `other` (`reads_other()` is False) holds no change, so its line is absent and its reading is
+  `ACTIVATION_BASE`, which is the before picture; a page that reads `other` must show `ACTIVATION_SHOWN`. On a page with the reading panel the other ask states click
   through it: `ask-box` the fold and `owner/web`'s answered thread's line (its reading is then
   `HEAD_ASK`: the field shown, the working question's line, the panel's Read line), `ask-goal`
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
+  `sharing-panel` is the owner's Sharing panel opened over one invented colleague of `owner/web`
+  after one admitted guest request; `guest-page` is that colleague's read-only page through a
+  stand-in Serve that adds the tailnet Host and login header, refused when a page with a door
+  meta (`#console-door`) is not the guest page. On the base commit's page, which has neither
+  the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
+  `guest-page` is the page the guest port served then, so a base run still writes every file.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 66 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 74 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -92,6 +106,8 @@ Contract:
   the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the `ASK_OPEN`
   button does not show `owner/web`'s open field, its working question and its answered question's
   Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a
+  `activation-tooling` or `activation-host` shot does not read its `ACTIVATION_SHOWN` entry (nor, on a page that
+  cannot read `other`, `ACTIVATION_BASE`); or when a
   `question-read` shot on a page with the panel does not read `READ_SHOWN` (`READ_READING`: the
   panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
   the script), the answer holding bold,
@@ -124,20 +140,24 @@ Contract:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import struct
 import sys
 import tempfile
+import threading
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agent_tools.console import capacity, event_log, manager, pictures, sessions, signin
+from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
-from agent_tools.console.event_log import EventLog
+from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
@@ -150,7 +170,8 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read")
+          "ask-goal", "question-read", "activation-tooling", "activation-host", "sharing-panel",
+          "guest-page")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -161,6 +182,9 @@ TRACKER_URL = "https://github.com/owner/web/issues"
 LOOK_APPROVE = "Approve this head"
 LOOK_HEAD = "3f9c1d27a05be84c61d9f0273b8e5a14c7d0962e"
 LOOK_FOUND = "8e41b0a6d2c7f35918ae04b7c6d1259f3e0a7b84"
+TAILNET = "desk.invented-tailnet.ts.net"
+COLLEAGUE = "colleague@example.invalid"
+SHARING_STATES = ("sharing-panel", "guest-page")
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -193,6 +217,25 @@ BASE_THREAD = (False, FOLLOW_READ_LINE, False)
 DESK_OUTSIDE = "outside-1136"
 DEAF_MANAGER = "manager-1229"
 READING_PANEL = "section#reading"
+ACTIVATION_COMMIT = "1258" * 10
+ACTIVATION_PATHS = {
+    "activation-tooling": ("python/agent_tools/system/util.py",
+                           "home/common/agent-skills/skills/deliver-standard/SKILL.md"),
+    "activation-host": ("python/agent_tools/system/util.py", "hosts/common/common-packages.nix")}
+ACTIVATION_SHOWN = {
+    "activation-tooling": ("A change to the agent tooling merged at 125812581258 and is not active "
+                           "on this host.", 1),
+    "activation-host": ("A change to the host configuration merged at 125812581258 and is not "
+                        "active on this host.", 1)}
+ACTIVATION_BASE = (None, 0)
+ACTIVATION_READING = """(() => {
+  const line = document.querySelector('#projects p.activation');
+  if (!line || line.getClientRects().length === 0) return [null, 0];
+  const text = line.querySelector('span');
+  const buttons = Array.from(line.querySelectorAll('button.activate')).filter(
+    (button) => button.getClientRects().length > 0);
+  return [text ? text.textContent.trim() : null, buttons.length];
+})()"""
 HEAD_ASK = (True, ASK_WORKING_QUESTION, ASK_READ_LINE)
 READ_QUESTION = "What was done in the last 7 days, and what is in production?"
 READ_FENCED_LINE = "Read: git log --since=7.days"
@@ -316,6 +359,7 @@ class Fixture:
     projects: tuple[Path, ...]
     holding: tuple[int, ...] = ()
     deaf: bool = False
+    activating: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -334,6 +378,7 @@ class Shot:
     acts: tuple[str, ...] = ()
     thread: tuple[bool, str | None, bool] | None = None
     reading: tuple[bool, int, bool, bool, int] | None = None
+    activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
 
 
@@ -535,6 +580,11 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
+    elif state in SHARING_STATES:
+        seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
+        seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -638,7 +688,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "session_id": DESK_OUTSIDE, "cwd": web_root, "repo": web_root,
             "state": "working", "name": "importer run"})
         return running, ended
-    elif state != "nothing-running":
+    elif state not in ("nothing-running", *ACTIVATION_PATHS):
         raise ValueError(f"unknown state {state!r}")
     return ()
 
@@ -749,7 +799,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         root=root, store=console / "events.sqlite3", registry=state_dir / "fleet" / "registry.json",
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
-        holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear")
+        holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
+        activating=ACTIVATION_PATHS.get(state, ()))
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -788,7 +839,21 @@ def _seed_lock_run(service: ConsoleService, fixture: Fixture, now_s: float) -> N
     service.poll_deliveries()
 
 
-def start_service(fixture: Fixture, now_s: float, launches: list | None = None) -> ConsoleService:
+def reads_other() -> bool:
+    """Whether this page's `Activation` can hold merged changes outside the console (it has `other`)."""
+    return "other" in Activation.__dataclass_fields__
+
+
+def _activation_reader(paths: tuple[str, ...]):
+    """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
+    def read(roots):
+        other = {"other": paths} if reads_other() else {}
+        return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
+    return read
+
+
+def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
+                  guest: bool = False) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
             launches.append(launch)
@@ -799,6 +864,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
     if fixture.holding:
         forge["pull_reader"] = lambda slug, pattern, *, cancelled: (
             PullRequest(7, frozenset(fixture.holding), False, None, True),)
+    if fixture.activating:
+        forge["activation_reader"] = _activation_reader(fixture.activating)
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
@@ -806,16 +873,79 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         activity=lambda root: None,
         slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
-        dispatch=lambda job: job(),
+        dispatch=lambda job: job(), guest_port=0 if guest else None,
         repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
     service.start()
     service.poll_spend()
+    if fixture.activating:
+        service.poll_activation()
     if fixture.holding:
         _seed_lock_run(service, fixture, now_s)
         service.poll_movement()
     elif fixture.deaf:
         service.poll_movement()
     return service
+
+
+def _guest_get(address: tuple[str, int], path: str = "/", *, host: str | None = TAILNET,
+               login: str | None = COLLEAGUE) -> http.client.HTTPResponse:
+    """One GET to `address` carrying the tailnet Host and the colleague's login header."""
+    headers = {}
+    if host is not None:
+        headers["Host"] = host
+    if login is not None:
+        headers["Tailscale-User-Login"] = login
+    connection = http.client.HTTPConnection(*address, timeout=10)
+    connection.request("GET", path, headers=headers)
+    return connection.getresponse()
+
+
+class _Serve:
+    """A loopback stand-in for Tailscale Serve in front of the guest port.
+
+    Each GET is forwarded to `guest_address` with `Host: TAILNET` and `Tailscale-User-Login:
+    COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For` and `Host` dropped; the status and
+    headers are copied and the body is streamed until EOF, each chunk flushed (the view stream
+    is event-stream). `.address` is where a browser reads it; `.close()` stops it.
+    """
+
+    def __init__(self, guest_address: tuple[str, int]):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                kept = {name: value for name, value in self.headers.items()
+                        if not name.lower().startswith("tailscale-")
+                        and name.lower() not in ("x-forwarded-for", "host")}
+                connection = http.client.HTTPConnection(*guest_address, timeout=3600)
+                try:
+                    connection.request("GET", self.path, headers={
+                        **kept, "Host": TAILNET, "Tailscale-User-Login": COLLEAGUE})
+                    response = connection.getresponse()
+                    self.send_response_only(response.status)
+                    for name, value in response.getheaders():
+                        self.send_header(name, value)
+                    self.end_headers()
+                    while chunk := response.read1(65536):
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+                    self.close_connection = True
+
+            def log_message(self, format: str, *args) -> None:
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self.address: tuple[str, int] = self._server.server_address[:2]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
@@ -837,15 +967,24 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                 with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp:
                     now_s = datetime.now(timezone.utc).timestamp()
                     service = start_service(
-                        build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s)
+                        build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
+                        guest=state in SHARING_STATES)
+                    serve = None
                     try:
                         host, port = service.address
+                        if state == "sharing-panel":
+                            _guest_get(service.guest_address).read()
+                        elif state == "guest-page":
+                            serve = _Serve(service.guest_address)
+                            host, port = serve.address
                         for width in widths:
                             path = "spend" if state == "spend-page" else ""
                             taken.append(
                                 _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
                                       question=read[0]))
                     finally:
+                        if serve is not None:
+                            serve.close()
                         service.close()
         finally:
             browser.close()
@@ -993,6 +1132,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
+        if state == "guest-page" and page.query_selector("#console-door") is not None:
+            page.wait_for_selector("#top-who:not([hidden])")
+            if page.query_selector("#capacity") is not None:
+                raise RuntimeError("the guest shot is not the guest page")
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')
@@ -1013,6 +1156,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")
+        if state == "sharing-panel" and page.query_selector("#sharing-open") is not None:
+            page.click("#sharing-open")
+            page.wait_for_selector("#sharing:not([hidden])")
         tell = None
         if state == "tell-box-open":
             page.click("button.tell-open")
@@ -1067,6 +1213,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             elif page.query_selector(ASK_FOLD):
                 for selector in (ASK_FOLD, READ_BASE_THREAD):
                     page.click(selector)
+        activation = None
+        if state in ACTIVATION_PATHS:
+            activation = tuple(page.evaluate(ACTIVATION_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
@@ -1080,7 +1229,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card)
+                card=card, activation=activation)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1147,6 +1296,13 @@ def main(argv: list[str] | None = None) -> int:
                    else shot.reading not in shown)]
     for shot in unread:
         print(f"console-screenshots: {shot.path.name} does not show the answer in the main column")
+    unlined = [shot for shot in taken if shot.state in ACTIVATION_SHOWN
+               and shot.activation not in (
+                   (ACTIVATION_SHOWN[shot.state],) if reads_other()
+                   else (ACTIVATION_SHOWN[shot.state], ACTIVATION_BASE))]
+    for shot in unlined:
+        print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
+              "Activate button")
     expected = {"question-words": WORDS_CARD, "question-refused": REFUSED_CARD}
     uncarded = [shot for shot in taken
                 if shot.state in expected and shot.card not in (None, expected[shot.state])]
@@ -1166,7 +1322,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or uncarded or offrow or scrolled or short) else 0
+                 or unlined or uncarded or offrow or scrolled or short) else 0
 
 
 if __name__ == "__main__":

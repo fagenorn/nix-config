@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from typing import Callable
 
-from agent_tools.console import register
+from agent_tools.console import activation, register, view
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -681,7 +681,7 @@ class DocsTreeTest(unittest.TestCase):
         decided = next(
             line for line in (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md")
             .read_text().splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262"), decided)
 
     def test_the_desk_spend_figure_decision_is_recorded(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -704,7 +704,7 @@ class DocsTreeTest(unittest.TestCase):
         status = next(line for line in lines if line.startswith("- **Status:**"))
         decided = next(line for line in lines if line.startswith("- **Decided in:**"))
         self.assertTrue(status.endswith("ADR-console-052, ADR-console-056, ADR-console-064"), status)
-        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"), decided)
+        self.assertTrue(decided.endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262"), decided)
         self.assertIn("ADR-console-056", desk)
         spend = self.doc("docs/areas/console/adr/052-the-spend-page-is-a-second-read-only-page-of-the-console.md")
         self.assertIn("- **Status:** accepted; amended by ADR-console-056", spend)
@@ -748,7 +748,7 @@ class DocsTreeTest(unittest.TestCase):
             "ADR-console-064, ADR-console-069")
         desk = adr_path + "002-the-desk-page-design-rules.md"
         self.assertTrue(head(desk, "- **Status:**").endswith("ADR-console-056, ADR-console-064"))
-        self.assertTrue(head(desk, "- **Decided in:**").endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"))
+        self.assertTrue(head(desk, "- **Decided in:**").endswith("#1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262"))
         self.assertIn(
             "A manager that failed to start is a card of its own like a stall card: its headline, "
             "its reason in plain words, \"Retry\" as its primary and \"Drop the sprint\" "
@@ -1133,7 +1133,7 @@ class DocsTreeTest(unittest.TestCase):
         adr002 = (adr_dir / "002-the-desk-page-design-rules.md").read_text()
         decided = next(row for row in adr002.splitlines()
                        if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1179, #1182, #1226, #1214"))
+        self.assertTrue(decided.endswith("#1179, #1182, #1226, #1214, #1262"))
         self.assertIn("main column", " ".join(adr002.split()))
         self.assertIn("What it read and ran", adr002)
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text()
@@ -1956,6 +1956,45 @@ class DocsTreeTest(unittest.TestCase):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
 
+    def test_the_host_built_activation_decision_is_recorded_as_adr_073(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("073-*.md"))
+        self.assertEqual(len(found), 1, [p.name for p in found])
+        first = found[0].read_text().splitlines()[0]
+        self.assertTrue(first.startswith("# ADR-console-073 \u2014 "), first)
+        adr = self.doc("docs/areas/console/adr/" + found[0].name)
+        needles = ["#1258", "ADR-console-043", "ADR-system-004", "configuration revision",
+                   "git diff-tree", "-dirty", "is a failed read",
+                   "a failed run for the shown commit keeps Activate",
+                   "24 hours after the run finished", "ADR-system-004 D6, D8 and D9"]
+        needles += [f"`{p}`" for p in
+                    activation.NOT_BUILT_DIRS + activation.NOT_BUILT_FILES + view.AGENT_TOOLING]
+        needles += [t.replace("{commit}", "<commit>") for t in
+                    (view.ACTIVATION_TEXT, view.ACTIVATION_TOOLING_TEXT,
+                     view.ACTIVATION_CONFIGURATION_TEXT)]
+        for needle in needles:
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+
+        def status(path):
+            return next(row for row in (REPO_ROOT / path).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+
+        self.assertEqual(
+            status("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-host-"
+                   "is-one-line-in-the-work-column.md"),
+            "- **Status:** accepted; amended by ADR-system-004, ADR-console-073")
+        self.assertEqual(
+            status("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
+                   "activate.md"),
+            "- **Status:** accepted; amended by ADR-console-073")
+        self.assertIn("ADR-console-073 D5 amends it",
+                      self.doc("docs/areas/system/adr/004-host-activation-runs-only-through-the-"
+                               "consoles-activate.md"))
+        lines = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
+        entry = lines[lines.index("**Activation line**:") + 1]
+        self.assertIn("ADR-console-073", entry)
+        self.assertNotIn("carries a console change this host does not run", entry)
+
     def test_make_it_a_goal_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
         for needle in ('"Make it a goal"',
@@ -1965,7 +2004,7 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1137, #1177, #1178, #1179, #1182, #1226, #1214"), decided)
+        self.assertTrue(decided.endswith("#1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262"), decided)
 
     def test_the_notices_fold_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
@@ -1973,7 +2012,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214"))
+        self.assertTrue(decided.endswith(", #1135, #1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262"))
         self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
         self.assertIn('"Hand-off for you, from <title>"', adr)
         self.assertIn("its paths in the code style", adr)
