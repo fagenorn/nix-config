@@ -15,6 +15,13 @@ command that inherits a member's environment, at any depth, reads them as if giv
 `GIT_CONFIG_COUNT` entry and any config file for the same key, a test's other count entries
 still apply, and a `git -c` option a command adds comes after them and wins.
 
+Scratch directory (issue 1283). Members write their temporary files where `TMPDIR` points.
+Unless `SUITE_RUNNER_SCRATCH` says otherwise the runner creates one `suite-runner-tmp-*`
+directory per run under `/dev/shm` when that is a writable directory, sets every member's
+`TMPDIR` to it and removes it when the run ends, so a test's files, forced flushes included,
+stay in memory. `SUITE_RUNNER_SCRATCH=disk` keeps the inherited `TMPDIR`; any other value is the
+directory the run's scratch directory is created in. A host without `/dev/shm` runs as before.
+
 Bytecode cache (issue 499). It is one directory per run. Before the first member starts the
 runner creates a `suite-runner-pycache-*` directory in the default temporary directory, sets
 `PYTHONPYCACHEPREFIX` to it, replacing an inherited value, and drops an inherited
@@ -80,6 +87,7 @@ running members`, waits for those members and prints no report.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -101,6 +109,11 @@ RESERVED_CPUS = 2
 TIMINGS_FILE = Path(__file__).with_name("suite_timings.json")
 INTERRUPTED = f"{PREFIX} interrupted, waiting for running members"
 INTERRUPT_EXIT = 130
+# Where the members' temporary files go (issue 1283): unset picks MEMORY_ROOT when it is a
+# writable directory, `disk` keeps the inherited TMPDIR, any other value names the directory.
+SCRATCH_ENV = "SUITE_RUNNER_SCRATCH"
+SCRATCH_DISK = "disk"
+MEMORY_ROOT = "/dev/shm"
 # Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
 # (issue 496).
 SUITE_GIT_CONFIG = "'maintenance.auto'='false' 'gc.auto'='0'"
@@ -204,6 +217,24 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     environment["PYTHONPYCACHEPREFIX"] = cache
     environment.pop("PYTHONDONTWRITEBYTECODE", None)
     return environment
+
+
+def scratch_root(environ: Mapping[str, str], memory_root: str = MEMORY_ROOT) -> str | None:
+    """The directory a run's scratch directory is created in, None to keep the inherited TMPDIR.
+
+    `SUITE_RUNNER_SCRATCH` decides: `disk` is None; any other non-empty value is that directory,
+    as given; unset or empty is `memory_root` when it is a directory this process can write and
+    search, else None (issue 1283: the suite's forced flushes kept the host's disk busy, and a
+    file there costs a flush where one in memory costs nothing).
+    """
+    choice = environ.get(SCRATCH_ENV, "")
+    if choice == SCRATCH_DISK:
+        return None
+    if choice:
+        return choice
+    if os.path.isdir(memory_root) and os.access(memory_root, os.W_OK | os.X_OK):
+        return memory_root
+    return None
 
 
 def validate_members(members: Sequence[str], cwd: Path) -> None:
@@ -455,11 +486,18 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
     Every member runs with `member_environment(os.environ, cache)`, computed
     once, where `cache` is the run's bytecode cache: a temporary directory
     created before the first launch and removed however this call ends, a
-    removal error propagating (issue 499).
+    removal error propagating (issue 499). When `scratch_root(os.environ)` names a
+    directory, every member's `TMPDIR` is a `suite-runner-tmp-*` directory created there
+    for the run and removed the same way (issue 1283); otherwise `TMPDIR` is inherited.
     """
     output = _Output(out)
-    with tempfile.TemporaryDirectory(prefix="suite-runner-pycache-") as cache:
+    root = scratch_root(os.environ)
+    with tempfile.TemporaryDirectory(prefix="suite-runner-pycache-") as cache, \
+            contextlib.ExitStack() as stack:
         environment = member_environment(os.environ, cache)
+        if root is not None:
+            environment["TMPDIR"] = stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="suite-runner-tmp-", dir=root))
         started = time.monotonic()
         if jobs == 1:
             results = _run_serial(members, environment, output)
