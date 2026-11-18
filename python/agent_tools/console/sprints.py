@@ -286,24 +286,34 @@ message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` othe
 
 Rounds of questions (#891) are what an approved sprint's manager asks the owner. Three rows carry
 them, all kept (`event_log.QUESTIONS_ASKED`, `QUESTION_ANSWERED`, `QUESTION_WITHDRAWN`; each with
-the project in its project column):
+the project in its project column), and a fourth, `look.recorded` (#1260, kept), records what the
+console did about a look card's approval:
 
     questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>, "pictures"?: [<id>],
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
+                                      "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
+                                                "approve": <str>},
                                       "replaces"?: {"round": <int>, "index": <int>}}]}
     question.withdrawn {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                         "question": <str>}
     question.answered {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                        "question": <str>, "answer": <str>, "chosen": <str> | null,
-                       "recommended": <str>, "differs": <bool>}
+                       "recommended": <str>, "differs": <bool>,
+                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>}}
+    look.recorded     {"sprint_id", "round": <int>, "index": <int>, "outcome": "moved" | "posted" |
+                       "failed", ...}  moved: "found": <40 hex> | null, "state": "open" | "closed"
+                       | "merged"; posted: "message": <int>, "comment_id": <int>;
+                       failed: "message": <int>, "reason": <str>
 
 The round the manager sends (inside the ask request) and the owner's answer (the page's write) are
 
     {"questions": [{"question": "<the ask>", "context": "<why, optional>",
                     "blocks": "<one line>", "options": ["<one line>", ...],
                     "recommended": "<exact text of one option>",
+                    "look": {"issue": <int >= 1>, "pr": <int >= 1>, "head": "<40 lowercase hex>",
+                             "approve": "<exact text of one option>"},
                     "pictures": [{"picture": "<id>", "line": "<one line>",
                                   "pair": "before" | "after"}, ...],
                     "replaces": {"round": <int >= 1>, "index": <int >= 0>}}, ...],
@@ -317,7 +327,7 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended, pictures, replaces`),
+a key outside `question, context, blocks, options, recommended, pictures, look, replaces`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -325,7 +335,10 @@ and not a string non-empty after stripping), `CONTEXT_TOO_LONG`, `QUESTION_MEMBE
 (one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option not a string non-empty after
 stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option with a line break or
 over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION`
-(`recommended` not a string whose strip equals one stripped option), then `REPLACES_SHAPE`
+(`recommended` not a string whose strip equals one stripped option), then (#1260) `LOOK_SHAPE`
+(`look` present and not an object of exactly `issue` and `pr`, each an int that is not a bool and
+at least 1, `head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE` (`approve`
+whose strip equals no stripped option), then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -353,7 +366,8 @@ order. With
 `question` or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a
 picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
-text stripped, a question carrying `"context"` only when the round gave one and `"pictures"`
+text stripped, a question carrying `"context"` only when the round gave one, `"look"` (`{"issue",
+"pr", "head", "approve"}`, `approve` stripped) only when it gave one, and `"pictures"`
 (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
 (`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
 question's `replaces` names in a checked round, in question order.
@@ -364,13 +378,17 @@ keys, plus an optional `"dry_run"` that must be `true`) and returns `(sprint_id,
 dry_run)`, `round` an object whose keys are a subset of
 `questions, blocker`; `parse_round_answer(body)` reads the page's body, exactly one of `choice` and
 `text`, and returns `(project_id, sprint_id, round_id, index, choice, text)` with the absent one
-None. Both are `ValueError` on anything else, a repeated key, NaN or nesting too deep.
+None; `parse_look_retry(body)` reads the page's retry of a look card's approval, exactly
+`{"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>}`, and returns
+`(project_id, sprint_id, round_id, index)`. All three are `ValueError` on anything else, a
+repeated key, NaN or nesting too deep.
 
 The fold keeps each open sprint's `Question`s on `SprintState.questions`, ordered by `(round_id,
 index)`. A `questions.asked` row changes a sprint only when it is open, its brief is approved
 (`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
 (absent: false), so a logged round over a limit folds whole and renders cut; each
-checked question is then added with `round_id` the row's `seq`, its `index` and `at`. Each checked
+checked question is then added with `round_id` the row's `seq`, its `index` and `at`, and its
+`look` kept as a `QuestionLook`. Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -387,7 +405,22 @@ and `index` (ints, not bools) name an unanswered question of the sprint, its `an
 its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
 `answered_at` (the row's `at`) and `differs`, computed as `chosen != recommended` (the row's own
 `differs` is not trusted; the owner's own words, `chosen` null, always differ), and the sprint gains
-a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). A second
+a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). An answer
+on a question with a `look` whose `chosen` equals `look.approve` and whose row's `look` equals the
+question's `(issue, pr, head)` sets `look_state` to `"posting"` (and `look_message` to the row's
+`seq`) and its message is `held`: `unread` leaves a held message out and no `sprint.read` or
+`sprint.nudged` watermark marks it read or delivered, so the approval reaches the manager only after
+the console has posted it; any other answer to a look question is an ordinary answer (`look_state`
+None, not held). A `look.recorded` row names a question by its `round` and `index`: `posted`
+applies when `look_state` is `"posting"` or `"failed"` and `message` is the held answer's id
+(`look_state` `"posted"`, `look_comment` the `comment_id`, the message no longer held, so the next
+read marks it once), `failed` under the same conditions (`look_state` `"failed"`, `look_reason`,
+the message stays held; a later `posted` still applies), `moved` only on an unanswered,
+unwithdrawn look question (`look_state` `"moved"`, `look_found`, `look_found_state`; the question
+stays open and an approving answer replaces it with `"posting"`); any other `look.recorded` row,
+an unknown `outcome` or a malformed member changes nothing. `pending_looks(state)` is the
+answered questions whose `look_state` is `"posting"` or `"failed"` in `(round_id, index)` order,
+none once the sprint has `stopped_at` or a `closing`. A second
 answer, or any other such row, changes nothing, and so does an answer naming a withdrawn question:
 no answer and no message. A `question.withdrawn` row (#1099) changes a sprint only when
 `takes_questions(state)` holds and its `round` and `index` (ints, not bools) name an unanswered,
@@ -587,7 +620,7 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_NO_PROGRESS,
+                                           GOAL_WITHDRAWN, LOOK_RECORDED, MANAGER_FAILED, MANAGER_NO_PROGRESS,
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
                                            MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
@@ -736,7 +769,9 @@ NO_QUESTIONS = "the round has no questions"
 TOO_MANY_QUESTIONS = "a round has at most 10 questions"
 BAD_BLOCKER = "the round's blocker is not true or false"
 QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, options, "
-                  "recommended, pictures and replaces")
+                  "recommended, pictures, look and replaces")
+LOOK_SHAPE = "question {n}'s look is not an object of issue, pr, head and approve"
+LOOK_APPROVE = "question {n}'s look approve is not one of its options"
 REPLACES_SHAPE = "question {n}'s replaces is not an object of round and index"
 REPLACES_TWICE = "question {n} replaces a question another question of the round replaces"
 REPLACES_REFUSED = "question {n} cannot replace round {round} question {index}: {reason}"
@@ -813,6 +848,8 @@ RENUDGE_AFTER_MS = 60_000
 MESSAGE_APPROVED = "approved"
 MESSAGE_CHANGES = "changes"
 MESSAGE_TEXT = "text"
+LOOK_MOVED, LOOK_POSTING, LOOK_POSTED, LOOK_FAILED = "moved", "posting", "posted", "failed"
+LOOK_FOUND_STATES = ("open", "closed", "merged")
 MESSAGE_ANSWER = "answer"
 MESSAGE_STOP = "stop"
 SENT = "sent"
@@ -933,6 +970,7 @@ class Message:
     question: str | None = None
     round_id: int | None = None
     chosen: str | None = None
+    held: bool = False
 
 
 @dataclass(frozen=True)
@@ -940,6 +978,14 @@ class QuestionPicture:
     picture: str
     line: str
     pair: str | None = None
+
+
+@dataclass(frozen=True)
+class QuestionLook:
+    issue: int
+    pr: int
+    head: str
+    approve: str
 
 
 @dataclass(frozen=True)
@@ -960,6 +1006,13 @@ class Question:
     pictures: tuple[QuestionPicture, ...] = ()
     withdrawn_at: str | None = None
     replaced_by: int | None = None
+    look: QuestionLook | None = None
+    look_state: str | None = None
+    look_reason: str | None = None
+    look_found: str | None = None
+    look_found_state: str | None = None
+    look_comment: int | None = None
+    look_message: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1135,6 +1188,12 @@ def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str
     choice = _count(value["choice"], 0) if "choice" in value else None
     return (project_id, _sprint_id(value["sprint_id"]), _count(value["round"], 1),
             _count(value["question"], 0), choice, text)
+
+
+def parse_look_retry(body: bytes) -> tuple[str, str, int, int]:
+    value = _object(body, {"project_id", "sprint_id", "round", "question"})
+    return (value["project_id"], _sprint_id(value["sprint_id"]), _count(value["round"], 1),
+            _count(value["question"], 0))
 
 
 def parse_withdraw_question_request(body: bytes) -> tuple[str, str, int, int]:
@@ -1348,7 +1407,7 @@ LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/
 def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
-                                                                "pictures", "replaces"}:
+                                                                "pictures", "look", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1382,6 +1441,12 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     recommended = question.get("recommended")
     if not isinstance(recommended, str) or recommended.strip() not in stripped:
         raise Refused(NO_RECOMMENDATION.format(n=n))
+    look = question.get("look")
+    if "look" in question:
+        if not _look_mark(look):
+            raise Refused(LOOK_SHAPE.format(n=n))
+        if look["approve"].strip() not in stripped:
+            raise Refused(LOOK_APPROVE.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1395,9 +1460,22 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         checked["context"] = context.strip()
     if pictures:
         checked["pictures"] = pictures
+    if "look" in question:
+        checked["look"] = {"issue": look["issue"], "pr": look["pr"], "head": look["head"],
+                           "approve": look["approve"].strip()}
     if "replaces" in question:
         checked["replaces"] = {"round": replaces["round"], "index": replaces["index"]}
     return checked
+
+
+HEAD = re.compile(r"[0-9a-f]{40}")
+
+
+def _look_mark(look: object) -> bool:
+    return (isinstance(look, dict) and set(look) == {"issue", "pr", "head", "approve"}
+            and _id(look["issue"]) and look["issue"] >= 1 and _id(look["pr"]) and look["pr"] >= 1
+            and isinstance(look["head"], str) and HEAD.fullmatch(look["head"]) is not None
+            and isinstance(look["approve"], str))
 
 
 def _replaces_mark(mark: object) -> bool:
@@ -1559,7 +1637,17 @@ def message_state(message: Message, now_ms: int | None) -> str:
 
 
 def unread(state: SprintState) -> tuple[Message, ...]:
-    return tuple(message for message in state.messages if message.read_at is None)
+    return tuple(message for message in state.messages
+                 if message.read_at is None and not message.held)
+
+
+def pending_looks(state: SprintState) -> tuple[Question, ...]:
+    """The answered look questions whose approval is not yet on the tracker, in `(round_id, index)` order."""
+    if state.stopped_at is not None or state.closing is not None:
+        return ()
+    return tuple(sorted((question for question in state.questions
+                         if question.look_state in (LOOK_POSTING, LOOK_FAILED)),
+                        key=lambda question: (question.round_id, question.index)))
 
 
 def unreachable(state: SprintState) -> bool:
@@ -1905,7 +1993,8 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
         if _id(through):
             return replace(state, failed_nudges=0, messages=tuple(
                 replace(message, read_at=event.at)
-                if message.message_id <= through and message.read_at is None else message
+                if (message.message_id <= through and message.read_at is None
+                    and not message.held) else message
                 for message in state.messages))
     elif event.kind == SPRINT_NUDGED:
         through, ok = payload.get("through"), payload.get("ok")
@@ -1914,8 +2003,8 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
             if ok:
                 messages = tuple(
                     replace(message, delivered_at=event.at)
-                    if message.message_id <= through and message.delivered_at is None
-                    else message for message in messages)
+                    if (message.message_id <= through and message.delivered_at is None
+                        and not message.held) else message for message in messages)
             return replace(state, messages=messages, last_nudge_at=event.at, last_nudge_ok=ok,
                            failed_nudges=0 if ok else state.failed_nudges + 1)
     elif event.kind == SPRINT_ANSWERED:
@@ -1947,6 +2036,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         added = tuple(Question(event.seq, index, event.at, checked["blocker"], row["question"],
                                row["blocks"], tuple(row["options"]), row["recommended"],
                                context=row.get("context"),
+                               look=QuestionLook(**row["look"]) if "look" in row else None,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -1970,14 +2060,71 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         if (question.answer is not None or question.withdrawn_at is not None
                 or (chosen is not None and chosen not in question.options)):
             return state
+        held = _approves_look(question, chosen, payload.get("look"))
         answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
-                           differs=chosen != question.recommended)
+                           differs=chosen != question.recommended,
+                           look_state=LOOK_POSTING if held else None,
+                           look_found=None, look_found_state=None,
+                           look_message=event.seq if held else None)
         questions = (*state.questions[:position], answered, *state.questions[position + 1:])
         return _with_message(
             replace(state, questions=questions),
             Message(event.seq, MESSAGE_ANSWER, event.at, None, answer, question=question.question,
-                    round_id=round_id, chosen=chosen))
+                    round_id=round_id, chosen=chosen, held=held))
     return state
+
+
+def _approves_look(question: Question, chosen: object, logged: object) -> bool:
+    """Whether an answer approves the head its look card names: the approve option and that head."""
+    look = question.look
+    return (look is not None and chosen == look.approve and isinstance(logged, dict)
+            and set(logged) == {"issue", "pr", "head"}
+            and _id(logged["issue"]) and _id(logged["pr"])
+            and (logged["issue"], logged["pr"], logged["head"]) == (look.issue, look.pr, look.head))
+
+
+def _folded_look(state: SprintState, event: Event) -> SprintState:
+    """A `look.recorded` row: what the console found or did about a look card's approval."""
+    payload = event.payload
+    round_id, index, outcome = payload.get("round"), payload.get("index"), payload.get("outcome")
+    for position, question in enumerate(state.questions):
+        if (question.round_id, question.index) == (round_id, index) and question.look is not None:
+            break
+    else:
+        return state
+    if outcome == LOOK_MOVED:
+        found, found_state = payload.get("found"), payload.get("state")
+        if (question.answer is not None or question.withdrawn_at is not None
+                or not (found is None or isinstance(found, str) and HEAD.fullmatch(found))
+                or found_state not in LOOK_FOUND_STATES):
+            return state
+        changed = replace(question, look_state=LOOK_MOVED, look_found=found,
+                          look_found_state=found_state)
+        return replace(state, questions=_swapped(state.questions, position, changed))
+    message = payload.get("message")
+    if (outcome not in (LOOK_POSTED, LOOK_FAILED) or not _id(message)
+            or question.look_state not in (LOOK_POSTING, LOOK_FAILED)
+            or question.look_message != message):
+        return state
+    if outcome == LOOK_POSTED:
+        comment = payload.get("comment_id")
+        if not _id(comment):
+            return state
+        changed = replace(question, look_state=LOOK_POSTED, look_comment=comment)
+        released = tuple(replace(item, held=False) if item.message_id == message else item
+                         for item in state.messages)
+        return replace(state, questions=_swapped(state.questions, position, changed),
+                       messages=released)
+    reason = payload.get("reason")
+    if not isinstance(reason, str):
+        return state
+    changed = replace(question, look_state=LOOK_FAILED, look_reason=reason)
+    return replace(state, questions=_swapped(state.questions, position, changed))
+
+
+def _swapped(questions: tuple[Question, ...], position: int, question: Question
+             ) -> tuple[Question, ...]:
+    return (*questions[:position], question, *questions[position + 1:])
 
 
 def _folded_session(folded: dict[str, SprintState], event: Event) -> None:
@@ -2198,6 +2345,8 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_question(folded[sprint_id], event)
             if event.kind == QUESTIONS_ASKED:
                 folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
+        elif event.kind == LOOK_RECORDED and sprint_id in folded:
+            folded[sprint_id] = _folded_look(folded[sprint_id], event)
         elif event.kind in (NOTICE_POSTED, NOTICE_WITHDRAWN) and sprint_id in folded:
             folded[sprint_id] = _folded_notice(folded[sprint_id], event)
         elif event.kind == PICTURE_STORED and sprint_id in folded:
