@@ -2250,6 +2250,8 @@ class CommitEnvironmentReadTest(unittest.TestCase):
                                          {"dev-shell": self.entry("out")}),
             "missing cwd": self.payload({"environment": "dev-shell"},
                                         {"dev-shell": self.entry("missing")}),
+            "NUL in cwd": self.payload({"environment": "dev-shell"},
+                                       {"dev-shell": self.entry("tools\u0000x")}),
             "unreadable commit": self.payload(None, {}),
         }
         for name, payload in cases.items():
