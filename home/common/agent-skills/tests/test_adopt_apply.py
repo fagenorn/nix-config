@@ -25,9 +25,11 @@ import json
 import os
 import posixpath
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path, PurePosixPath
 from unittest import mock
@@ -103,14 +105,18 @@ MOVED = {
 def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
                signed: bool = False,
                commands: dict[str, list[str]] | None = None,
-               integration_branch: str | None = None) -> Path:
+               integration_branch: str | None = None,
+               commit_environment: str | None = None,
+               command_cwds: dict[str, str] | None = None) -> Path:
     """This repository's shape at base, with cheap verification commands.
 
     A valid schema-1 contract without `platform`, the three legacy artifact
     trees, a `.claude/skills.config.json`, a `.gitignore` still carrying the
     runtime pattern, and no runtime sentinel — the `reconcile` shape whose plan
     reaches `ready`. `commands` declares further contract commands by id, each
-    its argv run from the repository root.
+    its argv run from the repository root. `command_cwds` gives a declared
+    command id that relative `cwd` instead of the repository root.
+    `commit_environment` names the command the contract's commit runs through.
     """
     root = init_repo()
     contract = fixture_contract()
@@ -120,7 +126,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     contract["bindings"]["commands"] = {
         "verify": {"argv": list(verification), "cwd": ".", "env": []},
         "review": {"argv": ["true"], "cwd": ".", "env": []},
-        **{command: {"argv": list(argv), "cwd": ".", "env": []}
+        **{command: {"argv": list(argv),
+                     "cwd": (command_cwds or {}).get(command, "."), "env": []}
            for command, argv in (commands or {}).items()},
     }
     contract["bindings"]["workflow"]["verification"] = ["verify"]
@@ -130,6 +137,9 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
         "plan": "review", "code": "review"}
     contract["bindings"]["vcs"]["commit"] = {
         "co_authored_by": True, "signed": signed}
+    if commit_environment is not None:
+        contract["bindings"]["vcs"]["commit"]["environment"] = \
+            commit_environment
     # This repository's GitHub release profile derives a `blocked` release
     # capability on any host without the forge adapter's executables on PATH;
     # no apply case is about release, so the fixture opts out of it to keep the
@@ -1978,6 +1988,300 @@ class CommitOutputTest(ApplyTestCase):
         self.assertEqual(record["repair_id"],
                          "adopt.commit.signing_unavailable")
         self.assertEqual(record["commit_output"], output)
+
+
+GENERATED = "tools/.generated-hook-config"
+NEEDS_ENVIRONMENT = (
+    "#!/bin/sh\n"
+    "if [ \"$DEV_SHELL_ENTERED\" != 1 ]; then "
+    "echo \"not inside the development environment\" >&2; exit 6; fi\n"
+    "if [ ! -f tools/.generated-hook-config ]; then "
+    "echo \"hook config missing\" >&2; exit 5; fi\n")
+ENTER = ["sh", "-c",
+         "printf 'generated\\n' > .generated-hook-config && "
+         "DEV_SHELL_ENTERED=1 && export DEV_SHELL_ENTERED && exec \"$@\"",
+         "dev-shell"]
+
+
+class CommitEnvironmentApplyTest(ApplyTestCase):
+    """The commit runs through the contract's environment command (issue 1249,
+    ADR-project-contract-008)."""
+
+    def tooled(self, **kwargs) -> Path:
+        root = apply_repo(self.home, **kwargs)
+        write(root, "tools/README.md", "# tools\n")
+        commit(root, "add tools")
+        return root
+
+    def record(self, plan_id: str) -> dict:
+        return json.loads(self.state(
+            "adopt", "worktrees",
+            self.digest(plan_id) + ".failure.json").read_text("utf-8"))
+
+    def hooked(self, root: Path, **hooks: str) -> None:
+        git(root, "config", "core.hooksPath", str(write_hooks(**hooks)))
+
+    def test_a_hook_needing_the_environment_commits_through_the_named_command(
+            self):
+        root = self.tooled(commands={"dev-shell": ENTER},
+                           command_cwds={"dev-shell": "tools"},
+                           commit_environment="dev-shell")
+        self.hooked(root, pre_commit=NEEDS_ENVIRONMENT)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        result = self.succeed(root, plan_id)
+        self.assertEqual(git(root, "rev-list", "--count",
+                             f"{base}..{result['branch']}").strip(), "1")
+        self.assertEqual(git(root, "rev-parse", result["branch"]).strip(),
+                         result["commit"])
+        self.assertNotIn(GENERATED, self.branch_files(root, result["branch"]))
+        self.assertFalse((root / GENERATED).exists())
+        self.assertFalse(self.worktree(plan_id).exists())
+
+    def test_without_the_binding_the_same_hook_still_stops_the_commit(self):
+        root = self.tooled(commands={"dev-shell": ENTER},
+                           command_cwds={"dev-shell": "tools"})
+        self.hooked(root, pre_commit=NEEDS_ENVIRONMENT)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        self.assertEqual(payload["error"]["commit_output"], {
+            "hook": "pre-commit", "exit": 6,
+            "lines": ["not inside the development environment"]})
+        self.assertFalse((self.worktree(plan_id) / GENERATED).exists())
+
+    def test_a_hook_failing_under_an_environment_that_runs_git_first_is_still_named(
+            self):
+        root = self.tooled(
+            commands={"dev-shell": [
+                "sh", "-c", "git rev-parse HEAD > .entered && exec \"$@\"",
+                "dev-shell"]},
+            commit_environment="dev-shell")
+        self.hooked(root, pre_commit="#!/bin/sh\necho out one\nexit 3\n")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        expected = {"hook": "pre-commit", "exit": 3, "lines": ["out one"]}
+        self.assertEqual(payload["error"]["commit_output"], expected)
+        self.assertEqual(self.record(plan_id)["commit_output"], expected)
+        self.assertTrue((self.worktree(plan_id) / ".entered").is_file())
+
+    def test_an_environment_that_fails_before_git_keeps_its_output_and_never_commits_without_it(
+            self):
+        root = self.tooled(
+            commands={"dev-shell": [
+                "sh", "-c", "echo 'dev shell unavailable' >&2; exit 4",
+                "dev-shell"]},
+            commit_environment="dev-shell")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        self.assertEqual(payload["error"]["commit_output"], {
+            "hook": None, "exit": None, "lines": ["dev shell unavailable"]})
+
+    def test_without_the_binding_a_file_a_hook_leaves_untracked_still_fails_the_proof(
+            self):
+        root = apply_repo(self.home)
+        self.hooked(root, pre_commit="#!/bin/sh\nprintf 'left\\n' > hook-left.txt\n")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id)
+        self.assertNotEqual(code, 0, err)
+        self.assertEqual(payload["error"]["code"], "adopt_failure")
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.commit.unproved")
+        self.assertTrue(self.worktree(plan_id).is_dir())
+
+    def test_a_tracked_file_the_environment_changes_still_fails_the_proof(self):
+        root = self.tooled(
+            commands={"dev-shell": [
+                "sh", "-c", "printf 'changed\\n' >> README.md && exec \"$@\"",
+                "dev-shell"]},
+            command_cwds={"dev-shell": "tools"},
+            commit_environment="dev-shell")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.commit.unproved", err or payload)
+        self.assertTrue(self.worktree(plan_id).is_dir())
+
+    def test_an_environment_command_that_cannot_start_is_retained_and_named(
+            self):
+        root = self.tooled(commands={"dev-shell": ["no-such-dev-shell-1249"]},
+                           commit_environment="dev-shell")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        expected = {"hook": None, "exit": None, "lines": [
+            "the commit environment command dev-shell could not be started: "
+            "no-such-dev-shell-1249 was not found"]}
+        self.assertEqual(payload["error"]["commit_output"], expected)
+        self.assertEqual(self.record(plan_id)["commit_output"], expected)
+
+    def test_a_failing_hook_with_a_signer_found_only_inside_the_environment_stays_commit_failed(
+            self):
+        tools = Path(tempfile.mkdtemp())
+        signer = tools / "env-only-gpg"
+        signer.write_text(WORKING_SIGNER, "utf-8")
+        signer.chmod(0o755)
+        root = self.tooled(
+            signed=True,
+            commands={"dev-shell": [
+                "sh", "-c", f"PATH={tools}:$PATH && export PATH && exec \"$@\"",
+                "dev-shell"]},
+            commit_environment="dev-shell")
+        git(root, "config", "gpg.format", "openpgp")
+        git(root, "config", "gpg.program", "env-only-gpg")
+        git(root, "config", "user.signingkey", "DEADBEEF")
+        self.hooked(root, pre_commit="#!/bin/sh\nexit 1\n")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        self.assert_retained(root, plan_id, base, "adopt.commit.failed")
+
+    def test_without_the_binding_a_git_that_cannot_start_is_still_git_unavailable(
+            self):
+        with mock.patch.object(adopt_apply.subprocess, "run",
+                               side_effect=FileNotFoundError):
+            with self.assertRaises(adopt_inspection.AdoptError) as caught:
+                adopt_apply.run_commit(Path(tempfile.mkdtemp()),
+                                       Path(tempfile.mkdtemp()), "-m", "x")
+        self.assertEqual(caught.exception.code, "adopt_failure")
+        self.assertEqual(caught.exception.repair_id, "adopt.git.unavailable")
+
+
+class CommitEnvironmentReadTest(unittest.TestCase):
+    """`commit_environment` reads the member out of the resolver's snapshot."""
+
+    def setUp(self) -> None:
+        self.worktree = Path(tempfile.mkdtemp()).resolve()
+        (self.worktree / "tools").mkdir()
+        os.symlink(tempfile.mkdtemp(), self.worktree / "out")
+
+    def entry(self, cwd: str) -> dict:
+        return {"argv": ["sh", "-c", "exec \"$@\"", "dev-shell"],
+                "cwd": str(self.worktree / cwd), "env": []}
+
+    def payload(self, commit: object, commands: object) -> dict:
+        return {"bindings": {"vcs": {"commit": commit}, "commands": commands}}
+
+    def test_a_named_entry_reads_with_its_nested_cwd_resolved(self):
+        self.assertEqual(
+            adopt_apply.commit_environment(
+                self.payload({"environment": "dev-shell"},
+                             {"dev-shell": self.entry("tools")}),
+                self.worktree),
+            {"id": "dev-shell",
+             "argv": ["sh", "-c", "exec \"$@\"", "dev-shell"],
+             "cwd": str(self.worktree / "tools")})
+
+    def test_a_commit_block_without_the_member_reads_none(self):
+        self.assertIsNone(adopt_apply.commit_environment(
+            self.payload({"co_authored_by": True, "signed": False},
+                         {"dev-shell": self.entry(".")}), self.worktree))
+
+    # Observed: a tracked symlink as the command's cwd reaches `ready`, but
+    # apply's `adopt.gate.cold-clone-resolves` gate refuses it before the
+    # commit, so no apply-level case can reach `commit_environment` with an
+    # escaping cwd; this table is the only pin on the containment.
+    def test_an_unresolvable_or_escaping_member_is_refused_never_none(self):
+        empty_argv = {**self.entry("tools"), "argv": []}
+        cases = {
+            "unknown id": self.payload({"environment": "dev-shell"}, {}),
+            "empty argv": self.payload({"environment": "dev-shell"},
+                                       {"dev-shell": empty_argv}),
+            "escaping cwd": self.payload({"environment": "dev-shell"},
+                                         {"dev-shell": self.entry("out")}),
+            "missing cwd": self.payload({"environment": "dev-shell"},
+                                        {"dev-shell": self.entry("missing")}),
+            "unreadable commit": self.payload(None, {}),
+        }
+        for name, payload in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(adopt_inspection.AdoptError) as caught:
+                    adopt_apply.commit_environment(payload, self.worktree)
+                self.assertEqual(caught.exception.code, "verification_failed")
+                self.assertEqual(caught.exception.repair_id,
+                                 "adopt.commit.unresolved_environment")
+
+
+IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+
+class CommitEnvironmentRunTest(unittest.TestCase):
+    """`run_commit` through an environment that waits for git ends its whole
+    tree on a timeout and when apply is killed."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, IDENTITY)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.root = init_repo()
+        write(self.root, "seed.txt", "seed\n")
+        commit(self.root, "seed")
+        write(self.root, "a.txt", "a\n")
+        git(self.root, "add", "a.txt")
+        git(self.root, "config", "core.hooksPath", str(write_hooks(
+            pre_commit="#!/bin/sh\n: > \"$(git rev-parse --git-dir)/hook-started\"\n"
+                       "sleep 3\n")))
+        self.base = git(self.root, "rev-parse", "HEAD").strip()
+        self.waiting = {"id": "dev-shell",
+                        "argv": ["sh", "-c", "\"$@\"; echo after", "dev-shell"],
+                        "cwd": str(self.root)}
+
+    def head(self) -> str:
+        return git(self.root, "rev-parse", "HEAD").strip()
+
+    def test_a_timed_out_environment_ends_its_whole_command_tree(self):
+        with mock.patch.object(adopt_apply, "ENVIRONMENT_TIMEOUT_SECONDS", 1):
+            with self.assertRaises(adopt_inspection.AdoptError) as caught:
+                adopt_apply.run_commit(
+                    self.root, Path(tempfile.mkdtemp()), "--quiet",
+                    "--no-gpg-sign", "-m", "x", environment=self.waiting)
+        self.assertEqual(caught.exception.repair_id, "adopt.commit.failed")
+        self.assertIsNone(caught.exception.commit_output["hook"])
+        self.assertEqual(
+            caught.exception.commit_output["lines"][0],
+            "the commit environment command dev-shell did not finish within "
+            "1 seconds")
+        time.sleep(4)
+        self.assertEqual(self.head(), self.base)
+
+    def test_the_same_waiting_environment_commits_when_it_finishes_in_time(
+            self):
+        code, _ = adopt_apply.run_commit(
+            self.root, Path(tempfile.mkdtemp()), "--quiet", "--no-gpg-sign",
+            "-m", "x", environment=self.waiting)
+        self.assertEqual(code, 0)
+        self.assertNotEqual(self.head(), self.base)
+
+    def test_an_apply_killed_mid_commit_takes_the_environment_tree_with_it(
+            self):
+        child = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys\n"
+             "from pathlib import Path\n"
+             "from agent_tools.project_contract import adopt_apply\n"
+             "adopt_apply.run_commit(Path(sys.argv[1]), Path(sys.argv[2]), "
+             "'--quiet', '--no-gpg-sign', '-m', 'x', environment={'id': "
+             "'dev-shell', 'argv': ['sh', '-c', '\"$@\"; echo after', "
+             "'dev-shell'], 'cwd': sys.argv[1]})\n",
+             str(self.root), tempfile.mkdtemp()],
+            env={**os.environ,
+                 "PYTHONPATH": str(Path(adopt_apply.__file__).parents[2])})
+        marker = self.root / ".git" / "hook-started"
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(marker.exists(), "the hook never started")
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait()
+        time.sleep(4)
+        self.assertEqual(self.head(), self.base)
 
 
 def trace_lines(*events: dict) -> bytes:

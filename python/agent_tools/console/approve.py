@@ -207,8 +207,9 @@ ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 HEX_RUN = re.compile(r"[0-9a-f]{12,}")
-HOOK_NOTE = ("The hook ran in a fresh copy of the repository, without the project's development "
-             "environment. Make it pass there, then choose Apply it again.")
+HOOK_NOTE = ("The hook ran in a fresh copy of the repository, in the development environment the "
+             "project contract names for its commit, or in none when it names none. Make it pass "
+             "there, then choose Apply it again.")
 BRANCH = re.compile(r"adopt-[0-9a-f]{12}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 PULL_URL = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/pull/([0-9]+)")
@@ -675,8 +676,9 @@ def hook_why(code: int) -> str:
 
 def hook_signing_note(hook: str, why: str) -> str:
     return (f"The project's {hook} hook also stopped the commit: {why}. Make it pass in a fresh "
-            "copy of the repository, without the project's development environment, and set up a "
-            "signing key on this computer, then choose Apply it again.")
+            "copy of the repository, in the development environment the project contract names for "
+            "its commit or in none when it names none, and set up a signing key on this computer, "
+            "then choose Apply it again.")
 
 
 def evidence_line(text: str, worktree: str | None) -> str | None:
