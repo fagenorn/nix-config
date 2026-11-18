@@ -80,7 +80,16 @@ reaches its signer for it. A failed commit's error object and failure
 record carry `commit_output` `{hook, exit, lines}`: git's merged output (the
 last 40 non-blank lines of its last 16384 bytes) and the hook git's trace2
 events name as the one that ended non-zero (else null); the commit runs as
-before and never skips a hook.
+before and never skips a hook. When `bindings.vcs.commit.environment` names a
+command (ADR-project-contract-008), the commit runs as that command's trailing
+arguments, in its cwd resolved inside the worktree. `GIT_TRACE2_EVENT` is set
+for git alone through `env`, and the command's whole process tree ends with the
+commit, on timeout and when apply is killed. A failure, a launch failure or a
+timeout is retained as `adopt.commit.failed` and never retried without the
+environment. Signing is probed in the same environment. A member the snapshot
+cannot resolve, or whose cwd leaves the worktree, is refused
+`adopt.commit.unresolved_environment`. Untracked files the environment leaves do
+not fail the branch proof, and the proved worktree is removed with `--force`.
 
 `plan --contract-draft FILE` plans the adoption of a checkout that has no
 project contract by carrying one drafted outside it (#1067). The file holds one
@@ -835,17 +844,34 @@ def command_apply(args: argparse.Namespace) -> int:
         raise adopt_inspection.refuse(
             "verification_failed", "adopt.commit.unresolved_policy", "",
             "the worktree's commit signing policy could not be resolved")
-    code, output = adopt_apply.run_commit(
-        worktree, worktree.parent, "--quiet",
-        # An unsigned contract is explicit about it: a host that signs every
-        # commit by default (`commit.gpgsign`) must not reach for its signer.
-        "-S" if signed else "--no-gpg-sign",
-        "-m", adopt_apply.commit_message(
-            stored_plan["project_id"], digest, records))
+    try:
+        environment = adopt_apply.commit_environment(
+            run.resolve_payload, worktree)
+    except adopt_inspection.AdoptError as error:
+        adopt_apply.retain_failure(digest, document, worktree, branch,
+                                   gates, error.repair_id)
+        raise
+    try:
+        code, output = adopt_apply.run_commit(
+            worktree, worktree.parent, "--quiet",
+            # An unsigned contract is explicit about it: a host that signs
+            # every commit by default (`commit.gpgsign`) must not reach for
+            # its signer.
+            "-S" if signed else "--no-gpg-sign",
+            "-m", adopt_apply.commit_message(
+                stored_plan["project_id"], digest, records),
+            environment=environment)
+    except adopt_inspection.AdoptError as error:
+        if error.commit_output is not None:
+            adopt_apply.retain_failure(
+                digest, document, worktree, branch, gates, error.repair_id,
+                commit_output=error.commit_output)
+        raise
     if code != 0:
         # Never retried unsigned: a contract that asks for a signature and a
         # machine that cannot produce one is a failure, not a downgrade.
-        unsigned = signed and not adopt_apply.signing_works(worktree)
+        unsigned = signed and not adopt_apply.signing_works(
+            worktree, environment)
         cause = (adopt_apply.SIGNING_UNAVAILABLE if unsigned
                  else "adopt.commit.failed")
         adopt_apply.retain_failure(digest, document, worktree, branch,
@@ -870,8 +896,14 @@ def command_apply(args: argparse.Namespace) -> int:
                                    error.repair_id)
         raise
     adopt_apply.prove_branch_carries_commit(
-        root, worktree, branch, base_revision, commit)
-    code, _ = adopt_inspection.run_git(root, "worktree", "remove", str(worktree))
+        root, worktree, branch, base_revision, commit,
+        untracked_allowed=environment is not None)
+    # ADR-project-contract-008 D6: an environment declared to generate files
+    # leaves untracked ones the proof allowed, which an unforced removal
+    # refuses; every tracked change was already refused above.
+    code, _ = adopt_inspection.run_git(
+        root, "worktree", "remove",
+        *(("--force",) if environment is not None else ()), str(worktree))
     if code != 0:
         raise adopt_inspection.refuse(
             "adopt_failure", "adopt.worktree.not_removed", "",

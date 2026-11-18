@@ -30,6 +30,11 @@ SLUG = "fixture/console-commit-failure"
 GUEST_HOST = "desk.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 ERROR_LINE = "console: plan_approve_error "
+NEEDS_CONFIG = ("#!/bin/sh\nif [ ! -f .generated-hook-config ]; then "
+                "echo \"hook config missing\" >&2; exit 1; fi\n")
+ENTER = ["sh", "-c", "printf 'generated\\n' > .generated-hook-config && exec \"$@\"", "dev-shell"]
+INSIDE = ["sh", "-c", "printf 'entered\\n' > .entered && exec \"$@\"", "dev-shell"]
+UNTRUE = "without the project's development environment"
 CHATTY = ("#!/bin/sh\ni=1\nwhile [ $i -le 12 ]; do echo \"hook line $i\"; i=$((i+1)); done\n"
           "echo \"checking $PWD/README.md\"\necho \"config missing [$0]\" >&2\nexit 1\n")
 
@@ -37,10 +42,15 @@ CHATTY = ("#!/bin/sh\ni=1\nwhile [ $i -le 12 ]; do echo \"hook line $i\"; i=$((i
 class CommitFailureCase(ApproveCase):
     become_ready = approve_tests.PlanApproveRealTest.become_ready
 
-    def hooked(self, hook_text: str, *, signed: bool = False) -> None:
+    def hooked(self, hook_text: str, *, signed: bool = False,
+               environment: list[str] | None = None) -> None:
         contract = json.loads((ROOT / register_check.CONTRACT_SOURCE).read_text("utf-8"))
         contract["bindings"]["vcs"]["commit"]["signed"] = signed
         contract["bindings"]["commands"]["nix-build"]["argv"] = ["true"]
+        if environment is not None:
+            contract["bindings"]["commands"]["dev-shell"] = {
+                "argv": environment, "cwd": ".", "env": []}
+            contract["bindings"]["vcs"]["commit"]["environment"] = "dev-shell"
         source = self.parent / "contract.json"
         source.write_text(json.dumps(contract), "utf-8")
         self.repo = register_check.adopted_repository(self.parent / "approve", SLUG, source)
@@ -139,6 +149,47 @@ class CommitFailureCardTest(CommitFailureCase):
         for text in (card["headline"], card["why"], *card["lines"]):
             self.assertIsNone(approve.PAGE_PATTERN.search(text), text)
         self.assertTrue(self.kept_worktree().is_dir())
+
+
+class CommitEnvironmentApprovalTest(CommitFailureCase):
+    """The demo of issue 1249: a hook that needs a generated file adopts through the environment."""
+
+    def test_a_project_whose_hook_needs_a_generated_file_adopts_through_its_environment(self):
+        self.hooked(NEEDS_CONFIG, environment=ENTER)
+        self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        self.assertEqual(self.steps(), ["applied", "opened"])
+        self.assertIsNone(approve.retained(self.shown["plan_id"]))
+        self.assertFalse((self.repo / ".generated-hook-config").exists())
+
+    def test_the_same_project_without_the_binding_stops_at_its_hook(self):
+        self.hooked(NEEDS_CONFIG)
+        card = self.failed()
+        self.assertIn("pre-commit hook", card["headline"])
+        self.assertEqual(card["lines"], ["hook config missing"])
+        self.assertEqual(card["why"], approve.HOOK_NOTE)
+        self.assertTrue(self.kept_worktree().is_dir())
+
+    def test_a_hook_failing_inside_the_environment_is_named_and_worded_truthfully(self):
+        self.hooked("#!/bin/sh\necho \"inside the environment\"\nexit 3\n", environment=INSIDE)
+        card = self.failed()
+        self.assertEqual(
+            card["headline"],
+            "The adoption of repo was not applied: the project's pre-commit hook stopped the "
+            "adoption commit: it ended with exit status 3.")
+        self.assertEqual(card["why"], approve.HOOK_NOTE)
+        self.assertNotIn(UNTRUE, card["why"])
+        self.assertEqual(card["lines"], ["inside the environment"])
+        self.assertTrue((self.kept_worktree() / ".entered").is_file())
+
+    def test_a_hook_and_signer_failing_inside_the_environment_word_the_signing_note_truthfully(
+            self):
+        self.hooked("#!/bin/sh\nexit 1\n", signed=True, environment=INSIDE)
+        card = self.failed()
+        self.assertTrue(card["headline"].endswith(approve.SIGNING_REASON + "."))
+        self.assertEqual(card["why"],
+                         approve.hook_signing_note("pre-commit", "it ended with exit status 1"))
+        self.assertNotIn(UNTRUE, card["why"])
+        self.assertTrue((self.kept_worktree() / ".entered").is_file())
 
 
 class CancelUntilShownTest(CancelChecks, CommitFailureCase):

@@ -598,7 +598,7 @@ def contained_path(root: Path, relative: str) -> Path | None:
     try:
         resolved = (root / relative).resolve(strict=True)
         anchor = root.resolve(strict=True)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return None
     if resolved == anchor or anchor in resolved.parents:
         return resolved

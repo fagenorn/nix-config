@@ -1,6 +1,6 @@
 # ADR-console-071 — A failed adoption commit shows its hook and last lines, and Cancel waits until it was shown
 
-- **Status:** accepted
+- **Status:** accepted; D3 amended by ADR-project-contract-008
 - **Decided in:** #1236
 
 ## Context
