@@ -41,6 +41,7 @@ TOKEN_HEADER = "X-Console-Token"
 FETCH_SITE_HEADER = "Sec-Fetch-Site"
 TOKEN_SLOT = b"__CONSOLE_TOKEN__"
 TOKEN_FILE = "page-token"
+GUEST_TOKEN_FILE = "guest-token"
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\n?")
 
 
@@ -68,9 +69,10 @@ def load_token(path: Path) -> str:
     return text.removesuffix("\n")
 
 
-def refusal(host: str, origins: list[str], tokens: list[str], token: str) -> tuple[int, str] | None:
+def refusal(host: str, origins: list[str], tokens: list[str], token: str, *,
+            scheme: str = "http") -> tuple[int, str] | None:
     """The `(status, text)` that refuses a page write, or None when it is admitted."""
-    if origins != [f"http://{host}"]:
+    if origins != [f"{scheme}://{host}"]:
         return 403, "origin refused"
     if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), token.encode()):
         return 403, "token refused"
@@ -78,9 +80,9 @@ def refusal(host: str, origins: list[str], tokens: list[str], token: str) -> tup
 
 
 def read_refusal(host: str, origins: list[str], fetch_sites: list[str], tokens: list[str],
-                 token: str) -> tuple[int, str] | None:
+                 token: str, *, scheme: str = "http") -> tuple[int, str] | None:
     """The `(status, text)` that refuses a page read, or None when it is admitted."""
-    if len(origins) > 1 or (origins and origins[0] != f"http://{host}"):
+    if len(origins) > 1 or (origins and origins[0] != f"{scheme}://{host}"):
         return 403, "origin refused"
     if fetch_sites and fetch_sites != ["same-origin"]:
         return 403, "origin refused"

@@ -61,6 +61,14 @@ client trust in `~/.claude.json` as well as in every profile (`agent_tools.conso
 It is given `trust_at_start` (#1183), so every registered project is granted its folder trust in every
 profile at start.
 
+`--guest-port N` (default 27185, loopback only; 0 picks a free one) binds the guest door's second port
+(#1237, `agent_tools.console.service`); a port that cannot be bound is `console: cannot listen on
+127.0.0.1:<that port>: <error>`, exit 1.
+
+`--tailscale PATH` (no default) names the Windows Tailscale client (#1237): it is read with
+`serve status --json` every minute to show whether Serve proxies the tailnet name to the guest port
+(`agent_tools.console.guest`). Without it the console never reads Serve and shows the state as unchecked.
+
 It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
 refuses.
@@ -93,7 +101,7 @@ from pathlib import Path
 import agent_tools
 from agent_tools.console import (
     account_add, activation, activation_run, account_remove, approve, inbox, manager, movement, nudge, probe,
-    project_question, register, service, signin, signin_run)
+    guest, project_question, register, service, signin, signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -112,6 +120,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="console", description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,
                         help="loopback port to listen on (0 picks a free one; default: %(default)s)")
+    parser.add_argument("--guest-port", type=port_number, default=service.DEFAULT_GUEST_PORT,
+                        help="loopback port of the guest door for Tailscale Serve (0 picks a free one; "
+                             "default: %(default)s)")
+    parser.add_argument("--tailscale", metavar="PATH", default=None,
+                        help="the Windows Tailscale client, read with `serve status --json` every minute "
+                             "to show whether Serve proxies the tailnet name to the guest port")
     parser.add_argument("--screenshots", type=Path, action="append", default=[], metavar="DIR",
                         help="a folder whose PNGs a manual check may show (repeatable)")
     return parser
@@ -121,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         console = service.ConsoleService(
-            service.default_store(), service.default_registry(), port=args.port,
+            service.default_store(), service.default_registry(), port=args.port, guest_port=args.guest_port,
             tracker=inbox.read_items, pull_reader=movement.read_pulls, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
             full_listing=nudge.full_lister_for(sys.platform),
@@ -136,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
             activation_reader=activation.reader_for(
                 Path(agent_tools.__file__).resolve().parent.parent, revision=activation_run.host_revision),
             activator=activation_run.Activator(service.default_store().parent),
-            choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots)
+            choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots,
+            serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1
@@ -144,7 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console: event log unusable: {error}", file=sys.stderr)
         return 1
     except OSError as error:
-        print(f"console: cannot listen on {service.HOST}:{args.port}: {error}", file=sys.stderr)
+        port = error.port if isinstance(error, service.GuestPortError) else args.port
+        print(f"console: cannot listen on {service.HOST}:{port}: {error}", file=sys.stderr)
         return 1
     stop = threading.Event()
     for number in (signal.SIGTERM, signal.SIGINT):
