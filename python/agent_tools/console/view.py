@@ -610,7 +610,7 @@ being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed sessio
 permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
 `drafting`); no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
-`NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
+`NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
 wait, `NOW_QUOTA_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
@@ -773,6 +773,7 @@ from agent_tools.console.sprints import (
     FINISHED_AFTER_MS,
     HELD,
     LANDED,
+    LOOK_FAILED,
     MAX_ASK_CHARS,
     MAX_CONTEXT_CHARS,
     MAX_OPTION_CHARS,
@@ -792,6 +793,8 @@ from agent_tools.console.sprints import (
     NOW_DEAF_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
+    NOW_LOOK_RECORDING_TEXT,
+    NOW_LOOK_RETRY_TEXT,
     NOW_FAILED_START_TEXT,
     NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
@@ -1628,6 +1631,12 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
     if questions := open_questions(state):
         return NOW_QUESTION_TEXT.format(question=questions[0].question)
     if waiting > 0:
+        # An approval the console holds is the owner's Retry on the page (#1260), never an answer on the tracker.
+        looks = pending_looks(state)
+        if any(question.look_state == LOOK_FAILED for question in looks):
+            return NOW_LOOK_RETRY_TEXT
+        if looks:
+            return NOW_LOOK_RECORDING_TEXT
         return NOW_DECISION_TEXT
     if state.stalled is not None:
         return NOW_STALLED_TEXT

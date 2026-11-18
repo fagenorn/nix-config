@@ -580,6 +580,8 @@ class LookAnswerTest(QuestionRoutes):
         sprint = next(s for e in view_of(svc)["entries"] for s in e["sprints"]
                       if s["sprint_id"] == sid)
         self.assertEqual((sprint["state"], sprint["waiting"]), ("waiting", 1))
+        self.assertEqual(sprint["now_text"], "waiting for you to press Retry on your approval")
+        self.assertNotIn("tracker", sprint["now_text"])
         self.store_comments()
         self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
         self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "posted"])
