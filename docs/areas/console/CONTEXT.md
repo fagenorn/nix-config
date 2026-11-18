@@ -14,7 +14,7 @@ The per-host loopback service and its two pages: the desk page, which says wheth
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
-Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief or question is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004). A held issue whose only open acceptance criteria are owner reviews, with no live runner prompt, is one owner check card per such criterion (ADR-console-054); a look marker whose approved head merged raises none (ADR-console-054 D8).
+Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief or question is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004), yet the statement counts a sprint whose manager waits there, and reads "Answer it in the manager's terminal." when that is all it counts (a manager that cannot hear the console is counted too and reads "Bring the manager back, or drop the sprint."), so it never says "Nothing needs you" beside a sprint that reads waiting on you (#1247). A held issue whose only open acceptance criteria are owner reviews, with no live runner prompt, is one owner check card per such criterion (ADR-console-054); a look marker whose approved head merged raises none (ADR-console-054 D8).
 _Avoid_: ask, notification
 
 **Answered item**:
