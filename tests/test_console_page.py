@@ -5634,6 +5634,16 @@ class PageFailedStartTest(unittest.TestCase):
             [n for n in nodes(snap["inbox"])
              if n["tag"] == "li" and FAILED_START["headline"] in full(n)], [])
 
+    def test_a_retry_failure_is_forgotten_once_its_card_leaves_the_inbox(self) -> None:
+        failed = look_answered("failed", FAILED_LINE)
+        (gone, back) = render([START, {"frame": frame([failed])},
+                               {"respond": {"status": 502, "text": FAILED_LINE + "\n"}},
+                               {"click": "look-retry"}, {"frame": frame([])}, {"snapshot": True},
+                               {"frame": frame([failed])}, {"snapshot": True}])
+        self.assertEqual(look_cards(gone), [])
+        (card,) = look_cards(back)
+        self.assertEqual([n for n in nodes(card) if has_class(n, "fail")], [])
+
     def test_a_sending_retry_is_disabled(self) -> None:
         (snap,) = render([
             START, {"frame": frame([FAILED_START])}, {"hold": True},
