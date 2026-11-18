@@ -1969,8 +1969,6 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
 
     DELIVER_DIRECT = DirectLaneRoutingTest.DELIVER_DIRECT
     STATUS = "`look-approval status --repo <slug> --issue <n> --pr <pr> --head <head>`"
-    POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
-            " --answer approved --message session-<id>`")
     FIX_POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
                 " --answer fix --message session-<id> --words-file <file>`")
     PUSH = "`git -C <dir> push origin <branch>`"
@@ -2053,14 +2051,19 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertNotIn(form, stop)
 
-    def test_approve_posts_only_for_the_unchanged_head(self):
+    def test_approve_reads_the_recorded_approval_only_for_the_unchanged_head(self):
         resume = self.section("Resume")
         self.assertIn("`forge-claim acquire`", resume)
         approve = self.bullet(resume, "approve")
         self.assertIn(self.HEAD_READ, approve)
-        self.assertIn(self.POST, approve)
-        self.assertLess(approve.index(self.HEAD_READ), approve.index(self.POST))
-        self.assertIn("`posted`", approve)
+        self.assertIn(self.STATUS, approve)
+        self.assertLess(approve.index(self.HEAD_READ), approve.index(self.STATUS))
+        for form in ("`approved`", "Never record an approval yourself", "the head moved", "the owner has not recorded it"):
+            with self.subTest(form=form):
+                self.assertIn(form, approve)
+        for form in ("look-approval post", "--answer approved"):
+            with self.subTest(absent=form):
+                self.assertNotIn(form, approve)
 
     def test_fix_posts_only_for_the_unchanged_head(self):
         fix = self.bullet(self.section("Resume"), "fix")
