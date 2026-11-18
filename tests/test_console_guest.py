@@ -464,7 +464,9 @@ class GuestWriteRuleTest(unittest.TestCase):
                          [True, False, True, False, False, False])
         self.assertEqual(result["inbox"]["answered"], [])
         self.assertFalse(guest.is_look([None, None]))
-        self.assertTrue(guest.is_look([None, "after"]))
+        self.assertFalse(guest.is_look([None, "after"]))
+        self.assertFalse(guest.is_look(["before"]))
+        self.assertTrue(guest.is_look(["after", None, "before"]))
         self.assertEqual(view_in, before)
         self.assertEqual(json.dumps(result).count(c), json.dumps(view_in).count(c))
 

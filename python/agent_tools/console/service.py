@@ -3983,11 +3983,13 @@ class ConsoleService:
         self._publish()
 
     def _guest_refusal(self, by: "guest.GuestActor | None", project_id: str) -> None:
-        """Under the ingest lock: refuse a guest whose access is gone or does not cover the project."""
+        """Under the ingest lock: refuse a guest whose access is gone or does not cover the project, or whose project is no longer registered."""
         if by is not None:
             text = guest.write_refusal(self._access, by, project_id)
             if text is not None:
                 raise sprints.Refused(text)
+            if project_id not in self._states:
+                raise sprints.Refused(sprints.UNREGISTERED)
 
     def _steered(self, by: "guest.GuestActor | None", project_id: str,
                  sprint_id: str) -> sprints.SprintState:
@@ -5674,6 +5676,10 @@ class ConsoleService:
         return sprint
 
     def _waiting_brief(self, sprint: sprints.SprintState, version: int) -> sprints.SprintState:
+        if not sprints.takes_questions(sprint):
+            raise sprints.Refused(sprints.ENDED)
+        if sprint.stop_at is not None:
+            raise sprints.Refused(sprints.ALREADY_STOPPING)
         if sprint.brief is None:
             raise sprints.Refused(sprints.NOT_WAITING)
         if version != sprint.brief.version:

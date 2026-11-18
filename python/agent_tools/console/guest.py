@@ -273,7 +273,8 @@ def steer_refusal(login: str, started_by: str | None) -> str | None:
 
 
 def is_look(pairs: Iterable[str | None]) -> bool:
-    return any(pair is not None for pair in pairs)
+    """A look is a question carrying both a before and an after picture; one alone is a plain picture."""
+    return {"before", "after"} <= set(pairs)
 
 
 def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],

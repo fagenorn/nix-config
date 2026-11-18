@@ -855,6 +855,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
             shots._shoot(browser, "http://console.test/", "owner-actors", 480, Path(tmp))
             self.assertEqual(page.waits[1:], [".started-by", "text=Answered by"])
 
+    def test_the_actor_shots_of_a_base_page_wait_for_no_actor_part(self) -> None:
+        self.assertIs(shots.reads_actors(), True)
+        for state in ("guest-steer", "owner-actors"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "reads_actors", return_value=False):
+                browser, page = fake_browser({"#console-door"})
+                shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                for part in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
+                    self.assertNotIn(part, page.waits)
+
     def test_the_guest_shot_on_the_base_page_waits_for_no_guest_part(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             browser, page = fake_browser({"#capacity"})

@@ -4670,7 +4670,10 @@ function drawInbox(view, guest = null) {
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const [id, state] of answers) {
-    if (!present.has(id) && keptWords(state)) section.appendChild(keptWordsCard(id, state));
+    if (present.has(id) || !keptWords(state)) continue;
+    const kept = keptWordsCard(id, state);
+    if (guest !== null) kept.dataset.steer = "1";
+    section.appendChild(kept);
   }
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
   if (briefs.length === 0 && tracked.length > 0) {

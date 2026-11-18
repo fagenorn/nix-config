@@ -10,6 +10,8 @@ import unittest
 
 from agent_tools.console import guest, service, sprints
 
+from agent_tools.console.event_log import MANAGER_STOPPED
+
 from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
 from .test_console_guest_page import GUEST, named, page_of
@@ -316,41 +318,80 @@ class GuestWriteTableTest(GuestWriteCase):
                     body = {**body, "sprint_id": self.waiting(svc, "owner/p01", ACTOR)}
                 self.assertEqual(self.guest_post(svc, route, body), (204, b""))
 
+    def write_calls(self, svc):
+        brief_sid = self.waiting(svc, "owner/p01", ACTOR)
+        q_sid = self.asking(svc, "owner/p01", ACTOR)
+        return (
+            lambda: svc.state_goal("owner/p01", GOAL, by=ACTOR),
+            lambda: svc.approve_brief("owner/p01", brief_sid, 1, by=ACTOR),
+            lambda: svc.reply_brief("owner/p01", brief_sid, 1, "split it", by=ACTOR),
+            lambda: svc.answer_question("owner/p01", q_sid, self.rounds[q_sid], 0, 0, None,
+                                        by=ACTOR),
+            lambda: svc.send_message("owner/p01", brief_sid, "hello", by=ACTOR))
+
+    def refused(self, svc, calls, text):
+        for call in calls:
+            with self.subTest(text=text, call=call.__code__.co_firstlineno):
+                def attempt(call=call):
+                    with self.assertRaises(sprints.Refused) as raised:
+                        call()
+                    self.assertEqual(str(raised.exception), text)
+                self.still(svc, attempt)
+
     def test_the_access_list_is_checked_again_at_write_time(self):
         self.seed()
         svc = self.start()
-        brief_sid = self.waiting(svc, "owner/p01", ACTOR)
-        q_sid = self.asking(svc, "owner/p01", ACTOR)
-
-        def calls():
-            return (
-                lambda: svc.state_goal("owner/p01", GOAL, by=ACTOR),
-                lambda: svc.approve_brief("owner/p01", brief_sid, 1, by=ACTOR),
-                lambda: svc.reply_brief("owner/p01", brief_sid, 1, "split it", by=ACTOR),
-                lambda: svc.answer_question("owner/p01", q_sid, self.rounds[q_sid], 0, 0, None,
-                                            by=ACTOR),
-                lambda: svc.send_message("owner/p01", brief_sid, "hello", by=ACTOR))
-
-        def refused(text):
-            for call in calls():
-                with self.subTest(text=text, call=call.__code__.co_firstlineno):
-                    def attempt(call=call):
-                        with self.assertRaises(sprints.Refused) as raised:
-                            call()
-                        self.assertEqual(str(raised.exception), text)
-                    self.still(svc, attempt)
-
+        calls = self.write_calls(svc)
         svc.set_tailnet("other.invented-tailnet.ts.net")
-        refused(guest.HOST_TEXT)
+        self.refused(svc, calls, guest.HOST_TEXT)
         svc.set_tailnet(TAILNET)
         svc.set_tailnet(None)
-        refused(guest.SHARING_OFF_TEXT)
+        self.refused(svc, calls, guest.SHARING_OFF_TEXT)
         svc.set_tailnet(TAILNET)
         svc.set_colleague(COLLEAGUE, ("owner/p00",))
-        refused(guest.NOT_YOUR_PROJECT_TEXT)
-        svc.set_colleague(COLLEAGUE, ("owner/p01",))
+        self.refused(svc, calls, guest.NOT_YOUR_PROJECT_TEXT)
+
+    def test_a_removed_colleague_is_refused_at_write_time(self):
+        self.seed()
+        svc = self.start()
+        calls = self.write_calls(svc)
         svc.remove_colleague(COLLEAGUE)
-        refused(guest.NOT_SHARED_TEXT)
+        self.refused(svc, calls, guest.NOT_SHARED_TEXT)
+
+    def test_a_project_unregistered_since_the_page_loaded_is_refused_at_write_time(self):
+        self.seed()
+        svc = self.start()
+        calls = self.write_calls(svc)
+        support.write_registry(self.registry, support.entries(2)[:1])
+        svc.refresh()
+        self.refused(svc, calls, sprints.UNREGISTERED)
+
+    def test_a_brief_of_a_stopping_or_stopped_sprint_takes_no_decision(self):
+        self.seed()
+        svc = self.start()
+        sid = self.waiting(svc, "owner/p01", ACTOR)
+        attempts = (lambda: svc.approve_brief("owner/p01", sid, 1, by=ACTOR),
+                    lambda: svc.reply_brief("owner/p01", sid, 1, "split it", by=ACTOR))
+        svc.stop_sprint("owner/p01", sid)
+        self.refused(svc, attempts, sprints.ALREADY_STOPPING)
+        with svc._ingest:
+            svc._apply(svc.log.append([(MANAGER_STOPPED, "owner/p01", {"sprint_id": sid})]))
+        self.refused(svc, attempts, sprints.ENDED)
+        self.assertEqual(self.rows("brief.approved"), [])
+        self.assertEqual(self.rows("brief.replied"), [])
+
+    def test_a_single_marked_picture_is_no_look_and_the_colleague_answers_it(self):
+        self.seed()
+        svc = self.start()
+        for pair in ("before", "after"):
+            with self.subTest(pair=pair):
+                sid = self.asking(svc, "owner/p01", ACTOR, pictures=[(PIXEL, pair)])
+                view = json.loads(svc.guest_view_bytes(COLLEAGUE))
+                self.assertIs(
+                    inbox_item(view, f"question/{sid}/{self.rounds[sid]}/0")["steer"], True)
+                status, body = self.guest_post(
+                    svc, "/api/round-answer", self.bodies(sid, sid)["/api/round-answer"])
+                self.assertEqual((status, body), (204, b""))
 
     def test_no_refusal_or_stderr_line_names_the_login(self):
         self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})

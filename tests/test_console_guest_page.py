@@ -530,7 +530,7 @@ def tracker_items() -> list:
             for item in tracker_read(tracker_page(cards))]
 
 
-def steer_frame(*, tracker: bool = True, rounds: bool = False) -> dict:
+def steer_frame(*, tracker: bool = True, rounds: bool = False, asked: dict = ASKED) -> dict:
     """The colleague's frame by the production path: the log's events, then `scoped`, `scrub` and `mark_steer`."""
     events = [Event(1, at(1), consoleview.REGISTERED, "owner/p01", {"root": "/srv/p01"})]
 
@@ -545,7 +545,7 @@ def steer_frame(*, tracker: bool = True, rounds: bool = False) -> dict:
         add(GOAL_STATED, {"sprint_id": ROUND_SID, "goal": "Read the checkpoint back", "by": COLLEAGUE})
         add(BRIEF_SENT, {"sprint_id": ROUND_SID, "version": 1, "brief": SECOND_PARTS})
         add(BRIEF_APPROVED, {"sprint_id": ROUND_SID, "version": 1, "by": COLLEAGUE})
-        add(QUESTIONS_ASKED, {"sprint_id": ROUND_SID, "questions": [ASKED], "blocker": False})
+        add(QUESTIONS_ASKED, {"sprint_id": ROUND_SID, "questions": [asked], "blocker": False})
     inputs = {
         "states": consoleview.project_states(events).values(),
         "sprints": sprint_words.sprint_states(events),
@@ -651,6 +651,19 @@ class GuestSteerPageTest(unittest.TestCase):
         self.assertIn(SENT_TEXT, full(snap["inbox"]))
         self.assertEqual([n["disabled"] for n in named(snap["inbox"], "send")], [True])
         self.assertEqual([n["disabled"] for n in named(snap["inbox"], "opt")], [True, True])
+
+    def test_a_withdrawn_question_keeps_the_colleague_s_typed_words_and_its_dismiss(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True, asked={**ASKED, "needs_words": ["files"]})
+        gone = steer_frame(tracker=False)
+        kept, dismissed = harness([
+            START, {"frame": frame}, {"click": "opt", "nth": 1},
+            {"type": {"class": "words-text", "text": "keep the files"}},
+            {"click": "send"}, SNAP, {"frame": gone}, {"clock": 5000}, SNAP,
+            {"click": "kept-words-dismiss"}, SNAP], GUEST)[-2:]
+        (card,) = named(kept["inbox"], "kept-words")
+        self.assertEqual([n["value"] for n in named(card, "kept-words-text")], ["keep the files"])
+        self.assertEqual(len(named(card, "kept-words-dismiss")), 1)
+        self.assertEqual(named(dismissed["inbox"], "kept-words"), [])
 
     def test_a_sprint_the_colleague_did_not_start_has_no_control(self) -> None:
         mine = {**OWNER_SPRINT, "sprint_id": "b" * 16, "title": "Mine", "steer": True,

@@ -87,7 +87,9 @@ Contract:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
   straight into the event log, so the base commit's service, which ignores `by`, serves a page
-  without those parts and the run fails at them, there being no before picture of the actors.
+  without those parts. On a page whose service does not read the actor (`reads_actors()` is False,
+  `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
+  file and the pictures are the before pictures of the actors.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 72 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
@@ -163,7 +165,7 @@ from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
 
 from .console_test_support import hook_body, write_registry
 
@@ -847,6 +849,11 @@ def reads_other() -> bool:
     return "other" in Activation.__dataclass_fields__
 
 
+def reads_actors() -> bool:
+    """Whether this page's service reads who started a sprint (`SprintState` has `started_by`)."""
+    return "started_by" in SprintState.__dataclass_fields__
+
+
 def _activation_reader(paths: tuple[str, ...]):
     """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
     def read(roots):
@@ -1139,10 +1146,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.wait_for_selector("#top-who:not([hidden])")
             if page.query_selector("#capacity") is not None:
                 raise RuntimeError("the guest shot is not the guest page")
-        if state == "guest-steer":
+        if state == "guest-steer" and reads_actors():
             for selector in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
                 page.wait_for_selector(selector)
-        if state == "owner-actors":
+        if state == "owner-actors" and reads_actors():
             for selector in (".started-by", "text=Answered by"):
                 page.wait_for_selector(selector)
         if state in ("finished-list", "desk-spend"):
