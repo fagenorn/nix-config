@@ -83,7 +83,7 @@ from types import MappingProxyType
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
-    SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event)
+    LOGIN_MAX, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event, normal_login)
 from agent_tools.console.view import project_for
 
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
@@ -116,12 +116,10 @@ READING_MEMBERS = ("admitted", "forwarded_for", "host", "host_form", "hosts", "l
                    "login_valid", "probe", "probe_login_arrived", "reason")
 
 TAILNET_MAX = 253
-LOGIN_MAX = 254
 PROJECTS_MAX = 50
 PROJECT_MAX = 200
 
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
-_LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 _HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
 
@@ -141,13 +139,6 @@ NO_ACCESS = Access(None, MappingProxyType({}))
 def valid_tailnet(text: object) -> bool:
     return (isinstance(text, str) and len(text) <= TAILNET_MAX
             and _TAILNET.fullmatch(text) is not None)
-
-
-def normal_login(text: object) -> str | None:
-    if (not isinstance(text, str) or len(text) > LOGIN_MAX or not text.isascii()
-            or _LOGIN.fullmatch(text) is None):
-        return None
-    return text.lower()
 
 
 def _projects_in_force(projects: object) -> bool:

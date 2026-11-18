@@ -169,7 +169,9 @@ counts in `inbox_items` and the headline. Its entry is
     {"type": "inbox_item", "reason": "brief", "key": "brief/<sprint id>", "project_id",
      "sprint_id", "title", "version": <int>, "brief": {"title", "done", "excluded", "slices",
      "risks", "asks"}, "pictures": [{"id", "line", "pair"}], "answered": false,
-     "waiting_since": "<time the brief was sent>"}
+     "waiting_since": "<time the brief was sent>", "started_by": "<login>" | null}
+
+`started_by` is the login of the guest who stated the sprint's goal, null for the owner (#1263).
 
 `pictures` is `_picture_entries(brief.pictures)`, `[]` for a brief with none, each line cut to
 `MAX_PICTURE_LINE_CHARS` and never refused; `brief` holds the six parts only.
@@ -313,7 +315,8 @@ is none. Its entry is
                     "recommended": "<option>", "recommended_index": <int>,
                     "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
-     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
+     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>",
+     "started_by": "<login>" | null}
 
 The texts are shown cut, never refused, though a round logged before the limits can exceed them
 (ADR-console-027): the ask and the headline to `MAX_ASK_CHARS` (140), `context` to
@@ -440,7 +443,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state_text": "<text>",
                       "ball": "manager" | "owner" | "nobody" | null,
                       "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
-                      "stated_at", "age_text", "manager_text": <text> | null,
+                      "stated_at", "started_by": "<login>" | null, "age_text",
+                      "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
                                        | "stalled" | "unavailable",
                       "manager_until": "<time>" | null, "retry": <bool>,
@@ -476,7 +480,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>}
+                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>,
+                       "by": "<login>" | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -1657,7 +1662,7 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
             "reply_at": message.reply_at, "words": message.words,
-            "new": _is_new(message, looked)}
+            "new": _is_new(message, looked), "by": message.by}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
@@ -1739,6 +1744,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                                sprint_wait(state, now_ms, listed, waits), failed_start=failed,
                                deaf=deaf),
         "stated_at": state.stated_at,
+        "started_by": state.started_by,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
         "manager_state": manager_state,
@@ -1969,7 +1975,8 @@ def _brief_entry(sprint: SprintState) -> dict:
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint), "version": brief.version, "brief": brief.parts,
             "pictures": _picture_entries(brief.pictures),
-            "answered": False, "waiting_since": brief.sent_at}
+            "answered": False, "waiting_since": brief.sent_at,
+            "started_by": sprint.started_by}
 
 
 def _question_entry(sprint: SprintState, question: Question) -> dict:
@@ -1991,7 +1998,8 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "needs_words_index": [i for i, option in enumerate(question.options)
                                                  if option in question.needs_words]}],
             "pictures": _picture_entries(question.pictures),
-            "items": [], "answers": [], "answered": False, "waiting_since": question.at}
+            "items": [], "answers": [], "answered": False, "waiting_since": question.at,
+            "started_by": sprint.started_by}
 
 
 def _stall_entry(sprint: SprintState) -> dict:

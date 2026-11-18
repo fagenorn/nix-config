@@ -65,6 +65,14 @@ NaN or Infinity literal or nesting too deep to parse raises `ValueError`.
 (`stated_seq` and `stated_at` are the event's `seq` and `at`); a `goal.withdrawn` with a string
 `sprint_id` removes it; the brief rows and the manager rows below change an open sprint; every other
 event and any malformed goal event changes nothing.
+
+A guest's `goal.stated`, `brief.approved`, `brief.replied`, `sprint.messaged` and
+`question.answered` rows carry `"by": <login>` (#1263), and an owner's row carries none. `actor_of`
+reads it: the login when it is already a normal login (`event_log.normal_login`, the definition
+admission uses), else None, which means the owner. `SprintState.started_by` is the actor of the
+`goal.stated` row, `Message.by` the actor of the row that made the message, and
+`Question.answered_by` the actor of its `question.answered` row. A malformed `by` reads as the
+owner, so no guest can steer that sprint.
 Registration events change nothing here: a goal row outlives the registration rows retention
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
@@ -604,6 +612,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
                                            MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
+                                           normal_login,
                                            NOTICE_WITHDRAWN,
                                            PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -949,6 +958,7 @@ class Message:
     round_id: int | None = None
     chosen: str | None = None
     words: str | None = None
+    by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -978,6 +988,7 @@ class Question:
     replaced_by: int | None = None
     needs_words: tuple[str, ...] = ()
     words: str | None = None
+    answered_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1027,6 +1038,7 @@ class SprintState:
     pictures: frozenset[str] = frozenset()
     notices: tuple[Notice, ...] = ()
     permission: Permission | None = None
+    started_by: str | None = None
 
     @property
     def state(self) -> str:
@@ -1803,6 +1815,8 @@ def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str
 def inbox_entry(message: Message) -> dict:
     entry = {"id": message.message_id, "kind": message.kind, "version": message.version,
              "text": message.text, "at": message.at}
+    if message.by is not None:
+        entry["by"] = message.by
     if message.kind == MESSAGE_ANSWER:
         words = (message.words if message.words is not None
                  else message.text if message.chosen is None else None)
@@ -1848,18 +1862,28 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if event.kind == BRIEF_APPROVED:
         return _with_message(
             replace(state, brief=replace(brief, decision=APPROVED, decided_at=event.at)),
-            Message(event.seq, MESSAGE_APPROVED, event.at, version, None))
+            Message(event.seq, MESSAGE_APPROVED, event.at, version, None, by=actor_of(payload)))
     reply = payload.get("reply")
     if isinstance(reply, str):
         return _with_message(
             replace(state,
                     brief=replace(brief, decision=CHANGES, reply=reply, decided_at=event.at)),
-            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply))
+            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply, by=actor_of(payload)))
     return state
 
 
 def _id(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def actor_of(payload: Mapping) -> str | None:
+    """The guest login a row's `by` names, or None for the owner (#1263).
+
+    `by` counts only when it is already a normal login (`event_log.normal_login`, the one definition
+    admission shares); an absent, malformed or non-canonical member reads as the owner, so no guest
+    can steer a sprint whose start row is malformed."""
+    value = payload.get("by")
+    return value if isinstance(value, str) and normal_login(value) == value else None
 
 
 def _folded_notice(state: SprintState, event: Event) -> SprintState:
@@ -1932,7 +1956,8 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
     if event.kind == SPRINT_MESSAGED:
         text = payload.get("text")
         if isinstance(text, str):
-            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text))
+            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text,
+                                                by=actor_of(payload)))
     elif event.kind == SPRINT_READ:
         through = payload.get("through")
         if _id(through):
@@ -2008,12 +2033,13 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
             return state
         words = payload.get("words")
         answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
-                           differs=chosen != question.recommended, words=words)
+                           differs=chosen != question.recommended, words=words,
+                           answered_by=actor_of(payload))
         questions = (*state.questions[:position], answered, *state.questions[position + 1:])
         return _with_message(
             replace(state, questions=questions),
             Message(event.seq, MESSAGE_ANSWER, event.at, None, answer, question=question.question,
-                    round_id=round_id, chosen=chosen, words=words))
+                    round_id=round_id, chosen=chosen, words=words, by=actor_of(payload)))
     return state
 
 
@@ -2199,7 +2225,7 @@ def sprint_states(events: Iterable[Event],
             goal = event.payload.get("goal")
             if event.project is not None and isinstance(goal, str):
                 folded[sprint_id] = SprintState(sprint_id, event.project, goal, event.seq,
-                                                event.at)
+                                                event.at, started_by=actor_of(event.payload))
         elif event.kind == GOAL_WITHDRAWN:
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:

@@ -1681,6 +1681,70 @@ def approved_rows():
     return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1)]
 
 
+GUEST = "colleague@example.invalid"
+
+
+def guest_rows(sid, by=None):
+    """One sprint's goal, brief, reply, approval, question, answer and message, each with `by`
+    when it is given (a guest's rows) and with none otherwise (an owner's)."""
+    who = {} if by is None else {"by": by}
+
+    def row(seq, kind, **payload):
+        return Event(seq, at(seq), kind, "owner/p00",
+                     {"sprint_id": sid, "goal": "one", **payload, **who})
+
+    return [
+        row(1, GOAL_STATED),
+        Event(2, at(2), BRIEF_SENT, "owner/p00",
+              {"sprint_id": sid, "version": 1, "goal": "one", "brief": PARTS}),
+        row(3, BRIEF_REPLIED, version=1, reply="smaller slices"),
+        Event(4, at(4), BRIEF_SENT, "owner/p00",
+              {"sprint_id": sid, "version": 2, "goal": "one", "brief": PARTS}),
+        row(5, BRIEF_APPROVED, version=2),
+        Event(6, at(6), event_log.QUESTIONS_ASKED, "owner/p00",
+              {"sprint_id": sid, "goal": "one", "blocker": False, "questions": [QUESTION]}),
+        row(7, event_log.QUESTION_ANSWERED, round=6, index=0, question="q", answer="sqlite",
+            chosen="sqlite", recommended="files", differs=True),
+        row(8, event_log.SPRINT_MESSAGED, text="a word"),
+    ]
+
+
+class ActorFoldTest(unittest.TestCase):
+    def folded(self):
+        return sprints.sprint_states([*guest_rows("a" * 16, GUEST), *guest_rows("b" * 16)])
+
+    def test_a_guest_row_records_its_login_and_an_owner_row_none(self):
+        states = self.folded()
+        mine, owners = states["a" * 16], states["b" * 16]
+        self.assertEqual(mine.started_by, GUEST)
+        self.assertEqual([m.kind for m in mine.messages],
+                         ["changes", "approved", "answer", "text"])
+        self.assertEqual([m.by for m in mine.messages], [GUEST] * 4)
+        self.assertEqual(mine.questions[0].answered_by, GUEST)
+        self.assertIsNone(owners.started_by)
+        self.assertEqual([m.by for m in owners.messages], [None] * 4)
+        self.assertIsNone(owners.questions[0].answered_by)
+
+    def test_an_actor_that_is_not_a_normal_login_reads_as_the_owner(self):
+        for value in ("owner", "Colleague@example.invalid", "", 7, None, "a b@example.invalid",
+                      "x" * 250 + "@e.io"):
+            with self.subTest(value=value):
+                self.assertIsNone(sprints.actor_of({"by": value}))
+        self.assertIsNone(sprints.actor_of({}))
+        self.assertEqual(sprints.actor_of({"by": GUEST}), GUEST)
+        from agent_tools.console import guest
+        self.assertIs(guest.normal_login, event_log.normal_login)
+
+    def test_a_guest_message_reaches_the_manager_with_its_actor(self):
+        states = self.folded()
+        for message in states["a" * 16].messages:
+            with self.subTest(kind=message.kind):
+                self.assertEqual(sprints.inbox_entry(message)["by"], GUEST)
+        for message in states["b" * 16].messages:
+            with self.subTest(kind=message.kind):
+                self.assertNotIn("by", sprints.inbox_entry(message))
+
+
 class QuestionEndTest(unittest.TestCase):
     DONE = {**REPORT, "phase": "done"}
     CLOSE = {"summary": "Stopped early", "issues": [], "differently": "ask sooner"}

@@ -24,6 +24,9 @@ Three kinds record what the owner says to a sprint and what comes of it (#889): 
 `KEPT_KINDS`; `SPRINT_NUDGED` (`sprint.nudged`, the record of an attempt to reach the manager) is
 not, and retention removes it like any other row.
 
+A guest's goal, approval, reply, message and answer rows carry `by`, the guest's normal login
+(#1263); an owner's row carries none.
+
 Two kinds record a manager's questions and the owner's answers (#891): `QUESTIONS_ASKED`
 (`questions.asked`) and `QUESTION_ANSWERED` (`question.answered`), both in `KEPT_KINDS`.
 `QUESTION_WITHDRAWN` (`question.withdrawn`, #1099, kept) records a manager taking back an
@@ -146,6 +149,7 @@ is shared across threads and every use of it holds one lock.
 """
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -154,6 +158,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 10
+LOGIN_MAX = 254
+_LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
@@ -313,6 +319,13 @@ def cancelled_registration(event: Event) -> tuple[str, str] | None:
             or not (plan_id is None or (isinstance(plan_id, str) and plan_id))):
         return None
     return (root, plan_id)
+
+
+def normal_login(text: object) -> str | None:
+    if (not isinstance(text, str) or len(text) > LOGIN_MAX or not text.isascii()
+            or _LOGIN.fullmatch(text) is None):
+        return None
+    return text.lower()
 
 
 def utc_now() -> str:

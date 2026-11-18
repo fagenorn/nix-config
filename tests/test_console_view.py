@@ -1114,7 +1114,7 @@ class BriefViewTest(unittest.TestCase):
             "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
             "project_id": "p00", "sprint_id": sid, "title": "Ship the importer",
             "version": 2, "brief": PARTS, "pictures": [], "answered": False,
-            "waiting_since": "t9"}])
+            "waiting_since": "t9", "started_by": None}])
         self.assertEqual(view["statement"]["inbox_items"], 1)
         self.assertEqual(view["statement"]["headline"], "1 thing needs you")
         self.assertEqual(view["statement"]["sentence"], BRIEF_SENTENCE)
@@ -1763,7 +1763,8 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
                            "recommended_index": options.index(recommended),
                            "needs_words_index": []}],
             "pictures": [],
-            "items": [], "answers": [], "answered": False, "waiting_since": T0}
+            "items": [], "answers": [], "answered": False, "waiting_since": T0,
+            "started_by": None}
 
 
 FIRST = question_entry(0, "Which store keeps the checkpoints?", ["sqlite", "files"], "files",
@@ -2630,6 +2631,46 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(derive_view([state("p00", 1)])["unstopped"], [])
 
 
+class ActorViewTest(unittest.TestCase):
+    GUEST = "colleague@example.invalid"
+
+    def test_the_sprint_its_cards_and_its_messages_carry_their_actor(self):
+        from .test_console_sprints import guest_rows
+        u, v = "d" * 16, "e" * 16
+        rows = [*guest_rows(A, self.GUEST), *guest_rows(B)]
+        when = at_row(9)
+
+        def row(seq, kind, sid, **payload):
+            return Event(seq, when, kind, "owner/p00",
+                         {"sprint_id": sid, "goal": "one", **payload})
+
+        ask = {"question": "Which store?", "blocks": "b", "options": ["sqlite", "files"],
+               "recommended": "files"}
+        rows += [
+            row(20, event_log.GOAL_STATED, u, by=self.GUEST),
+            row(21, event_log.BRIEF_SENT, u, version=1, brief=PARTS_ROW),
+            row(22, event_log.GOAL_STATED, v, by=self.GUEST),
+            row(23, event_log.BRIEF_SENT, v, version=1, brief=PARTS_ROW),
+            row(24, event_log.BRIEF_APPROVED, v, version=1),
+            row(25, event_log.QUESTIONS_ASKED, v, blocker=False, questions=[ask]),
+        ]
+        shown = derive_view([state("owner/p00", 1)], sprints=sprint_states(rows),
+                            now_ms=T0_MS)
+        by_id = {s["sprint_id"]: s for s in shown["entries"][0]["sprints"]}
+        mine, owners = by_id[A], by_id[B]
+        self.assertEqual(mine["started_by"], self.GUEST)
+        self.assertEqual([m["by"] for m in mine["messages"]], [self.GUEST] * len(mine["messages"]))
+        self.assertTrue(mine["messages"])
+        self.assertEqual(mine["approval"]["by"], self.GUEST)
+        self.assertIsNone(owners["started_by"])
+        self.assertTrue(owners["messages"])
+        self.assertEqual([m["by"] for m in owners["messages"]], [None] * len(owners["messages"]))
+        items = {i["key"]: i for i in shown["inbox"]["open"]}
+        self.assertEqual(items[f"brief/{u}"]["started_by"], self.GUEST)
+        question = next(i for k, i in items.items() if k.startswith(f"question/{v}/"))
+        self.assertEqual(question["started_by"], self.GUEST)
+
+
 class SprintViewTest(unittest.TestCase):
     def test_a_sprint_shows_its_goal_state_and_age(self):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
@@ -2639,7 +2680,7 @@ class SprintViewTest(unittest.TestCase):
             "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief",
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
-            "stated_at": T0, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
+            "stated_at": T0, "started_by": None, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
@@ -2872,7 +2913,7 @@ class SprintMessageViewTest(unittest.TestCase):
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
             "action_text": None, "read_at": None, "reply": None, "reply_at": None,
-            "words": None, "new": False}])
+            "words": None, "new": False, "by": None}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")
