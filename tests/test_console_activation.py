@@ -198,7 +198,9 @@ class ActivationReadingTest(Trees):
                      "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
                      "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
                      "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md",
-                     "home/common/agent-skills/evals/README.md", "home/common/agent-skills/evals/run-eval.sh"):
+                     "home/common/agent-skills/evals/README.md", "home/common/agent-skills/evals/run-eval.sh",
+                     "home/common/agent-skills/tests/test_x.py", "home/common/agent-skills/tests/fixtures/f.json",
+                     "lib/omlx-check.nix"):
             with self.subTest(path=path):
                 self.assertFalse(activation.host_built(path))
         for path in (SKILL, "home/common/agent-skills/skills/grill-with-docs/ADR-FORMAT.md",
@@ -207,8 +209,8 @@ class ActivationReadingTest(Trees):
                      "patches/agent-plugins/codex-plugin-cc.patch", "hosts/common/common-packages.nix",
                      "flake.lock", "flake.nix", "secrets/secrets.yaml", "data/zshrc/common/50-aliases",
                      "python/README.md", "home/common/claude-code/README.md.orig", "newdir/README.md",
-                     "home/common/agent-skills/evals-notes.md", "home/common/agent-skills/tests/test_x.py",
-                     "newdir/file"):
+                     "home/common/agent-skills/evals-notes.md", "home/common/agent-skills/tests-notes.md",
+                     "lib/omlx-check.nix.orig", "lib/agent-tools.nix", "newdir/file"):
             with self.subTest(path=path):
                 self.assertTrue(activation.host_built(path))
 
@@ -233,6 +235,12 @@ class ActivationReadingTest(Trees):
         self.assertIs(result.pending, False)
         self.advance({"home/common/agent-skills/standards/README.md": "s\n"})
         self.assertEqual(self.read().other, ("home/common/agent-skills/standards/README.md",))
+
+    def test_a_change_only_a_flake_check_reads_names_nothing(self):
+        self.advance({"lib/omlx-check.nix": "{ }\n", "home/common/agent-skills/tests/test_x.py": "T = 1\n"})
+        result = self.read()
+        self.assertEqual(result, Activation(str(self.checkout), (), self.origin_commit()))
+        self.assertIs(result.pending, False)
 
     def test_a_console_change_is_not_also_another_change(self):
         self.advance({f"{CONSOLE}/view.py": "from agent_tools.system import util\nVALUE = 2\n",
@@ -530,6 +538,9 @@ class Fake:
         return step
 
 
+ReadError = object()
+
+
 def shown(svc):
     return json.loads(svc.view_bytes)["activation"]
 
@@ -772,6 +783,75 @@ class ActivatePageWriteTest(Trees):
         svc.poll_activation()
         line = shown(svc)
         self.assertEqual((line["state"], line["commit"], line["activate"]), ("pending", self.commit, True))
+
+    def await_state(self, svc, state):
+        deadline = time.monotonic() + 20
+        while shown(svc) is None or shown(svc)["state"] != state:
+            self.assertLess(time.monotonic(), deadline, shown(svc))
+            time.sleep(0.05)
+
+    def refused_nothing(self, svc):
+        deadline = time.monotonic() + 20
+        while True:
+            status, _, body = self.post(svc)
+            if body.strip() != b"an activation is already running":
+                return status, body.strip()
+            self.assertLess(time.monotonic(), deadline, "the run's claim was never released")
+            time.sleep(0.05)
+
+    def test_a_failed_completion_read_does_not_offer_activate_again_for_the_same_commit(self):
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        steps = [pending]
+        svc = self.open(reader=lambda roots: steps[0] if steps[0] is not ReadError else self.raise_read())
+        self.assertEqual(self.post(svc)[0], 204)
+        steps[0] = ReadError
+        self.release.touch()
+        self.await_finished()
+        self.await_state(svc, "activated")
+        self.assertIs(shown(svc)["activate"], False)
+        self.assertEqual(self.refused_nothing(svc), (409, b"nothing to activate"))
+        svc.poll_activation()
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("activated", False))
+        steps[0] = None
+        svc.poll_activation()
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("activated", False))
+        steps[0] = pending
+        svc.poll_activation()
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+        self.assertEqual(len(self.payloads("activation.started")), 1)
+
+    def raise_read(self):
+        raise activation.ReadFailed("the revision could not be read")
+
+    def test_a_poll_begun_before_completion_does_not_overwrite_the_refresh(self):
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        entered, gate, slow_calls = threading.Event(), threading.Event(), []
+        refreshed = [False]
+
+        def reader(roots):
+            if threading.current_thread().name == "slow-poll":
+                slow_calls.append(1)
+                entered.set()
+                self.assertTrue(gate.wait(20))
+                return pending
+            return None if refreshed[0] else pending
+
+        svc = self.open(reader=reader)
+        self.assertEqual(self.post(svc)[0], 204)
+        slow = threading.Thread(target=svc.poll_activation, name="slow-poll")
+        slow.start()
+        self.addCleanup(slow.join)
+        self.addCleanup(gate.set)
+        self.assertTrue(entered.wait(20))
+        refreshed[0] = True
+        self.release.touch()
+        self.await_finished()
+        self.await_state(svc, "activated")
+        gate.set()
+        slow.join()
+        self.assertEqual(len(slow_calls), 1)
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("activated", False))
+        self.assertEqual(self.refused_nothing(svc), (409, b"nothing to activate"))
 
     def test_a_failed_run_stays_retryable_after_the_hosts_revision_reached_the_tip(self):
         before = self.commit

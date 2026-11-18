@@ -246,9 +246,18 @@ class ScreenshotFixtureTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertNotIn(phrase, text)
             self.assertEqual(shots.ACTIVATION_BASE, (None, 0))
+            self.assertIs(shots.reads_other(), True)
             code, text = run(lambda path: shots.Shot(state, 480, path, 480,
                                                      activation=shots.ACTIVATION_BASE))
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 1)
+            self.assertIn(phrase, text)
+            with mock.patch.object(shots, "reads_other", return_value=False):
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480,
+                                                         activation=shots.ACTIVATION_BASE))
+                self.assertEqual(code, 0)
+                self.assertNotIn(phrase, text)
+                code, text = run(lambda path: shots.Shot(state, 480, path, 480, activation=shown_))
+                self.assertEqual(code, 0)
         code, text = run(lambda path: shots.Shot("live-several", 480, path, 480,
                                                  activation=(None, 1)))
         self.assertEqual(code, 0)

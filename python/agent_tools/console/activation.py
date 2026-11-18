@@ -23,9 +23,9 @@ the host's configuration revision (the `base`, with a trailing `-dirty` removed)
 commit, kept when `host_built(path)` holds, minus every path of `running` and every path under
 `python/agent_tools/console/` (console status is decided by blobs only). `host_built` is False
 exactly for a path under a `NOT_BUILT_DIRS` directory (`docs/`, `tests/`, `.github/`, `.agents/`, and the
-skills' evaluation harness `home/common/agent-skills/evals/`, which only the checkout runs) or
-equal to a `NOT_BUILT_FILES` file (the root documents and `justfile`, `.gitignore`, `.sops.yaml`, and
-the Nix-module READMEs no `.nix` file reads); every other path is counted. The host's revision is
+skills' evaluation harness `home/common/agent-skills/evals/` and `home/common/agent-skills/tests/`, which only the checkout runs) or
+equal to a `NOT_BUILT_FILES` file (the root documents and `justfile`, `.gitignore`, `.sops.yaml`, the
+Nix-module READMEs no `.nix` file reads, and `lib/omlx-check.nix`, which `flake.nix` imports only under `checks`); every other path is counted. The host's revision is
 read on every reading, through the `revision` seam, so a later activation clears `other` by itself;
 a revision that cannot be read, or a commit the checkout lacks, is a failed read. `Activation.pending`
 is true when `changed` or `other` is not empty.
@@ -73,11 +73,12 @@ ENTRY = "python/agent_tools/console/console.py"
 _PACKAGE = "agent_tools"
 _CONSOLE_DIR = f"{SOURCE_DIR}/{_PACKAGE}/console/"
 _GIT_SECONDS = 30
-NOT_BUILT_DIRS = ("docs/", "tests/", ".github/", ".agents/", "home/common/agent-skills/evals/")
+NOT_BUILT_DIRS = ("docs/", "tests/", ".github/", ".agents/", "home/common/agent-skills/evals/",
+                  "home/common/agent-skills/tests/")
 NOT_BUILT_FILES = (
     "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
     "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
-    "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md",
+    "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md", "lib/omlx-check.nix",
 )
 
 
