@@ -127,7 +127,8 @@ with an id). `apply_items(latest, adoption, entry, action, *, deferred)` lists t
 card (an `inbox_item` of reason `register_apply`, `text` False, the options `[<first>, Not now]`
 and the values `[apply | retry, not_now]`) that action asks, else `[]`: none when `latest` or the
 action is None or when `latest["plan_id"]` is in `deferred`. A ready plan with no adoption asks
-`Apply this adoption?` with `Apply it` (key `register-apply/<plan_id>/<latest at>`, the plan's lines
+`Apply this adoption?` with `Apply it` (key `register-apply/<plan_id>/<latest at>`, the proposed
+commit environment's line (`contract_draft.proposed_lines`, ADR-console-074), then the plan's lines,
 as `lines`, and `folder_trust.TRUST_SENTENCE` as `why`: approving also grants the folder's client
 trust, #1078, ADR-console-034); with an adoption the ask is the entry's headline and its note is `why` (key
 `.../<adoption at>`), the option `Apply it again` for `approve` (waiting since the pull request's
@@ -178,7 +179,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from agent_tools.console import event_log, folder_trust, manager, register
+from agent_tools.console import contract_draft, event_log, folder_trust, manager, register
 from agent_tools.console.event_log import Event
 from agent_tools.project_contract import adopt_apply
 from agent_tools.system import forge_api
@@ -522,7 +523,8 @@ def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping
     if action == "approve" and adoption is None:
         key, ask, why = (f"register-apply/{plan_id}/{latest['at']}", APPLY_ASK,
                          folder_trust.TRUST_SENTENCE)
-        lines, first, value, since = list(latest["lines"]), APPLY_OPTION, APPLY_VALUE, latest["at"]
+        lines = [*contract_draft.proposed_lines(latest.get("draft")), *latest["lines"]]
+        first, value, since = APPLY_OPTION, APPLY_VALUE, latest["at"]
     elif action in ("approve", "retry") and adoption is not None and entry is not None:
         key = f"register-apply/{plan_id}/{latest['at']}/{adoption['at']}"
         ask, why, lines = entry["headline"], entry["note"], []

@@ -57,6 +57,13 @@ def sample(parent: Path, *, remote: bool, name: str = "sample-app") -> Path:
     return root
 
 
+def install_hook(root, name="pre-commit", text="#!/bin/sh\nexit 0\n", mode=0o755):
+    hooks = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()) / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / name).write_text(text)
+    (hooks / name).chmod(mode)
+
+
 def by_field(fields):
     return {f["field"]: f for f in fields}
 
@@ -227,6 +234,175 @@ class ContractDraftTest(unittest.TestCase):
             env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
 
+    def environment_checkout(self, parent=None):
+        root = sample(parent or self.parent, remote=True)
+        commit(root, {"devenv.nix": "{ ... }: { }\n"})
+        install_hook(root)
+        return root
+
+    def test_a_devenv_checkout_with_an_installed_hook_proposes_its_development_shell(self):
+        root = self.environment_checkout()
+        reading = cd.read(str(root))
+        fields = cd.draft(str(root), reading)
+        self.assertEqual(reading["hooks"], ["pre-commit"])
+        self.assertEqual(reading["environments"], ["devenv.nix"])
+        self.assertEqual([f["field"] for f in fields], [*cd.FIELDS, "commit-environment"])
+        self.assertEqual(pair(fields, "commit-environment"), ("devenv shell --", "files"))
+        self.assertNotIn("commit-environment", [f["field"] for f in cd.open_fields(fields)])
+        line = "command commits run through: devenv shell -- (found in its files)"
+        entry = next(e for e in cd.shown(fields) if e["field"] == "commit-environment")
+        self.assertEqual(entry["line"], line)
+        self.assertIs(entry["more"], False)
+        self.assertEqual(entry["options"], [
+            {"value": "none", "label": "Commits run without a development environment"}])
+        self.assertEqual(entry["placeholder"], "the command commits run through")
+        self.assertEqual(cd.proposed_lines(fields), [line])
+        self.assertEqual(cd.more_line(fields), "and 22 more settings at their usual values")
+        fields = self.settled(fields, str(root), build_command="none", test_command="none")
+        drafted = cd.contract(fields)
+        self.assertEqual(drafted["bindings"]["commands"]["commit-environment"],
+                         {"argv": ["devenv", "shell", "--"], "cwd": ".", "env": []})
+        self.assertEqual(drafted["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
+        del drafted["bindings"]["commands"]["commit-environment"]
+        del drafted["bindings"]["vcs"]["commit"]["environment"]
+        self.assertEqual(drafted, self.expected_contract())
+
+    def test_the_drafted_contract_with_a_commit_environment_resolves(self):
+        root = self.environment_checkout()
+        fields = cd.draft(str(root), cd.read(str(root)))
+        fields = self.settled(fields, str(root), build_command="none", test_command="none")
+        version = json.loads(MANIFEST.read_text())["platform_version"]
+        major = int(version.split(".")[0])
+        drafted = cd.contract(fields)
+        drafted["platform"] = {"min_inclusive": version, "max_exclusive": f"{major + 1}.0.0"}
+        copy = self.parent / "copy"
+        shutil.copytree(root, copy)
+        (copy / ".agents").mkdir()
+        (copy / ".agents" / "project.json").write_text(json.dumps(drafted))
+        home = self.parent / "home"
+        (home / ".agents" / "share").mkdir(parents=True)
+        shutil.copy(MANIFEST, home / ".agents" / "share" / "platform-manifest.json")
+        env = {**os.environ, "HOME": str(home), "PYTHONPATH": str(ROOT / "python")}
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.project_contract.resolve_project", "resolve",
+             "--repo-root", str(copy)],
+            env=env, text=True, stdin=subprocess.DEVNULL, capture_output=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        resolved = json.loads(done.stdout)
+        self.assertEqual(resolved["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
+
+    def global_hooks(self, parent):
+        hooks = parent / "f-global-hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        (hooks / "pre-commit").chmod(0o755)
+        config = parent / "f-global.gitconfig"
+        config.write_text(f"[core]\n\thooksPath = {hooks}\n")
+        saved = os.environ.get("GIT_CONFIG_GLOBAL")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(config)
+        self.addCleanup(os.environ.pop if saved is None else os.environ.__setitem__,
+                        "GIT_CONFIG_GLOBAL", *([] if saved is None else [saved]))
+
+    def test_without_a_committed_devenv_or_an_installed_commit_hook_the_draft_is_as_today(self):
+        def a(root):
+            commit(root, {"devenv.nix": "{ }\n"})
+            install_hook(root, "pre-commit.sample")
+
+        def b(root):
+            install_hook(root)
+
+        def c(root):
+            (root / "devenv.nix").write_text("{ }\n")
+            install_hook(root)
+
+        def d(root):
+            commit(root, {"devenv.nix": "{ }\n"})
+            install_hook(root, mode=0o644)
+
+        def e(root):
+            commit(root, {"devenv.nix": "{ }\n"})
+            install_hook(root, "pre-push")
+
+        def f(root):
+            commit(root, {"devenv.nix": "{ }\n"})
+            self.global_hooks(root.parent)
+
+        def h(root):
+            commit(root, {"devenv.nix": "{ }\n"})
+            install_hook(root, "post-commit", "#!/bin/sh\ngit lfs post-commit \"$@\"\n")
+
+        def i(root):
+            (root / "devenv.nix").write_text("{ }\n")
+            git(root, "add", "devenv.nix")
+            install_hook(root)
+
+        for letter, arrange in (("a", a), ("b", b), ("c", c), ("d", d), ("e", e), ("f", f),
+                                ("h", h), ("i", i)):
+            with self.subTest(case=letter):
+                root = sample(self.parent / letter, remote=True)
+                arrange(root)
+                fields = cd.draft(str(root), cd.read(str(root)))
+                self.assertEqual([x["field"] for x in fields], list(cd.FIELDS))
+                self.assertEqual(getattr(cd, "proposed_lines", lambda fs: [])(fields), [])
+                fields = self.settled(fields, str(root), build_command="none", test_command="none")
+                self.assertEqual(cd.contract(fields), self.expected_contract())
+
+    def test_only_the_repository_s_own_hooks_directory_is_read(self):
+        with self.subTest(case="g"):
+            root = sample(self.parent / "g", remote=True)
+            commit(root, {"devenv.nix": "{ }\n"})
+            git(root, "config", "core.hooksPath", "local-hooks")
+            (root / "local-hooks").mkdir()
+            (root / "local-hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+            (root / "local-hooks" / "pre-commit").chmod(0o755)
+            reading = cd.read(str(root))
+            self.assertEqual(reading["hooks"], ["pre-commit"])
+            fields = cd.draft(str(root), reading)
+            self.assertIn("commit-environment", [x["field"] for x in fields])
+        with self.subTest(case="f-prime"):
+            root = sample(self.parent / "f", remote=True)
+            commit(root, {"devenv.nix": "{ }\n"})
+            self.global_hooks(root.parent)
+            reading = cd.read(str(root))
+            self.assertEqual(reading["hooks"], [])
+            self.assertEqual(reading["environments"], ["devenv.nix"])
+
+    def test_the_owner_can_change_or_drop_the_proposed_commit_environment(self):
+        root = self.environment_checkout()
+        fields = cd.draft(str(root), cd.read(str(root)))
+        fields = self.settled(fields, str(root), build_command="none", test_command="none")
+        dropped, error = cd.set_value(fields, "commit-environment", "none", entries=[], root=str(root))
+        self.assertIsNone(error)
+        line = "command commits run through: none (set by you)"
+        self.assertEqual([e["line"] for e in cd.shown(dropped) if e["field"] == "commit-environment"],
+                         [line])
+        self.assertEqual(cd.proposed_lines(dropped), [line])
+        drafted = cd.contract(dropped)
+        self.assertNotIn("commit-environment", drafted["bindings"]["commands"])
+        self.assertNotIn("environment", drafted["bindings"]["vcs"]["commit"])
+        typed, error = cd.set_value(fields, "commit-environment", "nix develop --command",
+                                    entries=[], root=str(root))
+        self.assertIsNone(error)
+        self.assertEqual(cd.contract(typed)["bindings"]["commands"]["commit-environment"]["argv"],
+                         ["nix", "develop", "--command"])
+        self.assertEqual(cd.set_value(fields, "commit-environment", "devenv 'shell", entries=[],
+                                      root=str(root)), (None, cd.COMMAND_UNREADABLE))
+        plain = str(sample(self.parent / "plain", remote=True))
+        bare = cd.draft(plain, cd.read(plain))
+        self.assertEqual(cd.set_value(bare, "commit-environment", "devenv shell --", entries=[],
+                                      root=plain), (None, cd.UNKNOWN_FIELD))
+
+    def test_a_refusal_of_the_commit_environment_reopens_its_field(self):
+        wanted = ("commit-environment", "The plan refused the command commits run through: m")
+        for pointer in ("/bindings/commands/commit-environment/argv/0",
+                        "/bindings/vcs/commit/environment"):
+            error = {"repair_id": "adopt.draft.invalid",
+                     "violations": [{"pointer": pointer, "message": "m"}]}
+            self.assertEqual(cd.refused_field(error), wanted)
+        error = {"repair_id": "adopt.draft.invalid",
+                 "violations": [{"pointer": "/bindings/vcs/commit/signed", "message": "m"}]}
+        self.assertEqual(cd.refused_field(error)[0], "commit-signed")
+
     def test_a_typed_id_is_checked_against_the_rule_and_the_registry(self):
         root, fields = self.remote_fields()
         before = json.dumps(fields)
@@ -391,7 +567,8 @@ class ContractDraftTest(unittest.TestCase):
         plain = self.parent / "plain"
         plain.mkdir()
         self.assertEqual(cd.read(str(plain)),
-                         {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {}})
+                         {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {},
+                          "hooks": [], "environments": []})
         root = str(sample(self.parent, remote=True))
         before = (git(root, "status", "--porcelain"), git(root, "rev-parse", "HEAD^{tree}"))
         cd.read(root)

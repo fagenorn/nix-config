@@ -1,6 +1,7 @@
 """The console's drafted project contract for a repository that has none (#1067).
 
-Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. A repository with no `.agents/project.json` is registered with a contract
+Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. The proposed
+commit environment is ADR-console-074. A repository with no `.agents/project.json` is registered with a contract
 the console drafts from what the repository says and what the owner answers. This module reads the
 repository, drafts the 29 fields of the contract, words the open ones as cards, takes the owner's
 answers, and renders the wire-format contract that `adopt-project plan --contract-draft` takes. It
@@ -8,13 +9,18 @@ judges only what it must to stay total (the project id's shape, the registry, a 
 `shlex` can read, JSON that parses): every other value is the resolver's to judge (plan D2).
 
 Reading. `read(root)` returns `{"remotes": [(name, url)], "default_branch", "branches", "files",
-"texts"}` and never raises and never writes. Every git child has no shell, `stdin` and `stderr` to
+"texts", "hooks", "environments"}` and never raises and never writes. Every git child has no shell, `stdin` and `stderr` to
 `DEVNULL`, `GIT_TIMEOUT` (10 seconds) and `GIT_TERMINAL_PROMPT=0`; an `OSError`, a timeout or a
 non-zero exit reads as empty or None. Remotes are the authored URLs (`config --get-regexp`, before
 `insteadOf`), sorted by name, one URL per name. The default branch is asked of the remote only when
 there is exactly one (`ls-remote --symref`). Branches are the local heads, files the tracked paths,
 texts the tracked build files (`justfile`, `Makefile`, `package.json` and their spellings), at most
-65536 bytes each.
+65536 bytes each. `hooks` are the `COMMIT_HOOKS` names (`pre-commit`, `prepare-commit-msg`,
+`commit-msg`; never `post-commit`, which cannot stop a commit) installed as executable files in the
+repository's own hooks directory (`git rev-parse --git-path hooks` with no global or system config,
+so a global hooks path never counts), in `COMMIT_HOOKS` order. `environments` are the `ENVIRONMENTS`
+file names present in the `HEAD` commit (the revision Apply's worktree starts from, so an untracked or
+staged-only file never counts), in `ENVIRONMENTS` order.
 
 Fields. `FIELDS` lists the 29 field ids in order; each is a record with exactly the keys
 `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
@@ -36,6 +42,14 @@ it reads `<label>: <value> (<source>)`. `more_line` counts those shown `more` en
 `placeholder` gives a typed field the words its empty box shows (`PLACEHOLDERS`), None for a choice.
 Every label is plain words, never a contract term.
 
+Proposed field. `PROPOSED` lists the fields `draft` adds after the 29 only when proposed: today the
+`commit-environment` field (`command commits run through`), drafted with the command of the first
+`ENVIRONMENTS` file in `reading["environments"]` (source `files`) when `reading["hooks"]` is not empty,
+and never otherwise, so a draft without it is exactly the 29 records. It is a main field, a typed
+choice with the one option `none`, never open. `proposed_lines(fields)` gives the `shown` line of each
+`PROPOSED` field present in a draft list, in `PROPOSED` order, `[]` for a non-list or a draft without
+one; the ready Apply card shows them first.
+
 Answers. `set_value(fields, field, value, entries=, root=)` returns `(new_fields, None)` or `(None,
 text)`, refusing in order with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `ID_RULE`
 (two names joined by one slash), `taken(<id>)`, `COMMAND_UNREADABLE` (a command `shlex` cannot read) and
@@ -47,7 +61,9 @@ Contract. `contract(fields)` is total on every list `draft` and `set_value` prod
 `capabilities` (each `{"support": "supported" | "unsupported"}`), `projections` and `release`; a
 `none` command is left out, `light_lane` is left out when it is `none`, `yes`/`no` are booleans, a
 path list splits on commas, and a count that is all digits is an int. It has no `platform` member:
-the adoption plan adds it.
+the adoption plan adds it. A `commit-environment` value other than None or `none` adds the command
+`bindings.commands["commit-environment"]` and names it in `bindings.vcs.commit.environment`; it never
+changes `workflow.verification` or `capabilities`.
 
 Refusals. `refused_field(error)` maps an `adopt.draft.invalid` or `adopt.draft.id_taken` error to the
 field its first matching violation names (the longest matching pointer wins) and the one wording `The
@@ -89,6 +105,13 @@ COMMAND_UNREADABLE = ("the command could not be read: close every quote and do n
 NOT_JSON = "type it as JSON, or choose one of the offered answers"
 NO_DRAFT = "that plan has no drafted contract to change"
 REPAIRS = ("adopt.draft.invalid", "adopt.draft.id_taken")
+# The hooks whose exit status can stop `git commit` (githooks(5): post-commit cannot).
+COMMIT_HOOKS: tuple[str, ...] = ("pre-commit", "prepare-commit-msg", "commit-msg")
+# A root file that marks a development environment, and the command that proposes: in priority order.
+ENVIRONMENTS: tuple[tuple[str, str], ...] = (("devenv.nix", "devenv shell --"),)
+ENVIRONMENT_FIELD = "commit-environment"
+PROPOSED: tuple[str, ...] = (ENVIRONMENT_FIELD,)
+ENVIRONMENT_COMMAND = "commit-environment"
 ID_PATTERN = re.compile(r"^[^\s/]+/[^\s/]+$")
 DIGITS = re.compile(r"^[0-9]+$")
 
@@ -158,14 +181,21 @@ _TABLE = (
     ("release", "how it is released", ("/release",),
      [{"value": "unsupported", "label": "It makes no releases"}], True),
 )
+# Fields `draft` adds only when proposed; they are not among the 29 `FIELDS`.
+_PROPOSED_TABLE = (
+    (ENVIRONMENT_FIELD, "command commits run through",
+     ("/bindings/vcs/commit/environment", "/bindings/commands/commit-environment"),
+     _none("Commits run without a development environment"), True),
+)
 FIELDS: tuple[str, ...] = tuple(row[0] for row in _TABLE)
 ASKED = frozenset({"project-id", "default-branch", "tracker", "build-command", "test-command"})
-COMMAND_FIELDS = ("build-command", "test-command", "review-plan-command", "review-code-command")
+COMMAND_FIELDS = ("build-command", "test-command", "review-plan-command", "review-code-command",
+                  ENVIRONMENT_FIELD)
 JSON_FIELDS = ("light-lane", "projections", "release")
-LABELS = {row[0]: row[1] for row in _TABLE}
-POINTERS = {row[0]: row[2] for row in _TABLE}
-OPTIONS = {row[0]: row[3] for row in _TABLE}
-TEXT = {row[0]: row[4] for row in _TABLE}
+LABELS = {row[0]: row[1] for row in (*_TABLE, *_PROPOSED_TABLE)}
+POINTERS = {row[0]: row[2] for row in (*_TABLE, *_PROPOSED_TABLE)}
+OPTIONS = {row[0]: row[3] for row in (*_TABLE, *_PROPOSED_TABLE)}
+TEXT = {row[0]: row[4] for row in (*_TABLE, *_PROPOSED_TABLE)}
 # field -> (value, source) the console starts from; the project id, name, default branch, tracker,
 # documentation paths and the build and test commands are read, not started.
 STARTS = {
@@ -219,7 +249,7 @@ REST_WORDS = {
 }
 # The fields whose values are read from the repository or asked: they keep their own line.
 MAIN: tuple[str, ...] = ("project-id", "project-name", "default-branch", "tracker", "docs-paths",
-                         "build-command", "test-command")
+                         "build-command", "test-command", ENVIRONMENT_FIELD)
 _JSON = "the value as JSON"
 PLACEHOLDERS = {
     "project-id": "owner/name",
@@ -240,6 +270,7 @@ PLACEHOLDERS = {
     "rejections-paths": "paths, separated by commas",
     "build-command": "the build command",
     "test-command": "the test command",
+    ENVIRONMENT_FIELD: "the command commits run through",
     "review-plan-command": "the review command",
     "review-code-command": "the review command",
     "max-parallel": "a number",
@@ -262,12 +293,12 @@ OTHER_TOOLS = (("Cargo.toml", {"build": "cargo build", "test": "cargo test"}),
 # --------------------------------------------------------------------------
 
 
-def _git(root: str, *arguments: str) -> bytes | None:
+def _git(root: str, *arguments: str, extra_env: Mapping[str, str] | None = None) -> bytes | None:
     try:
         done = subprocess.run(
             ["git", "-C", root, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=GIT_TIMEOUT, shell=False,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(extra_env or {})})
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -294,8 +325,25 @@ def _default_branch(root: str, remotes: list[tuple[str, str]]) -> str | None:
     return match.group(1) if match else None
 
 
+def _hooks(root: str) -> list[str]:
+    """The `COMMIT_HOOKS` installed as executable files in the repository's own hooks directory."""
+    printed = _git(root, "rev-parse", "--path-format=absolute", "--git-path", "hooks",
+                   extra_env={"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    if not printed:
+        return []
+    directory = Path(printed.decode("utf-8", "replace").rstrip("\n"))
+    return [name for name in COMMIT_HOOKS
+            if (directory / name).is_file() and os.access(directory / name, os.X_OK)]
+
+
+def _environments(root: str) -> list[str]:
+    """The `ENVIRONMENTS` files in the `HEAD` commit, the revision Apply's worktree starts from."""
+    return [name for name, _ in ENVIRONMENTS
+            if _git(root, "cat-file", "-e", f"HEAD:{name}") is not None]
+
+
 def read(root: str) -> dict:
-    """What the repository says: remotes, default branch, local branches, tracked files and texts."""
+    """What the repository says: remotes, default branch, branches, files, texts, hooks, environments."""
     try:
         remotes = _remotes(root)
         branches = _lines(_git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads"))
@@ -308,9 +356,11 @@ def read(root: str) -> dict:
                 if body is not None:
                     texts[name] = body[:TEXT_LIMIT].decode("utf-8", "replace")
         return {"remotes": remotes, "default_branch": _default_branch(root, remotes),
-                "branches": branches, "files": files, "texts": texts}
+                "branches": branches, "files": files, "texts": texts,
+                "hooks": _hooks(root), "environments": _environments(root)}
     except Exception:  # read never raises: an unreadable repository reads as empty
-        return {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {}}
+        return {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {},
+                "hooks": [], "environments": []}
 
 
 def _host(url: str) -> str | None:
@@ -414,7 +464,19 @@ def _ask(field: str, name: str, remotes: int) -> str:
         verb = "builds" if field == "build-command" else "tests"
         return (f"Which command {verb} {name}?\nThe console found none in its files: "
                 "type the command, or say it has none.")
+    if field == ENVIRONMENT_FIELD:
+        return (f"Which command should the commits of {name} run through?\n"
+                "Its commit hooks need its development environment: type the command, or say they "
+                "need none.")
     return f"What should the {LABELS[field]} of {name} be?"
+
+
+def _proposal(reading: Mapping) -> str | None:
+    """The command commits run through, when a development environment and a commit hook exist."""
+    environments = reading.get("environments") or ()
+    if not reading.get("hooks"):
+        return None
+    return next((command for name, command in ENVIRONMENTS if name in environments), None)
 
 
 def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> list[dict]:
@@ -446,6 +508,13 @@ def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> li
         fields.append({"field": field, "label": LABELS[field], "value": value, "source": source,
                        "options": options, "text": TEXT[field], "reason": None,
                        "ask": _ask(field, name, len(remotes))})
+    proposal = _proposal(reading)
+    if proposal is not None:
+        fields.append({"field": ENVIRONMENT_FIELD, "label": LABELS[ENVIRONMENT_FIELD],
+                       "value": proposal, "source": "files",
+                       "options": copy.deepcopy(OPTIONS[ENVIRONMENT_FIELD]),
+                       "text": TEXT[ENVIRONMENT_FIELD], "reason": None,
+                       "ask": _ask(ENVIRONMENT_FIELD, name, len(remotes))})
     held = taken_id(fields, entries, root)
     if held is not None:
         fields[0]["reason"] = held
@@ -527,6 +596,14 @@ def shown(fields: Iterable[Mapping]) -> list[dict]:
             for f in fields if f["field"] not in still_open]
 
 
+def proposed_lines(fields: object) -> list[str]:
+    """The shown line of each proposed field a draft holds, in `PROPOSED` order."""
+    if not isinstance(fields, list):
+        return []
+    lines = {entry["field"]: entry["line"] for entry in shown(fields)}
+    return [lines[field] for field in PROPOSED if field in lines]
+
+
 def more_line(fields: Iterable[Mapping]) -> str | None:
     """The counted line for the shown settings outside `MAIN`, None when there are none."""
     more = _more(list(fields))
@@ -557,7 +634,9 @@ def _parses(value: str) -> bool:
 def set_value(fields: Iterable[Mapping], field: str, value: str, *, entries: Iterable[Mapping],
               root: str) -> tuple[list[dict] | None, str | None]:
     """The fields with `field` set by the owner, or `(None, text)` saying why not."""
-    if field not in FIELDS:
+    fields = list(fields)
+    if (field not in FIELDS and field not in PROPOSED) or not any(
+            record["field"] == field for record in fields):
         return None, UNKNOWN_FIELD
     value = value.strip()
     if not value:
@@ -621,8 +700,14 @@ def contract(fields: Iterable[Mapping]) -> dict:
         if v[field] is not None and v[field] != "none":
             commands[key] = {"argv": shlex.split(v[field]), "cwd": ".", "env": []}
     verification = [key for key in ("build", "test") if key in commands]
+    environment = v.get(ENVIRONMENT_FIELD)
+    if environment is not None and environment != "none":
+        commands[ENVIRONMENT_COMMAND] = {"argv": shlex.split(environment), "cwd": ".", "env": []}
     github = v["tracker"] == "github"
     default = v["default-branch"]
+    commit = {"co_authored_by": _flag(v["co-authored-by"]), "signed": _flag(v["commit-signed"])}
+    if ENVIRONMENT_COMMAND in commands:
+        commit["environment"] = ENVIRONMENT_COMMAND
     workflow = {
         "verification": verification,
         "orchestration": {"max_parallel": _count(v["max-parallel"]),
@@ -644,8 +729,7 @@ def contract(fields: Iterable[Mapping]) -> dict:
                     "integration_branch": v["integration-branch"] or default,
                     "branch_pattern": v["branch-pattern"],
                     "worktree": {"root": v["worktree-root"], "prefix": v["worktree-prefix"]},
-                    "commit": {"co_authored_by": _flag(v["co-authored-by"]),
-                               "signed": _flag(v["commit-signed"])},
+                    "commit": commit,
                     "merge": {"strategy": v["merge-strategy"],
                               "delete_branch": _flag(v["delete-branch"])}},
             "tracker": {"kind": "github" if github else "none", "cli": "gh" if github else "none",
@@ -696,7 +780,7 @@ def refused_field(error: Mapping) -> tuple[str, str] | None:
         if not isinstance(pointer, str):
             continue
         best, size = None, -1
-        for field in FIELDS:
+        for field in (*FIELDS, *PROPOSED):
             for candidate in POINTERS[field]:
                 if _matches(pointer, candidate) and len(candidate) > size:
                     best, size = field, len(candidate)

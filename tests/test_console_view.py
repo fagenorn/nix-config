@@ -3244,8 +3244,8 @@ class RegisterItemViewTest(unittest.TestCase):
                 self.assertNotIn(term, text.lower())
         self.assertEqual(
             shown["registration"]["draft_more"],
-            f"and {len(contract_draft.FIELDS) - len(contract_draft.MAIN)} more settings at "
-            "their usual values")
+            f"and {len([f for f in contract_draft.FIELDS if f not in contract_draft.MAIN])} more "
+            "settings at their usual values")
         self.assertEqual(shown["registration"]["draft_more"],
                          "and 22 more settings at their usual values")
 
