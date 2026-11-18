@@ -1,9 +1,10 @@
-"""The console's activation reading (#1114): which console files this host runs behind origin's integration branch.
+"""The console's activation reading (#1114, #1258): what this host runs behind origin's integration branch.
 
 The console runs from a build of the `python/` tree (`SOURCE_DIR`). This module compares the files
 that build holds with the files on the remote-tracking integration branch of a registered checkout,
-so the page can say, in one line, that a `just switch` would change what the console runs. It writes
-nothing: no ref, no file, no log row.
+and the files the host's configuration is built from with that branch, so the page can say, in one
+line, that a `just switch` would change what the host runs. It writes nothing: no ref, no file, no
+log row.
 
 Console-built files. Every regular file under `<package_root>/agent_tools/console/` except
 `__pycache__` directories and `.pyc` files, plus every `agent_tools` module those `.py` files
@@ -16,17 +17,32 @@ with `/` separators; values are git blob ids (`blob_id`).
 (not under `__pycache__`, not `.pyc`) that `running` does not hold. The result is sorted, without
 duplicates.
 
+Host-built changes. `Activation.other` holds the paths a merged change touched that the host's
+configuration is built from but that are not console files: the paths `git diff-tree` reports between
+the host's configuration revision (the `base`, with a trailing `-dirty` removed) and the reading's
+commit, kept when `host_built(path)` holds, minus every path of `running` and every path under
+`python/agent_tools/console/` (console status is decided by blobs only). `host_built` is False
+exactly for a path under a `NOT_BUILT_DIRS` directory (`docs/`, `tests/`, `.github/`, `.agents/`, and the
+skills' evaluation harness `home/common/agent-skills/evals/` and `home/common/agent-skills/tests/`, which only the checkout runs) or
+equal to a `NOT_BUILT_FILES` file (the root documents and `justfile`, `.gitignore`, `.sops.yaml`, the
+Nix-module READMEs no `.nix` file reads, and `lib/omlx-check.nix`, which `flake.nix` imports only under `checks`); every other path is counted. The host's revision is
+read on every reading, through the `revision` seam, so a later activation clears `other` by itself;
+a revision that cannot be read, or a commit the checkout lacks, is a failed read. `Activation.pending`
+is true when `changed` or `other` is not empty.
+
 `Activation.commit` is the 40-hex object id of `refs/remotes/origin/<branch>` that the compared tree
 was read from: the id is read once and the tree is listed at that id, never re-resolved from the ref
 name. An activation builds that commit, not the checkout's own `HEAD` or working tree, so the
 checkout needs no update first and the reading carries no "checkout behind" flag.
 
-`reading(roots, running)` reads only `refs/remotes/origin/<branch>` of each checkout, where
+`reading(roots, running, revision=...)` reads only `refs/remotes/origin/<branch>` of each checkout, where
 `<branch>` is the integration branch of the checkout's project contract, never the local branch or
-the working tree. It returns `Activation(root, changed, commit)` for the first root in sorted order
+the working tree. It returns `Activation(root, changed, commit, other)` for the first root in sorted order
 whose branch is a string and whose origin tree holds `ENTRY` (the file that marks a checkout as the
 console's source), even when an earlier root's read failed. Its `tree` seam is
-`origin_tree(root, branch)`, giving `(commit, files)`.
+`origin_tree(root, branch)`, giving `(commit, files)`; its `changes` seam is
+`host_changes(root, base, commit)`. `revision()` is called once, only after a candidate root is
+found, and a failure of `revision` or `changes` for that root propagates at once.
 
 `origin_tip(root)` is the commit of `refs/remotes/origin/<integration_branch(root)>`: None when the
 root has no contract or no such ref, `ReadFailed` when git or the resolver fails.
@@ -37,8 +53,8 @@ non-zero, could not run or timed out; the resolver failed; a malformed record) r
 when no root qualifies, naming the failed roots; `reading` returns None only when every root was read
 and none is a candidate.
 
-`reader_for(package_root)` computes `console_files(package_root)` once, when called (the running
-build is immutable), and reuses it for every later call.
+`reader_for(package_root, revision=...)` computes `console_files(package_root)` once, when called
+(the running build is immutable), and reuses it for every later call; `revision` is read on every call.
 """
 
 from __future__ import annotations
@@ -57,6 +73,13 @@ ENTRY = "python/agent_tools/console/console.py"
 _PACKAGE = "agent_tools"
 _CONSOLE_DIR = f"{SOURCE_DIR}/{_PACKAGE}/console/"
 _GIT_SECONDS = 30
+NOT_BUILT_DIRS = ("docs/", "tests/", ".github/", ".agents/", "home/common/agent-skills/evals/",
+                  "home/common/agent-skills/tests/")
+NOT_BUILT_FILES = (
+    "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
+    "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
+    "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md", "lib/omlx-check.nix",
+)
 
 
 class ReadFailed(Exception):
@@ -68,6 +91,16 @@ class Activation:
     root: str
     changed: tuple[str, ...]
     commit: str
+    other: tuple[str, ...] = ()
+
+    @property
+    def pending(self) -> bool:
+        return bool(self.changed or self.other)
+
+
+def host_built(path: str) -> bool:
+    """False exactly for a path the host's configuration is not built from; see the module docstring."""
+    return not (path.startswith(NOT_BUILT_DIRS) or path in NOT_BUILT_FILES)
 
 
 def blob_id(data: bytes) -> str:
@@ -206,6 +239,13 @@ def changed_paths(running: Mapping[str, str], origin: Mapping[str, str]) -> tupl
     return tuple(sorted(changed))
 
 
+def host_changes(root: str, base: str, commit: str) -> tuple[str, ...]:
+    """The host-built paths that differ between the commits `base` and `commit`, sorted."""
+    out = _git(root, "diff-tree", "-r", "--name-only", "-z", "--no-renames", base, commit, "--")
+    paths = {record.decode("utf-8", "surrogateescape") for record in out.split(b"\0") if record}
+    return tuple(sorted(path for path in paths if host_built(path)))
+
+
 def integration_branch(root: str) -> str | None:
     """The integration branch of the project contract at `root`; None only when the root holds no contract."""
     try:
@@ -231,8 +271,10 @@ def reading(
     roots: Iterable[str],
     running: Mapping[str, str],
     *,
+    revision: Callable[[], str | None],
     branch_of: Callable[[str], str | None] = integration_branch,
     tree: Callable[[str, str], tuple[str, Mapping[str, str]] | None] = origin_tree,
+    changes: Callable[[str, str, str], tuple[str, ...]] = host_changes,
 ) -> Activation | None:
     """The activation reading of the first root whose origin carries the console; see the module docstring."""
     failures: list[str] = []
@@ -245,13 +287,21 @@ def reading(
             continue
         if read is not None and ENTRY in read[1]:
             commit, origin = read
-            return Activation(root, changed_paths(running, origin), commit)
+            base = revision()
+            if base is None:
+                raise ReadFailed(f"{root}: the host's configuration revision could not be read")
+            other = tuple(
+                path for path in changes(root, base.removesuffix("-dirty"), commit)
+                if path not in running and not path.startswith(_CONSOLE_DIR))
+            return Activation(root, changed_paths(running, origin), commit, other)
     if failures:
         raise ReadFailed("; ".join(failures))
     return None
 
 
-def reader_for(package_root: Path) -> Callable[[Iterable[str]], Activation | None]:
+def reader_for(
+    package_root: Path, *, revision: Callable[[], str | None]
+) -> Callable[[Iterable[str]], Activation | None]:
     """A reader over the checkouts, comparing against the files of the running build taken now."""
     running = console_files(package_root)
-    return lambda roots: reading(roots, running, branch_of=integration_branch)
+    return lambda roots: reading(roots, running, revision=revision, branch_of=integration_branch)
