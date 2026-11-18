@@ -24,7 +24,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -84,6 +84,9 @@ def fake_browser(present):
             if expression == shots.ACTIVATION_READING:
                 self.reads += 1
                 return list(shots.ACTIVATION_SHOWN["activation-tooling"])
+            if expression == shots.REGISTER_READING:
+                self.reads += 1
+                return list(shots.REGISTER_SHOWN["register-apply"])
             if expression == shots.CARD_READING:
                 self.reads += 1
                 return list(self.card)
@@ -113,8 +116,8 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_four_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 34)
+    def test_the_set_is_thirty_six_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 36)
         self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
@@ -124,11 +127,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-16:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-18:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
-                                              "activation-tooling", "activation-host"))
+                                              "activation-tooling", "activation-host",
+                                              "register-apply", "register-draft"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -136,7 +140,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
                  27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
-                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four"}
+                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
+                 35: "thirty-five", 36: "thirty-six"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -274,6 +279,46 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(page.reads, reads)
                 self.assertEqual(shot.activation, tuple(
                     shots.ACTIVATION_SHOWN["activation-tooling"]) if reads else None)
+
+    def test_a_register_shot_without_its_proposal_fails_the_command(self) -> None:
+        def run(state, reading):
+            out = StringIO()
+            shot = shots.Shot(state, 480, Path("x.png"), 480, register=reading)
+            with mock.patch.object(shots, "capture", return_value=[shot]), \
+                    tempfile.TemporaryDirectory() as tmp, redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        line = "command commits run through: devenv shell -- (found in its files)"
+        self.assertEqual(shots.REGISTER_SHOWN, {"register-apply": (line, None, False),
+                                                "register-draft": (None, line, True)})
+        phrase = "does not show the proposed commit environment"
+        self.assertIs(shots.proposes_environment(), True)
+        for state, shown_ in shots.REGISTER_SHOWN.items():
+            other = next(v for k, v in shots.REGISTER_SHOWN.items() if k != state)
+            for reading in (other, (None, None, False), (shown_[0], shown_[1], not shown_[2]),
+                            (line + " now", shown_[1], shown_[2])):
+                with self.subTest(state=state, reading=reading):
+                    code, text = run(state, reading)
+                    self.assertEqual(code, 1)
+                    self.assertIn(phrase, text)
+            self.assertEqual(run(state, shown_)[0], 0)
+            self.assertNotIn(phrase, run(state, shown_)[1])
+            self.assertEqual(run(state, shots.REGISTER_BASE[state])[0], 1)
+            with mock.patch.object(shots, "proposes_environment", return_value=False):
+                code, text = run(state, shots.REGISTER_BASE[state])
+                self.assertEqual(code, 0)
+                self.assertNotIn(phrase, text)
+                self.assertEqual(run(state, shown_)[0], 1)
+        self.assertEqual(run("live-several", (None, None, False))[0], 0)
+
+    def test_the_register_shots_read_the_card_and_the_draft_only_in_their_own_states(self) -> None:
+        for state, reads in (("register-apply", 1), ("register-draft", 1), ("live-several", 0)):
+            with self.subTest(state), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(set())
+                shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                self.assertEqual(page.reads, reads)
+                self.assertEqual(shot.register, shots.REGISTER_SHOWN["register-apply"] if reads else None)
 
     def test_an_ask_goal_shot_without_the_filled_box_fails_the_command(self) -> None:
         def run(shot):
@@ -973,6 +1018,23 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         "state": "pending", "commit": "1258" * 10,
                         "root": str(fixture.projects[1]), "activate": True})  # sorted: api
                     self.assertEqual(view["statement"]["inbox_items"], 0)
+                elif state in shots.REGISTER_STATES:
+                    registration = view["registration"]
+                    self.assertEqual(registration["name"], "sample-app")
+                    self.assertEqual(running, [])
+                    if state == "register-apply":
+                        (card,) = view["inbox"]["open"]
+                        self.assertEqual(card["reason"], "register_apply")
+                        self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
+                        self.assertEqual(card["lines"][-2:], shots.REGISTER_PLAN_LINES)
+                        self.assertEqual(card["lines"][:-2],
+                                         [shots.PROPOSAL_LINE] if shots.proposes_environment() else [])
+                        self.assertIsNone(registration["draft"])
+                    else:
+                        self.assertEqual(view["inbox"]["open"], [])
+                        rows = {row["field"]: row["line"] for row in registration["draft"]}
+                        self.assertEqual(rows.get("commit-environment"),
+                                         shots.PROPOSAL_LINE if shots.proposes_environment() else None)
                 elif state in ("question-words", "question-refused"):
                     (asked,) = view["inbox"]["open"]
                     (look,) = asked["questions"]
@@ -1274,6 +1336,25 @@ class ScreenshotReadingTest(unittest.TestCase):
             shots.ACTIVATION_READING)
         self.assertEqual(found, [
             list(shown_), [text_, 0], [text_, 2], [None, 0], [None, 0]])
+
+    def test_the_register_reading_reads_the_apply_card_and_the_draft_row(self) -> None:
+        line = shots.PROPOSAL_LINE
+
+        def page(*, card=True, row=True, change=True, style=""):
+            apply = (f'<ul class="apply-lines"{style}><li>{line}</li><li>writes the project contract</li></ul>'
+                     if card else "")
+            draft = (f'<ul class="register-draft"><li><span class="draft-line">{line}</span>'
+                     + ('<button class="draft-change">Change</button>' if change else "")
+                     + "</li></ul>" if row else "")
+            return f'<div class="lead">{apply}</div><section id="projects">{draft}</section>'
+
+        found = self.read_pages(
+            [page(row=False), page(card=False), page(card=False, change=False),
+             page(card=False, row=False), page(row=False, style=' style="display:none"')],
+            shots.REGISTER_READING)
+        self.assertEqual(found, [
+            [line, None, False], [None, line, True], [None, line, False],
+            [None, None, False], [None, None, False]])
 
     def test_the_goal_reading_reads_the_filled_box(self) -> None:
         filled = shots.FILLED_GOAL[1]
