@@ -28,7 +28,7 @@ Contract:
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
   two options and an owner check beside it; `look-card` is a look card on an approved `owner/web`
-  sprint, open, with its three options (#1260); `look-moved` is that card after an approval found
+  sprint, open, with its three options and the before and after pictures every look card carries (#1260); `look-moved` is that card after an approval found
   the pull request at another head, so its line says nothing was recorded and to ask for a new look,
   the options still there; `look-failed` is that card answered with the approval and its
   tracker post failed, so the card holds the headline, the reason and a Retry button and no
@@ -115,14 +115,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 import tempfile
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import capacity, event_log, manager, sessions, signin
+from agent_tools.console import capacity, event_log, manager, pictures, sessions, signin
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
@@ -307,6 +309,18 @@ def sandbox_environ(root: Path) -> dict[str, str]:
             "XDG_CONFIG_HOME": str(root / "xdg-config")}
 
 
+def _solid_png(colour: tuple[int, int, int], width: int = 96, height: int = 60) -> bytes:
+    """A small RGB PNG of one colour, so a picture gallery has something to draw."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    row = b"\x00" + bytes(colour) * width
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+
+
 def _iso(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="microseconds")
 
@@ -314,8 +328,9 @@ def _iso(seconds: float) -> str:
 class _Seed:
     """One event log whose every row carries the time its writer chose, `ago` seconds before now."""
 
-    def __init__(self, log: EventLog, at: list[str], now_s: float):
+    def __init__(self, log: EventLog, at: list[str], now_s: float, pictures_dir: Path | None = None):
         self.log = log
+        self.pictures_dir = pictures_dir
         self._at = at
         self.now_s = now_s
         self.count = 0
@@ -379,16 +394,28 @@ class _Seed:
             "the trust prompt, then retry.")})
         return sid, goal
 
+    def look_pictures(self, project: str, sid: str) -> list[dict]:
+        """The before and after pictures of a look question: two stored PNGs of one size, in two colours."""
+        stored = []
+        for pair, line, colour in (("before", "Before, 1440 px", (222, 226, 232)),
+                                   ("after", "After, 1440 px", (196, 224, 205))):
+            picture, _ = pictures.store(self.pictures_dir, _solid_png(colour))
+            self.put(MINUTE * 5, *pictures.entry(project, sid, picture))
+            stored.append({"picture": picture, "line": line, "pair": pair})
+        return stored
+
     def look(self, project: str, sid: str, goal: str, *, moved: bool = False,
              failed: bool = False) -> None:
-        """One look question on `sid`: open, found moved to another head, or approved with the post failed."""
+        """One look question on `sid`: open, found moved to another head, or approved with the post failed.
+        It carries the two pictures a real look card always has, marked before and after."""
         base = {"sprint_id": sid, "goal": goal}
+        shown = self.look_pictures(project, sid)
         asked = self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
             "question": "Does the settings page look right?",
             "blocks": "the merge of issue 12",
             "context": "The before and after of the settings page, from the same pull request.",
             "options": [LOOK_APPROVE, "Approve with one fix", "Ask for changes"],
-            "recommended": LOOK_APPROVE,
+            "recommended": LOOK_APPROVE, "pictures": shown,
             "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "approve": LOOK_APPROVE}}]})
         where = {"round": asked.seq, "index": 0}
         if moved:
@@ -678,7 +705,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
     at = [_iso(now_s)]
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
-        sprint_ids = _seed_state(_Seed(log, at, now_s), state, str(projects[0]), read=read)
+        sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read)
     finally:
         log.close()
     if state == "accounts-panel":

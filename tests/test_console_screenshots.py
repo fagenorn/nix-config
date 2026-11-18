@@ -607,6 +607,24 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 svc.close()
             self.assertEqual([d["total"]["dollars"] for d in days if d["total"]["dollars"]], [])
 
+    def test_each_look_state_carries_a_before_and_an_after_picture_the_console_serves(self) -> None:
+        for state in ("look-card", "look-moved", "look-failed"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp), state, now_s)
+                svc = shots.start_service(fixture, now_s)
+                try:
+                    view = json.loads(svc.view_bytes)
+                    pictures_dir = svc.pictures_dir
+                finally:
+                    svc.close()
+                card = view["inbox"]["open"][0]
+                self.assertEqual([p["pair"] for p in card["pictures"]], ["before", "after"])
+                self.assertEqual(len({p["id"] for p in card["pictures"]}), 2)
+                for picture in card["pictures"]:
+                    data = (pictures_dir / picture["id"]).read_bytes()
+                    self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_each_fixture_view_shows_its_state(self) -> None:
         for state in shots.STATES:
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
