@@ -6229,12 +6229,27 @@ class ConsoleService:
         return revive.next_step(
             sprint, self._waiting(sprint),
             self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
-            self._nudger is not None, out, out and self._room_elsewhere())
+            self._nudger is not None, out, out and self._room_elsewhere(sprint))
 
-    def _room_elsewhere(self) -> bool:
-        """Under the ingest lock: whether a new session would get an account with room (#1278)."""
-        return isinstance(manager.choose_profile(
-            capacity.capacity_view(self._profiles, self._capacity, self._clock()), self._use.last), str)
+    def _room_elsewhere(self, sprint: sprints.SprintState) -> bool:
+        """Under the ingest lock: whether a takeover would land on another account with room (#1278).
+
+        The view is the launch's own (`_prepared_launch`: signed in, not removing, the owner's
+        exclusions and pin), so the decision and the launch agree. The chosen profile must not be
+        the manager's, must share no account with it, and must read as having room: an unread
+        profile or the launcher's last-used fallback is no reason to leave a session that only waits.
+        """
+        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned)
+        choice = manager.choose_profile(view, self._use.last)
+        mine = sprint.manager.profile if sprint.manager else None
+        if not isinstance(choice, str) or choice == mine:
+            return False
+        entries = {entry["profile"]: entry for entry in view["profiles"]}
+        chosen = entries.get(choice)
+        if chosen is None or chosen["state"] not in ("ok", "reset") or chosen["excluded"]:
+            return False
+        return mine not in chosen["same_account_as"] and chosen.get("duplicate_of") != mine
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""

@@ -9,7 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import nudge, permission, service, sprints
+from agent_tools.console import capacity, nudge, permission, service, sprints
 
 from . import console_test_support as support
 from .test_console_messages import PARTS
@@ -387,6 +387,25 @@ class IdleQuotaTest(IdleCase):
         self.assertEqual(self.revives(), [])
         self.assertEqual([call.profile for call in self.launches.calls], ["work", "home"])
         self.assertIs(self.launches.calls[-1].takeover, True)
+
+    def test_a_gone_manager_waits_when_the_other_account_gives_no_reason_to_move(self):
+        cases = {
+            "no reading yet": lambda svc: self.append(svc, [
+                (capacity.READING, None, {"profile": "work", **self.exhausted(RESET)})]),
+            "excluded by the owner": lambda svc: (self.out_readings(svc),
+                                                  svc.set_exclusion("home", True)),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                svc, sid = self.start_out(listed=False, readings=False)
+                arrange(svc)
+                svc.poll_sessions()
+                self.gone(svc)
+                self.poll(svc, 600)
+                self.assertEqual([call.profile for call in self.launches.calls], ["work"])
+                self.assertEqual(self.revives(), [])
+                self.assertEqual(self.rows("manager.waiting"), [])
 
     def test_a_withdrawn_sprint_leaves_the_quota_mark(self):
         svc, sid = self.start_out()
