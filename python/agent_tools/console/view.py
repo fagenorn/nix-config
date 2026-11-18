@@ -286,7 +286,8 @@ is none. Its entry is
      "project_id", "sprint_id", "title", "round": <int>, "index": <int>, "blocker": <bool>,
      "blocks": "<text>", "headline": "<ask>", "context": "<text>" | null, "more_questions": 0,
      "questions": [{"question": "<ask>", "options": [<str>, ...], "chosen": null,
-                    "recommended": "<option>", "recommended_index": <int>}],
+                    "recommended": "<option>", "recommended_index": <int>,
+                    "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
 
@@ -296,7 +297,9 @@ The texts are shown cut, never refused, though a round logged before the limits 
 with `sprints.cut`; each picture's line to `MAX_PICTURE_LINE_CHARS` (140), and `pictures`
 is `[]` when the question has none. `recommended_index` is the recommendation's index among the
 logged options, so it names the right option even when two cut options read the same; the owner's
-answer is still an option index into the full logged options.
+answer is still an option index into the full logged options. `needs_words_index` lists, ascending,
+the indices among the logged options of the options the manager marked `needs_words` (`[]` when
+none): the page refuses such an option until the owner has written words with it.
 
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
@@ -444,12 +447,12 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                    "issues": [<int>],
                                    "waits": {"ci_at", "commit_at", "release_at", "lock_at":
                                              "<ISO time>" | null}}}
-    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
+    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop" | "answer",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null, "new": <bool>}
+                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -624,6 +627,8 @@ not ended (an ended one has no Tell box and no stop or drop control to point at)
 pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
 `TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
 changes `retry` and never hides a message.
+`words` is the message's own `words` (the owner's words sent with an option, on an `answer`
+message), else null; the page reads the option and the words together.
 `new` is true exactly when the message has a `reply_at` and `derive_view(..., looked=<ISO time>)`
 (the owner's last look; the service passes its own) is None or earlier than `reply_at`, compared as
 aware datetimes. `new_replies` (always present, possibly empty) lists every message entry with `new`
@@ -1617,7 +1622,8 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
     return {"id": message.message_id, "kind": message.kind, "version": message.version,
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
-            "reply_at": message.reply_at, "new": _is_new(message, looked)}
+            "reply_at": message.reply_at, "words": message.words,
+            "new": _is_new(message, looked)}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
@@ -1947,7 +1953,9 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "options": [cut(o, MAX_OPTION_CHARS) for o in question.options],
                            "chosen": None, "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
-                           "recommended_index": question.options.index(question.recommended)}],
+                           "recommended_index": question.options.index(question.recommended),
+                           "needs_words_index": [i for i, option in enumerate(question.options)
+                                                 if option in question.needs_words]}],
             "pictures": _picture_entries(question.pictures),
             "items": [], "answers": [], "answered": False, "waiting_since": question.at}
 

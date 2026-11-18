@@ -595,10 +595,13 @@ to the whole round.
 `Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
 `sprints.takes_questions`, `UNKNOWN_QUESTION` unless
 `(round_id, index)` is one of its questions, `ANSWERED_ALREADY` when it is answered, with a choice
-`NOT_AN_OPTION` unless it indexes an option, with text whatever `sprints.checked_message` refuses;
-the answer is the option or the text exactly, `chosen` the option or None, `differs` is `chosen`
-not being the recommendation. It appends exactly one `question.answered` row `{"sprint_id",
-"goal", "round", "index", "question", "answer", "chosen", "recommended", "differs"}`, folds,
+`NOT_AN_OPTION` unless it indexes an option, with text whatever `sprints.checked_message` refuses,
+and with a choice whose option is in the question's `needs_words` and no text `WORDS_NEEDED`;
+the answer is the option or the text exactly (the option when both are given), `chosen` the option
+or None, `differs` is `chosen` not being the recommendation. It appends exactly one
+`question.answered` row `{"sprint_id", "goal", "round", "index", "question", "answer", "chosen",
+"recommended", "differs"}`, plus `"words"` (the checked text) only when a choice and text were
+both given, folds,
 publishes, nudges the manager as `send_message` does and returns the row's `seq`, the message's id.
 Every refusal appends and publishes nothing, and neither the secret nor the owner's text appears
 in a stderr line.
@@ -6230,16 +6233,22 @@ class ConsoleService:
                 raise sprints.Refused(sprints.UNKNOWN_QUESTION)
             if asked.answer is not None:
                 raise sprints.Refused(sprints.ANSWERED_ALREADY)
+            words = None
             if choice is not None:
                 if not 0 <= choice < len(asked.options):
                     raise sprints.Refused(sprints.NOT_AN_OPTION)
                 chosen = answer = asked.options[choice]
+                if text is not None:
+                    words = sprints.checked_message(text)
+                elif chosen in asked.needs_words:
+                    raise sprints.Refused(sprints.WORDS_NEEDED)
             else:
                 chosen, answer = None, sprints.checked_message(text)
             appended = self.log.append([(QUESTION_ANSWERED, project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "round": round_id, "index": index,
                 "question": asked.question, "answer": answer, "chosen": chosen,
-                "recommended": asked.recommended, "differs": chosen != asked.recommended})])
+                "recommended": asked.recommended, "differs": chosen != asked.recommended,
+                **({} if words is None else {"words": words})})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
