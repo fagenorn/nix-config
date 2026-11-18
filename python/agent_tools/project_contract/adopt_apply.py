@@ -9,7 +9,10 @@ three proofs taken over the commit once it exists — that it changes exactly
 the planned paths, that no Markdown file in it has more non-resolving relative
 links than its pre-move counterpart, and that the branch carries it and
 nothing else — the commit runner, which keeps git's own output and names the
-hook git's trace2 events show ended non-zero (#1236), and the retention of a
+hook git's trace2 events show ended non-zero (#1236) and which runs git through
+the contract's commit environment command when one is named (#1249), the trace
+file given to git alone and the command's whole process tree ended with the
+commit, and the retention of a
 failed attempt beside its worktree (D17), and its removal: `discard_retained` is #72's acknowledged cleanup, the
 one thing that deletes a retained copy. It removes that plan's worktree with
 its own administrative entry, its branch and its failure record, and nothing
@@ -64,6 +67,7 @@ from agent_tools.project_contract.adopt_inspection import (
     RUNTIME_SENTINEL,
     canonical_json,
     classify,
+    contained_path,
     contained_relative,
     gate_entry,
     git_or_fail,
@@ -238,10 +242,14 @@ def status_records(root: Path) -> list[tuple[str, tuple[str, ...]]]:
     rename detection this reads is the whole point of the first commit gate.
     Rename detection is turned on explicitly rather than inherited, so a move
     reports one rename record — exactly what the gate demands — whatever
-    `status.renames` or `diff.renames` the machine carries.
+    `status.renames` or `diff.renames` the machine carries. A submodule's
+    changes are reported whatever `ignore` the repository configures for it:
+    a worktree is judged clean only when nothing in it, a submodule included,
+    would be lost by removing it.
     """
     fields = git_or_fail(
         root, "status", "--porcelain", "-z", "--renames",
+        "--ignore-submodules=none",
         "--untracked-files=all").split(b"\0")
     records: list[tuple[str, tuple[str, ...]]] = []
     index = 0
@@ -835,6 +843,34 @@ def failed_hook(trace: bytes) -> tuple[str, int] | None:
     return failed
 
 
+def git_exit_code(trace: bytes) -> int | None:
+    """The exit code git's own trace2 `exit` event reports, or None.
+
+    Only the events of the first session in the file (the `sid` of its first
+    `version` event) are read, as `failed_hook` reads them. None means git
+    wrote no `exit` event: it never ran, or it was killed.
+    """
+    sid: object = None
+    code: int | None = None
+    for raw in trace.splitlines():
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if sid is None:
+            if event.get("event") != "version":
+                continue
+            sid = event.get("sid")
+        if event.get("sid") != sid or event.get("event") != "exit":
+            continue
+        value = event.get("code")
+        if isinstance(value, int) and not isinstance(value, bool):
+            code = value
+    return code
+
+
 def commit_output_lines(tail: bytes, cut: bool) -> list[str]:
     """The kept lines of a commit's output tail.
 
@@ -849,14 +885,40 @@ def commit_output_lines(tail: bytes, cut: bool) -> list[str]:
     return kept[-COMMIT_OUTPUT_LINES:]
 
 
-def run_commit(worktree: Path, trace_dir: Path,
-               *args: str) -> tuple[int, dict]:
+def read_tail(output) -> tuple[bytes, bool]:
+    """The last `COMMIT_OUTPUT_BYTES` of an open output file, and whether the
+    output was longer."""
+    size = output.seek(0, os.SEEK_END)
+    output.seek(max(0, size - COMMIT_OUTPUT_BYTES))
+    return output.read(COMMIT_OUTPUT_BYTES), size > COMMIT_OUTPUT_BYTES
+
+
+def environment_failure(lines: list[str]) -> AdoptError:
+    """A commit environment that did not run the commit, kept like a hook."""
+    return refuse(
+        "verification_failed", "adopt.commit.failed", "",
+        "the command the contract's commit runs through did not run the "
+        "commit",
+        commit_output={"hook": None, "exit": None, "lines": lines})
+
+
+def run_commit(worktree: Path, trace_dir: Path, *args: str,
+               environment: dict | None = None) -> tuple[int, dict]:
     """`git -C <worktree> commit <args>`: its exit code and its output.
 
     Git's stdout and stderr stay merged in order and only the last
     `COMMIT_OUTPUT_BYTES` are read. A trace2 event file, made in `trace_dir`
     and removed on every outcome, names the hook that failed. Nothing about
     the commit itself changes: no hook is skipped and nothing is retried.
+
+    With an `environment` (the `commit_environment` shape) the same command
+    runs as the trailing arguments of that command, in its own `cwd`, through
+    `run_leashed`. The trace file reaches git alone, set by `env` after the
+    environment command, because `failed_hook` keys on the first git process
+    that writes to it and a git call the environment made earlier would
+    otherwise be taken for the commit. A launch failure or a timeout on that
+    path is `adopt.commit.failed` with the reason as its output, never
+    `adopt.git.unavailable`.
     """
     descriptor, trace_name = tempfile.mkstemp(dir=trace_dir,
                                               prefix="commit-trace-")
@@ -864,28 +926,35 @@ def run_commit(worktree: Path, trace_dir: Path,
     trace_path = Path(trace_name)
     try:
         with tempfile.TemporaryFile() as output:
-            try:
-                completed = subprocess.run(
-                    ["git", "-C", str(worktree), "commit", *args],
-                    stdin=subprocess.DEVNULL, stdout=output,
-                    stderr=subprocess.STDOUT,
-                    env={**os.environ, "GIT_TRACE2_EVENT": trace_name},
-                    timeout=GIT_TIMEOUT_SECONDS)
-            except (OSError, subprocess.SubprocessError):
-                raise refuse("adopt_failure", "adopt.git.unavailable", "",
-                             "git could not be started") from None
-            size = output.seek(0, os.SEEK_END)
-            output.seek(max(0, size - COMMIT_OUTPUT_BYTES))
-            tail = output.read(COMMIT_OUTPUT_BYTES)
-            cut = size > COMMIT_OUTPUT_BYTES
+            if environment is None:
+                try:
+                    completed = subprocess.run(
+                        ["git", "-C", str(worktree), "commit", *args],
+                        stdin=subprocess.DEVNULL, stdout=output,
+                        stderr=subprocess.STDOUT,
+                        env={**os.environ, "GIT_TRACE2_EVENT": trace_name},
+                        timeout=GIT_TIMEOUT_SECONDS)
+                except (OSError, subprocess.SubprocessError):
+                    raise refuse("adopt_failure", "adopt.git.unavailable", "",
+                                 "git could not be started") from None
+                returncode = completed.returncode
+            else:
+                returncode = run_through_environment(
+                    environment, worktree, trace_name, output, args)
+            tail, cut = read_tail(output)
         try:
             trace = trace_path.read_bytes()
         except OSError:
             trace = b""
     finally:
         trace_path.unlink(missing_ok=True)
+    if environment is not None and returncode == 0:
+        # A wrapper reports the status of its own last command, which need
+        # not be git's: git's exit event is the commit's own result.
+        git_code = git_exit_code(trace)
+        returncode = 1 if git_code is None else git_code
     hook = failed_hook(trace)
-    return completed.returncode, {
+    return returncode, {
         "hook": hook[0] if hook else None,
         "exit": hook[1] if hook else None,
         "lines": commit_output_lines(tail, cut),
@@ -975,10 +1044,131 @@ def signing_requested(payload: object) -> bool | None:
     return signed if isinstance(signed, bool) else None
 
 
+ENVIRONMENT_UNRESOLVED = "adopt.commit.unresolved_environment"
+ENVIRONMENT_TIMEOUT_SECONDS = GIT_TIMEOUT_SECONDS
+
+
+def commit_environment(payload: object, worktree: Path) -> dict | None:
+    """The command the contract's commit runs through, or None (#1249).
+
+    Read out of the resolver's own view of the worktree, as the signing
+    policy is. None means the `commit` block names no `environment`. A member
+    the snapshot cannot resolve to a command with an argv and a `cwd` that is
+    an existing directory inside the worktree is refused, never read as "no
+    environment": the contract asked for one. The `cwd` is resolved here, just
+    before launch, so a symlinked directory that leaves the worktree is
+    refused.
+    """
+    unresolved = refuse(
+        "verification_failed", ENVIRONMENT_UNRESOLVED, "",
+        "the command the contract's commit runs through could not be "
+        "resolved")
+    bindings = payload.get("bindings") if isinstance(payload, dict) else None
+    vcs = bindings.get("vcs") if isinstance(bindings, dict) else None
+    commit = vcs.get("commit") if isinstance(vcs, dict) else None
+    if not isinstance(commit, dict):
+        raise unresolved
+    if "environment" not in commit:
+        return None
+    commands = bindings.get("commands")
+    entry = (commands.get(commit["environment"])
+             if isinstance(commands, dict)
+             and isinstance(commit["environment"], str) else None)
+    argv = entry.get("argv") if isinstance(entry, dict) else None
+    cwd = entry.get("cwd") if isinstance(entry, dict) else None
+    if (not isinstance(argv, list) or not argv
+            or not all(isinstance(word, str) and word for word in argv)
+            or not isinstance(cwd, str)):
+        raise unresolved
+    resolved = contained_path(worktree, cwd)
+    if resolved is None or not resolved.is_dir():
+        raise unresolved
+    return {"id": commit["environment"], "argv": list(argv),
+            "cwd": str(resolved)}
+
+
+def run_leashed(argv: list[str], *, cwd: str, env: dict[str, str], stdout,
+                timeout: float) -> int:
+    """Run `argv` so that its whole process tree ends with it, on every outcome.
+
+    `subprocess.run(timeout=...)` kills only the process it started, and the
+    console ends an apply that it cancels by killing apply's own process
+    group, which a command started in another group is not in. So a leash, a
+    shell that reads its stdin and then kills its whole process group, is
+    started in a new group of its own, and `argv` joins that group. Apply
+    closes the leash's stdin in a `finally`, on success, timeout, launch
+    failure and every `BaseException`; the kernel closes it when apply itself
+    is killed. Either way the leash reads EOF and kills the launcher, git, a
+    hook and every straggler in the group before both are reaped. The return
+    value is the launcher's exit code; `subprocess.TimeoutExpired` and
+    `OSError` propagate after the group is ended. A launcher that starts its
+    own session escapes the group, but is itself killed and reaped here.
+    """
+    leash = subprocess.Popen(
+        ["sh", "-c", "read _; kill -KILL 0", "commit-leash"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, process_group=0)
+    launcher = None
+    try:
+        launcher = subprocess.Popen(
+            argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=stdout,
+            stderr=subprocess.STDOUT, process_group=leash.pid)
+        return launcher.wait(timeout=timeout)
+    finally:
+        leash.stdin.close()
+        leash.wait()
+        if launcher is not None:
+            if launcher.poll() is None:
+                # A launcher in a group or session of its own is out of the
+                # leash's reach and may never return.
+                launcher.kill()
+            launcher.wait()
+
+
+def environment_env() -> dict[str, str]:
+    """The process environment the commit's environment command starts with:
+    the caller's, without the trace file variable."""
+    return {key: value for key, value in os.environ.items()
+            if key != "GIT_TRACE2_EVENT"}
+
+
+def run_through_environment(environment: dict, worktree: Path,
+                            trace_name: str, output, args: tuple[str, ...]
+                            ) -> int:
+    """`run_commit`'s commit through the environment command, with every
+    launch failure and timeout kept as the retained commit failure."""
+    name, argv = environment["id"], environment["argv"]
+    try:
+        return run_leashed(
+            [*argv, "env", f"GIT_TRACE2_EVENT={trace_name}", "git", "-C",
+             str(worktree), "commit", *args],
+            cwd=environment["cwd"], env=environment_env(), stdout=output,
+            timeout=ENVIRONMENT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        tail, cut = read_tail(output)
+        line = (f"the commit environment command {name} did not finish "
+                f"within {ENVIRONMENT_TIMEOUT_SECONDS} seconds")
+        raise environment_failure(
+            [line, *commit_output_lines(tail, cut)[1 - COMMIT_OUTPUT_LINES:]]
+        ) from None
+    except FileNotFoundError:
+        raise environment_failure([
+            f"the commit environment command {name} could not be started: "
+            f"{argv[0]} was not found"]) from None
+    except OSError as error:
+        raise environment_failure([
+            f"the commit environment command {name} could not be started: "
+            f"{error.strerror or 'an error'}"]) from None
+    except ValueError:
+        raise environment_failure([
+            f"the commit environment command {name} could not be started: "
+            f"an argument contains a NUL character"]) from None
+
+
 SIGNING_UNAVAILABLE = "adopt.commit.signing_unavailable"
 
 
-def signing_works(worktree: Path) -> bool:
+def signing_works(worktree: Path, environment: dict | None = None) -> bool:
     """Whether this host can sign a commit under the worktree's configuration.
 
     Asked only after a failed commit whose contract asked for a signature: a
@@ -993,14 +1183,33 @@ def signing_works(worktree: Path) -> bool:
     through `git var`, which applies the same strict rule: one that cannot be
     resolved is the commit's failure, not the signer's, and is answered `True`
     (the signer is not what stopped the commit).
+
+    With an `environment` each probe runs as the trailing arguments of that
+    command, in its cwd and without the trace variable, exactly as the commit
+    did, so a signer only that environment provides counts. A probe that
+    cannot start or does not finish ends the diagnosis at once with `True`
+    as well: the signer is not shown to be at fault, and no later probe may
+    blame it for what the unfinished one would have shown.
     """
+    if environment is None:
+        def probe(*words: str) -> int | None:
+            return run_git(worktree, *words)[0]
+    else:
+        def probe(*words: str) -> int | None:
+            try:
+                return run_leashed(
+                    [*environment["argv"], "git", "-C", str(worktree), *words],
+                    cwd=environment["cwd"], env=environment_env(),
+                    stdout=subprocess.DEVNULL,
+                    timeout=ENVIRONMENT_TIMEOUT_SECONDS)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return None
     for role in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
-        identity, _ = run_git(worktree, "var", role)
-        if identity != 0:
+        if probe("var", role) != 0:
             return True
-    code, _ = run_git(worktree, "commit-tree", "-S", "-m",
-                      "adopt signing probe", "HEAD^{tree}")
-    return code == 0
+    code = probe("commit-tree", "-S", "-m", "adopt signing probe",
+                 "HEAD^{tree}")
+    return code is None or code == 0
 
 
 def expected_commit_paths(operations: list[dict]) -> tuple[set[str], set[str]]:
@@ -1087,18 +1296,22 @@ def prove_commit_links(worktree: Path, commit: str,
 
 
 def prove_branch_carries_commit(root: Path, worktree: Path, branch: str,
-                                base_revision: str, commit: str) -> None:
+                                base_revision: str, commit: str, *,
+                                untracked_allowed: bool = False) -> None:
     """The three proofs D17 makes worktree removal conditional on.
 
     The ref holds this commit, it is the only commit the branch adds, and the
-    worktree is clean. Never elapsed time.
+    worktree is clean. Never elapsed time. When the commit ran through an
+    environment that is declared to generate files, `untracked_allowed` lets
+    untracked (`??`) records pass; every tracked change is still residue.
     """
     head = git_or_fail(
         root, "rev-parse", branch).decode("ascii", "strict").strip()
     count = git_or_fail(
         worktree, "rev-list", "--count",
         f"{base_revision}..{branch}").decode("ascii", "strict").strip()
-    residue = status_records(worktree)
+    residue = [record for record in status_records(worktree)
+               if not (untracked_allowed and record[0] == "??")]
     if head != commit or count != "1" or residue:
         raise refuse(
             "adopt_failure", "adopt.commit.unproved", "",
