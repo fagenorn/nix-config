@@ -128,7 +128,7 @@ card (an `inbox_item` of reason `register_apply`, `text` False, the options `[<f
 and the values `[apply | retry, not_now]`) that action asks, else `[]`: none when `latest` or the
 action is None or when `latest["plan_id"]` is in `deferred`. A ready plan with no adoption asks
 `Apply this adoption?` with `Apply it` (key `register-apply/<plan_id>/<latest at>`, the proposed
-commit environment's line (`contract_draft.proposed_lines`, ADR-console-074), then the plan's lines,
+commit environment's line (`contract_draft.proposed_lines`, ADR-console-075), then the plan's lines,
 as `lines`, and `folder_trust.TRUST_SENTENCE` as `why`: approving also grants the folder's client
 trust, #1078, ADR-console-034); with an adoption the ask is the entry's headline and its note is `why` (key
 `.../<adoption at>`), the option `Apply it again` for `approve` (waiting since the pull request's

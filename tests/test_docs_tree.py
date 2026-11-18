@@ -1309,16 +1309,19 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
                  "- **Status:** accepted; amended by ADR-console-033, ADR-console-070, "
-                 "ADR-console-074")):
+                 "ADR-console-075")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
 
     def test_the_commit_environment_proposal_decision_is_recorded(self):
-        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("074-*.md"))
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("075-*.md"))
         self.assertEqual(len(found), 1)
+        self.assertEqual(sorted(adr_dir.glob(
+            "*-registration-proposes-the-commit-environment-a-projects-hooks-need.md")), found)
         first = found[0].read_text().splitlines()[0]
-        self.assertEqual(first, "# ADR-console-074 \u2014 Registration proposes the commit "
+        self.assertEqual(first, "# ADR-console-075 \u2014 Registration proposes the commit "
                                 "environment a project's hooks need")
         adr = found[0].read_text()
         for needle in ("#1268", "devenv.nix", "devenv shell --", "commit-environment",
@@ -1329,19 +1332,21 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 ("docs/areas/project-contract/adr/"
                  "008-a-contract-names-the-command-its-adoption-commit-runs-through.md",
-                 "- **Status:** accepted; D4 amended by ADR-console-074"),
+                 "- **Status:** accepted; D4 amended by ADR-console-075"),
                 ("docs/areas/console/adr/033-the-drafted-contract-and-the-question-cards-"
                  "read-plainly-and-fit-the-screen.md",
-                 "- **Status:** accepted; D1 amended by ADR-console-074")):
+                 "- **Status:** accepted; D1 amended by ADR-console-075")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
         context = self.doc("docs/areas/console/CONTEXT.md")
         entry = context.split("**Drafted contract**:")[1].split("_Avoid_")[0]
-        self.assertIn("ADR-console-074", entry)
+        self.assertIn("ADR-console-075", entry)
         self.assertIn("devenv.nix", entry)
-        self.assertIn("ADR-console-074",
-                      self.doc("python/agent_tools/console/contract_draft.py"))
+        for module in ("contract_draft", "approve"):
+            docs = self.doc(f"python/agent_tools/console/{module}.py")
+            self.assertIn("ADR-console-075", docs)
+            self.assertNotIn("ADR-console-074", docs)
 
     def test_the_plain_draft_and_cards_decision_is_recorded(self):
         path = ("docs/areas/console/adr/033-the-drafted-contract-and-the-question-cards-"
