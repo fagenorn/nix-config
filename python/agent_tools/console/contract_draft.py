@@ -48,9 +48,10 @@ Proposed field. `PROPOSED` lists the fields `draft` adds after the 29 only when 
 `commit-environment` field (`commits run in its development shell`), drafted with the command of the first
 `ENVIRONMENTS` file in `reading["environments"]` (source `files`) when `reading["hooks"]` is not empty,
 and never otherwise, so a draft without it is exactly the 29 records. It is a main field, a typed
-choice with the one option `none`, never open. `proposed_lines(fields)` gives the `shown` line of each
-`PROPOSED` field present in a draft list, in `PROPOSED` order, `[]` for a non-list or a draft without
-one; the ready Apply card shows them first.
+choice with the one option `none`, never open. Its shown line leaves a trailing `--` off the command
+(`devenv shell`); the value and the command the contract names keep it. `proposed_lines(fields)` gives
+the `shown` line of each `PROPOSED` field present in a draft list, in `PROPOSED` order, `[]` for a
+non-list or a draft without one; the ready Apply card shows them first.
 
 Answers. `set_value(fields, field, value, entries=, root=)` returns `(new_fields, None)` or `(None,
 text)`, refusing in order with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `ID_RULE`
@@ -605,6 +606,8 @@ def _display(field: Mapping, fields: Iterable[Mapping]) -> str:
         return f"GitHub, as {slug}"
     if field["field"] == "integration-branch" and value is None:
         return "the same as the default branch"
+    if field["field"] == ENVIRONMENT_FIELD and isinstance(value, str):
+        return value.removesuffix(" --")
     return str(value)
 
 

@@ -188,7 +188,7 @@ REGISTER_STATES = ("register-apply", "register-draft")
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
-PROPOSAL_LINE = "commits run in its development shell: devenv shell -- (found in its files)"
+PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
 REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
                   "register-draft": (None, PROPOSAL_LINE, True)}
 REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),

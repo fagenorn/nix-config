@@ -289,7 +289,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 code = shots.main(["--out", tmp])
             return code, out.getvalue()
 
-        line = "commits run in its development shell: devenv shell -- (found in its files)"
+        line = "commits run in its development shell: devenv shell (found in its files)"
         self.assertEqual(shots.REGISTER_SHOWN, {"register-apply": (line, None, False),
                                                 "register-draft": (None, line, True)})
         phrase = "does not show the proposed commit environment"

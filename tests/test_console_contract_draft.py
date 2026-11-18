@@ -249,7 +249,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertEqual([f["field"] for f in fields], [*cd.FIELDS, "commit-environment"])
         self.assertEqual(pair(fields, "commit-environment"), ("devenv shell --", "files"))
         self.assertNotIn("commit-environment", [f["field"] for f in cd.open_fields(fields)])
-        line = "commits run in its development shell: devenv shell -- (found in its files)"
+        line = "commits run in its development shell: devenv shell (found in its files)"
         entry = next(e for e in cd.shown(fields) if e["field"] == "commit-environment")
         self.assertEqual(entry["line"], line)
         self.assertIs(entry["more"], False)
@@ -433,6 +433,13 @@ class ContractDraftTest(unittest.TestCase):
                          ["nix", "develop", "--command"])
         self.assertEqual(cd.set_value(fields, "commit-environment", "devenv 'shell", entries=[],
                                       root=str(root)), (None, cd.COMMAND_UNREADABLE))
+        again, _ = cd.set_value(fields, "commit-environment", "devenv shell --", entries=[],
+                                root=str(root))
+        self.assertEqual(
+            next(e["line"] for e in cd.shown(again) if e["field"] == "commit-environment"),
+            "commits run in its development shell: devenv shell (set by you)")
+        self.assertEqual(cd.contract(again)["bindings"]["commands"]["commit-environment"]["argv"],
+                         ["devenv", "shell", "--"])
         plain = str(sample(self.parent / "plain", remote=True))
         bare = cd.draft(plain, cd.read(plain))
         self.assertEqual(cd.set_value(bare, "commit-environment", "devenv shell --", entries=[],

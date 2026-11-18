@@ -232,7 +232,7 @@ class DraftedEnvironmentTest(CommitFailureCase):
         self.arrange(devenv=True)
         (card,) = self.apply_cards()
         self.assertEqual(card["lines"][0],
-                         "commits run in its development shell: devenv shell -- (found in its files)")
+                         "commits run in its development shell: devenv shell (found in its files)")
         plan = self.stored(self.shown["plan_id"])
         self.assertEqual(plan["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
         self.assertEqual(plan["bindings"]["commands"]["commit-environment"]["argv"],
@@ -256,7 +256,7 @@ class DraftedEnvironmentTest(CommitFailureCase):
         (entry,) = [d for d in self.view()["registration"]["draft"]
                     if d["field"] == "commit-environment"]
         self.assertEqual(entry["line"],
-                         "commits run in its development shell: devenv shell -- (found in its files)")
+                         "commits run in its development shell: devenv shell (found in its files)")
         self.assertIs(entry["more"], False)
         given = {"id": contract_draft.QUESTION_ID, "subject": "commit-environment", "value": "none"}
         self.assertEqual(self.answer(answer_of(plan_id, given))[0], 204)
