@@ -121,9 +121,10 @@ class ProbeCommandTest(unittest.TestCase):
 
         self.assertEqual(HITS, [])
 
-    def test_the_prober_is_linux_only(self):
+    def test_the_prober_is_linux_and_macos_only(self):
         self.assertIs(probe.prober_for("linux"), probe.run_probe)
-        self.assertIsNone(probe.prober_for("darwin"))
+        self.assertIs(probe.prober_for("darwin"), probe.run_probe)
+        self.assertIsNone(probe.prober_for("win32"))
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "reads /proc")
     def test_a_timed_out_probe_leaves_no_process_behind(self):

@@ -366,9 +366,10 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.ends, [])
         self.assertEqual(runs.running(), frozenset())
 
-    def test_runs_are_linux_only(self):
+    def test_runs_are_linux_and_macos_only(self):
         self.assertIs(runs_for("linux"), SignIns)
-        self.assertIsNone(runs_for("darwin"))
+        self.assertIs(runs_for("darwin"), SignIns)
+        self.assertIsNone(runs_for("win32"))
 
 
 if __name__ == "__main__":

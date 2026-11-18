@@ -107,6 +107,13 @@ class CommandTest(Case):
             "--name", NAME, "--settings", str(self.settings), PROMPT])
         self.assertFalse([part for part in command if "s3cret" in part])
 
+    def test_the_macos_command_runs_the_manager_in_its_own_session(self):
+        command = manager.launch_command(self.launch(), "darwin")
+        self.assertEqual(command, [
+            "claude-account", "run", "--bg", "--name", NAME, "--settings", str(self.settings),
+            PROMPT])
+        self.assertFalse([part for part in command if "s3cret" in part])
+
     def test_the_prompt_sends_the_manager_to_its_contract_then_states_the_goal(self):
         goal = "keep  `the` goal's \"text\" verbatim"
         launch = manager.new_launch(SID, "owner/p01", goal, "/srv/p01", "work", "s3cret", self.dir)
@@ -155,12 +162,22 @@ class CommandTest(Case):
                 self.assertEqual(support.goal_of(lead + "finish it"), "finish it")
         self.assertIn("notice_block", manager.__doc__)
 
-    def test_no_command_is_built_on_macos(self):
-        self.assertIsNone(manager.launch_command(self.launch(), "darwin"))
-        self.assertIs(manager.supported("darwin"), False)
+    def test_managers_are_supported_on_linux_and_macos_only(self):
         self.assertIs(manager.supported("linux"), True)
-        self.assertIsNone(manager.launcher_for("darwin"))
+        self.assertIs(manager.supported("darwin"), True)
+        self.assertIs(manager.supported("win32"), False)
         self.assertIs(manager.launcher_for("linux"), manager.run_launch)
+        self.assertIs(manager.launcher_for("darwin"), manager.run_launch)
+        self.assertIs(manager.stopper_for("darwin"), manager.stop_session)
+        self.assertIsNone(manager.launch_command(self.launch(), "win32"))
+        self.assertIsNone(manager.launcher_for("win32"))
+        self.assertIsNone(manager.stopper_for("win32"))
+
+    def test_launch_tools_name_what_each_platform_runs(self):
+        self.assertEqual(manager.launch_tools("linux"), manager.LAUNCH_TOOLS)
+        self.assertEqual(manager.launch_tools("darwin"),
+                         ("bash", "dirname", "mkdir", "chmod", "ln"))
+        self.assertEqual(manager.launch_tools("win32"), ())
 
 
 class RunTest(Case):
@@ -186,6 +203,23 @@ class RunTest(Case):
         self.assertNotIn("capture_output", kwargs)
         self.assertIs(kwargs["start_new_session"], True)
         self.assertEqual(kwargs["timeout"], 60)
+        self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
+                                         "CLAUDE_ACCOUNT": "work"})
+
+    def test_a_macos_launch_starts_in_its_own_session(self):
+        launch = self.launch(root=str(self.root))
+        run = self.fake()
+        manager.run_launch(launch, platform="darwin", run=run, environ=self.ENVIRON)
+        self.assertEqual(len(run.calls), 1)
+        argv, kwargs = run.calls[0]
+        self.assertEqual(argv, manager.launch_command(launch, "darwin"))
+        self.assertEqual(argv[0], "claude-account")
+        self.assertNotIn("systemd-run", argv)
+        self.assertFalse([part for part in argv if "s3cret" in part])
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["cwd"], str(self.root))
         self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
                                          "CLAUDE_ACCOUNT": "work"})
 
@@ -264,9 +298,15 @@ class RunTest(Case):
             pass
 
     def test_claude_account_launches_with_only_the_declared_tools(self):
+        self.launches_with_only_the_declared_tools("linux")
+
+    def test_claude_account_launches_on_macos_with_only_the_declared_tools(self):
+        self.launches_with_only_the_declared_tools("darwin")
+
+    def launches_with_only_the_declared_tools(self, platform):
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name in manager.LAUNCH_TOOLS:
+        for name in manager.launch_tools(platform):
             if name == "systemd-run":
                 continue
             found = shutil.which(name)
@@ -274,9 +314,10 @@ class RunTest(Case):
                 self.skipTest(f"{name} is not installed")
             (bin_dir / name).symlink_to(found)
         bash = shutil.which("bash")
-        (bin_dir / "systemd-run").write_text(
-            f'#!{bash}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
-        (bin_dir / "systemd-run").chmod(0o755)
+        if platform == "linux":
+            (bin_dir / "systemd-run").write_text(
+                f'#!{bash}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+            (bin_dir / "systemd-run").chmod(0o755)
         (bin_dir / "claude-account").symlink_to(
             REPO_ROOT / "home/common/claude-code/accounts/bin/claude-account")
         out = self.tmp / "out"
@@ -289,7 +330,7 @@ class RunTest(Case):
         home = self.tmp / "home"
         home.mkdir()
         (self.tmp / "accounts/profiles/work").mkdir(parents=True)
-        manager.run_launch(self.launch(root=str(self.root)), platform="linux", environ={
+        manager.run_launch(self.launch(root=str(self.root)), platform=platform, environ={
             "PATH": str(bin_dir), "HOME": str(home),
             "CLAUDE_ACCOUNTS_DIR": str(self.tmp / "accounts"), "CLAUDE_BIN": str(claude),
             "CLAUDE_CACHE_PROXY": "0"})
@@ -327,11 +368,11 @@ class RunTest(Case):
             text, run = self.reason()
             self.assertEqual(text, "the project root /nonexistent/x is not a directory")
             self.assertEqual(run.calls, [])
-        with self.subTest("macos"):
+        with self.subTest("unsupported"):
             self.root_for = str(self.root)
             run = self.fake()
             with self.assertRaises(manager.LaunchFailed) as caught:
-                manager.run_launch(self.launch(root=self.root_for), platform="darwin", run=run,
+                manager.run_launch(self.launch(root=self.root_for), platform="win32", run=run,
                                    environ=self.ENVIRON)
             self.assertEqual(str(caught.exception), manager.UNAVAILABLE_TEXT)
             self.assertEqual(run.calls, [])

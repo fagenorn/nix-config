@@ -13,7 +13,7 @@ from agent_tools.console import bypass_proof, manager, nudge
 from agent_tools.verification import verify_exec
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .wake_proof_world import LINUX_ONLY, WakeProofWorld
+from .wake_proof_world import MANAGER_HOST, WakeProofWorld
 
 STEPS = list(bypass_proof.WAKE_TEARDOWN_STEPS)
 
@@ -37,7 +37,7 @@ def stops_and_removals(world):
     return [argv[1:] for argv in world.argv_log() if argv[1:3] in (["run", "stop"], ["run", "rm"])]
 
 
-@LINUX_ONLY
+@MANAGER_HOST
 class BypassProofWakesTest(unittest.TestCase):
     def test_two_wakes_reach_the_bypass_manager_and_each_reads_its_inbox(self):
         world = WakeProofWorld(self)
@@ -299,8 +299,8 @@ class BypassProofWakesTest(unittest.TestCase):
 class BypassProofWakesPortableTest(unittest.TestCase):
     """What holds on every host: the refusals that come first, the arguments and the verdict rule."""
 
-    def test_a_host_that_is_not_linux_is_refused(self):
-        with mock.patch.object(sys, "platform", "darwin"), \
+    def test_a_host_that_cannot_start_managers_is_refused(self):
+        with mock.patch.object(sys, "platform", "win32"), \
                 mock.patch.dict(os.environ, {}, clear=False) as environ:
             environ.pop("CLAUDECODE", None)
             with self.assertRaises(bypass_proof.ProofRefused) as refused:

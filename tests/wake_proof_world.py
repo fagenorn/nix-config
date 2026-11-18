@@ -21,7 +21,7 @@ waiting for its client, which registers its session only after `S` seconds, in t
 process group), `STOP_FAILS` and `STOP_HANGS` (a stop whose client child outlives the wrapper's
 wait; the child's pid is logged in `stop_child.pid`).
 
-`LINUX_ONLY` marks a test that needs a launch to succeed: the step refuses other hosts.
+`MANAGER_HOST` marks a test that needs a launch to succeed: the step refuses a host that cannot start managers.
 """
 import json
 import os
@@ -39,7 +39,7 @@ from agent_tools.console import manager
 from .guard_policy_world import MANIFEST, REPO_ROOT
 
 PROFILE = "work"
-LINUX_ONLY = unittest.skipUnless(manager.supported(sys.platform), manager.UNAVAILABLE_TEXT)
+MANAGER_HOST = unittest.skipUnless(manager.supported(sys.platform), manager.UNAVAILABLE_TEXT)
 SESSION_ID = "m1aaaaaaaaaaaaaa"
 
 FAKE_SYSTEMD_RUN = """#!{python}
@@ -98,7 +98,10 @@ def save(state):
 
 
 def proc_start(pid):
-    stat = Path("/proc/" + str(pid) + "/stat").read_text(encoding="utf-8")
+    path = Path("/proc/" + str(pid) + "/stat")
+    if not path.exists():
+        return None
+    stat = path.read_text(encoding="utf-8")
     return stat.rsplit(")", 1)[1].split()[19]
 
 

@@ -163,8 +163,8 @@ head, base, cancel=None)` (the open pull request of that head and base as `{numb
 None), `open_pull_request(slug, head, base, title, body, cancel=None)` and `pull_request_state(slug,
 number, cancel=None)` (`merged`, `closed`, `ready` for an open pull request whose `mergeable_state`
 is in `READY_MERGEABLE`, else `open`); the link of a pull request is built here from the slug and
-number, never read from the forge's answer. `forge_for(platform)` is `GitHubForge()` where
-`manager.supported(platform)`, else None.
+number, never read from the forge's answer. `forge_for(platform)` is `GitHubForge()` on Linux only,
+else None (ADR-console-028 D9: the adoption it serves stays Linux only, though managers run on macOS too).
 """
 
 from __future__ import annotations
@@ -1023,4 +1023,4 @@ class GitHubForge:
 
 
 def forge_for(platform: str) -> GitHubForge | None:
-    return GitHubForge() if manager.supported(platform) else None
+    return GitHubForge() if platform.startswith("linux") else None

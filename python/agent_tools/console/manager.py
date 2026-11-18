@@ -32,12 +32,17 @@ drops the owner (P3). `write_choice(path, profile)` writes `<name>\n` atomically
 `CHOICE_FILE` names (`chosen-profile`) and removes the file for None; `read_choice(path)` reads it
 back, None for a missing, empty or unreadable file.
 
-Command (Linux only; `launch_command` is None elsewhere and `launcher_for` gives None). The
-manager runs in its own transient systemd scope and in the background, so it outlives the console
-unit and a restart of it does not end it:
+Command (Linux and macOS; `launch_command` is None on any other host and `launcher_for` gives None).
+On Linux the manager runs in its own transient systemd scope and in the background, so it outlives
+the console unit and a restart of it does not end it:
 
     systemd-run --user --scope --quiet --collect --description=agent manager <name> --
         claude-account run --bg --name <name> --settings <file> "<prompt>"
+
+On macOS the command is the client argv alone, `claude-account run --bg --name <name> --settings
+<file> "<prompt>"`: `run_launch` starts it with `start_new_session`, so it is in its own session
+and outside the console job's process group, and the console's launchd job sets
+`AbandonProcessGroup`, so the job's group cleanup does not touch it (ADR-console-075).
 
 The name is `<project> sprint <sprint id>`. The prompt is one argv element, `PROMPT_LEAD` (`You
 are the manager of one sprint, started by the console. Run "sprint contract" first and follow
@@ -76,10 +81,11 @@ seconds. The client's environment (`client_environment(profile, environ)`, share
 commands) is the console's without `CLAUDE_CONFIG_DIR`, `CONSOLE_SPRINT_ID`
 and `CONSOLE_SPRINT_SECRET`, plus `CLAUDE_ACCOUNT=<profile>` and `$HOME/.agents/bin` first on
 `PATH` (where `sprint` and `resolve-project` are installed). `LAUNCH_TOOLS` names every program the
-launch runs by name on `PATH`.
+Linux launch runs by name on `PATH`; `launch_tools(platform)` is that tuple on Linux, without
+`systemd-run` on macOS and empty elsewhere.
 
 Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret>`: the host is
-not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
+neither Linux nor macOS (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
 The view never shows a reason as given: `plain_reason` maps it to one of `PLAIN_TEXTS` (a table of
@@ -98,7 +104,7 @@ within <n> s`, the last non-empty stderr line, or `the stop exited <n>`. `stop_l
 registry, stop)` reads `registry()` fresh and calls `stop(session_id, profile)` for each listed
 session whose name is in `names` (profile `default` when the record has none), attempts every one
 even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
-`stopper_for(platform)` is `stop_session` where `supported(platform)`, else None: the owner's stop
+`stopper_for(platform)` is `stop_session` where `supported(platform)` (Linux and macOS), else None: the owner's stop
 of a sprint (#892) uses it through the console service.
 `remove_session(session_id, profile)` runs `claude-account run rm <short id>` under the session's
 own profile within `REMOVE_TIMEOUT` seconds, and its failures are `RemoveFailed` (a `StopFailed`)
@@ -398,16 +404,26 @@ def quota_wait(capacity: Mapping, profile: str | None) -> Wait | None:
 
 
 def supported(platform: str) -> bool:
-    return platform.startswith("linux")
+    return platform.startswith("linux") or platform == "darwin"
+
+
+def launch_tools(platform: str) -> tuple[str, ...]:
+    if platform.startswith("linux"):
+        return LAUNCH_TOOLS
+    if platform == "darwin":
+        return tuple(tool for tool in LAUNCH_TOOLS if tool != "systemd-run")
+    return ()
 
 
 def launch_command(launch: Launch, platform: str) -> list[str] | None:
     if not supported(platform):
         return None
+    client = ["claude-account", "run", "--bg", "--name", launch.session_name,
+              "--settings", str(launch.settings), launch.prompt]
+    if not platform.startswith("linux"):
+        return client
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
-            f"--description=agent manager {launch.session_name}", "--",
-            "claude-account", "run", "--bg", "--name", launch.session_name,
-            "--settings", str(launch.settings), launch.prompt]
+            f"--description=agent manager {launch.session_name}", "--", *client]
 
 
 def stopper_for(platform: str) -> Callable[[str, str], None] | None:
