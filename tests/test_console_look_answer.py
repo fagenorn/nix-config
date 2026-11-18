@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import threading
+import unittest
 
 from agent_tools.claims import forge_markers
 from agent_tools.console import answer, manager, sessions, sprints
@@ -54,6 +55,14 @@ def gh_argvs(world):
 
 def posts(world):
     return [argv for argv in gh_argvs(world) if "-X" in argv and "POST" in argv]
+
+
+class LookMovedWordsTest(unittest.TestCase):
+    def test_the_moved_head_line_asks_nothing_of_the_owner(self):
+        self.assertEqual(
+            answer.LOOK_MOVED.format(found="bbbbbbb", head="aaaaaaa"),
+            "Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, the head "
+            "these pictures show. The manager will send the new pictures.")
 
 
 class LookAnswerTest(QuestionRoutes):

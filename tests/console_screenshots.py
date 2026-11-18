@@ -38,7 +38,8 @@ Contract:
   does not keep it, `NEEDS_WORDS_KEPT`), while a page with neither shows no question card at all, which
   fails; `look-card` is a look card on an approved `owner/web`
   sprint, open, with its three options and the before and after pictures every look card carries (#1260); `look-moved` is that card after an approval found
-  the pull request at another head, so its line says nothing was recorded and to ask for a new look,
+  the pull request at another head, so its line says nothing was recorded and that the manager will send the new
+  pictures,
   the options still there; `look-failed` is that card answered with the approval and its
   tracker post failed, so the card holds the headline, the reason and a Retry button and no
   options; `accounts-panel` is the accounts panel opened over

@@ -5657,7 +5657,7 @@ class PageFailedStartTest(unittest.TestCase):
 
 
 MOVED_LINE = ("Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, "
-              "the head these pictures show. Ask for a new look.")
+              "the head these pictures show. The manager will send the new pictures.")
 FAILED_LINE = "GitHub had a problem and did not take the answer. Try again in a moment."
 
 
