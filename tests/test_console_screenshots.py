@@ -688,7 +688,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     serve.close()
                 svc.close()
 
-    def test_the_sharing_shot_opens_the_panel(self) -> None:
+    def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
+        for present, opens in (({"#sharing-open"}, True), (set(), False)):
+            with self.subTest(opens=opens):
+                self.check_sharing_shot(present, opens)
+
+    def check_sharing_shot(self, present: set, opens: bool) -> None:
         calls: list[tuple[str, tuple]] = []
 
         class Page:
@@ -699,7 +704,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 calls.append(("wait_for_selector", (selector,)))
 
             def query_selector(self, selector):
-                return None
+                return object() if selector in present else None
 
             def click(self, selector):
                 calls.append(("click", (selector,)))
@@ -725,11 +730,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             shots._shoot(Browser(), "http://console.test/", "sharing-panel", 480, Path(tmp))
+        if not opens:
+            self.assertNotIn(("click", ("#sharing-open",)), calls)
+            self.assertNotIn(("wait_for_selector", ("#sharing:not([hidden])",)), calls)
+            return
         click = calls.index(("click", ("#sharing-open",)))
         self.assertLess(click, calls.index(("wait_for_selector", ("#sharing:not([hidden])",))))
 
     def test_the_guest_shot_refuses_the_owner_page(self) -> None:
-        for present, refused in (({"#capacity"}, True), (set(), False)):
+        door = "#console-door"
+        for present, refused in (({door, "#capacity"}, True), ({door}, False)):
             with self.subTest(refused=refused), tempfile.TemporaryDirectory() as tmp:
                 browser, page = fake_browser(present)
                 if refused:
@@ -738,6 +748,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 else:
                     shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
                 self.assertIn("#top-who:not([hidden])", page.waits)
+
+    def test_the_guest_shot_on_the_base_page_waits_for_no_guest_part(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            browser, page = fake_browser({"#capacity"})
+            shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+        self.assertNotIn("#top-who:not([hidden])", page.waits)
 
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)

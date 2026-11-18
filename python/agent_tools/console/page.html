@@ -523,7 +523,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><span class="top-who" id="top-who" hidden></span><a class="nav" id="spend-link" href="/spend" hidden>Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false" hidden>Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><span class="top-who" id="top-who" hidden></span><a class="nav" id="spend-link" href="/spend" hidden>Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal" hidden></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)" hidden></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false" hidden>Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -835,7 +835,7 @@ function messageList(messages) {
       continue;
     }
     const row = el("li", "message");
-    row.appendChild(el("span", "message-text", "You: " + messageLabel(message)));
+    row.appendChild(el("span", "message-text", ownerSays("You") + ": " + messageLabel(message)));
     row.appendChild(el("span", "message-state", message.state_text));
     if (message.new === true) row.appendChild(el("span", "message-new", "new"));
     if (typeof message.action_text === "string") {
@@ -2011,9 +2011,9 @@ function noticeLine(notice, projectId) {
   const item = el("li", "notice");
   const head = el("p", "notice-head");
   const who = el("span", "notice-who");
-  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + notice.to_text : notice.kind_text;
+  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + ownerSays(notice.to_text) : notice.kind_text;
   who.appendChild(cutWords(el("b", "notice-label"), label));
-  who.appendChild(cutWords(el("span", "notice-from"), ", from " + notice.poster));
+  who.appendChild(cutWords(el("span", "notice-from"), ", from " + (notice.sprint_id === null ? ownerSays(notice.poster) : notice.poster)));
   head.appendChild(who);
   const owned = notice.owner === true;
   const withdrawal = owned ? noticeWithdrawals.get(noticeKey(projectId, notice.id)) : undefined;
@@ -2991,7 +2991,7 @@ function shareLast(r) {
   if (r === null || typeof r !== "object") return "No request has come to the guest port yet.";
   const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
   const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
-  const why = SHARE_WHY.get(r.reason);
+  const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
   return "Last request on the guest port: " + host + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
 function shareTailnet(tailnet) {
@@ -3025,7 +3025,7 @@ function shareAct(parent, key, cls, label, onClick, off) {
   const button = actionButton(cls, label, onClick);
   const sending = state !== undefined && state.phase === "sending";
   button.disabled = off;
-  // aria-disabled, not disabled, while the post is held: a disabled button cannot take the focus the rebuild restores to it; postShare ignores a second click.
+  // aria-disabled, not disabled, while held: a disabled button cannot take the restored focus; postShare ignores a second click.
   if (sending) button.setAttribute("aria-disabled", "true");
   markBusy(button, sending && state.cls === cls.split(" ")[0]);
   parent.appendChild(button);
@@ -5816,18 +5816,23 @@ if (guestDoor) {
   who.textContent = GUEST_TOP;
   who.hidden = false;
 } else {
-  document.getElementById("spend-link").hidden = false;
-  document.getElementById("sharing-open").hidden = false;
+  for (const id of ["spend-link", "goal", "capacity", "sharing-open"]) document.getElementById(id).hidden = false;
+}
+function ownerSays(text) {
+  return guestDoor ? text.replace(/^You$/, "The owner").replace(/^for you$/, "for the owner") : text;
 }
 function ownerWords(text) {
   if (!guestDoor) return text;
-  return text.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner");
+  const [lead, ...rest] = text.split(": ");
+  return [lead.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner"), ...rest].join(": ");
 }
 function renderGuestStatement(view) {
   const n = view.statement.inbox_items;
-  const nodes = [el("h1", "", n === 0 ? "Nothing waits on the owner" : n === 1 ? "1 thing waits on the owner" : n + " things wait on the owner")];
   const sentence = view.statement.sentence;
-  if (typeof sentence === "string" && sentence.startsWith(STALE_LEAD)) nodes.push(el("p", "sub", ownerWords(sentence)));
+  const stale = typeof sentence === "string" && sentence.startsWith(STALE_LEAD);
+  const none = "Nothing " + (stale || view.statement.stale === true ? "known " : "") + "waits on the owner";
+  const nodes = [el("h1", "", n === 0 ? none : n === 1 ? "1 thing waits on the owner" : n + " things wait on the owner")];
+  if (stale) nodes.push(el("p", "sub", ownerWords(sentence)));
   document.getElementById("statement").replaceChildren(...nodes);
 }
 function renderGuestInbox(view) {
@@ -5847,6 +5852,7 @@ function renderGuestInbox(view) {
       row.appendChild(Number.isFinite(Date.parse(item.waiting_since))
         ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
         : el("span", "guest-wait", "Waiting on the owner"));
+      if (item.stale) row.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
       cards.set(stateId(item), row);
       list.appendChild(row);
     }

@@ -64,8 +64,10 @@ Contract:
   thread's line; on a page without it each clicks what it always did.
   `sharing-panel` is the owner's Sharing panel opened over one invented colleague of `owner/web`
   after one admitted guest request; `guest-page` is that colleague's read-only page through a
-  stand-in Serve that adds the tailnet Host and login header, refused when the captured page is
-  not the guest page.
+  stand-in Serve that adds the tailnet Host and login header, refused when a page with a door
+  meta (`#console-door`) is not the guest page. On the base commit's page, which has neither
+  the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
+  `guest-page` is the page the guest port served then, so a base run still writes every file.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
   writes `<state>-<width>.png` for every pair, so a full run writes 64 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
@@ -1011,7 +1013,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
-        if state == "guest-page":
+        if state == "guest-page" and page.query_selector("#console-door") is not None:
             page.wait_for_selector("#top-who:not([hidden])")
             if page.query_selector("#capacity") is not None:
                 raise RuntimeError("the guest shot is not the guest page")
@@ -1035,7 +1037,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")
-        if state == "sharing-panel":
+        if state == "sharing-panel" and page.query_selector("#sharing-open") is not None:
             page.click("#sharing-open")
             page.wait_for_selector("#sharing:not([hidden])")
         tell = None

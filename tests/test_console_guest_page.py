@@ -17,8 +17,9 @@ from agent_tools.console import guest, service, sprints as sprint_words, view as
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_guest import guest_inputs
 from .test_console_page import (
-    ACTIVATION, CHECK, CHECK_ITEM, F3, HARNESS, HEADSUP_W, OWNER_W, PAGE, REPORTED, SPRINT, START,
-    box_open, full, has_class, nodes, project, role, view, with_check, with_notices, with_sprints)
+    ACTIVATION, CHECK, CHECK_ITEM, F3, HANDOFF_W, HARNESS, HEADSUP_W, OWNER_W, PAGE, REPORTED, SPRINT, START,
+    box_open, full, has_class, message_entry, nodes, project, role, view, with_check, with_notices,
+    with_sprints)
 
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_TAILNET = "other.invented-tailnet.ts.net"
@@ -149,7 +150,11 @@ class SharingPanelTest(unittest.TestCase):
             (guest.reading(ACCESS, [], [], [], []),
              last + "no Host, no login header, refused because the Host is not the tailnet name."),
             (guest.reading(ACCESS, [TAILNET], [COLLEAGUE, SECOND], [], []),
-             last + f"Host {TAILNET}, 2 login headers, refused because that login is not on the list."),
+             last + f"Host {TAILNET}, 2 login headers, refused because it had not exactly one login header."),
+            (guest.reading(ACCESS, [TAILNET], [], [], []),
+             last + f"Host {TAILNET}, no login header, refused because it had not exactly one login header."),
+            (guest.reading(ACCESS, [TAILNET], [STRANGER], [], []),
+             last + f"Host {TAILNET}, a login header, refused because that login is not on the list."),
             (guest.reading(ACCESS, [TAILNET], [COLLEAGUE], [], []),
              last + f"Host {TAILNET}, a login header, admitted."),
             (guest.reading(guest.NO_ACCESS, [TAILNET], [COLLEAGUE], [], []),
@@ -294,6 +299,7 @@ SENTENCES = [
     value.format_map(defaultdict(lambda: "Which store?"))
     for name, value in [*vars(sprint_words).items(), *[("BALL_TEXT", v) for v in sprint_words.BALL_TEXT.values()]]
     if isinstance(value, str) and (name.endswith("_TEXT") or name == "BALL_TEXT") and SECOND_PERSON.search(value)
+    and name != "STOP_TEXT"  # the words sent to the manager, never a sentence the page draws
 ]
 
 
@@ -346,8 +352,8 @@ class GuestPageTest(unittest.TestCase):
         snap = page_of(PAGE.read_bytes(), GUEST_STEPS)
         for member in ("capacity", "spend_link", "sharing_open", "goal", "register"):
             self.assertIsNotNone(snap[member], member)
-        self.assertFalse(snap["spend_link"]["hidden"])
-        self.assertFalse(snap["sharing_open"]["hidden"])
+        for member in ("spend_link", "sharing_open", "goal", "capacity"):
+            self.assertFalse(snap[member]["hidden"], member)
         roles = {role(n["cls"]) for n in nodes(snap["page"]) if n["cls"]}
         self.assertIn("activation", roles)
         self.assertTrue({"ask-open", "retry"} & roles)
@@ -422,10 +428,65 @@ class GuestPageTest(unittest.TestCase):
 
     def test_the_guest_bytes_hide_the_owner_header_before_the_script(self) -> None:
         markup = GUEST[:GUEST.index(b"<script>")].decode()
-        for ident in ("spend-link", "sharing-open", "accounts", "sharing"):
+        for ident in ("spend-link", "sharing-open", "accounts", "sharing", "goal", "capacity"):
             (tag,) = re.findall(r'<[^>]*\bid="' + ident + r'"[^>]*>', markup)
             self.assertRegex(tag, r"\shidden(\s|>|$)", tag)
         self.assertIn(".top-in > [hidden] { display: none; }", markup)
         snap = harness([START, {"frame": view([])}, SNAP], None)[-1]
         self.assertFalse(snap["spend_link"]["hidden"])
         self.assertFalse(snap["sharing_open"]["hidden"])
+
+    def test_the_guest_reads_notices_and_messages_as_the_owner_s(self) -> None:
+        sent = message_entry(3, "text", "sent", text="a note")
+        approved = message_entry(4, "approved", "sent")
+        frame = view([with_notices({**project(1, []), "sprints": [{**OWNER_SPRINT, "messages": [sent, approved]}]},
+                                   OWNER_W, HANDOFF_W, HEADSUP_W)])
+
+        def lines(snap: dict) -> list:
+            return [full(n) for n in nodes(snap["projects"])
+                    if has_class(n, "notice-head") or has_class(n, "message-text")]
+
+        guest_lines = lines(page_of(GUEST, [START, {"frame": frame}]))
+        self.assertEqual(len(guest_lines), 5)
+        for line in guest_lines:
+            self.assertIsNone(re.search(r"\byou\b", line, re.IGNORECASE), line)
+        joined = " ".join(guest_lines)
+        self.assertIn("Heads-up, from The owner", joined)
+        self.assertIn("Hand-off for the owner, from Fix the settings page", joined)
+        self.assertIn("Heads-up, from Keep the importer fast", joined)
+        self.assertIn("The owner: a note", guest_lines)
+        owner_lines = lines(page_of(PAGE.read_bytes(), [START, {"frame": frame}]))
+        self.assertIn("You: a note", owner_lines)
+        self.assertIn("Hand-off for you, from Fix the settings page", " ".join(owner_lines))
+
+    def test_the_guest_keeps_a_question_and_a_check_as_the_manager_wrote_them(self) -> None:
+        question = "Can you retry? Your call."
+        sprint = {**OWNER_SPRINT, "now_text": sprint_words.NOW_QUESTION_TEXT.format(question=question),
+                  "checks": [{**CHECK, "project_id": "owner/p01",
+                              "text": sprint_words.CHECK_LINE_TEXT.format(question=question)}]}
+        frame = {**OWNER_FRAME, "entries": [
+            {**e, "sprints": [sprint]} if e["project_id"] == "owner/p01" else e for e in OWNER_FRAME["entries"]]}
+        shown = sprint_text(page_of(GUEST, [START, {"frame": frame}]))
+        self.assertIn("waiting for the owner's answer: " + question, shown)
+        self.assertIn("The owner's check: " + question, shown)
+
+    def test_a_failed_tracker_read_never_reads_as_an_empty_inbox(self) -> None:
+        def headline(frame: dict) -> str:
+            snap = page_of(GUEST, [START, {"frame": frame}])
+            (h1,) = [n for n in snap["statement"]["children"] if n["tag"] == "h1"]
+            return full(h1)
+
+        base = view([project(1, [])])
+        stale = consoleview.STALE_SENTENCE.format(projects="owner/p00")
+        sentence = {**base, "statement": {**base["statement"], "sentence": stale}}
+        flagged = {**base, "statement": {**base["statement"], "stale": True}}
+        self.assertEqual(headline(sentence), "Nothing known waits on the owner")
+        self.assertEqual(headline(flagged), "Nothing known waits on the owner")
+        self.assertEqual(headline(base), "Nothing waits on the owner")
+        read_at = "2026-11-12T10:00:00+00:00"
+        cached = page_of(GUEST, [START, {"frame": with_check([{**CHECK_ITEM, "stale": True, "read_at": read_at}])}])
+        (row,) = named(cached["inbox"], "guest-item")
+        (shown,) = named(row, "read-at")
+        self.assertTrue(full(shown).startswith("read "), full(shown))
+        fresh = page_of(GUEST, [START, {"frame": with_check([{**CHECK_ITEM, "stale": False}])}])
+        self.assertEqual(named(named(fresh["inbox"], "guest-item")[0], "read-at"), [])
