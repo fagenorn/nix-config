@@ -19,7 +19,7 @@ A fresh adoption worktree lacks the generated, untracked hook configuration that
 
 **D5. Failure.** A failing environment command or hook, an environment executable that cannot start and a run past the bound are each retained as `adopt.commit.failed` with `commit_output`, `hook` and `exit` null when git never ran, and each launch or timeout line names the command id. A failing hook can instead be `adopt.commit.signing_unavailable`, decided by the existing probe, which now runs in the same environment, so a signer only that environment provides counts. The commit is never retried without the environment and never skips a hook. Without the binding, a git that cannot start stays `adopt.git.unavailable`.
 
-**D6. Proof and removal.** When the environment ran, which is declared to generate untracked files, the branch proof allows untracked records but still refuses every tracked change, and the proved worktree is removed with `--force`. Without the binding, the proof and the unforced removal are unchanged.
+**D6. Proof and removal.** When the environment ran, which is declared to generate untracked files, the branch proof allows untracked records but still refuses every tracked change, a change inside a submodule included whatever `ignore` it is configured with, and the proved worktree is removed with `--force`. Without the binding, the proof and the unforced removal are unchanged.
 
 **D7. Bound and process tree.** The commit through the environment is bounded by `ENVIRONMENT_TIMEOUT_SECONDS`, the same 300 s as every other git call; the console's apply child stays bounded at 1800 s. The command runs in a process group led by a leash, a shell that reads its stdin and then kills its group. Only apply holds the leash's stdin: it closes it on every outcome, and the kernel closes it when the console kills apply's own group. Either way the launcher, git, its hooks and any straggler end with the commit, so no git can move the branch afterwards. Rejected: `subprocess.run(timeout=...)`, which kills only the launcher, and a new session alone, which the console's group kill of apply would not reach.
 
@@ -31,5 +31,5 @@ A fresh adoption worktree lacks the generated, untracked hook configuration that
 - A host's installed resolver refuses the member until that host switches.
 - The project adds the member and its command to its own contract before registering.
 - The environment command's first run counts against the 300 s bound.
-- A launcher that starts a session of its own escapes the leash.
+- A launcher that starts a session of its own escapes the leash. Apply still kills and reaps that launcher itself at the timeout, so apply returns; processes it started in that session may outlive it.
 - This amends ADR-console-071 D3 and the wording of its card note.

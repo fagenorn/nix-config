@@ -242,10 +242,14 @@ def status_records(root: Path) -> list[tuple[str, tuple[str, ...]]]:
     rename detection this reads is the whole point of the first commit gate.
     Rename detection is turned on explicitly rather than inherited, so a move
     reports one rename record — exactly what the gate demands — whatever
-    `status.renames` or `diff.renames` the machine carries.
+    `status.renames` or `diff.renames` the machine carries. A submodule's
+    changes are reported whatever `ignore` the repository configures for it:
+    a worktree is judged clean only when nothing in it, a submodule included,
+    would be lost by removing it.
     """
     fields = git_or_fail(
         root, "status", "--porcelain", "-z", "--renames",
+        "--ignore-submodules=none",
         "--untracked-files=all").split(b"\0")
     records: list[tuple[str, tuple[str, ...]]] = []
     index = 0
@@ -839,6 +843,34 @@ def failed_hook(trace: bytes) -> tuple[str, int] | None:
     return failed
 
 
+def git_exit_code(trace: bytes) -> int | None:
+    """The exit code git's own trace2 `exit` event reports, or None.
+
+    Only the events of the first session in the file (the `sid` of its first
+    `version` event) are read, as `failed_hook` reads them. None means git
+    wrote no `exit` event: it never ran, or it was killed.
+    """
+    sid: object = None
+    code: int | None = None
+    for raw in trace.splitlines():
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if sid is None:
+            if event.get("event") != "version":
+                continue
+            sid = event.get("sid")
+        if event.get("sid") != sid or event.get("event") != "exit":
+            continue
+        value = event.get("code")
+        if isinstance(value, int) and not isinstance(value, bool):
+            code = value
+    return code
+
+
 def commit_output_lines(tail: bytes, cut: bool) -> list[str]:
     """The kept lines of a commit's output tail.
 
@@ -916,6 +948,11 @@ def run_commit(worktree: Path, trace_dir: Path, *args: str,
             trace = b""
     finally:
         trace_path.unlink(missing_ok=True)
+    if environment is not None and returncode == 0:
+        # A wrapper reports the status of its own last command, which need
+        # not be git's: git's exit event is the commit's own result.
+        git_code = git_exit_code(trace)
+        returncode = 1 if git_code is None else git_code
     hook = failed_hook(trace)
     return returncode, {
         "hook": hook[0] if hook else None,
@@ -1065,7 +1102,7 @@ def run_leashed(argv: list[str], *, cwd: str, env: dict[str, str], stdout,
     hook and every straggler in the group before both are reaped. The return
     value is the launcher's exit code; `subprocess.TimeoutExpired` and
     `OSError` propagate after the group is ended. A launcher that starts its
-    own session escapes the group.
+    own session escapes the group, but is itself killed and reaped here.
     """
     leash = subprocess.Popen(
         ["sh", "-c", "read _; kill -KILL 0", "commit-leash"],
@@ -1081,6 +1118,10 @@ def run_leashed(argv: list[str], *, cwd: str, env: dict[str, str], stdout,
         leash.stdin.close()
         leash.wait()
         if launcher is not None:
+            if launcher.poll() is None:
+                # A launcher in a group or session of its own is out of the
+                # leash's reach and may never return.
+                launcher.kill()
             launcher.wait()
 
 
@@ -1118,6 +1159,10 @@ def run_through_environment(environment: dict, worktree: Path,
         raise environment_failure([
             f"the commit environment command {name} could not be started: "
             f"{error.strerror or 'an error'}"]) from None
+    except ValueError:
+        raise environment_failure([
+            f"the commit environment command {name} could not be started: "
+            f"an argument contains a NUL character"]) from None
 
 
 SIGNING_UNAVAILABLE = "adopt.commit.signing_unavailable"
@@ -1142,27 +1187,29 @@ def signing_works(worktree: Path, environment: dict | None = None) -> bool:
     With an `environment` each probe runs as the trailing arguments of that
     command, in its cwd and without the trace variable, exactly as the commit
     did, so a signer only that environment provides counts. A probe that
-    cannot start or does not finish answers `True` as well: the signer is not
-    shown to be at fault.
+    cannot start or does not finish ends the diagnosis at once with `True`
+    as well: the signer is not shown to be at fault, and no later probe may
+    blame it for what the unfinished one would have shown.
     """
     if environment is None:
-        def probe(*words: str) -> int:
+        def probe(*words: str) -> int | None:
             return run_git(worktree, *words)[0]
     else:
-        def probe(*words: str) -> int:
+        def probe(*words: str) -> int | None:
             try:
                 return run_leashed(
                     [*environment["argv"], "git", "-C", str(worktree), *words],
                     cwd=environment["cwd"], env=environment_env(),
                     stdout=subprocess.DEVNULL,
                     timeout=ENVIRONMENT_TIMEOUT_SECONDS)
-            except (OSError, subprocess.SubprocessError):
-                return 0
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return None
     for role in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
         if probe("var", role) != 0:
             return True
-    return probe("commit-tree", "-S", "-m", "adopt signing probe",
-                 "HEAD^{tree}") == 0
+    code = probe("commit-tree", "-S", "-m", "adopt signing probe",
+                 "HEAD^{tree}")
+    return code is None or code == 0
 
 
 def expected_commit_paths(operations: list[dict]) -> tuple[set[str], set[str]]:

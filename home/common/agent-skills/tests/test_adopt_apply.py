@@ -2141,6 +2141,60 @@ class CommitEnvironmentApplyTest(ApplyTestCase):
         base = git(root, "rev-parse", "HEAD").strip()
         self.assert_retained(root, plan_id, base, "adopt.commit.failed")
 
+    def test_a_submodule_edit_the_environment_makes_is_residue_even_when_the_submodule_ignores_dirty(
+            self):
+        update = ("git -c protocol.file.allow=always submodule update --init "
+                  "--quiet && printf 'edit\\n' >> vendor/f && exec \"$@\"")
+        root = self.tooled(
+            commands={"dev-shell": ["sh", "-c", update, "dev-shell"]},
+            commit_environment="dev-shell")
+        source = init_repo()
+        write(source, "f", "a\n")
+        commit(source, "vendored")
+        git(root, "-c", "protocol.file.allow=always", "submodule", "add",
+            "--quiet", str(source), "vendor")
+        git(root, "config", "-f", ".gitmodules", "submodule.vendor.ignore",
+            "dirty")
+        commit(root, "vendor a submodule")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        code, payload, err = self.apply(plan_id)
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.commit.unproved", err or payload)
+        edited = self.worktree(plan_id) / "vendor" / "f"
+        self.assertEqual(edited.read_text("utf-8"), "a\nedit\n")
+
+    def test_a_waiting_environment_that_hides_the_commit_exit_still_names_the_failed_hook(
+            self):
+        root = self.tooled(
+            commands={"dev-shell": [
+                "sh", "-c", "\"$@\"; echo after", "dev-shell"]},
+            commit_environment="dev-shell")
+        self.hooked(root, pre_commit="#!/bin/sh\necho out one\nexit 3\n")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        expected = {"hook": "pre-commit", "exit": 3,
+                    "lines": ["out one", "after"]}
+        self.assertEqual(payload["error"]["commit_output"], expected)
+        self.assertEqual(self.record(plan_id)["commit_output"], expected)
+
+    def test_an_environment_argument_a_process_cannot_take_is_retained_as_a_start_failure(
+            self):
+        root = self.tooled(
+            commands={"dev-shell": [
+                "sh", "-c", "exec \"$@\"", "dev-shell", "bad\u0000word"]},
+            commit_environment="dev-shell")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.failed")
+        expected = {"hook": None, "exit": None, "lines": [
+            "the commit environment command dev-shell could not be started: "
+            "an argument contains a NUL character"]}
+        self.assertEqual(payload["error"]["commit_output"], expected)
+        self.assertEqual(self.record(plan_id)["commit_output"], expected)
+
     def test_without_the_binding_a_git_that_cannot_start_is_still_git_unavailable(
             self):
         with mock.patch.object(adopt_apply.subprocess, "run",
@@ -2259,6 +2313,21 @@ class CommitEnvironmentRunTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotEqual(self.head(), self.base)
 
+    def test_a_launcher_that_leaves_its_process_group_and_hangs_is_still_ended_at_the_timeout(
+            self):
+        escaping = {"id": "dev-shell", "cwd": str(self.root), "argv": [
+            sys.executable, "-c",
+            "import os, time\nos.setsid()\ntime.sleep(30)\n", "dev-shell"]}
+        started = time.monotonic()
+        with mock.patch.object(adopt_apply, "ENVIRONMENT_TIMEOUT_SECONDS", 1):
+            with self.assertRaises(adopt_inspection.AdoptError) as caught:
+                adopt_apply.run_commit(
+                    self.root, Path(tempfile.mkdtemp()), "--quiet",
+                    "--no-gpg-sign", "-m", "x", environment=escaping)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertEqual(caught.exception.repair_id, "adopt.commit.failed")
+        self.assertEqual(self.head(), self.base)
+
     def test_an_apply_killed_mid_commit_takes_the_environment_tree_with_it(
             self):
         child = subprocess.Popen(
@@ -2282,6 +2351,38 @@ class CommitEnvironmentRunTest(unittest.TestCase):
         child.wait()
         time.sleep(4)
         self.assertEqual(self.head(), self.base)
+
+
+class SigningProbeTest(unittest.TestCase):
+    """`signing_works` blames the signer only when its probes ran."""
+
+    def setUp(self) -> None:
+        patcher = mock.patch.dict(os.environ, {
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in IDENTITY:
+            if name.startswith("GIT_AUTHOR") or name.startswith("GIT_COMMITTER"):
+                saved = os.environ.pop(name, None)
+                if saved is not None:
+                    self.addCleanup(os.environ.__setitem__, name, saved)
+        self.root = init_repo()
+        write(self.root, "seed.txt", "seed\n")
+        commit(self.root, "seed")
+        git(self.root, "config", "user.useConfigOnly", "true")
+        git(self.root, "config", "--unset", "user.name")
+        git(self.root, "config", "--unset", "user.email")
+
+    def environment(self, script: str) -> dict:
+        return {"id": "dev-shell", "cwd": str(self.root),
+                "argv": ["sh", "-c", script, "dev-shell"]}
+
+    def test_an_identity_probe_that_does_not_finish_ends_the_diagnosis(self):
+        hanging = self.environment(
+            "for word in \"$@\"; do [ \"$word\" = var ] && sleep 30; done; "
+            "exec \"$@\"")
+        with mock.patch.object(adopt_apply, "ENVIRONMENT_TIMEOUT_SECONDS", 1):
+            self.assertTrue(adopt_apply.signing_works(self.root, hanging))
 
 
 def trace_lines(*events: dict) -> bytes:
