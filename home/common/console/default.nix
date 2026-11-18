@@ -17,9 +17,9 @@
 # a user service starts with a bare `PATH`. `/usr/bin:/bin` follows it for the system tools.
 # The manager launch (issue 888) runs `systemd-run` and `claude-account` by name,
 # `claude-account` runs coreutils by name, and the manager is an agent that needs the
-# owner's tools, so on Linux the unit also carries the user profile (`claude-account` and
-# the tools a terminal session has) and the system profile (coreutils, bash and `systemd-run`)
-# between gh and `/usr/bin:/bin`.
+# owner's tools, so the service also carries the user profile (`claude-account` and the tools
+# a terminal session has) and the system profile (coreutils, bash and, on Linux, `systemd-run`)
+# between gh and `/usr/bin:/bin`. A launchd agent reads no `home.sessionPath` either.
 #
 # On Linux `/run/wrappers/bin` comes first after gh, before the system profile, so the
 # `sudo` the page's activation runs (`just switch` runs `sudo nixos-rebuild switch` by name)
@@ -55,12 +55,10 @@ let
 
   path = lib.concatStringsSep ":" (
     [ (lib.makeBinPath [ config.programs.gh.package ]) ]
-    ++ lib.optionals pkgs.stdenv.isLinux [
-      "/run/wrappers/bin"
+    ++ lib.optionals pkgs.stdenv.isLinux [ "/run/wrappers/bin" ]
+    ++ [
       "${config.home.profileDirectory}/bin"
       "/run/current-system/sw/bin"
-    ]
-    ++ [
       "/usr/bin"
       "/bin"
     ]
@@ -86,7 +84,7 @@ in
     path = lib.mkOption {
       type = lib.types.str;
       readOnly = true;
-      description = "The PATH the console service runs with: gh's bin, on Linux the setuid wrappers (sudo), the user and system profiles, then the system tools.";
+      description = "The PATH the console service runs with: gh's bin, on Linux the setuid wrappers (sudo), on every host the user and system profiles, then the system tools.";
     };
   };
 

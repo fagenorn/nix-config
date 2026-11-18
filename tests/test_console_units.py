@@ -107,6 +107,7 @@ class DarwinAgent(unittest.TestCase):
       command = u.agentConsole.command;
       path = u.agentConsole.path;
       home = u.home.homeDirectory;
+      profile = u.home.profileDirectory;
       agentCommand = c.launchd.user.agents.agent-console.command;
       homeAgent = u.launchd.agents ? agent-console;
       plist = c.environment.userLaunchAgents."org.nixos.agent-console.plist".text;
@@ -142,11 +143,16 @@ class DarwinAgent(unittest.TestCase):
         for got, plist in self.hosts():
             self.assertEqual(plist["EnvironmentVariables"], {"PATH": got["path"], "HOME": got["home"]})
 
-    def test_the_agent_path_is_gh_then_the_system_tools(self):
+    def test_the_agent_leaves_a_managers_process_group_alone(self):
+        for _, plist in self.hosts():
+            self.assertIs(plist["AbandonProcessGroup"], True)
+
+    def test_the_agent_path_is_gh_the_profiles_then_the_system_tools(self):
         for got, _ in self.hosts():
             segments = got["path"].split(":")
             self.assertRegex(segments[0], r"^/nix/store/[0-9a-z]{32}-gh-[^/]+/bin$")
-            self.assertEqual(segments[1:], ["/usr/bin", "/bin"])
+            self.assertEqual(segments[1:], [f"{got['profile']}/bin", "/run/current-system/sw/bin",
+                                            "/usr/bin", "/bin"])
 
     def test_the_agent_logs_to_one_file_and_has_no_other_keys(self):
         for got, plist in self.hosts():
@@ -154,7 +160,7 @@ class DarwinAgent(unittest.TestCase):
             self.assertEqual(plist["StandardOutPath"], log)
             self.assertEqual(plist["StandardErrorPath"], log)
             self.assertEqual(set(plist), {"Label", "ProgramArguments", "RunAtLoad", "KeepAlive",
-                                          "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"})
+                                          "AbandonProcessGroup", "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"})
 
     def test_home_manager_declares_no_second_console_agent(self):
         for got, _ in self.hosts():
