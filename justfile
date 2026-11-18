@@ -220,6 +220,7 @@ agent-workflow-tests *args:
     tests/test_console_plan_questions.py \
     tests/test_console_project_question.py \
     tests/test_console_question_records.py \
+    tests/test_console_question_check.py \
     tests/test_console_contract_draft.py \
     tests/test_console_checkout_remote.py \
     tests/test_console_register.py \
