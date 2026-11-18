@@ -1973,6 +1973,7 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
                 " --answer fix --message session-<id> --words-file <file>`")
     PUSH = "`git -C <dir> push origin <branch>`"
     HEAD_READ = "`gh pr view <pr> --repo <slug> --json headRefOid`"
+    STATE_READ = "`gh pr view <pr> --repo <slug> --json state,headRefOid`"
     MERGE = "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`"
     LAND_RELEASE = "`forge-claim land release --repo <slug> --branch <int> --sha <lock sha>`"
     TICK = "`look-approval tick --repo <slug> --issue <n> --pr <pr> --head <head>`"
@@ -2021,7 +2022,7 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         status = land[land.index(self.STATUS):land.index("`forge-claim land acquire")]
         self.assertNotIn("stop", status.replace("; `needed` stops.", ""))
         rules = self.section("Land")
-        self.assertIn("On `error`, merge nothing: run `forge-claim release` and report it", rules)
+        self.assertIn("On `error` or `unmarked`, merge nothing: run `forge-claim release` and report it", rules)
         self.assertIn("On `approved`, land as step 6 does", rules)
 
     def test_a_resync_that_ends_approved_keeps_landing(self):
@@ -2051,13 +2052,14 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
             with self.subTest(form=form):
                 self.assertNotIn(form, stop)
 
-    def test_approve_reads_the_recorded_approval_only_for_the_unchanged_head(self):
+    def test_approve_reads_the_recorded_approval_only_for_the_open_unchanged_head(self):
         resume = self.section("Resume")
         self.assertIn("`forge-claim acquire`", resume)
         approve = self.bullet(resume, "approve")
-        self.assertIn(self.HEAD_READ, approve)
+        self.assertIn(self.STATE_READ, approve)
+        self.assertIn("only while it is `OPEN` at that head", approve)
         self.assertIn(self.STATUS, approve)
-        self.assertLess(approve.index(self.HEAD_READ), approve.index(self.STATUS))
+        self.assertLess(approve.index(self.STATE_READ), approve.index(self.STATUS))
         for form in ("`approved`", "Never record an approval yourself", "the head moved", "the owner has not recorded it"):
             with self.subTest(form=form):
                 self.assertIn(form, approve)
@@ -2065,12 +2067,12 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
             with self.subTest(absent=form):
                 self.assertNotIn(form, approve)
 
-    def test_an_approve_read_that_errors_is_reported_not_called_a_missing_approval(self):
+    def test_an_approve_read_that_errors_or_finds_no_marker_is_reported_not_called_a_missing_approval(self):
         approve = self.bullet(self.section("Resume"), "approve")
-        self.assertIn("on `error`", approve)
-        self.assertLess(approve.index("on `error`"), approve.index("Never record an approval yourself"))
-        self.assertIn("apply the `error` rule below", approve)
-        self.assertIn("On `error`, merge nothing: run `forge-claim release` and report it.",
+        self.assertIn("on `error` or `unmarked`", approve)
+        self.assertLess(approve.index("on `error` or `unmarked`"), approve.index("else merge nothing"))
+        self.assertIn("apply the rule below", approve)
+        self.assertIn("On `error` or `unmarked`, merge nothing: run `forge-claim release` and report it.",
                       self.section("Land"))
 
     def test_fix_posts_only_for_the_unchanged_head(self):

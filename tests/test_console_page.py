@@ -5538,6 +5538,17 @@ class PageLookTest(unittest.TestCase):
         self.assertEqual(json.loads(post["body"]),
                          {"project_id": "owner/p00", "sprint_id": SID, "round": 3, "question": 0})
 
+    def test_a_look_answer_the_console_found_moved_says_why_once(self) -> None:
+        options = ["approve", "ask for changes"]
+        open_card = question(0, "May this merge?", options, "approve", look=look_of("open", "Choosing approve records it."))
+        moved_card = question(0, "May this merge?", options, "approve", look=look_of("moved", MOVED_LINE))
+        (snap,) = render([START, {"frame": frame([open_card])},
+                          {"respond": {"status": 409, "text": MOVED_LINE + "\n"}},
+                          {"key": "Enter"}, {"clock": 5000}, {"frame": frame([moved_card])},
+                          {"snapshot": True}])
+        self.assertEqual(full(snap["inbox"]).count(MOVED_LINE), 1)
+        self.assertNotIn("Could not send", full(snap["inbox"]))
+
     def test_a_failed_retry_says_why(self) -> None:
         failed = look_answered("failed", FAILED_LINE)
         (snap,) = render([START, {"frame": frame([failed])},

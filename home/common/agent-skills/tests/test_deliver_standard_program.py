@@ -10410,12 +10410,30 @@ class LookResumeTest(unittest.TestCase):
         self.assertIn("--match-head-commit " + SHA, prompt(calls, "merge"))
 
     def test_an_approve_with_no_recorded_approval_stops_and_merges_nothing(self):
-        cases = (({"verdict": "needed", "kept_from": None}, "needed"), ({"verdict": "error", "detail": "x"}, "error: x"), (None, "nothing"))
+        cases = (({"verdict": "needed", "kept_from": None}, "needed"), ({"verdict": "unmarked", "kept_from": None}, "unmarked"))
         for reply, tail in cases:
             with self.subTest(tail=tail):
                 result, calls = self.approve(replies={"look-read": reply})
                 self.stops_at_approve(result, calls, "the approval of " + SHA + " was not recorded: the verified head was " + SHA
                                       + " and look-approval status answered " + tail, absent=("look-post", "look-pr", "pr", "merge"))
+
+    def test_an_approve_whose_status_read_has_no_verdict_says_it_could_not_check(self):
+        result, calls = self.approve(replies={"look-read": {"detail": "x"}})
+        self.stops_at_approve(result, calls, "the approval of " + SHA + " could not be checked: the verified head was " + SHA
+                              + " and look-approval status answered no verdict: x", absent=("look-post", "look-pr", "pr", "merge"))
+        self.assertNotIn("not recorded", result["details"])
+
+    def test_an_approve_carrying_the_number_the_inbox_prints_reads_the_approval_and_lands(self):
+        for message in (7, "msg-7"):
+            with self.subTest(message=message):
+                result, calls = self.approve(message=message)
+                self.assertEqual(result["stage"], "done")
+                self.assertIn("look-read", labels(calls))
+                self.assertNotIn("look-post", labels(calls))
+        for message in (0, -1, 1.5, True, None, "bad message", [7]):
+            with self.subTest(message=message):
+                result, _ = self.approve(message=message)
+                self.assertEqual(result["stage"], "args")
 
     def test_approve_for_an_older_head_records_nothing_and_stops_at_the_current_head(self):
         result, calls = self.approve(head=B)
@@ -10786,14 +10804,14 @@ class LookResumeTest(unittest.TestCase):
 
     def test_an_approve_whose_read_fails_stops_with_both_heads(self):
         cases = (
-            ({}, {"look-read": {"verdict": "error", "detail": "x"}}, SHA, "answered error: x"),
-            ({}, {"look-read": None}, SHA, "answered nothing"),
-            (dict(head=D, patch=LOOK_MERGED), {"look-verify": LOOK_OK, "look-read": {"verdict": "refused"}}, D, "answered refused"),
+            ({}, {"look-read": {"verdict": "error", "detail": "x"}}, SHA, "could not be checked", "answered error: x"),
+            ({}, {"look-read": None}, SHA, "could not be checked", "answered nothing"),
+            (dict(head=D, patch=LOOK_MERGED), {"look-verify": LOOK_OK, "look-read": {"verdict": "refused"}}, D, "was not recorded", "answered refused"),
         )
-        for kwargs, replies, answered, tail in cases:
+        for kwargs, replies, answered, what, tail in cases:
             with self.subTest(tail=tail):
                 result, calls = self.approve(replies=replies, **kwargs)
-                self.stops_at_approve(result, calls, "the approval of " + answered + " was not recorded: the verified head was " + SHA
+                self.stops_at_approve(result, calls, "the approval of " + answered + " " + what + ": the verified head was " + SHA
                                       + " and look-approval status " + tail, absent=("look-post", "look-pr", "pr", "merge"))
 
     def test_an_approve_on_a_pr_that_is_not_open_stops_with_both_heads(self):

@@ -57,8 +57,8 @@ returns its comment id. It lists the issue's trusted markers (`look_marker.TRUST
 `issue`, `pr`, `head`, `answer=approved` and `message` all equal the given ones is returned and nothing is posted,
 so a retry after a lost reply posts no second marker, and one a trusted end marker withdrew is settled too: the
 retry never undoes a withdrawal. Otherwise it reads the pull request once more (`look_head`): one that is not open
-(`Refused(LOOK_CLOSED)`) or not at `head` (`Refused(LOOK_MOVED)`) is not approved, so no attempt posts a stale
-approval. Then it posts `look_marker.approval_body(issue, pr, head,
+(`LookMoved`, a `Refused` carrying `LOOK_CLOSED`) or not at `head` (`LookMoved` carrying `LOOK_MOVED`; `state` and
+`found` are what it is) is not approved, so no attempt posts a stale approval. Then it posts `look_marker.approval_body(issue, pr, head,
 "approved", message)` and lists the trusted markers again: the new comment must be among them, else
 `Refused(LOOK_UNTRUSTED)` (GitHub took it, but not as the owner or a member, so the merge would not count it).
 
@@ -170,6 +170,18 @@ LOOK_NOT_PENDING = "this approval is not waiting to be recorded"
 
 class Refused(Exception):
     """The answer was not sent; `str(error)` is the one-line reason."""
+
+
+class LookMoved(Refused):
+    """The pull request is closed, merged or at another head than the card's: nothing was recorded.
+
+    `state` is what the pull request is (`open`, `closed` or `merged`), `found` the head it has.
+    """
+
+    def __init__(self, state: str, found: str, head: str):
+        super().__init__(LOOK_CLOSED.format(state=state) if state != "open"
+                         else LOOK_MOVED.format(found=found[:7], head=head[:7]))
+        self.state, self.found = state, found
 
 
 def _reduced(questions: Sequence[dict]) -> list[tuple[str, list[str]]]:
@@ -304,10 +316,8 @@ def record_look(slug: str, issue: int, pr: int, head: str, message: str) -> int:
                 and all(marker.fields.get(key) == value for key, value in wanted.items())):
             return marker.comment_id
     state, found = look_head(slug, pr)
-    if state != "open":
-        raise Refused(LOOK_CLOSED.format(state=state))
-    if found != head:
-        raise Refused(LOOK_MOVED.format(found=found[:7], head=head[:7]))
+    if state != "open" or found != head:
+        raise LookMoved(state, found, head)
     posted = fm.post(slug, issue, look_marker.approval_body(issue, pr, head, "approved", message))
     if not any(marker.comment_id == posted for marker in fm.list_markers(slug, issue, look_marker.TRUSTED)):
         raise Refused(LOOK_UNTRUSTED)

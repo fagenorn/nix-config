@@ -410,13 +410,15 @@ class _Seed:
         It carries the two pictures a real look card always has, marked before and after."""
         base = {"sprint_id": sid, "goal": goal}
         shown = self.look_pictures(project, sid)
-        asked = self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
+        question = {
             "question": "Does the settings page look right?",
             "blocks": "the merge of issue 12",
             "context": "The before and after of the settings page, from the same pull request.",
             "options": [LOOK_APPROVE, "Approve with one fix", "Ask for changes"],
             "recommended": LOOK_APPROVE, "pictures": shown,
-            "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "approve": LOOK_APPROVE}}]})
+            "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "approve": LOOK_APPROVE}}
+        asked = self.put(MINUTE * 4, "questions.asked", project, {
+            **base, "blocker": False, "look_repo": "owner/web", "questions": [question]})
         where = {"round": asked.seq, "index": 0}
         if moved:
             self.put(MINUTE * 2, "look.recorded", project, {

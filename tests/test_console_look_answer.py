@@ -205,23 +205,75 @@ class LookAnswerTest(QuestionRoutes):
             answer.record_look(SLUG, ISSUE, PR, HEAD, "41")
         self.assertEqual(str(caught.exception), answer.LOOK_UNTRUSTED)
 
-    def test_a_retry_after_the_head_moved_posts_nothing_and_says_why(self):
+    def replace_round(self, svc, sid, round_id, head):
+        """The manager's replacement of the reopened look card, for the head the pull request has now."""
+        question = {**LOOK_Q, "look": {**LOOK_Q["look"], "head": head},
+                    "replaces": {"round": round_id, "index": 0}}
+        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [question]})
+        self.assertEqual(status, 200, body)
+
+    def reopened_by_a_retry(self, kw, line, found_state):
         svc = self.open()
         sid, round_id, seq = self.failed_post(svc)
         before = len(posts(self.world))
-        self.pull(sha=MOVED)
+        self.pull(**kw)
         status, _, body = self.retry(svc, sid, round_id)
-        self.assertEqual((status, body), (
-            502, answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]).encode() + b"\n"))
+        self.assertEqual((status, body), (409, line.encode() + b"\n"))
         self.assertEqual(len(posts(self.world)), before)
         self.assertEqual(self.world.stored(), [])
-        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "failed"])
-        self.assertEqual(self.entry(svc, sid)["look"]["line"],
-                         answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]))
+        moved = self.rows("look.recorded")
+        self.assertEqual([r["outcome"] for r in moved], ["failed", "moved"])
+        self.assertEqual((moved[-1]["message"], moved[-1]["state"]), (seq, found_state))
+        entry = self.entry(svc, sid)
+        self.assertIs(entry["answered"], False)
+        self.assertEqual(entry["look"], {"issue": ISSUE, "pr": PR, "head": HEAD,
+                                         "state": "moved", "line": line})
         self.assertEqual(self.answers(svc, sid), [])
-        self.pull(state="closed")
-        self.assertEqual(self.retry(svc, sid, round_id)[0], 502)
+        status, _, body = self.retry(svc, sid, round_id)
+        self.assertEqual((status, body), (409, answer.LOOK_NOT_PENDING.encode() + b"\n"))
+        self.replace_round(svc, sid, round_id, MOVED)
+        return svc, sid
+
+    def test_a_retry_after_the_head_moved_gives_the_question_back_to_the_manager(self):
+        self.reopened_by_a_retry({"sha": MOVED}, answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]),
+                                 "open")
+
+    def test_a_retry_after_the_pull_request_closed_gives_the_question_back_to_the_manager(self):
+        self.reopened_by_a_retry({"state": "closed"}, answer.LOOK_CLOSED.format(state="closed"),
+                                 "closed")
+
+    def test_a_head_that_moves_after_the_answer_was_kept_gives_the_question_back(self):
+        svc = self.open(look_reader=lambda slug, pr: ("open", HEAD))
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull(sha=MOVED)
+        line = answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7])
+        status, _, body = self.approve(svc, sid, round_id)
+        self.assertEqual((status, body), (409, line.encode() + b"\n"))
+        (answered,) = self.rows("question.answered")
+        (moved,) = self.rows("look.recorded")
+        self.assertEqual((moved["outcome"], moved["message"], moved["found"], moved["state"]),
+                         ("moved", answered["seq"], MOVED, "open"))
         self.assertEqual(self.world.stored(), [])
+        self.assertEqual(posts(self.world), [])
+        entry = self.entry(svc, sid)
+        self.assertIs(entry["answered"], False)
+        self.assertEqual((entry["look"]["state"], entry["look"]["line"]), ("moved", line))
+        self.assertEqual(self.answers(svc, sid), [])
+        self.replace_round(svc, sid, round_id, MOVED)
+
+    def test_a_retry_after_the_sprint_ended_posts_nothing(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        before = len(posts(self.world))
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Stopped early", "issues": [], "differently": "ask sooner"})
+        self.pull()
+        status, _, body = self.retry(svc, sid, round_id)
+        self.assertEqual((status, body), (409, sprints.ENDED.encode() + b"\n"))
+        self.assertEqual(len(posts(self.world)), before)
+        self.assertEqual(self.world.stored(), [])
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed"])
 
     def test_a_post_whose_head_moved_between_attempts_is_not_made(self):
         with self.assertRaises(answer.Refused) as caught:
@@ -245,6 +297,33 @@ class LookAnswerTest(QuestionRoutes):
         (comment,) = self.world.stored()
         self.assertEqual(comment["body"], self.marker_for(seq))
         self.assertTrue(all("elsewhere/other" not in " ".join(argv) for argv in gh_argvs(self.world)))
+
+    def test_an_approval_goes_to_the_repository_the_card_was_issued_for(self):
+        repository = {"slug": SLUG}
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(slug_of=lambda root: repository["slug"],
+                         write_sleep=lambda seconds: False)
+        sid, round_id = self.asked(svc)
+        repository["slug"] = "elsewhere/other"
+        self.store_comments()
+        self.pull()
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        (answered,) = self.rows("question.answered")
+        self.assertEqual(answered["look"]["repo"], SLUG)
+        (comment,) = self.world.stored()
+        self.assertEqual(comment["body"], self.marker_for(answered["seq"]))
+        self.assertTrue(all("elsewhere/other" not in " ".join(argv) for argv in gh_argvs(self.world)))
+
+    def test_a_card_issued_without_a_repository_records_nothing_even_when_one_is_known_later(self):
+        repository = {"slug": None}
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(slug_of=lambda root: repository["slug"],
+                         write_sleep=lambda seconds: False)
+        sid, round_id = self.asked(svc)
+        repository["slug"] = SLUG
+        status, _, body = self.approve(svc, sid, round_id)
+        self.assertEqual((status, body), (409, answer.LOOK_NO_REPOSITORY.encode() + b"\n"))
+        self.assertEqual(gh_argvs(self.world), [])
 
     def test_a_retry_does_not_undo_a_withdrawn_approval(self):
         svc = self.open()

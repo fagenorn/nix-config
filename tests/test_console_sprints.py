@@ -2847,6 +2847,62 @@ class LookCardTest(unittest.TestCase):
         state = self.state(look_record(6, "moved", found="b" * 40, state="open"), look_answer(7))
         self.assertEqual(self.look_question(state).look_state, "posting")
 
+    def test_a_moved_head_found_after_the_answer_takes_it_back_and_opens_the_question(self):
+        failed = look_record(7, "failed", message=6, reason="GitHub had a problem")
+        moved = look_record(8, "moved", message=6, found="b" * 40, state="open")
+        for before in ((), (failed,)):
+            with self.subTest(before=len(before)):
+                state = self.state(look_answer(6), *before, moved)
+                question = self.look_question(state)
+                self.assertEqual((question.answer, question.chosen, question.answered_at,
+                                  question.look_state, question.look_found, question.look_message,
+                                  question.look_repo),
+                                 (None, None, None, "moved", "b" * 40, None, None))
+                self.assertEqual(sprints.open_questions(state), (question,))
+                self.assertEqual(sprints.pending_looks(state), ())
+                self.assertEqual([m.message_id for m in state.messages if m.kind == "answer"], [])
+                self.assertEqual(sprints.unread(state), ())
+                again = self.state(look_answer(6), *before, moved, look_answer(9))
+                self.assertEqual(self.look_question(again).look_state, "posting")
+
+    def test_a_moved_record_for_an_answer_that_is_not_waiting_changes_nothing(self):
+        posted = look_record(7, "posted", message=6, comment_id=501)
+        for name, rows in {"another message": [look_answer(6),
+                                               look_record(7, "moved", message=5, found=None,
+                                                           state="closed")],
+                           "a message that is no id": [look_answer(6),
+                                                       look_record(7, "moved", message="6",
+                                                                   found=None, state="closed")],
+                           "an approval already posted": [look_answer(6), posted,
+                                                          look_record(8, "moved", message=6,
+                                                                      found=None, state="closed")],
+                           "an answer that is no approval": [
+                               look_answer(6, answer="Ask for changes", chosen="Ask for changes"),
+                               look_record(7, "moved", message=6, found=None, state="closed")]}.items():
+            with self.subTest(name):
+                state = self.state(*rows)
+                question = self.look_question(state)
+                self.assertIsNotNone(question.answer)
+                self.assertNotEqual(question.look_state, "moved")
+                self.assertEqual([m.message_id for m in state.messages if m.kind == "answer"], [6])
+
+    def test_a_card_binds_the_repository_it_was_issued_for(self):
+        def bound(repo, *more):
+            rows = self.rows(*more)
+            rows[4] = row(5, event_log.QUESTIONS_ASKED, {
+                "goal": "one", "blocker": False, "questions": [LOOK_QUESTION], "look_repo": repo})
+            return sprints.sprint_states(rows)[SID]
+
+        state = bound("owner/p00", look_answer(6))
+        self.assertEqual(self.look_question(state).look.repo, "owner/p00")
+        self.assertEqual(self.look_question(state).look_state, "posting")
+        elsewhere = bound("owner/p00", look_answer(6, look={**LOOKED, "repo": "elsewhere/x"}))
+        self.assertIsNone(self.look_question(elsewhere).look_state)
+        self.assertEqual([m.message_id for m in sprints.unread(elsewhere)], [6])
+        for repo in (" ", 3, None):
+            with self.subTest(repo=repo):
+                self.assertIsNone(self.look_question(bound(repo)).look.repo)
+
     def test_an_answer_that_does_not_approve_reaches_the_manager_at_once(self):
         cases = {"another option": dict(answer="Ask for changes", chosen="Ask for changes"),
                  "words": dict(answer="make it bold", chosen=None),

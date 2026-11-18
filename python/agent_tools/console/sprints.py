@@ -293,6 +293,7 @@ the project in its project column), and a fourth, `look.recorded` (#1260, kept),
 console did about a look card's approval:
 
     questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>, "pictures"?: [<id>],
+                       "look_repo"?: <str> (the project's repository when a question has a look),
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
@@ -307,8 +308,8 @@ console did about a look card's approval:
                        "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>, "repo": <str>}}
     look.recorded     {"sprint_id", "round": <int>, "index": <int>, "outcome": "moved" | "posted" |
                        "failed", ...}  moved: "found": <40 hex> | null, "state": "open" | "closed"
-                       | "merged"; posted: "message": <int>, "comment_id": <int>;
-                       failed: "message": <int>, "reason": <str>
+                       | "merged", "message"?: <int> (the answer taken back); posted: "message":
+                       <int>, "comment_id": <int>; failed: "message": <int>, "reason": <str>
 
 The round the manager sends (inside the ask request) and the owner's answer (the page's write) are
 
@@ -414,14 +415,19 @@ question's `(issue, pr, head)` and names a `repo` (`owner/name`, the repository 
 for) sets `look_state` to `"posting"` (and `look_message` to the row's `seq`, `look_repo` to the
 `repo`, which a retry posts to) and its message is `held`: `unread` leaves a held message out and no `sprint.read` or
 `sprint.nudged` watermark marks it read or delivered, so the approval reaches the manager only after
-the console has posted it; any other answer to a look question is an ordinary answer (`look_state`
-None, not held). A `look.recorded` row names a question by its `round` and `index`: `posted`
+the console has posted it; the `repo` must equal the `look_repo` the `questions.asked` row bound to the
+card when it was issued (`QuestionLook.repo`; a card without one accepts the logged repo), else the answer is an
+ordinary one; any other answer to a look question is an ordinary answer (`look_state` None, not held). A `look.recorded` row names a question by its `round` and `index`: `posted`
 applies when `look_state` is `"posting"` or `"failed"` and `message` is the held answer's id
 (`look_state` `"posted"`, `look_comment` the `comment_id`, the message no longer held, so the next
 read marks it once), `failed` under the same conditions (`look_state` `"failed"`, `look_reason`,
-the message stays held; a later `posted` still applies), `moved` only on an unanswered,
-unwithdrawn look question (`look_state` `"moved"`, `look_found`, `look_found_state`; the question
-stays open and an approving answer replaces it with `"posting"`); any other `look.recorded` row,
+the message stays held; a later `posted` still applies), `moved` on an unanswered, unwithdrawn look
+question (`look_state` `"moved"`, `look_found`, `look_found_state`; the question stays open and an approving
+answer replaces it with `"posting"`) and, with a `message` that is the held answer's id, on that answered
+question while its `look_state` is `"posting"` or `"failed"`: the console found the pull request moved or ended
+after it kept the answer and before it posted it, so the answer is taken back (`answer`, `chosen`,
+`answered_at`, `look_message` and `look_repo` cleared, its held message removed and never offered to the manager)
+and the question is open again, replaceable or withdrawable by the manager, in the `"moved"` state; any other `look.recorded` row,
 an unknown `outcome` or a malformed member changes nothing. `pending_looks(state)` is the
 answered questions whose `look_state` is `"posting"` or `"failed"` in `(round_id, index)` order,
 none once the sprint has `stopped_at` or a `closing`. A second
@@ -990,6 +996,7 @@ class QuestionLook:
     pr: int
     head: str
     approve: str
+    repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2043,10 +2050,12 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
             replace(question, withdrawn_at=event.at, replaced_by=event.seq)
             if (question.round_id, question.index) in marks and question.answer is None
             and question.withdrawn_at is None else question for question in state.questions)
+        bound = payload.get("look_repo")
+        bound = bound if _text(bound) else None
         added = tuple(Question(event.seq, index, event.at, checked["blocker"], row["question"],
                                row["blocks"], tuple(row["options"]), row["recommended"],
                                context=row.get("context"),
-                               look=QuestionLook(**row["look"]) if "look" in row else None,
+                               look=QuestionLook(**row["look"], repo=bound) if "look" in row else None,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -2091,7 +2100,8 @@ def _approves_look(question: Question, chosen: object, logged: object) -> bool:
     return (look is not None and chosen == look.approve and isinstance(logged, dict)
             and set(logged) == {"issue", "pr", "head", "repo"}
             and _id(logged["issue"]) and _id(logged["pr"]) and _text(logged["repo"])
-            and (logged["issue"], logged["pr"], logged["head"]) == (look.issue, look.pr, look.head))
+            and (logged["issue"], logged["pr"], logged["head"]) == (look.issue, look.pr, look.head)
+            and (look.repo is None or logged["repo"] == look.repo))
 
 
 def _folded_look(state: SprintState, event: Event) -> SprintState:
@@ -2105,13 +2115,29 @@ def _folded_look(state: SprintState, event: Event) -> SprintState:
         return state
     if outcome == LOOK_MOVED:
         found, found_state = payload.get("found"), payload.get("state")
-        if (question.answer is not None or question.withdrawn_at is not None
+        message = payload.get("message")
+        if (question.withdrawn_at is not None
                 or not (found is None or isinstance(found, str) and HEAD.fullmatch(found))
                 or found_state not in LOOK_FOUND_STATES):
             return state
-        changed = replace(question, look_state=LOOK_MOVED, look_found=found,
-                          look_found_state=found_state)
-        return replace(state, questions=_swapped(state.questions, position, changed))
+        if message is None:
+            if question.answer is not None:
+                return state
+            changed = replace(question, look_state=LOOK_MOVED, look_found=found,
+                              look_found_state=found_state)
+            return replace(state, questions=_swapped(state.questions, position, changed))
+        # The head moved after the answer was kept and before it was posted: the answer is taken
+        # back, the held message with it, and the question is open again for the manager to replace.
+        if (not _id(message) or question.answer is None
+                or question.look_state not in (LOOK_POSTING, LOOK_FAILED)
+                or question.look_message != message):
+            return state
+        reopened = replace(question, answer=None, chosen=None, differs=None, answered_at=None,
+                           look_state=LOOK_MOVED, look_found=found, look_found_state=found_state,
+                           look_reason=None, look_message=None, look_repo=None)
+        return replace(state, questions=_swapped(state.questions, position, reopened),
+                       messages=tuple(item for item in state.messages
+                                      if item.message_id != message))
     message = payload.get("message")
     if (outcome not in (LOOK_POSTED, LOOK_FAILED) or not _id(message)
             or question.look_state not in (LOOK_POSTING, LOOK_FAILED)

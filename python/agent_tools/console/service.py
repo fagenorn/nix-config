@@ -152,6 +152,9 @@ request is read through `look_reader` with `answer.with_retries`, outside the in
 is appended; a failed read appends nothing, logs `console: look_head_failed <sprint> <round> <index> <code>:
 <detail>` and is the 502 above. A head that is not the card's, or a pull request that is closed or merged,
 appends one `look.recorded moved` row and is a 409 with `LOOK_MOVED` or `LOOK_CLOSED`; the question stays open.
+The repository is the one the card was issued for: `ask_questions` writes the project's `slug_of(root)` into the
+round's `questions.asked` row as `look_repo` when a question carries a look, and an answer reads and posts to
+that, never to the checkout's origin at answer time (a card issued without one is `LOOK_NO_REPOSITORY`).
 Otherwise the refusals of any answer are checked again (a question withdrawn or answered meanwhile is refused
 and nothing is posted), one `question.answered` row is appended with its `look` member (the repository too), and the approval is
 posted through `look_recorder` with `str(<that row's seq>)` as the message, outside the lock, retrying
@@ -159,10 +162,15 @@ transient failures (each retry logs `console: look_post_retry <sprint> <round> <
 <detail>`). It then appends `look.recorded posted` and nudges the manager, or `look.recorded failed` with the
 plain reason after logging `console: look_post_failed <sprint> <round> <index> <code>: <detail>` (`refused:
 <reason>` for `answer.Refused`); the answer is still 204 and the card stays on the page with Retry
-(`retry_look` posts again, refusing `NOT_OPEN`, `UNKNOWN_QUESTION`, `LOOK_NOT_PENDING` and `LOOK_SENDING`; it posts to the repository kept in the answer's row, never to the
+(`retry_look` posts again, refusing `NOT_OPEN`, `UNKNOWN_QUESTION`, `ENDED`, `LOOK_NOT_PENDING` and `LOOK_SENDING`; it posts to the repository kept in the answer's row, never to the
 checkout's repository now, and `answer.record_look` finds a trusted marker already posted for that message,
 ended or not, and posts nothing, else reads the pull request again and posts nothing when it is not open at the
-card's head, so no attempt, an automatic retry included, posts a stale approval). The manager's answer message is
+card's head, so no attempt, an automatic retry included, posts a stale approval). A post that finds the pull
+request closed, merged or at another head (`answer.LookMoved`, on the first attempt or on a retry) appends
+`look.recorded moved` with the answer's id: the fold takes the answer back and the question is open again for the
+manager to replace, so the answer or the retry is a 409 with `LOOK_MOVED` or `LOOK_CLOSED` after logging
+`console: look_post_moved <sprint> <round> <index>: <reason>`. `retry_look` also refuses `ENDED` once the sprint
+has ended or stopped, and posts nothing. The manager's answer message is
 held until `posted`. At `start()`, before the threads, each approval left `posting` by a stopped console gets
 `look.recorded failed` with `LOOK_INTERRUPTED`. An answer that does not approve a look card is unchanged. `POST /api/signin`, `POST /api/signin-code` and
 `POST /api/signin-cancel` (#1026) run the same checks with `MAX_SIGNIN_BYTES` (4096) and
@@ -6206,6 +6214,11 @@ class ConsoleService:
                        "questions": checked["questions"]}
             if listed := sprints.round_pictures(checked):
                 payload["pictures"] = listed
+            if any("look" in question for question in checked["questions"]):
+                state = self._states.get(sprint.project_id)
+                bound = self._slug_of(state.root) if state is not None else None
+                if bound is not None:
+                    payload["look_repo"] = bound
             appended = self.log.append([(QUESTIONS_ASKED, sprint.project_id, payload)])
             self._apply(appended)
             return appended[-1].seq, len(checked["questions"])
@@ -6332,8 +6345,7 @@ class ConsoleService:
                 self._apply(appended)
                 reserved = self._reserve_nudge(sprint_id)
             else:
-                state = self._states.get(project_id)
-                slug = self._slug_of(state.root) if state is not None else None
+                slug = look.repo
                 if slug is None:
                     raise sprints.Refused(answer.LOOK_NO_REPOSITORY)
                 if slot in self._look_sending:
@@ -6378,13 +6390,18 @@ class ConsoleService:
         seq = appended[-1].seq
         try:
             self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+        except answer.LookMoved as error:
+            raise sprints.Refused(str(error)) from None
         except (ForgeError, answer.Refused):
             pass
         return seq
 
     def _post_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
                    look: sprints.QuestionLook, seq: int) -> None:
-        """Post the approval of the answer `seq` and record the outcome; a failure is raised after it is recorded."""
+        """Post the approval of the answer `seq` and record the outcome; a failure is raised after it is recorded.
+
+        A pull request found closed or at another head is recorded as `moved` with the answer's id, which
+        takes the answer back and opens the question again; `answer.LookMoved` is raised after it."""
         key = f"{sprint_id} {round_id} {index}"
 
         def on_retry(attempt: int, error: ForgeError) -> None:
@@ -6395,6 +6412,15 @@ class ConsoleService:
             comment = answer.with_retries(
                 lambda: self._look_recorder(slug, look.issue, look.pr, look.head, str(seq)),
                 clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
+        except answer.LookMoved as error:
+            print(f"console: look_post_moved {key}: {error}", file=sys.stderr)
+            with self._ingest:
+                if not self._stop.is_set():
+                    self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                        "sprint_id": sprint_id, "round": round_id, "index": index,
+                        "outcome": sprints.LOOK_MOVED, "message": seq, "found": error.found,
+                        "state": error.state})]))
+            raise
         except (ForgeError, answer.Refused) as error:
             if isinstance(error, ForgeError):
                 print(f"console: look_post_failed {key} {error.code}: "
@@ -6430,6 +6456,8 @@ class ConsoleService:
                           if (question.round_id, question.index) == (round_id, index)), None)
             if asked is None:
                 raise sprints.Refused(sprints.UNKNOWN_QUESTION)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
             if (asked.look is None or asked.answer is None
                     or asked.look_state not in (sprints.LOOK_POSTING, sprints.LOOK_FAILED)
                     or asked.look_message is None):
@@ -6442,6 +6470,8 @@ class ConsoleService:
             self._look_sending.add(slot)
         try:
             self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+        except answer.LookMoved as error:
+            raise sprints.Refused(str(error)) from None
         finally:
             with self._ingest:
                 self._look_sending.discard(slot)

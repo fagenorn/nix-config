@@ -4012,7 +4012,9 @@ function statusLine(act, state, item) {
     act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") {
-      act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+      // A look card the console found moved already says so in its own line: the same words twice read as two problems.
+      const said = isQuestion(item) && item.look !== null && typeof item.look === "object" && item.look.state === "moved" && item.look.line === state.reason;
+      if (!said) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
         act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
       }

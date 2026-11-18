@@ -15,8 +15,8 @@ from .test_console_page import (
     FAILED_REGISTRATION, FAILED_START, GOAL_FRAME, HEADSUP_W, MORE_KEY, NOW_MS, NOW_S, NO_ITEM, NO_LINK_RUNNING,
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
-    asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
-    style_rules, thread, view, with_check, with_notices, with_run, with_sprints)
+    FAILED_LINE, asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
+    look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -45,7 +45,7 @@ def _roles(kinds: frozenset, *names: str) -> dict:
 
 DESK_CONTROLS: dict = {
     **_roles(PRIMARY_OR_QUIET, "approve", "send", "try-again", "signin-start", ANS_ROLE),
-    **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry"),
+    **_roles(PRIMARY_ONLY, "continue", "answer", "start-retry", "look-retry"),
     **_roles(DANGER_ONLY, "withdraw", "stall-withdraw", "start-withdraw", "progress-withdraw",
              "acct-remove", "acct-remove-send"),
     **_roles(OPTION_ONLY, "opt"),
@@ -198,6 +198,8 @@ def desk_scenarios() -> list:
         [START, {"frame": {**view([project(0, [], quiet=True)]), "activation": ACTIVATION}},
          snapshot],
         [START, {"frame": with_check([DECISION_ITEM])}, snapshot],
+        # an approved look card whose post failed, with its Retry (#1260)
+        [START, {"frame": frame([look_answered("failed", FAILED_LINE)])}, snapshot],
         # a stall and a progress card
         [START, {"frame": frame([STALL, PROGRESS])}, snapshot],
         [START, {"frame": frame([FAILED_START])}, snapshot],
@@ -571,7 +573,7 @@ BUSY_ROLES = frozenset({
     "account-link-get", "account-code-send", "account-signin-cancel", "draft-option", "draft-send",
     "register-withdraw", "send", "retry", "withdraw", "stop-confirm", "stop-cancel", "try-again",
     "stall-withdraw", "start-retry", "start-withdraw", "continue", "progress-withdraw",
-    "signin-start", "signin-send",
+    "signin-start", "signin-send", "look-retry",
     "signin-cancel", "notice-withdraw", "ans-words", "ans-draft", "opt", "words-text", "draft-text"})
 
 
@@ -679,6 +681,8 @@ BUSY_SCENARIOS = [
                               {"open": MORE_KEY}, {"click": "stop"}],
              held("stop-confirm"), refusal("this sprint is already stopping"),
              {"stop-confirm", "stop-cancel"}),
+    busy_row("look-retry", [START, {"frame": frame([look_answered("failed", FAILED_LINE)])}],
+             held("look-retry"), refusal("this approval is not waiting to be recorded")),
     busy_row("try-again", [START, {"frame": frame([STALL])}], held("try-again"),
              refusal("this sprint has a manager")),
     busy_row("stall-withdraw", [START, {"frame": frame([STALL])}], held("stall-withdraw"),
