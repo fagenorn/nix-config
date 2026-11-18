@@ -355,6 +355,7 @@ class ContractDraftTest(unittest.TestCase):
             (root / "local-hooks").mkdir()
             (root / "local-hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
             (root / "local-hooks" / "pre-commit").chmod(0o755)
+            commit(root, {})
             reading = cd.read(str(root))
             self.assertEqual(reading["hooks"], ["pre-commit"])
             fields = cd.draft(str(root), reading)
@@ -366,6 +367,47 @@ class ContractDraftTest(unittest.TestCase):
             reading = cd.read(str(root))
             self.assertEqual(reading["hooks"], [])
             self.assertEqual(reading["environments"], ["devenv.nix"])
+
+    def test_a_relative_hooks_path_counts_only_a_hook_the_apply_worktree_will_have(self):
+        for letter, track, mode, wanted in (("untracked", False, 0o755, []),
+                                            ("plain", True, 0o644, []),
+                                            ("tracked", True, 0o755, ["pre-commit"])):
+            with self.subTest(case=letter):
+                root = sample(self.parent / letter, remote=True)
+                commit(root, {"devenv.nix": "{ }\n"})
+                git(root, "config", "core.hooksPath", "local-hooks")
+                (root / "local-hooks").mkdir()
+                (root / "local-hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+                (root / "local-hooks" / "pre-commit").chmod(mode)
+                if track:
+                    commit(root, {})
+                reading = cd.read(str(root))
+                self.assertEqual(reading["hooks"], wanted)
+                fields = cd.draft(str(root), reading)
+                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
+
+    def test_the_hooks_are_found_in_a_checkout_trusted_only_through_the_global_configuration(self):
+        root = self.environment_checkout()
+        config = self.parent / "trust.gitconfig"
+        config.write_text(f"[safe]\n\tdirectory = {root}\n")
+        for name, value in (("GIT_CONFIG_GLOBAL", str(config)), ("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")):
+            saved = os.environ.get(name)
+            os.environ[name] = value
+            self.addCleanup(os.environ.pop if saved is None else os.environ.__setitem__,
+                            name, *([] if saved is None else [saved]))
+        self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        config.write_text("")
+        self.assertEqual(cd.read(str(root))["hooks"], [])
+
+    def test_a_directory_named_like_an_environment_file_is_not_that_file(self):
+        root = sample(self.parent / "dir", remote=True)
+        (root / "devenv.nix").mkdir()
+        commit(root, {"devenv.nix/README.md": "x\n"})
+        install_hook(root)
+        reading = cd.read(str(root))
+        self.assertEqual(reading["environments"], [])
+        fields = cd.draft(str(root), reading)
+        self.assertNotIn("commit-environment", [x["field"] for x in fields])
 
     def test_the_owner_can_change_or_drop_the_proposed_commit_environment(self):
         root = self.environment_checkout()

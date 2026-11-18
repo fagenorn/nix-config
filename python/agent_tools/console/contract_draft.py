@@ -17,10 +17,12 @@ there is exactly one (`ls-remote --symref`). Branches are the local heads, files
 texts the tracked build files (`justfile`, `Makefile`, `package.json` and their spellings), at most
 65536 bytes each. `hooks` are the `COMMIT_HOOKS` names (`pre-commit`, `prepare-commit-msg`,
 `commit-msg`; never `post-commit`, which cannot stop a commit) installed as executable files in the
-repository's own hooks directory (`git rev-parse --git-path hooks` with no global or system config,
-so a global hooks path never counts), in `COMMIT_HOOKS` order. `environments` are the `ENVIRONMENTS`
-file names present in the `HEAD` commit (the revision Apply's worktree starts from, so an untracked or
-staged-only file never counts), in `ENVIRONMENTS` order.
+repository's own hooks directory (the `core.hooksPath` its own configuration sets, else its
+`hooks` directory; a global or system hooks path never counts, and Git's checkout trust is kept), in
+`COMMIT_HOOKS` order. A relative `core.hooksPath` is resolved in each checkout, so such a hook counts
+only when `HEAD` tracks it as an executable file. `environments` are the `ENVIRONMENTS`
+file names present in the `HEAD` commit as a regular file (the revision Apply's worktree starts from,
+so an untracked, staged-only or directory entry never counts), in `ENVIRONMENTS` order.
 
 Fields. `FIELDS` lists the 29 field ids in order; each is a record with exactly the keys
 `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
@@ -325,13 +327,53 @@ def _default_branch(root: str, remotes: list[tuple[str, str]]) -> str | None:
     return match.group(1) if match else None
 
 
+def _entry(root: str, path: str) -> tuple[str, str] | None:
+    """The (mode, type) of `path` in the `HEAD` commit, None when it is not there."""
+    listed = _git(root, "ls-tree", "--full-tree", "-z", "HEAD", "--", path,
+                  extra_env={"GIT_LITERAL_PATHSPECS": "1"})
+    if not listed:
+        return None
+    meta, _, name = listed.split(b"\0")[0].partition(b"\t")
+    fields = meta.decode("utf-8", "replace").split()
+    if len(fields) < 2 or name.decode("utf-8", "replace") != path:
+        return None
+    return fields[0], fields[1]
+
+
+def _repository_hooks_path(root: str) -> str | None:
+    """The `core.hooksPath` the repository itself sets (the last one wins), never a global or system one."""
+    value = None
+    for line in _lines(_git(root, "config", "--show-scope", "--get-all", "core.hooksPath")):
+        scope, _, setting = line.partition("\t")
+        if scope in ("local", "worktree", "command"):
+            value = setting
+    return value
+
+
 def _hooks(root: str) -> list[str]:
-    """The `COMMIT_HOOKS` installed as executable files in the repository's own hooks directory."""
-    printed = _git(root, "rev-parse", "--path-format=absolute", "--git-path", "hooks",
-                   extra_env={"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+    """The `COMMIT_HOOKS` that will run when Apply commits in its fresh worktree of `HEAD`.
+
+    The hooks directory is the repository's own: a global or system `core.hooksPath` never counts,
+    while Git's checkout trust (`safe.directory`) is kept. A relative `core.hooksPath` is resolved
+    in each checkout, so its hook counts only when `HEAD` tracks it as an executable file.
+    """
+    setting = _repository_hooks_path(root)
+    probe = ("--git-common-dir",) if setting is None else ("--git-path", "hooks")
+    printed = _git(root, "rev-parse", "--path-format=absolute", *probe)
     if not printed:
         return []
     directory = Path(printed.decode("utf-8", "replace").rstrip("\n"))
+    if setting is None:
+        directory = directory / "hooks"
+    elif not os.path.isabs(setting) and not setting.startswith("~"):
+        top = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        try:
+            relative = directory.relative_to(top.decode("utf-8", "replace").rstrip("\n")) if top else None
+        except ValueError:
+            relative = None
+        if relative is not None:
+            return [name for name in COMMIT_HOOKS
+                    if _entry(root, (relative / name).as_posix()) == ("100755", "blob")]
     return [name for name in COMMIT_HOOKS
             if (directory / name).is_file() and os.access(directory / name, os.X_OK)]
 
@@ -339,7 +381,7 @@ def _hooks(root: str) -> list[str]:
 def _environments(root: str) -> list[str]:
     """The `ENVIRONMENTS` files in the `HEAD` commit, the revision Apply's worktree starts from."""
     return [name for name, _ in ENVIRONMENTS
-            if _git(root, "cat-file", "-e", f"HEAD:{name}") is not None]
+            if _entry(root, name) in (("100644", "blob"), ("100755", "blob"))]
 
 
 def read(root: str) -> dict:
