@@ -72,8 +72,12 @@ round is
                     "recommended": "<exact text of one option>",
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
+                    "look": {"issue": <n>, "pr": <n>, "head": "<40-hex>", "approve": "<exact text of one option>"},
                     "replaces": {"round": <id>, "index": <n>}}, ...],
      "blocker": true | false}                   (blocker optional, default false)
+
+`look` is optional and marks the question as the owner's look at a pull request before merge: the console
+checks it and records the owner's approval itself when that option is picked (see the manager contract).
 
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that

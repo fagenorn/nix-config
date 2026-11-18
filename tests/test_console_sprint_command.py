@@ -1035,13 +1035,28 @@ class ManagerContractTest(unittest.TestCase):
                 '"pair": "before"', '"pair": "after"', "the same delivery's resume",
                 "the full 40-hex sha of the head the pictures show",
                 "the id of the owner's `answer` message as `sprint inbox` printed it",
-                "records the approval with that message id", "approve for that head",
+                "the console records the approval", "approve for that head",
                 "changes with the owner's own words", "Never merge it any other way"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
         self.assertLess(section.index("Report it"), section.index("`sprint ask`"))
         self.assertLess(section.index("`sprint ask`"),
                         section.index("the same delivery's resume"))
+
+    def test_the_contract_says_a_look_card_names_its_look_and_the_console_records_it(self):
+        text = run_sprint("contract").stdout
+        section = " ".join(
+            text.partition("## A look before merge\n")[2].partition("\n## ")[0].split())
+        for needle in ("`look`", "`issue`", "`pr`", "`head`", "`approve`",
+                       "the console records the approval", "never record an approval yourself"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertNotIn("The resume records the approval", section)
+
+    def test_the_ask_help_names_the_look_member(self):
+        self.assertIn(
+            '"look": {"issue": <n>, "pr": <n>, "head": "<40-hex>", '
+            '"approve": "<exact text of one option>"}', " ".join(sprint.__doc__.split()))
 
     def test_the_contract_says_how_a_question_carries_pictures(self):
         text = CONTRACT.read_text(encoding="utf-8")
