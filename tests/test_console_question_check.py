@@ -306,6 +306,10 @@ class QuestionCheckTest(unittest.TestCase):
                 h.seed([grounded("q1"), "Answer: x\nRead: " + read, grounded("q3")])
                 code, line = h.run()
                 self.assertEqual((code, line["verdicts"][1]), (1, "ungrounded"))
+        for read in ("I tried to open " + path + ", but the hook denied it.", path + "; access was refused",
+                     "Read " + path + ".\nIt could not be opened."):
+            with self.subTest(read=read):
+                self.assertFalse(question_check.cites("Read: " + read, "q2.records.json"))
         for read in ("flake.nix (could not open), " + path, path + ", docs/a.md"):
             with self.subTest(read=read):
                 self.assertTrue(question_check.cites("Read: " + read, "q2.records.json"))

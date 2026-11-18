@@ -70,9 +70,11 @@ splits the rest into clauses (at a newline, and at `.`, `;`, `,`, `!` or `?` fol
 A clause names `name` when, splitting it on whitespace and `,;()[]<>` backquote and quote and `*`,
 stripping each token's trailing `.` and `:` and then a line suffix (`:12`, `:1-40`, `:3,5`), some
 token's text after its last `/` equals `name` exactly, so a backup, a longer name or another
-question's file never counts. `cites` is True iff at least one clause names `name` and none that does
-matches `_FAILED_READ` (could not, cannot, unable, failed, denied, refused, not found, not readable,
-missing, error and the like): an answer that says it could not open its records file has not read it.
+question's file never counts. `cites` is True iff at least one clause names `name` and no clause from
+the first one that does to the end of the section matches `_FAILED_READ` (could not, cannot, unable,
+failed, denied, refused, not found, not readable, missing, error and the like): an answer that says,
+in that clause or any later one, that it could not open its records file has not read it. A failure
+word in a clause before the first naming one (`flake.nix (could not open), q2.records.json`) does not count.
 
 The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
 """
@@ -123,9 +125,9 @@ def cites(read_text: str | None, name: str) -> bool:
     """Whether the Read section names the file `name` as a complete name."""
     if read_text is None:
         return False
-    clauses = [clause for clause in _CLAUSE_SPLIT.split(
-        read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))) if _names(clause, name)]
-    return bool(clauses) and not any(_FAILED_READ.search(clause) for clause in clauses)
+    clauses = _CLAUSE_SPLIT.split(read_text.removeprefix(view.ASK_READ_TEXT.format(text="")))
+    named = [i for i, clause in enumerate(clauses) if _names(clause, name)]
+    return bool(named) and not any(_FAILED_READ.search(clause) for clause in clauses[named[0]:])
 
 
 def _names(clause: str, name: str) -> bool:
