@@ -44,10 +44,12 @@ from agent_tools.console.movement import (
 from agent_tools.console.sprints import (
     APPROVED,
     CHANGES,
+    MESSAGE_ANSWER,
     NONE,
     Brief,
     Closing,
     Manager,
+    Message,
     Notice,
     Observed,
     PendingStop,
@@ -1388,6 +1390,140 @@ class SprintQuotaViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["sentence"], view.MANAGER_SENTENCE)
 
 
+class HeadingCountsOwnerBallTest(unittest.TestCase):
+    """The heading never says "Nothing needs you" beside a sprint whose ball is the owner's (#1247)."""
+
+    def shown(self, sprint_state, sessions=(), records=None):
+        return derive_view([state("p00", 1)], records, sprints={A: sprint_state},
+                           sessions=sessions, now_ms=R + 2 * MIN, managers=True)
+
+    def test_every_sprint_state_with_the_owners_ball_is_counted_in_the_heading(self):
+        base = with_manager(reported(started(A), R))
+        answer = [session("s1", "waiting_answer", name=NAME)]
+        permission = [session("s1", "waiting_permission", name=NAME)]
+        table = [
+            ("a manager waiting for an answer at its terminal", base, answer, None, 1),
+            ("a manager waiting for a permission at its terminal", base, permission, None, 1),
+            ("a brief", dataclasses.replace(sprint(A), brief=Brief(1, PARTS, T0, NONE, None, None)),
+             [], None, 1),
+            ("a stall", dataclasses.replace(base, stalled="r", stalled_at=iso(R + MIN)), [], None, 1),
+            ("no progress", dataclasses.replace(base, no_progress_at=iso(R + MIN)), [], None, 1),
+            ("a failed start", dataclasses.replace(
+                with_manager(sprint(A), state="failed"),
+                manager=Manager("failed", T0, "work", NAME, reason="x")), [], None, 1),
+            ("an open item the sprint names", reported(started(A), R, inbox=(12,)), [],
+             {("p00", "k1"): open_item("p00", "k1", 12)}, 1),
+            ("a stall and a terminal wait", dataclasses.replace(
+                base, stalled="r", stalled_at=iso(R + MIN)), answer, None, 1),
+            ("an open item and a terminal wait", reported(started(A), R, inbox=(12,)), answer,
+             {("p00", "k1"): open_item("p00", "k1", 12)}, 1),
+        ]
+        for label, sprint_state, sessions, records, count in table:
+            with self.subTest(label):
+                shown = self.shown(sprint_state, sessions, records)
+                self.assertEqual(entry(shown)["ball"], "owner")
+                self.assertEqual(shown["statement"]["inbox_items"], count)
+                self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+
+    def test_a_sprint_waiting_at_its_terminal_is_named_in_a_plain_sentence(self):
+        shown = self.shown(with_manager(reported(started(A), R)),
+                           [session("s1", "waiting_answer", name=NAME)])
+        self.assertEqual(shown["statement"]["sentence"], view.TERMINAL_SENTENCE)
+        self.assertEqual(view.TERMINAL_SENTENCE, "Answer it in the manager's terminal.")
+        self.assertEqual(shown["inbox"]["open"], [])
+
+    def test_the_terminal_sentence_is_only_for_a_heading_that_counts_nothing_else(self):
+        waiting = with_manager(reported(started(A), R))
+        answer = [session("s1", "waiting_answer", name=NAME)]
+        decision = {**item("p00", "kd"), "issue": 99, "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None}]}
+        table = [
+            ("an unrelated decision", [InboxRecord(decision, "t1", "u1")], CHOOSE_SENTENCE),
+            ("an unrelated question", [InboxRecord({**item("p00", "kq"), "issue": 99}, "t1", "u1")], NEEDS_SENTENCE),
+        ]
+        for label, records, expected in table:
+            with self.subTest(label):
+                shown = self.shown(waiting, answer, {("p00", r.item["key"]): r for r in records})
+                self.assertEqual(shown["statement"]["inbox_items"], 2)
+                self.assertEqual(shown["statement"]["sentence"], expected)
+
+    def test_a_manager_that_cannot_hear_the_console_is_counted_with_its_own_sentence(self):
+        base = reported(with_manager(started(A)), R)
+        held = moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),))
+        answer = [session("s1", "waiting_answer", name=NAME)]
+        table = [
+            ("an idle manager", base, [session("s1", "idle", name=NAME)], view.DEAF_SENTENCE),
+            ("a working manager", base, [session("s1", "working", name=NAME)], view.DEAF_SENTENCE),
+            ("no registry session", dataclasses.replace(base, manager_session="s1"), [],
+             view.DEAF_SENTENCE),
+            ("a question at the terminal", base, answer, view.TERMINAL_SENTENCE),
+            ("a permission at the terminal", base, [session("s1", "waiting_permission", name=NAME)],
+             view.DEAF_SENTENCE),
+        ]
+        for label, sprint_state, sessions, sentence in table:
+            with self.subTest(label):
+                shown = derive_view([state("p00", 1)], None, sprints={A: sprint_state},
+                                    sessions=sessions, now_ms=R + 2 * MIN, managers=True,
+                                    movement=held)
+                self.assertEqual(entry(shown)["ball"], "owner")
+                self.assertEqual(shown["statement"]["inbox_items"], 1)
+                self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+                self.assertEqual(shown["statement"]["sentence"], sentence)
+
+    def test_a_deaf_manager_whose_sprint_is_stopping_is_not_sent_to_a_terminal(self):
+        held = moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),))
+        stopping = dataclasses.replace(reported(with_manager(started(A)), R), stop_at=iso(R + MIN))
+        shown = derive_view([state("p00", 1)], None, sprints={A: stopping},
+                            sessions=[session("s1", "idle", name=NAME)],
+                            now_ms=R + 2 * MIN, managers=True, movement=held)
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], view.DEAF_SENTENCE)
+
+    def test_a_deaf_manager_waiting_for_a_permission_is_not_sent_to_a_terminal_even_when_stopping(self):
+        held = moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),))
+        base = reported(with_manager(started(A)), R)
+        stopping = dataclasses.replace(base, stop_at=iso(R + MIN))
+        for label, sprint_state in (("running", base), ("stopping", stopping)):
+            with self.subTest(label):
+                shown = derive_view([state("p00", 1)], None, sprints={A: sprint_state},
+                                    sessions=[session("s1", "waiting_permission", name=NAME)],
+                                    now_ms=R + 2 * MIN, managers=True, movement=held)
+                self.assertEqual(shown["statement"]["inbox_items"], 1)
+                self.assertEqual(shown["statement"]["sentence"], view.DEAF_SENTENCE)
+
+    def test_a_stopping_manager_waiting_at_its_terminal_is_sent_there(self):
+        stopping = dataclasses.replace(reported(with_manager(started(A)), R), stop_at=iso(R + MIN))
+        for waiting in ("waiting_answer", "waiting_permission"):
+            with self.subTest(waiting):
+                shown = derive_view([state("p00", 1)], None, sprints={A: stopping},
+                                    sessions=[session("s1", waiting, name=NAME)],
+                                    now_ms=R + 2 * MIN, managers=True)
+                self.assertEqual(entry(shown)["now_text"], view.NOW_STOPPING_TEXT)
+                self.assertEqual(shown["statement"]["inbox_items"], 1)
+                self.assertEqual(shown["statement"]["sentence"], view.TERMINAL_SENTENCE)
+
+    def test_a_deaf_manager_beside_a_terminal_question_reads_both(self):
+        B = "b" * 16
+        deaf = reported(with_manager(started(A)), R)
+        asking = reported(dataclasses.replace(
+            with_manager(started(B)), manager=Manager("started", T0, "work", session_name("p00", B))), R)
+        shown = derive_view(
+            [state("p00", 1)], None, sprints={A: deaf, B: asking},
+            sessions=[session("s1", "idle", name=NAME),
+                      session("s2", "waiting_answer", name=session_name("p00", B))],
+            now_ms=R + 2 * MIN, managers=True,
+            movement=moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),)))
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["sentence"], view.TERMINAL_DEAF_SENTENCE)
+
+    def test_a_sprint_the_manager_holds_is_not_counted(self):
+        shown = self.shown(with_manager(reported(started(A), R)),
+                           [session("s1", "working", name=NAME)])
+        self.assertEqual(entry(shown)["ball"], "manager")
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+
+
 class SprintReportViewTest(unittest.TestCase):
     def test_a_reports_pictures_reach_the_sprint_entry_cut(self):
         it = reported(started(A), R)
@@ -1624,7 +1760,8 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
             "headline": text, "context": None, "more_questions": 0,
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
-                           "recommended_index": options.index(recommended)}],
+                           "recommended_index": options.index(recommended),
+                           "needs_words_index": []}],
             "pictures": [],
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
@@ -1643,6 +1780,14 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["sentence"], QUESTION_SENTENCE)
         self.assertEqual(QUESTION_SENTENCE,
                          "Choose an option with its number and press Enter, or answer in your own words.")
+
+    def test_a_question_names_the_options_that_need_words_by_index(self):
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(
+            state_, questions=(dataclasses.replace(first, needs_words=("files",)), *rest))
+        shown = derive_view([state("p00", 1)], sprints={A: state_})
+        self.assertEqual(shown["inbox"]["open"][0]["questions"][0]["needs_words_index"], [1])
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
@@ -2727,7 +2872,7 @@ class SprintMessageViewTest(unittest.TestCase):
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
             "action_text": None, "read_at": None, "reply": None, "reply_at": None,
-            "new": False}])
+            "words": None, "new": False}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")
@@ -2768,6 +2913,19 @@ class SprintMessageViewTest(unittest.TestCase):
         self.assertEqual([(m["id"], m["kind"], m["version"], m["text"])
                           for m in entry["messages"]],
                          [(4, "changes", 1, "smaller slices"), (6, "approved", 2, None)])
+
+    def test_an_answer_with_words_carries_the_option_and_the_words_in_its_message(self):
+        answered = [Message(7, MESSAGE_ANSWER, message_at(7), None, "Ask for changes",
+                            question="Approve?", round_id=5, chosen="Ask for changes",
+                            words="split the reader slice"),
+                    Message(8, MESSAGE_ANSWER, message_at(8), None, "Approve",
+                            question="Ship?", round_id=5, chosen="Approve")]
+        shown = derive_view([state("p00", 1)], sprints={
+            A: dataclasses.replace(started(A), messages=tuple(answered))}, now_ms=T0_MS)
+        messages = shown["entries"][0]["sprints"][0]["messages"]
+        self.assertEqual([(m["kind"], m["text"], m["words"]) for m in messages],
+                         [("answer", "Ask for changes", "split the reader slice"),
+                          ("answer", "Approve", None)])
 
     def test_only_the_ten_newest_messages_are_shown(self):
         rows = message_rows(*(messaged_row(seq, f"note {seq}") for seq in range(3, 15)))

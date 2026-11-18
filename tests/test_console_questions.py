@@ -27,6 +27,9 @@ Q0 = {"question": "Which store keeps the checkpoints?", "blocks": "the resume sl
       "options": ["sqlite", "files"], "recommended": "files"}
 Q1 = {"question": "May the reader change?", "blocks": "the reader slice",
       "options": ["yes", "no"], "recommended": "no"}
+QW = {"question": "Does the new line read right?", "blocks": "the copy slice",
+      "options": ["Approve", "Ask for changes"], "recommended": "Approve",
+      "needs_words": ["Ask for changes"]}
 ROUND = {"questions": [Q0, Q1]}
 OWN_WORDS = "use the reader\nnot the writer"
 
@@ -189,6 +192,36 @@ class QuestionRouteTest(Case):
             (OWN_WORDS, Q1["question"], round_id, None)])
         self.assertEqual([m["id"] for m in sent], [first["seq"], second["seq"]])
 
+    def test_an_option_and_words_are_one_answer_and_the_inbox_carries_both(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc, {"questions": [QW]})
+        status, _, body = self.reply(
+            svc, self.answer_body(sid, round_id, 0, choice=1, text="make the line shorter"))
+        self.assertEqual(status, 204, body)
+        (row,) = self.rows("question.answered")
+        self.assertEqual({k: v for k, v in row.items() if k != "seq"}, {
+            "sprint_id": sid, "goal": GOAL_TEXT, "round": round_id, "index": 0,
+            "question": QW["question"], "answer": "Ask for changes", "chosen": "Ask for changes",
+            "words": "make the line shorter", "recommended": "Approve", "differs": True})
+        (sent,) = [m for m in json.loads(self.inbox(svc, sid)[2])["messages"]
+                   if m["kind"] == "answer"]
+        self.assertEqual((sent["text"], sent["chosen"], sent["words"]),
+                         ("Ask for changes", "Ask for changes", "make the line shorter"))
+
+    def test_an_option_that_needs_words_is_refused_without_them(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc, {"questions": [QW]})
+        got = self.assert_unchanged(
+            svc, lambda: self.reply(svc, self.answer_body(sid, round_id, 0, choice=1)))
+        self.assertEqual((got[0], got[2]), (409, sprints.WORDS_NEEDED.encode() + b"\n"))
+        self.assertEqual(
+            self.reply(svc, self.answer_body(sid, round_id, 0, choice=0))[0], 204)
+        (row,) = self.rows("question.answered")
+        self.assertNotIn("words", row)
+        (sent,) = [m for m in json.loads(self.inbox(svc, sid)[2])["messages"]
+                   if m["kind"] == "answer"]
+        self.assertIsNone(sent["words"])
+
     def test_a_closed_sprint_takes_no_question_and_no_answer(self):
         svc = self.open()
         sid, round_id = self.asked(svc)
@@ -244,7 +277,7 @@ class QuestionRouteTest(Case):
                 ("another sprint of that project", {**valid, "sprint_id": other,
                                                     "project_id": "owner/p01"}, 409,
                  sprints.NOT_OPEN),
-                ("choice and text", {**valid, "text": "both"}, 400, "bad round answer")):
+                ("choice and blank text", {**valid, "text": "  "}, 409, sprints.EMPTY_MESSAGE)):
             with self.subTest(name):
                 got = self.assert_unchanged(svc, lambda: self.reply(svc, body))
                 self.assertEqual((got[0], got[2]), (status, text.encode() + b"\n"))

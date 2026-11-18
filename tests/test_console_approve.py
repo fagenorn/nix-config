@@ -39,7 +39,7 @@ def step_payload(step="opened", plan_id="p1", **over):
     payload = {"by": "owner", "plan_id": plan_id, "root": "/srv/r", "project_id": "o/r",
                "step": step, "branch": BRANCH, "commit": COMMIT, "base": "develop",
                "pull_request": {"number": 7, "url": "https://example.test/pull/7"},
-               "reason": None, "note": None, "kept": None}
+               "reason": None, "note": None, "kept": None, "evidence": None}
     if step != "opened":
         payload["pull_request"] = None
         payload["base"] = None
@@ -99,8 +99,13 @@ class RowTest(unittest.TestCase):
         self.assertEqual((kind, project, row), ("adoption.step", None, payload))
         self.assertIsNot(row, payload)
         self.assertEqual(approve.step_row(step_payload("apply_failed", kept=KEPT))[2]["kept"], KEPT)
-        bad_rows = [{k: v for k, v in payload.items() if k != member} for member in payload]
+        bad_rows = [{k: v for k, v in payload.items() if k != member}
+                    for member in payload if member != "evidence"]
         bad_rows += [
+            {**payload, "evidence": {"hook": "pre-commit"}},
+            {**payload, "evidence": {"hook": "Pre Commit", "why": "w", "lines": []}},
+            {**payload, "evidence": {"hook": None, "why": None, "lines": ["x"] * 9}},
+            {**payload, "evidence": {"hook": None, "why": None, "lines": ["x" * 161]}},
             {**payload, "x": 1}, {**payload, "by": "agent"}, {**payload, "step": "merged"},
             {**payload, "pull_request": {"number": True, "url": "u"}},
             {**payload, "pull_request": {"number": 0, "url": "u"}},
@@ -111,6 +116,12 @@ class RowTest(unittest.TestCase):
         for bad in bad_rows:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 approve.step_row(bad)
+
+    def test_a_stored_step_without_evidence_reads_none(self):
+        payload = {k: v for k, v in step_payload().items() if k != "evidence"}
+        self.assertIsNone(approve.step_row(payload)[2]["evidence"])
+        found = approve.adoptions([Event(1, "t1", approve.STEP, None, payload)])
+        self.assertIsNone(found["p1"]["evidence"])
 
     def test_pull_row_takes_a_known_state(self):
         kind, project, payload = approve.pull_row("p", 7, "u", "ready")
@@ -585,6 +596,153 @@ UNCHECKED = "the adoption on the remote did not pass the registration's checks"
 
 def refused(reason, note):
     return {"result": "refused", "project_id": None, "reason": reason, "note": note}
+
+
+class EvidenceTest(unittest.TestCase):
+    def test_a_worktree_path_reads_relative_to_the_worktree(self):
+        self.assertEqual(approve.evidence_line("checking /w/t/README.md now", "/w/t"),
+                         "checking README.md now")
+        self.assertEqual(approve.evidence_line("in /w/t", "/w/t"), "in .")
+
+    def test_any_other_absolute_path_reads_as_its_last_segment(self):
+        self.assertEqual(
+            approve.evidence_line("/h/x/.git/hooks/pre-commit: line 2: tool: command not found",
+                                  "/w/t"),
+            "pre-commit: line 2: tool: command not found")
+        self.assertEqual(approve.evidence_line("see (/a/b/c)", None), "see (c)")
+        self.assertEqual(approve.evidence_line("url https://example.test/a", None),
+                         "url https://example.test/a")
+        for text, expected in (("failed [/home/alice/project/config]", "failed [config]"),
+                               ("x:/home/alice/a", "x:a"), ("{/home/alice/b}", "{b}"),
+                               ("a,/home/alice/d", "a,d"), ("--root=/home/alice/r", "--root=r"),
+                               ("<path:/home/alice/e>", "<path:e>"),
+                               ("file:///home/alice/c", "file:c"),
+                               ("keep a/b/c and ./x and ~/y", "keep a/b/c and ./x and ~/y")):
+            with self.subTest(text=text):
+                result = approve.evidence_line(text, None)
+                self.assertEqual(result, expected)
+                self.assertNotIn("/home/alice", result)
+
+    def test_a_long_hex_run_is_cut_to_seven_characters(self):
+        self.assertEqual(approve.evidence_line("tree " + "a" * 40, None), "tree aaaaaaa\u2026")
+
+    def test_escapes_and_control_characters_are_removed(self):
+        self.assertEqual(approve.evidence_line("\x1b[31mred\x1b[0m\tok\x07", None), "red ok")
+
+    def test_a_long_line_is_cut_with_an_ellipsis(self):
+        result = approve.evidence_line("word " * 40, None)
+        self.assertEqual(len(result), 160)
+        self.assertTrue(result.endswith("\u2026"))
+
+    def test_a_line_that_still_matches_the_page_pattern_is_dropped(self):
+        self.assertIsNone(approve.evidence_line("plan sha256:abc", None))
+        self.assertIsNone(approve.evidence_line("--plan-id x", None))
+        self.assertIsNone(approve.evidence_line("   ", None))
+
+    def test_commit_evidence_keeps_the_last_lines_and_names_the_hook(self):
+        error = {"repair_id": "adopt.commit.failed",
+                 "commit_output": {"hook": "pre-commit", "exit": 127,
+                                   "lines": [f"l{n}" for n in range(12)] + ["sha256:x"]}}
+        kept = {"branch": "b", "worktree": "/w/t"}
+        found = approve.commit_evidence(error, kept)
+        self.assertEqual(found, {"hook": "pre-commit", "why": "a command it runs was not found",
+                                 "lines": [f"l{n}" for n in range(4, 12)]})
+        for text in [found["why"], *found["lines"]]:
+            self.assertIsNone(INVARIANT.search(text))
+
+    def test_malformed_commit_output_gives_no_evidence(self):
+        good = {"hook": "pre-commit", "exit": 1, "lines": []}
+        for output in ({"hook": "pre commit", "exit": 1, "lines": []},
+                       {"hook": "pre-commit", "exit": True, "lines": []},
+                       {"hook": "pre-commit", "exit": None, "lines": []},
+                       {"hook": None, "exit": None, "lines": "x"},
+                       {**good, "extra": 1}, []):
+            with self.subTest(output=output):
+                self.assertIsNone(approve.commit_evidence({"commit_output": output}, None))
+        self.assertIsNone(approve.commit_evidence({"repair_id": "x"}, None))
+
+    def test_hook_why_words_each_exit_code(self):
+        self.assertEqual(approve.hook_why(127), "a command it runs was not found")
+        self.assertEqual(approve.hook_why(126), "a command it runs could not be executed")
+        self.assertEqual(approve.hook_why(-1), "it could not be started")
+        self.assertEqual(approve.hook_why(1), "it ended with exit status 1")
+        self.assertEqual(approve.hook_why(3), "it ended with exit status 3")
+
+    def hook_error(self, repair="adopt.commit.failed", hook="pre-commit", code=1):
+        return {"code": "verification_failed", "repair_id": repair, "violations": [],
+                "commit_output": {"hook": hook, "exit": None if hook is None else code,
+                                  "lines": []}}
+
+    def test_a_failed_hook_is_named_in_the_reason_with_the_hook_note(self):
+        reason, note = approve.apply_failure("r", self.hook_error(), None)
+        self.assertEqual(reason, "the project's pre-commit hook stopped the adoption commit: "
+                                 "it ended with exit status 1")
+        self.assertEqual(note, approve.HOOK_NOTE)
+        for text in (reason, note):
+            self.assertIsNone(INVARIANT.search(text))
+            self.assertFalse([word for word in BANNED if word in text])
+        commit_note = register.unknown_step("r", "apply").replace("Try again", "Apply it again", 1)
+        self.assertEqual(approve.apply_failure("r", self.hook_error(hook=None), None),
+                         ("the adoption commit could not be made", commit_note))
+
+    def signing_latest(self):
+        return {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": [],
+                "draft": [{"field": "commit-signed", "label": "signed commits",
+                           "value": "yes", "source": "x", "options": [], "text": False,
+                           "reason": None, "ask": None}]}
+
+    def test_a_failed_commit_card_carries_its_evidence_lines(self):
+        latest = {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": []}
+        cases = (({"hook": None, "why": None, "lines": ["a", "b"]}, ["a", "b"]), (None, []))
+        for evidence, lines in cases:
+            with self.subTest(evidence=evidence):
+                found = approve.adoptions([step_event(
+                    2, "t2", step="apply_failed", reason="r", note="n", evidence=evidence)])
+                adoption = found["p1"]
+                entry = approve.entry(adoption, running=False, name="r")
+                items = approve.apply_items(latest, adoption, entry, "approve")
+                self.assertEqual(len(items), 1)
+                self.assertEqual(items[0]["lines"], lines)
+
+    def test_a_signing_failure_after_a_failed_hook_names_the_hook(self):
+        error = self.hook_error(repair=approve.SIGNING_REPAIR)
+        reason, note = approve.apply_failure("r", error, None)
+        self.assertEqual((reason, note), (approve.SIGNING_REASON, approve.hook_signing_note(
+            "pre-commit", "it ended with exit status 1")))
+        self.assertIn("pre-commit hook", note)
+        self.assertIn("it ended with exit status 1", note)
+        self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", note)), 2)
+        self.assertIsNone(INVARIANT.search(note))
+        self.assertFalse([word for word in BANNED if word in note])
+        self.assertEqual(approve.apply_failure("r", self.hook_error(
+            repair=approve.SIGNING_REPAIR, hook=None), None),
+            (approve.SIGNING_REASON, approve.SIGNING_NOTE))
+        evidence = {"hook": "pre-commit", "why": "it ended with exit status 1",
+                    "lines": ["hook said no"]}
+        adoption = {**step_payload("apply_failed", reason=reason, note=note, kept=KEPT,
+                                   branch=None, commit=None, evidence=evidence),
+                    "at": "t", "pull_state": None, "pull_at": None}
+        entry = approve.entry(adoption, running=False, name="r")
+        items = approve.apply_items(self.signing_latest(), adoption, entry, "approve")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["questions"][0]["options"],
+                         ["Apply it again", "Turn signed commits off", "Not now"])
+        self.assertEqual(items[0]["why"], note)
+        self.assertEqual(items[0]["lines"], ["hook said no"])
+
+    def test_every_hook_note_is_at_most_two_sentences_and_page_safe(self):
+        for hook in ("pre-commit", "prepare-commit-msg", "commit-msg"):
+            for code in (127, 126, -1, 1):
+                why = approve.hook_why(code)
+                reason, _ = approve.apply_failure("r", self.hook_error(hook=hook, code=code),
+                                                  None)
+                texts = (reason, approve.HOOK_NOTE, approve.hook_signing_note(hook, why))
+                with self.subTest(hook=hook, code=code):
+                    for text in texts:
+                        self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", text)), 2)
+                        self.assertIsNone(INVARIANT.search(text))
+                        self.assertFalse([word for word in BANNED if word in text])
+                    self.assertLessEqual(len(reason), approve.REASON_CHARS)
 
 
 class OutcomeTest(unittest.TestCase):

@@ -813,7 +813,7 @@ let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
-  return message.text;
+  return typeof message.words === "string" ? message.text + ": " + message.words : message.text;
 }
 function messageList(messages) {
   const list = el("ul", "sprint-messages");
@@ -3471,7 +3471,7 @@ function answerState(item) {
     const first = picks.indexOf(null);
     state = {
       phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
-      project_id: item.project_id, key: item.key,
+      project_id: item.project_id, key: item.key, id,
     };
     answers.set(id, state);
   }
@@ -3534,6 +3534,7 @@ function choose(state, qi, oi) {
   state.q = qi;
   state.phase = "choosing";
   state.reason = "";
+  state.notice = "";
 }
 function begin(item, state, pending) {
   state.phase = "waiting";
@@ -3555,9 +3556,31 @@ function planBusy(item, state) {
   }
   return false;
 }
+function needsWords(question, index) {
+  return Array.isArray(question.needs_words_index) && question.needs_words_index.includes(index);
+}
+function startQuestion(item, state) {
+  const words = draftOf(wordsKey(item)).value;
+  const typed = words.trim() !== "";
+  const pick = state.picks[0];
+  const picked = typeof pick === "number";
+  if (!picked && !typed) return false;
+  if (picked && !typed && needsWords(item.questions[0], pick)) {
+    state.notice = WORDS_NEEDED_NOTICE;
+    return true;
+  }
+  state.headline = item.headline;
+  const answer = {};
+  if (picked) answer.choice = pick;
+  if (typed) answer.text = words;
+  return begin(item, state, { round: true, body: roundBody(item, answer) });
+}
+function questionSendOff(item, state) {
+  return !choosable(state) || (typeof state.picks[0] !== "number" && draftOf(wordsKey(item)).value.trim() === "");
+}
 function start(item, state) {
+  if (isQuestion(item)) return choosable(state) && startQuestion(item, state);
   if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
-  if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
   if (isRetry(item)) return begin(item, state, { retry: true, body: { plan_id: item.plan_id } });
   if (isApply(item)) {
     const body = { plan_id: item.plan_id };
@@ -3593,10 +3616,6 @@ function startDraft(item, state, text) {
   const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: text };
   return begin(item, state, { plan: true, body });
 }
-function startWords(item, state, text) {
-  if (!choosable(state) || !isQuestion(item)) return false;
-  return begin(item, state, { round: true, body: roundBody(item, { text }) });
-}
 function startCheck(item, state, answer, extra) {
   if (!choosable(state) || !check(item)) return false;
   return begin(item, state, { check: true, body: { project_id: state.project_id, key: state.key, answer, version: item.version, ...extra } });
@@ -3604,27 +3623,37 @@ function startCheck(item, state, answer, extra) {
 function dropDrafts(id, names) {
   for (const name of names) drafts.delete(id + "\n" + name);
 }
+function openItem(id) {
+  return lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+}
+function withdrawn(id, state) {
+  if (!roundWords(state.pending)) return answers.delete(id);
+  state.phase = "failed";
+  state.again = false;
+  state.kept = state.reason = "the question was withdrawn before the answer was sent";
+}
 function undo(state) {
   if (state.phase !== "waiting") return;
   clearTimeout(state.timer);
   state.timer = null;
   state.phase = "choosing";
+  if (roundWords(state.pending) && openItem(state.id) === undefined) withdrawn(state.id, state);
 }
 function fireAnswer(id) {
   const state = answers.get(id);
   if (state === undefined || state.phase !== "waiting") return;
   state.timer = null;
-  const item = lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+  const item = openItem(id);
   if (item === undefined) {
-    answers.delete(id);
-    return;
-  }
-  sendAnswer(id, state, item);
+    withdrawn(id, state);
+    redraw();
+  } else sendAnswer(id, state, item);
 }
 function postPlanAnswer(body) {
   return fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body: JSON.stringify(body) });
 }
 const NO_REASON = "the console did not say why.";
+const WORDS_NEEDED_NOTICE = "Say what to change.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
     && !state.pending.round && !state.pending.retry && !state.pending.plan;
@@ -3676,9 +3705,11 @@ async function sendAnswer(id, state, item) {
   } else if (reason === null) {
     dropDrafts(id, ["note", "confirm", "words", "draft"]);
     state.phase = "sent";
+    delete state.kept;
   } else {
     state.phase = "failed";
     state.reason = reason;
+    if (roundWords(state.pending)) state.kept = reason;
   }
   redraw();
 }
@@ -3966,13 +3997,40 @@ function statusLine(act, state, item) {
   }
   return true;
 }
-function actionLine(item, state, lead) {
+function roundWords(pending) {
+  return pending !== null && pending !== undefined && pending.round === true && typeof pending.body.text === "string";
+}
+function keptWords(state) {
+  return state.kept !== undefined && roundWords(state.pending);
+}
+function keptWordsCard(id, state) {
+  const card = el("article", "card kept-words");
+  card.appendChild(el("p", "q", state.headline || "A question that is no longer open"));
+  card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.kept));
+  const area = typedArea("kept-words-text field-area", "Your words, not sent", "");
+  const edited = draftOf(id + "\nwords").value;
+  area.value = edited.trim() === "" ? state.pending.body.text : edited;
+  area.readOnly = true;
+  card.appendChild(area);
   const act = el("div", "act");
-  if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
+  act.appendChild(actionButton("kept-words-dismiss btn-quiet", "Dismiss", () => {
+    answers.delete(id);
+    dropDrafts(id, ["words"]);
+    redraw();
+  }));
+  card.appendChild(act);
+  return card;
+}
+function actionLine(item, state, lead, card) {
+  const act = el("div", "act");
+  const idle = !statusLine(act, state, item);
+  if ((idle || isQuestion(item)) && (item.questions.length > 0 || !textCard(item))) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send btn-primary" : "send btn-quiet", words, () => { if (start(item, state)) redraw(); });
-    if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
-    markBusy(send, planBusy(item, state));
+    const off = isQuestion(item) ? questionSendOff(item, state) : !picksComplete(item, state) || planBusy(item, state);
+    if (off) send.setAttribute("disabled", "");
+    if (isQuestion(item)) card.send = send;
+    markBusy(send, isQuestion(item) ? state.phase === "sending" : planBusy(item, state));
     send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
@@ -4020,21 +4078,13 @@ function noteBox(item, state, box) {
   send.disabled = area.value.trim() === "";
   return send;
 }
-function wordsBox(item, state, box) {
+function wordsBox(item, state, box, card) {
   const area = typedArea("words-text field-area", "Answer in your own words", "Answer in your own words");
-  const send = actionButton("ans-words btn-quiet", "Send my words", () => {
-    const text = area.value;
-    if (text.trim() === "") return;
-    if (startWords(item, state, text)) redraw();
-  });
-  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
-  const pending = !choosable(state);
-  box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
-  area.disabled = pending;
+  box.appendChild(draftField(area, wordsKey(item), () => {
+    if (card.send !== null) card.send.disabled = questionSendOff(item, state);
+  }));
+  area.disabled = !choosable(state);
   markBusy(area, state.phase === "sending");
-  send.disabled = pending || area.value.trim() === "";
-  markBusy(send, state.phase === "sending");
-  box.appendChild(send);
 }
 function draftInput(cls, placeholder) {
   const input = el("input", cls);
@@ -4048,7 +4098,6 @@ function draftInput(cls, placeholder) {
 function draftBox(item, state, box) {
   const input = draftInput("draft-text field-line", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
   const row = el("div", "draft-row");
-  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
   const pending = !choosable(state) || planBusy(item, state);
   const submit = () => {
     const text = input.value.trim();
@@ -4148,7 +4197,7 @@ function answerBox(item, state, lead) {
       if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
-        choose(state, qi, oi);
+        choose(state, qi, isQuestion(item) && state.picks[qi] === oi ? null : oi);
         redraw();
       });
       const row = el("li");
@@ -4161,9 +4210,10 @@ function answerBox(item, state, lead) {
     const held = heldLine(item);
     if (held !== null) box.appendChild(held);
   }
-  if (isQuestion(item)) wordsBox(item, state, box);
+  const card = { send: null };
+  if (isQuestion(item)) wordsBox(item, state, box, card);
   if (textCard(item)) draftBox(item, state, box);
-  box.appendChild(actionLine(item, state, lead));
+  box.appendChild(actionLine(item, state, lead, card));
   return box;
 }
 function boxState(item) {
@@ -4400,7 +4450,7 @@ function drawInbox(view) {
         continue;
       }
     }
-    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
+    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending" && !keptWords(state);
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
   }
   for (const id of [...replaced.keys()]) {
@@ -4410,7 +4460,7 @@ function drawInbox(view) {
     if (key.startsWith("draft:")) continue;
     const id = key.split("\n")[0];
     const state = answers.get(id);
-    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending");
+    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending" || keptWords(state));
     if (!present.has(id) && !busy) drafts.delete(key);
   }
   const current = currentEntry(open);
@@ -4423,6 +4473,9 @@ function drawInbox(view) {
   for (const item of starts) section.appendChild(failedStartCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
+  for (const [id, state] of answers) {
+    if (!present.has(id) && keptWords(state)) section.appendChild(keptWordsCard(id, state));
+  }
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);

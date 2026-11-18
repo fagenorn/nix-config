@@ -96,7 +96,10 @@ null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
 and so is each open question of the registration's plan, and each retry, apply, confirm,
-failure or trust card, see below), else
+failure or trust card, see below, and each running sprint whose `ball` is `owner` and that no item
+above already counts: its manager waits for an answer or a permission at its terminal, #1247; it
+has no card, so the heading and its `TERMINAL_SENTENCE` are all that name it; a manager that
+cannot hear the console, #1229, is counted too but is not a terminal question), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
@@ -104,7 +107,10 @@ stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` whe
 stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
 when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
-merge, else `QUESTION_SENTENCE` when any manager question is open, else
+merge, else `QUESTION_SENTENCE` when any manager question is open, else, when only such sprints are
+counted, `TERMINAL_SENTENCE` for managers waiting at their terminals (an answer, or a permission unless the manager cannot hear the console), `DEAF_SENTENCE` for managers
+that cannot hear the console or are otherwise not waiting at a terminal (nothing to answer there),
+`TERMINAL_DEAF_SENTENCE` for both, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
@@ -294,7 +300,8 @@ is none. Its entry is
      "project_id", "sprint_id", "title", "round": <int>, "index": <int>, "blocker": <bool>,
      "blocks": "<text>", "headline": "<ask>", "context": "<text>" | null, "more_questions": 0,
      "questions": [{"question": "<ask>", "options": [<str>, ...], "chosen": null,
-                    "recommended": "<option>", "recommended_index": <int>}],
+                    "recommended": "<option>", "recommended_index": <int>,
+                    "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
 
@@ -304,7 +311,9 @@ The texts are shown cut, never refused, though a round logged before the limits 
 with `sprints.cut`; each picture's line to `MAX_PICTURE_LINE_CHARS` (140), and `pictures`
 is `[]` when the question has none. `recommended_index` is the recommendation's index among the
 logged options, so it names the right option even when two cut options read the same; the owner's
-answer is still an option index into the full logged options.
+answer is still an option index into the full logged options. `needs_words_index` lists, ascending,
+the indices among the logged options of the options the manager marked `needs_words` (`[]` when
+none): the page refuses such an option until the owner has written words with it.
 
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
@@ -452,12 +461,12 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                    "issues": [<int>],
                                    "waits": {"ci_at", "commit_at", "release_at", "lock_at":
                                              "<ISO time>" | null}}}
-    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
+    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop" | "answer",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null, "new": <bool>}
+                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -632,6 +641,8 @@ not ended (an ended one has no Tell box and no stop or drop control to point at)
 pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
 `TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
 changes `retry` and never hides a message.
+`words` is the message's own `words` (the owner's words sent with an option, on an `answer`
+message), else null; the page reads the option and the words together.
 `new` is true exactly when the message has a `reply_at` and `derive_view(..., looked=<ISO time>)`
 (the owner's last look; the service passes its own) is None or earlier than `reply_at`, compared as
 aware datetimes. `new_replies` (always present, possibly empty) lists every message entry with `new`
@@ -881,6 +892,9 @@ FAILED_START_SENTENCE = "Retry to start the manager, or drop the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
+TERMINAL_SENTENCE = "Answer it in the manager's terminal."
+DEAF_SENTENCE = "Bring the manager back, or drop the sprint."
+TERMINAL_DEAF_SENTENCE = "Answer it in the manager's terminal, or bring the other manager back, or drop its sprint."
 ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
@@ -1628,7 +1642,8 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
     return {"id": message.message_id, "kind": message.kind, "version": message.version,
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
-            "reply_at": message.reply_at, "new": _is_new(message, looked)}
+            "reply_at": message.reply_at, "words": message.words,
+            "new": _is_new(message, looked)}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
@@ -1958,7 +1973,9 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
                            "options": [cut(o, MAX_OPTION_CHARS) for o in question.options],
                            "chosen": None, "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
-                           "recommended_index": question.options.index(question.recommended)}],
+                           "recommended_index": question.options.index(question.recommended),
+                           "needs_words_index": [i for i, option in enumerate(question.options)
+                                                 if option in question.needs_words]}],
             "pictures": _picture_entries(question.pictures),
             "items": [], "answers": [], "answered": False, "waiting_since": question.at}
 
@@ -2165,42 +2182,6 @@ def derive_view(
     starts = sorted((s for group in drafted.values() for s in group
                      if failed_start(s, bool(in_sprint.get(s.sprint_id)), managers)),
                     key=lambda s: (s.manager.at, s.sprint_id))
-    open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(failures) + len(trusts) + len(open_items))
-    all_out = bool(capacity["all_out"])
-    if all_out:
-        sentence = ALL_OUT_SENTENCE
-    elif stale_projects:
-        sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
-    elif briefs:
-        sentence = BRIEF_SENTENCE
-    elif stalls:
-        sentence = MANAGER_SENTENCE
-    elif starts:
-        sentence = FAILED_START_SENTENCE
-    elif unprogressed:
-        sentence = PROGRESS_SENTENCE
-    elif signins:
-        sentence = SIGNIN_SENTENCE
-    elif adoptions:
-        sentence = ADOPTION_SENTENCE
-    elif asked:
-        sentence = QUESTION_SENTENCE
-    elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
-        sentence = REGISTER_SENTENCE
-    elif any(e["text"] for e in registering):
-        sentence = REGISTER_TYPE_SENTENCE
-    elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
-        sentence = CHOOSE_SENTENCE
-    elif any(r.item.get("answers") for r in open_items):
-        sentence = ANSWER_SENTENCE
-    elif registering and not open_items:
-        sentence = REGISTER_STEP_SENTENCE
-    elif open_count:
-        sentence = NEEDS_SENTENCE
-    else:
-        sentence = _sentence(len(states), adopting)
     runs: dict[str, list[DeliveryState]] = {}
     for delivery in (deliveries or {}).values():
         runs.setdefault(delivery.session_id, []).append(delivery)
@@ -2246,6 +2227,69 @@ def derive_view(
                                     notice_post=notice_post[s.project_id],
                                     read=health.get(s.project_id), questions=asks[s.project_id])
                      for s in quiet]
+    counted = {s.sprint_id for s in (*briefs, *stalls, *starts, *unprogressed)}
+    counted.update(s.sprint_id for s, _ in asked)
+    at_terminal_sprints = [sprint for project in (*entries, *quiet_entries)
+                           for sprint in project["sprints"]
+                           if sprint["ball"] == BALL_OWNER and not sprint["waiting"]
+                           and sprint["sprint_id"] not in counted]
+    at_terminal = [sprint["sprint_id"] for sprint in at_terminal_sprints]
+    # Only a manager with a session waiting at its terminal sends the owner there, read from the
+    # sessions rather than `now_text` (a stopping sprint's `now_text` is the stop sentence even while
+    # its manager waits); any other counted sprint (one that cannot hear the console,
+    # ADR-console-042 D5) has no terminal to go to and reads the recovery sentence.
+    held_sessions = {m.session_id for read in (movement or {}).values() for m in read.sessions if m.held}
+
+    def asks_at_terminal(sprint: dict) -> bool:
+        # The order `sprint_now` reads: an answer, then a manager that cannot hear the console,
+        # then a permission, so a deaf manager's permission wait is not a terminal question.
+        if any(s["state"] == WAITING_ANSWER for s in sprint["sessions"]):
+            return True
+        deaf = any(m["manager"] and m["session_id"] in held_sessions
+                   for m in sprint["movement"]["sessions"])
+        return not deaf and any(s["state"] == WAITING_PERMISSION for s in sprint["sessions"])
+
+    at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints if asks_at_terminal(sprint)]
+    open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
+                  + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
+                  + len(failures) + len(trusts) + len(open_items) + len(at_terminal))
+    all_out = bool(capacity["all_out"])
+    if all_out:
+        sentence = ALL_OUT_SENTENCE
+    elif stale_projects:
+        sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
+    elif briefs:
+        sentence = BRIEF_SENTENCE
+    elif stalls:
+        sentence = MANAGER_SENTENCE
+    elif starts:
+        sentence = FAILED_START_SENTENCE
+    elif unprogressed:
+        sentence = PROGRESS_SENTENCE
+    elif signins:
+        sentence = SIGNIN_SENTENCE
+    elif adoptions:
+        sentence = ADOPTION_SENTENCE
+    elif asked:
+        sentence = QUESTION_SENTENCE
+    elif at_terminal and open_count == len(at_terminal):
+        sentence = (DEAF_SENTENCE if not at_terminal_asks
+                    else TERMINAL_SENTENCE if len(at_terminal_asks) == len(at_terminal)
+                    else TERMINAL_DEAF_SENTENCE)
+    elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
+        sentence = REGISTER_SENTENCE
+    elif any(e["text"] for e in registering):
+        sentence = REGISTER_TYPE_SENTENCE
+    elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
+        sentence = CHOOSE_SENTENCE
+    elif any(r.item.get("answers") for r in open_items):
+        sentence = ANSWER_SENTENCE
+    elif registering and not open_items:
+        sentence = REGISTER_STEP_SENTENCE
+    elif open_count:
+        sentence = NEEDS_SENTENCE
+    else:
+        sentence = _sentence(len(states), adopting)
     new_replies = sorted(
         ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
           "title": sprint["title"], "message_id": message["id"], "reply_at": message["reply_at"]}
