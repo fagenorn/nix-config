@@ -46,6 +46,8 @@ def fake_browser(present):
             self.clicks = []
             self.waits = []
             self.reads = 0
+            self.card = ()
+            self.fills = []
 
         def goto(self, url):
             pass
@@ -58,6 +60,9 @@ def fake_browser(present):
 
         def click(self, selector):
             self.clicks.append(selector)
+
+        def fill(self, selector, text):
+            self.fills.append((selector, text))
 
         def evaluate(self, expression, arg=None):
             if expression == shots.ASK_READING:
@@ -73,6 +78,9 @@ def fake_browser(present):
             if expression == shots.GOAL_READING:
                 self.reads += 1
                 return list(shots.FILLED_GOAL)
+            if expression == shots.CARD_READING:
+                self.reads += 1
+                return list(self.card)
             if expression == shots.ACTS_ROW:
                 return []
             if expression == shots.SCROLL_Y:
@@ -99,15 +107,18 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_eight_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 28)
+    def test_the_set_is_thirty_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 30)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
+        self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
+                         ("inbox-card", "question-words", "question-refused"))
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-10:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-12:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+                                              "question-words", "question-refused",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
@@ -116,7 +127,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight"}
+                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -310,6 +321,83 @@ class ScreenshotFixtureTest(unittest.TestCase):
             self.assertEqual(page.clicks, [])
             self.assertIsNone(shot.thread)
             self.assertEqual(shot.acts, ())
+
+    def test_a_question_card_shot_without_its_pick_and_words_or_its_refusal_fails_the_command(
+            self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        phrase = "does not show the question card"
+        wrong = {"question-words": ((None, shots.LOOK_WORDS, True, None),
+                                    ("Ask for changes", "", True, None),
+                                    ("Ask for changes", shots.LOOK_WORDS, False, None),
+                                    ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change."),
+                                    (None, None, None, None)),
+                 "question-refused": (("Ask for changes", "", True, None),
+                                      (None, "", True, "Say what to change."),
+                                      ("Ask for changes", shots.LOOK_WORDS, True, "Say what to change."),
+                                      (None, None, None, None))}
+        right = {"question-words": ("Ask for changes", shots.LOOK_WORDS, True, None),
+                 "question-refused": ("Ask for changes", "", True, "Say what to change.")}
+        for state, readings in wrong.items():
+            for card in readings:
+                with self.subTest(state=state, card=card):
+                    code, text = run(lambda path: shots.Shot(state, 480, path, 480, card=card))
+                    self.assertEqual(code, 1)
+                    self.assertIn(phrase, text)
+            for card in (right[state], None):
+                with self.subTest(state=state, card=card):
+                    code, text = run(lambda path: shots.Shot(state, 480, path, 480, card=card))
+                    self.assertEqual(code, 0)
+                    self.assertNotIn(phrase, text)
+        self.assertEqual((shots.WORDS_CARD, shots.REFUSED_CARD), (right["question-words"],
+                                                                  right["question-refused"]))
+
+    def test_the_question_card_shots_pick_ask_for_changes_and_type_or_send_only_on_a_page_with_the_words_box(
+            self) -> None:
+        empty = (None, None, None, None)
+        third = ".lead ul.opts li:nth-child(3) button.opt"
+        cases = (("question-words", {shots.WORDS_BOX}, [third], [(shots.WORDS_BOX, shots.LOOK_WORDS)],
+                  shots.WORDS_CARD),
+                 ("question-refused", {shots.WORDS_BOX}, [third, ".lead button.send"], [],
+                  shots.REFUSED_CARD),
+                 ("question-words", {shots.LOOK_OPTION}, [], [], None),
+                 ("question-refused", {shots.LOOK_OPTION}, [], [], None),
+                 ("question-words", set(), [], [], empty),
+                 ("question-refused", set(), [], [], empty),
+                 ("inbox-card", {shots.WORDS_BOX}, [], [], None))
+        for state, present, clicks, fills, card in cases:
+            for width in shots.WIDTHS:
+                with self.subTest(state=state, present=bool(present), width=width), \
+                        tempfile.TemporaryDirectory() as tmp:
+                    browser, page = fake_browser(present)
+                    page.card = card or ()
+                    shot = shots._shoot(browser, "http://console.test/", state, width, Path(tmp))
+                    self.assertEqual(page.clicks, clicks)
+                    self.assertEqual(page.fills, fills)
+                    self.assertEqual(shot.card, card)
+                    self.assertEqual(page.reads, 1 if card and card != empty else 0)
+
+    def test_the_look_check_question_is_seeded_with_needs_words_only_where_the_service_keeps_it(
+            self) -> None:
+        for kept in (True, False):
+            with self.subTest(kept=kept), tempfile.TemporaryDirectory() as tmp:
+                at = [""]
+                log = shots.EventLog(Path(tmp) / "events.db", clock=lambda: at[0])
+                with mock.patch.object(shots, "NEEDS_WORDS_KEPT", kept):
+                    shots._Seed(log, at, 10000.0).sprint("owner/web", "t", started=1800,
+                                                           look=True)
+                (asked,) = [e for e in log.events() if e.kind == "questions.asked"]
+                log.close()
+                (question,) = asked.payload["questions"]
+                self.assertEqual(question["options"], shots.LOOK_OPTIONS)
+                self.assertEqual("needs_words" in question, kept)
+        self.assertTrue(shots.NEEDS_WORDS_KEPT)
 
     def test_a_question_read_shot_that_does_not_read_the_answer_in_the_main_column_fails_the_command(
             self) -> None:
@@ -712,6 +800,13 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         again.close()
                 elif state == "inbox-card":
                     self.assertEqual(len(view["inbox"]["open"][0]["questions"][0]["options"]), 2)
+                elif state in ("question-words", "question-refused"):
+                    (asked,) = view["inbox"]["open"]
+                    (look,) = asked["questions"]
+                    self.assertEqual(look["options"],
+                                     ["Approve", "Approve with one fix", "Ask for changes"])
+                    self.assertEqual(look["recommended_index"], 0)
+                    self.assertEqual(look["needs_words_index"], [1, 2])
                 elif state == "accounts-panel":
                     self.assertEqual(
                         sorted(e["profile"] for e in view["capacity"]["profiles"]),

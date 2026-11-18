@@ -44,10 +44,12 @@ from agent_tools.console.movement import (
 from agent_tools.console.sprints import (
     APPROVED,
     CHANGES,
+    MESSAGE_ANSWER,
     NONE,
     Brief,
     Closing,
     Manager,
+    Message,
     Notice,
     Observed,
     PendingStop,
@@ -1758,7 +1760,8 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
             "headline": text, "context": None, "more_questions": 0,
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
-                           "recommended_index": options.index(recommended)}],
+                           "recommended_index": options.index(recommended),
+                           "needs_words_index": []}],
             "pictures": [],
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
@@ -1777,6 +1780,14 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["sentence"], QUESTION_SENTENCE)
         self.assertEqual(QUESTION_SENTENCE,
                          "Choose an option with its number and press Enter, or answer in your own words.")
+
+    def test_a_question_names_the_options_that_need_words_by_index(self):
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(
+            state_, questions=(dataclasses.replace(first, needs_words=("files",)), *rest))
+        shown = derive_view([state("p00", 1)], sprints={A: state_})
+        self.assertEqual(shown["inbox"]["open"][0]["questions"][0]["needs_words_index"], [1])
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
@@ -2861,7 +2872,7 @@ class SprintMessageViewTest(unittest.TestCase):
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
             "action_text": None, "read_at": None, "reply": None, "reply_at": None,
-            "new": False}])
+            "words": None, "new": False}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")
@@ -2902,6 +2913,19 @@ class SprintMessageViewTest(unittest.TestCase):
         self.assertEqual([(m["id"], m["kind"], m["version"], m["text"])
                           for m in entry["messages"]],
                          [(4, "changes", 1, "smaller slices"), (6, "approved", 2, None)])
+
+    def test_an_answer_with_words_carries_the_option_and_the_words_in_its_message(self):
+        answered = [Message(7, MESSAGE_ANSWER, message_at(7), None, "Ask for changes",
+                            question="Approve?", round_id=5, chosen="Ask for changes",
+                            words="split the reader slice"),
+                    Message(8, MESSAGE_ANSWER, message_at(8), None, "Approve",
+                            question="Ship?", round_id=5, chosen="Approve")]
+        shown = derive_view([state("p00", 1)], sprints={
+            A: dataclasses.replace(started(A), messages=tuple(answered))}, now_ms=T0_MS)
+        messages = shown["entries"][0]["sprints"][0]["messages"]
+        self.assertEqual([(m["kind"], m["text"], m["words"]) for m in messages],
+                         [("answer", "Ask for changes", "split the reader slice"),
+                          ("answer", "Approve", None)])
 
     def test_only_the_ten_newest_messages_are_shown(self):
         rows = message_rows(*(messaged_row(seq, f"note {seq}") for seq in range(3, 15)))

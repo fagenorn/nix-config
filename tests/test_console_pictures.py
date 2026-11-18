@@ -1633,7 +1633,8 @@ class PictureDocsTest(unittest.TestCase):
         adr = "docs/areas/console/adr/"
         for path, amended in (
                 ("019-a-managers-questions-arrive-as-inbox-items.md",
-                 "- **Status:** accepted; amended by ADR-console-038, ADR-console-040"),
+                 "- **Status:** accepted; amended by ADR-console-038, ADR-console-040, "
+                 "ADR-console-072"),
                 ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-038 and ADR-console-045")):
             with self.subTest(path):
