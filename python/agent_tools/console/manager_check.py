@@ -26,19 +26,24 @@ finish in the expected case; a run that spends its budget keeps its state file a
 approved run resumes. `start` has no time bound of its own: a brief that has not arrived, a manager
 still working and a sprint parked `waiting` on quota are all 75 however long ago `stated_at` was,
 and the hold's expiry bounds the wait. Without a state file: a console that does not answer is 75
-`not_running`, one whose view has no `managers` key is 75 `not_deployed`, no readable token is 75
+`not_running`, one whose view has no `managers` key is 75 `not_deployed`, a console on the port that is
+not the console's launchd job (macOS) is 75 `console_not_the_job`, no readable token is 75
 `no_token`, and `managers` false is 1 `managers_unavailable`; nothing is posted in any of them.
 
 Not met (exit 1, `{"status": "not_met", "reason": ..., "brief_seconds": [...]}`) only for a
 functional failure: a sprint that is gone (`the sprint is gone`), a `failed` or `missing` manager
 (its `manager_text`), a brief at a version other than 1, seen on any poll even before the other sprint has a brief
 (`a brief reached another sprint's slot`),
-a console that refuses a goal, a failed restart (`restart failed: <error>`), or a manager not
+a console that refuses a goal, a failed restart (`restart failed: <error>`, which on macOS includes `the console did not come back
+under its launchd job`), or a manager not
 listed after the restart (`the manager is not running after the restart`). A slow brief is never
 not met here.
 
-Once both briefs are version 1, `start` restarts the console (`systemctl --user restart
-agent-console`), waits 10 seconds and reads the session registry up to three times 5 seconds apart
+Once both briefs are version 1, `start` restarts the console (on Linux `systemctl --user restart
+agent-console`; on macOS, only when the pid `launchctl print` reports for `org.nixos.agent-console` in
+`gui/<uid>`, else `system`, serves the port, it sends that pid SIGTERM and waits up to 60 seconds for
+launchd's `KeepAlive` to bring a new pid of the job back on the port; a console on the port that is not
+the job is never signalled and the run is 75 `waiting` with `NOT_THE_JOB_TEXT`, the sprints kept), waits 10 seconds and reads the session registry up to three times 5 seconds apart
 until each sprint's manager (`manager.session_name`) is listed. The registry is read fresh from the
 registry files and filtered by live process, never from the console's view, which replays sessions
 from the log and drops a missing one only after two polls: a manager killed by the restart cannot
@@ -77,15 +82,18 @@ the sorted profiles of the stopped sessions; it removes the state file.
 `timing` only reads the result file (a new run deletes the previous one, so it never reports an earlier run): absent is 75 `no_result`; any `brief_seconds` null or above
 `--deadline` is 1 `slow`; else 0 `met`, each with `brief_seconds`. It changes no file.
 
-The default `restart`, `registry`, `stop` and `remove` and the `clock` and `sleep` of `main` are seams for tests.
+The default `restart`, `owner`, `registry`, `stop` and `remove` and the `clock` and `sleep` of `main` are seams for tests.
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import http.client
 import json
 import os
+import re
+import signal
 import subprocess
 import sys
 import time
@@ -108,6 +116,10 @@ RETURN_SECONDS = 60
 GOALS = ("[verify #888 a] check that a stated goal starts a manager; withdraw me",
          "[verify #888 b] check that a second manager on the same profile keeps its own sprint; "
          "withdraw me")
+CONSOLE_LABEL = "org.nixos.agent-console"
+LSOF = "/usr/sbin/lsof"
+NOT_THE_JOB_TEXT = "the console on the port is not the console's launchd job"
+PID_LINE = re.compile(r"^\tpid = (\d+)$", re.MULTILINE)
 NOT_RUNNING_TEXT = "the manager is not running after the restart"
 NOT_STOPPED_TEXT = "the test managers are not stopped yet"
 NOT_REMOVED_TEXT = "the test managers' sessions are not removed yet"
@@ -235,15 +247,80 @@ def _print(document: dict) -> None:
     print(json.dumps(document, sort_keys=True))
 
 
-def default_restart() -> None:
-    subprocess.run(["systemctl", "--user", "restart", "agent-console"], check=True, timeout=60)
+class NotTheJob(Exception):
+    """The console on the port is not the console's launchd job, so it is not restarted."""
+
+
+def job_pid(platform: str, *, run=subprocess.run, uid=os.getuid) -> int | None:
+    """The pid `launchctl print` reports for the console's job in `gui/<uid>`, else `system`."""
+    for domain in (f"gui/{uid()}", "system"):
+        answer = run(["launchctl", "print", f"{domain}/{CONSOLE_LABEL}"], capture_output=True,
+                     text=True, timeout=30, check=False)
+        if answer.returncode == 0:
+            found = PID_LINE.search(answer.stdout or "")
+            if found:
+                return int(found.group(1))
+    return None
+
+
+def serves(pid: int, port: int, *, run=subprocess.run) -> bool:
+    """Whether `pid`, or a process it is an ancestor of (within five steps), listens on `port`."""
+    answer = run([LSOF, "-nP", "-a", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"], capture_output=True,
+                 text=True, timeout=30, check=False)
+    for text in (answer.stdout or "").split():
+        if not text.isdigit():
+            continue
+        current = int(text)
+        for step in range(6):
+            if current == pid:
+                return True
+            if step == 5:
+                break
+            parent = run(["ps", "-o", "ppid=", "-p", str(current)], capture_output=True,
+                         text=True, timeout=30, check=False)
+            current = int(parent.stdout.strip()) if (parent.stdout or "").strip().isdigit() else 0
+            if current in (0, 1):
+                break
+    return False
+
+
+def default_owner(platform: str = sys.platform, *, port: int = 27184, run=subprocess.run,
+                  uid=os.getuid) -> bool:
+    """Whether the console on the port is the one `default_restart` restarts."""
+    if platform.startswith("linux"):
+        return True
+    if platform == "darwin":
+        pid = job_pid(platform, run=run, uid=uid)
+        return pid is not None and serves(pid, port, run=run)
+    return False
+
+
+def default_restart(platform: str = sys.platform, *, port: int = 27184, run=subprocess.run,
+                    kill=os.kill, uid=os.getuid, clock=time.monotonic, sleep=time.sleep) -> None:
+    if platform.startswith("linux"):
+        run(["systemctl", "--user", "restart", "agent-console"], check=True, timeout=60)
+        return
+    if platform != "darwin":
+        raise RuntimeError(f"no console restart on {platform}")
+    old = job_pid(platform, run=run, uid=uid)
+    if old is None or not serves(old, port, run=run):
+        raise NotTheJob()
+    kill(old, signal.SIGTERM)
+    deadline = clock() + RETURN_SECONDS
+    while True:
+        sleep(2)
+        new = job_pid(platform, run=run, uid=uid)
+        if new is not None and new != old and serves(new, port, run=run):
+            return
+        if clock() >= deadline:
+            raise RuntimeError("the console did not come back under its launchd job")
 
 
 def default_registry() -> dict:
     return sessions.read_session_registry(service.default_session_dirs())
 
 
-def _start(args, restart, registry, stop, remove, clock, sleep) -> int:
+def _start(args, restart, owner, registry, stop, remove, clock, sleep) -> int:
     state_file = args.state_file or _state_dir() / "checks" / "manager-start.json"
     result_file = args.result_file or _state_dir() / "checks" / "manager-start-result.json"
     token_file = args.token_file or _state_dir() / "page-token"
@@ -353,6 +430,9 @@ def _start(args, restart, registry, stop, remove, clock, sleep) -> int:
         if "managers" not in view:
             _print({"status": "not_deployed"})
             return NOT_YET
+        if not owner():
+            _print({"status": "console_not_the_job"})
+            return NOT_YET
         if not view["managers"]:
             _print({"status": "managers_unavailable"})
             return 1
@@ -415,6 +495,9 @@ def _start(args, restart, registry, stop, remove, clock, sleep) -> int:
 
     try:
         restart()
+    except NotTheJob:
+        _print({"status": "waiting", "reason": NOT_THE_JOB_TEXT})
+        return NOT_YET
     except Exception as error:
         return finish(1, f"restart failed: {error}", seconds)
     sleep(POLL_SECONDS)
@@ -463,7 +546,8 @@ def _timing(args) -> int:
 
 
 def main(argv: list[str] | None = None, *,
-         restart: Callable[[], None] = default_restart,
+         restart: Callable[[], None] | None = None,
+         owner: Callable[[], bool] | None = None,
          registry: Callable[[], dict] = default_registry,
          stop: Callable[[str, str], None] = manager.stop_session,
          remove: Callable[[str, str], None] = manager.remove_session,
@@ -472,7 +556,9 @@ def main(argv: list[str] | None = None, *,
     args = build_parser().parse_args(argv)
     if args.command == "timing":
         return _timing(args)
-    return _start(args, restart, registry, stop, remove, clock, sleep)
+    port = urlsplit(args.url).port or 80
+    return _start(args, restart or functools.partial(default_restart, port=port),
+                  owner or functools.partial(default_owner, port=port), registry, stop, remove, clock, sleep)
 
 
 if __name__ == "__main__":
