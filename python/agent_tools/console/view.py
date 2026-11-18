@@ -288,7 +288,17 @@ is none. Its entry is
      "questions": [{"question": "<ask>", "options": [<str>, ...], "chosen": null,
                     "recommended": "<option>", "recommended_index": <int>}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
+     "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
+                     "line": <str> | null},
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
+
+`look` (#1260) is null for a question that carries no look. For one that does, `state` is `open`
+(`line` null), `moved` (the pull request moved or ended before the owner approved; `line` is
+`answer.LOOK_MOVED`, or `answer.LOOK_CLOSED` when the found state is not open), `posting` (`line` is
+`answer.LOOK_RECORDING`) or `failed` (`line` is the recorded reason). Each question of
+`sprints.pending_looks` (an approval answered but not yet on the tracker) is an entry too, with
+`answered` true, `chosen` the option chosen and the `look` above; they are ordered with the open
+questions by `(at, sprint_id, round, index)` and counted in `inbox_items` and the headline.
 
 The texts are shown cut, never refused, though a round logged before the limits can exceed them
 (ADR-console-027): the ask and the headline to `MAX_ASK_CHARS` (140), `context` to
@@ -682,7 +692,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
-from agent_tools.console import contract_draft, inbox, project_question
+from agent_tools.console import answer as owner_answer, contract_draft, inbox, project_question
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
@@ -808,6 +818,7 @@ from agent_tools.console.sprints import (
     merge_refused,
     message_state,
     open_questions,
+    pending_looks,
     open_notices,
     open_owner_notices,
     progress_text,
@@ -1932,9 +1943,27 @@ def _brief_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": brief.sent_at}
 
 
+def _look_entry(question: Question) -> dict | None:
+    look = question.look
+    if look is None:
+        return None
+    state, line = "open", None
+    if question.look_state == "moved":
+        state = "moved"
+        line = (owner_answer.LOOK_MOVED.format(found=(question.look_found or "")[:7], head=look.head[:7])
+                if question.look_found_state == "open" and question.look_found is not None
+                else owner_answer.LOOK_CLOSED.format(state=question.look_found_state))
+    elif question.look_state == "posting":
+        state, line = "posting", owner_answer.LOOK_RECORDING.format(head=look.head[:7], issue=look.issue)
+    elif question.look_state == "failed":
+        state, line = "failed", question.look_reason
+    return {"issue": look.issue, "pr": look.pr, "head": look.head, "state": state, "line": line}
+
+
 def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
+    answered = question.answer is not None
     return {"type": "inbox_item", "reason": "question",
             "key": f"question/{sprint.sprint_id}/{question.round_id}/{question.index}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
@@ -1945,11 +1974,13 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
             "more_questions": 0,
             "questions": [{"question": ask,
                            "options": [cut(o, MAX_OPTION_CHARS) for o in question.options],
-                           "chosen": None, "recommended": cut(question.recommended,
+                           "chosen": (cut(question.chosen, MAX_OPTION_CHARS)
+                                      if question.chosen is not None else None),
+                           "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
                            "recommended_index": question.options.index(question.recommended)}],
-            "pictures": _picture_entries(question.pictures),
-            "items": [], "answers": [], "answered": False, "waiting_since": question.at}
+            "pictures": _picture_entries(question.pictures), "look": _look_entry(question),
+            "items": [], "answers": [], "answered": answered, "waiting_since": question.at}
 
 
 def _stall_entry(sprint: SprintState) -> dict:
@@ -2106,7 +2137,7 @@ def derive_view(
                      if s.brief is not None and s.brief.decision == NONE),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
-                    for q in open_questions(s)),
+                    for q in (*open_questions(s), *pending_looks(s))),
                    key=lambda pair: (pair[1].at, pair[0].sprint_id, pair[1].round_id,
                                      pair[1].index))
     stalls = sorted((s for group in drafted.values() for s in group if s.stalled is not None),

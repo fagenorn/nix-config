@@ -1625,7 +1625,7 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
             "questions": [{"question": text, "options": options, "chosen": None,
                            "recommended": recommended,
                            "recommended_index": options.index(recommended)}],
-            "pictures": [],
+            "pictures": [], "look": None,
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
 

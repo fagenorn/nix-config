@@ -261,6 +261,7 @@ agent-workflow-tests *args:
     tests/test_console_briefs.py \
     tests/test_console_messages.py \
     tests/test_console_questions.py \
+    tests/test_console_look_answer.py \
     tests/test_console_notices.py \
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \

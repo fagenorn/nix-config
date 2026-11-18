@@ -31,7 +31,7 @@ ROUND = {"questions": [Q0, Q1]}
 OWN_WORDS = "use the reader\nnot the writer"
 
 
-class QuestionRouteTest(Case):
+class QuestionRoutes(Case):
     def open(self):
         support.write_registry(self.registry, support.entries(2))
         return self.start()
@@ -75,6 +75,8 @@ class QuestionRouteTest(Case):
         return {"project_id": "owner/p01", "sprint_id": sid, "round": round_id,
                 "question": question, **member}
 
+
+class QuestionRouteTest(QuestionRoutes):
     def test_a_round_with_the_secret_is_one_open_item_per_question(self):
         svc = self.open()
         sid = self.approved(svc)

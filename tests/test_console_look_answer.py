@@ -1,0 +1,357 @@
+"""The console records a look approval itself (#1260).
+
+Run: just agent-workflow-tests
+"""
+import contextlib
+import io
+import json
+import threading
+
+from agent_tools.console import answer, sprints
+from agent_tools.delivery import look_marker
+from agent_tools.system.forge_api import ForgeError
+
+from . import console_test_support as support
+from .forge_world import ForgeWorld
+from .test_console_answer import view_of
+from .test_console_questions import JSON, Q0, QuestionRoutes, withdraw
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+
+SLUG = "owner/p01"
+ISSUE = 7
+PR = 12
+HEAD = "a" * 40
+MOVED = "b" * 40
+PULL = ["api", f"repos/{SLUG}/pulls/{PR}"]
+COMMENTS = ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/{ISSUE}/comments?per_page=100"]
+MARKED_BODY = ("## Acceptance criteria\n\n"
+               "- [ ] [code] the heading reads well — measured: a test\n"
+               "- [ ] [human] before merge: the settings page — measured: the owner, on the console\n")
+LOOK_Q = {"question": "Does the settings page look right?", "blocks": "the merge of issue 7",
+          "options": ["Approve this head", "Approve with one fix", "Ask for changes"],
+          "recommended": "Approve this head",
+          "look": {"issue": ISSUE, "pr": PR, "head": HEAD, "approve": "Approve this head"}}
+
+
+def gh_argvs(world):
+    try:
+        return world.argvs("gh")
+    except FileNotFoundError:
+        return []
+
+
+def posts(world):
+    return [argv for argv in gh_argvs(world) if "-X" in argv and "POST" in argv]
+
+
+class LookAnswerTest(QuestionRoutes):
+    def setUp(self):
+        super().setUp()
+        self.world = ForgeWorld(self)
+
+    def store_comments(self, **kw):
+        self.world.comment_store(SLUG, ISSUE, [], labels=[], **kw)
+
+    def open(self, **kw):
+        support.write_registry(self.registry, support.entries(2))
+        return self.start(slug_of=lambda root: SLUG, write_sleep=lambda seconds: False, **kw)
+
+    def pull(self, state="open", sha=HEAD, merged=False):
+        self.world.respond_json("gh", PULL, {"number": PR, "state": state, "merged": merged,
+                                             "head": {"sha": sha}})
+
+    def asked(self, svc):
+        sid = self.approved(svc)
+        status, _, body = self.inbox(svc, sid)
+        self.assertEqual(status, 200)
+        messages = json.loads(body)["messages"]
+        self.assertEqual([m["kind"] for m in messages], ["approved"])
+        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [LOOK_Q]})
+        self.assertEqual(status, 200, body)
+        return sid, json.loads(body)["round"]
+
+    def approve(self, svc, sid, round_id):
+        return self.reply(svc, self.answer_body(sid, round_id, 0, choice=0))
+
+    def answers(self, svc, sid):
+        status, _, body = self.inbox(svc, sid)
+        self.assertEqual(status, 200)
+        return json.loads(body)["messages"]
+
+    def retry(self, svc, sid, round_id):
+        body = json.dumps({"project_id": "owner/p01", "sprint_id": sid, "round": round_id,
+                           "question": 0}).encode()
+        return support.post_page(svc.address, "/api/look-retry", self.own(svc, **JSON), body)
+
+    def failed_post(self, svc):
+        sid, round_id = self.asked(svc)
+        self.store_comments(fail_once=("post",) * (len(answer.RETRY_DELAYS) + 1))
+        self.pull()
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        self.store_comments()
+        (row,) = self.rows("question.answered")
+        return sid, round_id, row["seq"]
+
+    def entry(self, svc, sid):
+        return next(item for item in view_of(svc)["inbox"]["open"]
+                    if item["reason"] == "question" and item["sprint_id"] == sid)
+
+    def marker_for(self, seq):
+        return look_marker.approval_body(ISSUE, PR, HEAD, "approved", str(seq))
+
+    def test_an_approve_answer_posts_the_marker_the_merge_guard_admits(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull()
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        (answered,) = self.rows("question.answered")
+        seq = answered["seq"]
+        self.assertEqual(answered["look"], {"issue": ISSUE, "pr": PR, "head": HEAD})
+        (comment,) = self.world.stored()
+        self.assertEqual(comment["body"], self.marker_for(seq))
+        facts = look_marker.IssueFacts(ISSUE, MARKED_BODY, tuple(self.world.stored()))
+        self.assertIs(look_marker.judge(PR, HEAD, [facts]).admit, True)
+        (recorded,) = self.rows("look.recorded")
+        self.assertEqual((recorded["outcome"], recorded["message"], recorded["comment_id"]),
+                         ("posted", seq, comment["id"]))
+        (message,) = [m for m in self.answers(svc, sid) if m["kind"] == "answer"]
+        self.assertEqual(message["id"], seq)
+        self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
+
+    def test_an_approve_for_a_moved_head_records_nothing_and_the_card_says_why(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        table = (
+            ({"sha": MOVED}, answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]), "open"),
+            ({"state": "closed"}, answer.LOOK_CLOSED.format(state="closed"), "closed"),
+            ({"state": "closed", "merged": True}, answer.LOOK_CLOSED.format(state="merged"),
+             "merged"))
+        for number, (kw, line, found_state) in enumerate(table, 1):
+            with self.subTest(kw=kw):
+                self.pull(**kw)
+                status, _, body = self.approve(svc, sid, round_id)
+                self.assertEqual((status, body), (409, line.encode() + b"\n"))
+                self.assertEqual(self.world.stored(), [])
+                self.assertEqual(posts(self.world), [])
+                self.assertEqual(self.rows("question.answered"), [])
+                moved = self.rows("look.recorded")
+                self.assertEqual(len(moved), number)
+                self.assertEqual((moved[-1]["outcome"], moved[-1]["state"]), ("moved", found_state))
+                entry = self.entry(svc, sid)
+                self.assertIs(entry["answered"], False)
+                self.assertEqual(entry["look"], {"issue": ISSUE, "pr": PR, "head": HEAD,
+                                                 "state": "moved", "line": line})
+                self.assertEqual([m for m in self.answers(svc, sid)], [])
+
+    def test_a_failed_post_stays_on_the_card_with_retry_and_retry_posts_once(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments(fail_once=("post",) * (len(answer.RETRY_DELAYS) + 1))
+        self.pull()
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        self.assertEqual(self.world.stored(), [])
+        (answered,) = self.rows("question.answered")
+        seq = answered["seq"]
+        (failed,) = self.rows("look.recorded")
+        self.assertEqual((failed["outcome"], failed["reason"]), ("failed", answer.FORGE_DOWN))
+        entry = self.entry(svc, sid)
+        self.assertIs(entry["answered"], True)
+        self.assertEqual((entry["look"]["state"], entry["look"]["line"]),
+                         ("failed", answer.FORGE_DOWN))
+        self.assertEqual(self.answers(svc, sid), [])
+        lines = [line for line in buf.getvalue().splitlines() if "look_post_failed" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("gh_failed", lines[0])
+        self.assertIn("HTTP 502", lines[0])
+        self.store_comments()
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        (comment,) = self.world.stored()
+        self.assertEqual(comment["body"], self.marker_for(seq))
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "posted"])
+        self.assertEqual([i for i in view_of(svc)["inbox"]["open"] if i["reason"] == "question"], [])
+        self.assertEqual([m["id"] for m in self.answers(svc, sid)], [seq])
+        status, _, body = self.retry(svc, sid, round_id)
+        self.assertEqual((status, body), (409, answer.LOOK_NOT_PENDING.encode() + b"\n"))
+        self.assertEqual(len(self.world.stored()), 1)
+
+    def test_a_retry_after_a_lost_reply_posts_no_second_marker(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        before = len(posts(self.world))
+        self.world.append_comment({"id": 900, "body": self.marker_for(seq),
+                                   "author_association": "OWNER", "created_at": "2026-11-06T10:00:00Z",
+                                   "updated_at": "2026-11-06T10:00:00Z"})
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        self.assertEqual(len(posts(self.world)), before)
+        (posted,) = [r for r in self.rows("look.recorded") if r["outcome"] == "posted"]
+        self.assertEqual(posted["comment_id"], 900)
+        self.assertEqual(len(self.world.stored()), 1)
+
+    def test_record_look_refuses_a_comment_not_counted_as_the_owner(self):
+        world = ForgeWorld(self)
+        world.respond_json("gh", COMMENTS, [[]])
+        world.respond_json(
+            "gh", ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/comments", "-f",
+                   "body=" + look_marker.approval_body(ISSUE, PR, HEAD, "approved", "41")], {"id": 9})
+        with self.assertRaises(answer.Refused) as caught:
+            answer.record_look(SLUG, ISSUE, PR, HEAD, "41")
+        self.assertEqual(str(caught.exception), answer.LOOK_UNTRUSTED)
+
+    def test_look_head_reads_the_pull_request(self):
+        for state, merged, expected in (("open", False, "open"), ("closed", False, "closed"),
+                                        ("closed", True, "merged")):
+            with self.subTest(state=state, merged=merged):
+                self.pull(state=state, merged=merged)
+                self.assertEqual(answer.look_head(SLUG, PR), (expected, HEAD))
+        for payload in ({"state": "open", "merged": False},
+                        {"state": "open", "merged": False, "head": {"sha": "abc123"}}):
+            with self.subTest(payload=payload):
+                self.world.respond_json("gh", PULL, payload)
+                with self.assertRaises(ForgeError) as caught:
+                    answer.look_head(SLUG, PR)
+                self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def test_a_failed_head_read_answers_nothing(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.world.respond("gh", PULL, exit=1, stderr="gh: Service Unavailable (HTTP 503)")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            status, _, body = self.approve(svc, sid, round_id)
+        self.assertEqual((status, body), (502, answer.FORGE_DOWN.encode() + b"\n"))
+        self.assertEqual(self.rows("question.answered"), [])
+        self.assertEqual(self.rows("look.recorded"), [])
+        self.assertEqual(self.entry(svc, sid)["look"]["state"], "open")
+        (line,) = [l for l in buf.getvalue().splitlines() if "look_head_failed" in l]
+        self.assertIn("gh_failed", line)
+        self.assertIn("HTTP 503", line)
+
+    def test_a_changes_answer_posts_nothing_and_reaches_the_manager(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        for member in ({"choice": 1}, {"text": "make it bold"}):
+            with self.subTest(member=member):
+                self.assertEqual(
+                    self.reply(svc, self.answer_body(sid, round_id, 0, **member))[0], 204)
+                self.assertEqual(gh_argvs(self.world), [])
+                (message,) = self.answers(svc, sid)
+                self.assertEqual((message["kind"], message["round"]), ("answer", round_id))
+                status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [LOOK_Q]})
+                self.assertEqual(status, 200, body)
+                round_id = json.loads(body)["round"]
+
+    def test_an_approval_left_posting_by_a_restart_reads_failed_with_retry(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        with svc._ingest:
+            asked = svc._sprints[sid].questions[0]
+            appended = svc.log.append([("question.answered", "owner/p01", {
+                "sprint_id": sid, "goal": svc._sprints[sid].goal, "round": round_id, "index": 0,
+                "question": asked.question, "answer": "Approve this head",
+                "chosen": "Approve this head", "recommended": asked.recommended,
+                "differs": False, "look": {"issue": ISSUE, "pr": PR, "head": HEAD}})])
+        seq = appended[-1].seq
+        svc.close()
+        again = self.start(slug_of=lambda root: SLUG, write_sleep=lambda seconds: False)
+        (failed,) = self.rows("look.recorded")
+        self.assertEqual((failed["outcome"], failed["message"], failed["reason"]),
+                         ("failed", seq, answer.LOOK_INTERRUPTED))
+        entry = self.entry(again, sid)
+        self.assertEqual((entry["look"]["state"], entry["look"]["line"]),
+                         ("failed", answer.LOOK_INTERRUPTED))
+
+    def test_a_project_without_a_repository_records_nothing(self):
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(slug_of=lambda root: None, write_sleep=lambda seconds: False)
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        rows = support.log_rows(self.store)
+        status, _, body = self.approve(svc, sid, round_id)
+        self.assertEqual((status, body), (409, answer.LOOK_NO_REPOSITORY.encode() + b"\n"))
+        self.assertEqual(gh_argvs(self.world), [])
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_a_question_withdrawn_while_the_head_is_read_records_nothing(self):
+        state = {}
+
+        def reader(slug, pr):
+            self.assertEqual(withdraw(state["svc"], state["sid"], self.secret(state["sid"]),
+                                      state["round"], 0)[0], 200)
+            return "open", HEAD
+
+        svc = state["svc"] = self.open(look_reader=reader)
+        state["sid"], state["round"] = self.asked(svc)
+        self.store_comments()
+        status, _, body = self.approve(svc, state["sid"], state["round"])
+        self.assertEqual((status, body), (409, sprints.TAKEN_BACK.encode() + b"\n"))
+        self.assertEqual(self.world.stored(), [])
+        self.assertEqual(self.rows("question.answered"), [])
+
+    def test_a_second_retry_while_one_is_posting_is_refused(self):
+        gate, entered, calls = threading.Event(), threading.Event(), []
+
+        def recorder(slug, issue, pr, head, message):
+            calls.append(message)
+            if len(calls) == 1:
+                raise answer.Refused(answer.LOOK_UNTRUSTED)
+            entered.set()
+            self.assertTrue(gate.wait(10))
+            return 77
+
+        svc = self.open(look_recorder=recorder)
+        sid, round_id = self.asked(svc)
+        self.pull()
+        self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        (failed,) = self.rows("look.recorded")
+        self.assertEqual(failed["reason"], answer.LOOK_UNTRUSTED)
+        results = []
+        first = threading.Thread(target=lambda: results.append(self.retry(svc, sid, round_id)))
+        first.start()
+        self.assertTrue(entered.wait(10))
+        status, _, body = self.retry(svc, sid, round_id)
+        self.assertEqual((status, body), (409, answer.LOOK_SENDING.encode() + b"\n"))
+        gate.set()
+        first.join(10)
+        self.assertEqual(results[0][0], 204)
+
+    def test_a_post_that_fails_once_is_retried_and_recorded(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments(fail_once=("post",))
+        self.pull()
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        (answered,) = self.rows("question.answered")
+        (comment,) = self.world.stored()
+        self.assertEqual(comment["body"], self.marker_for(answered["seq"]))
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["posted"])
+        self.assertEqual([m["id"] for m in self.answers(svc, sid)], [answered["seq"]])
+        text = buf.getvalue()
+        (line,) = [l for l in text.splitlines() if "look_post_retry" in l]
+        self.assertIn("gh_failed", line)
+        self.assertIn("HTTP 502", line)
+        self.assertNotIn("look_post_failed", text)
+
+    def test_an_inbox_read_while_an_approval_is_held_does_not_swallow_it(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [Q0], "blocker": True})
+        self.assertEqual(status, 200, body)
+        blocker = json.loads(body)["round"]
+        self.assertEqual(self.reply(svc, self.answer_body(sid, blocker, 0, choice=0))[0], 204)
+        (only,) = self.answers(svc, sid)
+        self.assertEqual((only["kind"], only["round"]), ("answer", blocker))
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        (approval,) = self.answers(svc, sid)
+        self.assertEqual(approval["id"], seq)
+        self.assertEqual(self.answers(svc, sid), [])
+        svc.close()
+        again = self.open()
+        self.assertEqual(self.answers(again, sid), [])

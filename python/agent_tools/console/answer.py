@@ -49,6 +49,16 @@ retries. When the retries end, the last `ForgeError` itself is raised.
 
 No sentence carries raw tracker text.
 
+`look_head(slug, pr)` (#1260) reads pull request `pr` once (`forge_api.api_get("repos/<slug>/pulls/<pr>")`) and
+returns `("merged", sha)` when `merged` is true, else `("open", sha)` or `("closed", sha)` from `state`; `sha` is
+`head.sha` and must be 40 lowercase hex, and any other shape is `ForgeError("payload_invalid", ...)`.
+`record_look(slug, issue, pr, head, message)` writes the owner's look approval of `head` on issue `issue` and
+returns its comment id. It lists the issue's trusted markers (`look_marker.TRUSTED`); a live `look` marker whose
+`issue`, `pr`, `head`, `answer=approved` and `message` all equal the given ones is returned and nothing is posted,
+so a retry after a lost reply posts no second marker. Otherwise it posts `look_marker.approval_body(issue, pr, head,
+"approved", message)` and lists the trusted markers again: the new comment must be among them, else
+`Refused(LOOK_UNTRUSTED)` (GitHub took it, but not as the owner or a member, so the merge would not count it).
+
 `answer_criterion(slug, issue, index, answer, version=, note=)` (#1113) answers one review item of a held
 issue, as the owner (`forge_api.run_gh` drops the tokens). `answer` is `passed` (tick the criterion) or
 `note` (post `review_note_body(slug, issue, index, note)` and tick nothing); `version` is the
@@ -109,6 +119,7 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import inbox
+from agent_tools.delivery import look_marker
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer
 
@@ -139,6 +150,17 @@ GH_MISSING = ("gh is not installed on this computer. Install it and sign it in w
               "then try again.")
 NOT_TAKEN = "GitHub did not take the answer. Try again, or answer it on GitHub."
 UNEXPECTED_FAILURE = "the console ran into a problem it did not expect. Try again, or answer it on GitHub."
+LOOK_MOVED = ("Nothing was recorded: the pull request is now at {found}, not at {head}, the head "
+              "these pictures show. Ask for a new look.")
+LOOK_CLOSED = "Nothing was recorded: the pull request is {state}."
+LOOK_RECORDING = "Recording your approval of {head} on issue #{issue}."
+LOOK_UNTRUSTED = ("GitHub took the approval, but not as the repository's owner or a member, so the "
+                  "merge would not count it. Sign gh in as the owner, then Retry.")
+LOOK_INTERRUPTED = "The console stopped before it recorded the approval. Retry to record it."
+LOOK_NO_REPOSITORY = ("The console cannot tell this project's GitHub repository, so nothing was "
+                      "recorded.")
+LOOK_SENDING = "this approval is already being recorded"
+LOOK_NOT_PENDING = "this approval is not waiting to be recorded"
 
 
 class Refused(Exception):
@@ -255,6 +277,31 @@ def tick_on_tracker(slug: str, issue: int, comment_id: int, questions: list[dict
             return
         raise Refused(ALREADY)
     fm.edit(slug, comment_id, foa.tick_body(marker.body, choices))
+
+
+def look_head(slug: str, pr: int) -> tuple[str, str | None]:
+    pull = forge_api.api_get(f"repos/{slug}/pulls/{pr}")
+    head = pull.get("head") if isinstance(pull, dict) else None
+    sha = head.get("sha") if isinstance(head, dict) else None
+    state = pull.get("state") if isinstance(pull, dict) else None
+    if (not isinstance(sha, str) or not look_marker.HEAD_PATTERN.fullmatch(sha)
+            or state not in ("open", "closed") or not isinstance(pull.get("merged"), bool)):
+        raise forge_api.ForgeError("payload_invalid", f"pull request {pr} has no readable state and head")
+    return ("merged" if pull["merged"] else state), sha
+
+
+def record_look(slug: str, issue: int, pr: int, head: str, message: str) -> int:
+    wanted = {"issue": str(issue), "pr": str(pr), "head": head, "answer": "approved",
+              "message": message}
+    markers = fm.list_markers(slug, issue, look_marker.TRUSTED)
+    for marker in markers:
+        if (marker.kind == look_marker.KIND and fm.is_live(marker, markers)
+                and all(marker.fields.get(key) == value for key, value in wanted.items())):
+            return marker.comment_id
+    posted = fm.post(slug, issue, look_marker.approval_body(issue, pr, head, "approved", message))
+    if not any(marker.comment_id == posted for marker in fm.list_markers(slug, issue, look_marker.TRUSTED)):
+        raise Refused(LOOK_UNTRUSTED)
+    return posted
 
 
 def review_note_body(slug: str, issue: int, index: int, note: str) -> str:
