@@ -291,6 +291,164 @@ class HookTableTest(unittest.TestCase):
                     hook.parse_allowed(text)
 
 
+class HookConfinementTest(unittest.TestCase):
+    """The hook confines reads of the console's state to the question's own records (#1271)."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.t = t = Path(directory.name).resolve()
+        self.P = P = t / "state" / "console"
+        self.S = S = P / "project-question-settings"
+        S.mkdir(parents=True)
+        (P / "events.sqlite3").write_text("log")
+        (P / "page-token").write_text("token")
+        self.R = S / "a.records.json"
+        self.Q = S / "b.records.json"
+        self.R.write_text("{}")
+        self.Q.write_text("{}")
+        self.root = root = t / "srv" / "p01"
+        (root / "sub").mkdir(parents=True)
+        (root / "flake.nix").write_text("{}")
+        (root / "sub" / "a.nix").write_text("{}")
+        (root / "docs").symlink_to(root / "sub")
+        self.c = hook.parse_confinement(str(P), str(self.R))
+        self.denied = ("deny", hook.RECORDS_DENIED.format(records=self.c.records))
+        self.allowed = ("allow", hook.ALLOWED)
+
+    def doc(self, name, tool_input, cwd=None):
+        return {**tool(name, tool_input), "cwd": str(cwd or self.root)}
+
+    def command(self, text, cwd=None):
+        return {**bash(text), "cwd": str(cwd or self.root)}
+
+    def test_read_grep_and_glob_reach_only_the_own_records_file(self):
+        P, S, R, Q, t, root = self.P, self.S, self.R, self.Q, self.t, self.root
+        for name, tool_input, expected in (
+            ("Read", {"file_path": str(R)}, self.allowed),
+            ("Grep", {"pattern": "x", "path": str(R)}, self.allowed),
+            ("Read", {"file_path": str(root / "flake.nix")}, self.allowed),
+            ("Grep", {"pattern": "x"}, self.allowed),
+            ("Glob", {"pattern": "**/*.nix"}, self.allowed),
+            ("Grep", {"pattern": "x", "path": str(root / "docs")}, self.allowed),
+            ("Read", {"file_path": str(Q)}, self.denied),
+            ("Read", {"file_path": str(P / "events.sqlite3")}, self.denied),
+            ("Read", {"file_path": str(P / "page-token")}, self.denied),
+            ("Read", {"file_path": "../../state/console/events.sqlite3"}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(S)}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(t)}, self.denied),
+            ("Grep", {"pattern": "x", "path": "/"}, self.denied),
+            ("Glob", {"pattern": str(P) + "/**/*.json"}, self.denied),
+            ("Glob", {"path": str(root), "pattern": "../../state/console/**"}, self.denied),
+            ("Glob", {"path": str(t), "pattern": "**/*.records.json"}, self.denied),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), expected)
+
+    def test_writes_stay_write_denied_under_the_confinement(self):
+        for name in ("Write", "Edit", "NotebookEdit"):
+            for path in (self.R, self.Q):
+                with self.subTest(name=name, path=path):
+                    self.assertEqual(
+                        hook.decide(
+                            self.doc(name, {"file_path": str(path)}), DECLARED, None, self.c),
+                        ("deny", hook.WRITE_DENIED.format(tool=name)))
+
+    def test_an_admitted_command_naming_the_console_state_is_denied(self):
+        denied = self.command("git diff --no-index ../../state/console/events.sqlite3 flake.nix")
+        self.assertEqual(hook.decide(denied, DECLARED, None, self.c), self.denied)
+        for text in ("git show HEAD", "git log --format=%H -n5", "just build"):
+            with self.subTest(text):
+                self.assertEqual(
+                    hook.decide(self.command(text), DECLARED, None, self.c), self.allowed)
+
+    def test_a_file_named_as_an_attached_option_value_is_denied(self):
+        for text in (
+            "git blame --contents=" + str(self.P / "page-token") + " flake.nix",
+            "git blame --contents=../../state/console/events.sqlite3 flake.nix",
+            "git blame --contents=" + str(self.Q) + " flake.nix",
+            "git diff -O../../state/console/page-token",
+            "git diff -O@../../state/console/page-token",
+        ):
+            with self.subTest(text):
+                self.assertEqual(
+                    hook.decide(self.command(text), DECLARED, None, self.c), self.denied)
+                self.assertEqual(hook.decide(self.command(text), DECLARED), self.allowed)
+
+    def test_a_symlink_into_the_console_state_is_resolved(self):
+        (self.root / "link").symlink_to(self.P)
+        for name, tool_input in (
+            ("Read", {"file_path": str(self.root / "link" / "events.sqlite3")}),
+            ("Grep", {"pattern": "x", "path": str(self.root / "link")}),
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+
+    def test_a_search_that_would_meet_the_console_state_later_is_denied(self):
+        root = self.root
+        (root / "sub" / "deep").mkdir()
+        (root / "sub" / "deep" / "link").symlink_to(self.P)
+        for name, tool_input in (
+            ("Grep", {"pattern": "x"}),
+            ("Grep", {"pattern": "x", "path": str(root / "sub")}),
+            ("Glob", {"pattern": "*/*/link/*"}),
+            ("Glob", {"pattern": "**/*.json"}),
+            ("Glob", {"path": str(root), "pattern": "*/../../../state/console/*"}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+        other = self.t / "other"
+        other.mkdir()
+        (other / "back").symlink_to(self.P)
+        second = self.t / "srv" / "p02"
+        second.mkdir()
+        (second / "ext").symlink_to(other)
+        for tool_input in ({"pattern": "x"}, {"pattern": "x", "glob": "../../state/**"}):
+            with self.subTest(second=tool_input):
+                self.assertEqual(
+                    hook.decide(
+                        self.doc("Grep", tool_input, cwd=second), DECLARED, None, self.c),
+                    self.denied)
+        clean = self.t / "srv" / "p03"
+        clean.mkdir()
+        for name, tool_input in (
+            ("Grep", {"pattern": "x", "glob": "../../state/**"}),
+            ("Glob", {"pattern": "*/../../../state/console/*"}),
+        ):
+            with self.subTest(clean=name):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input, cwd=clean), DECLARED, None, self.c),
+                    self.denied)
+
+    def test_a_search_too_large_to_check_is_refused(self):
+        with mock.patch.object(hook, "WALK_LIMIT", 2):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=2)))
+            self.assertEqual(
+                hook.decide(
+                    self.doc("Read", {"file_path": str(self.root / "flake.nix")}),
+                    DECLARED, None, self.c),
+                self.allowed)
+
+    def test_without_a_confinement_reads_are_admitted_as_before(self):
+        self.assertEqual(
+            hook.decide(self.doc("Read", {"file_path": str(self.Q)}), DECLARED), self.allowed)
+
+    def test_a_confinement_that_is_not_absolute_or_not_inside_is_refused(self):
+        for private, records in (
+            ("rel", str(self.R)),
+            (str(self.P), str(self.t / "x.records.json")),
+            (str(self.P), str(self.P)),
+        ):
+            with self.subTest(private=private, records=records):
+                with self.assertRaises(ValueError):
+                    hook.parse_confinement(private, records)
+
+
 class HookProcessTest(unittest.TestCase):
     def run_hook(self, args, stdin_text):
         return subprocess.run(
@@ -327,6 +485,26 @@ class HookProcessTest(unittest.TestCase):
         done = self.run_hook(
             ['[["just","build"]]', ""], json.dumps(bash("gh pr list --repo owner/p01")))
         self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.reads_denied(None)))
+
+    def test_the_module_takes_the_confinement_as_two_more_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            P = Path(directory).resolve() / "state" / "console"
+            (P / "project-question-settings").mkdir(parents=True)
+            R = P / "project-question-settings" / "a.records.json"
+            Q = P / "project-question-settings" / "b.records.json"
+            for path in (R, Q):
+                path.write_text("{}")
+            args = ['[["just","build"]]', "owner/p01", str(P), str(R)]
+            done = self.run_hook(args, json.dumps(tool("Read", {"file_path": str(R)})))
+            self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
+            done = self.run_hook(args, json.dumps(tool("Read", {"file_path": str(Q)})))
+            self.assertEqual(
+                json.loads(done.stdout),
+                self.wire("deny", hook.RECORDS_DENIED.format(records=str(R))))
+            done = self.run_hook(
+                ['[["just","build"]]', "owner/p01", "rel", str(R)],
+                json.dumps(tool("Read", {"file_path": str(R)})))
+            self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.MALFORMED))
 
     def test_a_bad_argument_denies_everything(self):
         read = json.dumps(tool("Read", {"file_path": "/x"}))

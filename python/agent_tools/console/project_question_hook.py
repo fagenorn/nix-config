@@ -3,20 +3,27 @@
 Why. The console answers an owner's question about a registered project with a Claude Code client
 run in that project's folder. The session only reads: this hook is the one place that decides, for
 every tool call, whether the call is a read. It is a packaged sibling run by the console's own
-interpreter as `python -m agent_tools.console.project_question_hook '<allowed json>' '<repo>'`; it has no
+interpreter as `python -m agent_tools.console.project_question_hook '<allowed json>' '<repo>' ['<private dir>'
+'<records file>']`; it has no
 command-table row (ADR-console-058) and imports only the standard library.
 
 Input. `argv[1]` is the allowed commands: a JSON list of non-empty lists of non-empty strings, each
 one declared read-only command's argv (`parse_allowed`, `ValueError` otherwise). `argv[2]` is the
 project's GitHub repository as `owner/name`, or the empty string when its contract names none
 (`parse_repo`, `ValueError` otherwise). Stdin is the client's hook document, a JSON object with
-`tool_name` and `tool_input`.
+`tool_name` and `tool_input`, and `cwd` when the client gives one. `argv[3]` and `argv[4]`, given
+together or not at all, are the console's private directory and the question's own records file
+(`parse_confinement`, `ValueError` unless both are absolute and the file lies strictly inside the
+directory); they are the confinement of #1271 and ADR-console-075.
 
 Decision. `decide(document, allowed, repo)` returns `("allow", ALLOWED)` or `("deny", <sentence>)`, in
 this order:
 
 1. A document that is not an object, or whose `tool_name` is not a non-empty string: `MALFORMED`.
-2. `Read`, `Grep` and `Glob` (`READ_TOOLS`): allowed.
+2. `Read`, `Grep` and `Glob` (`READ_TOOLS`): allowed; with a confinement, allowed only after the
+   confinement below, which reads `cwd` when it is an absolute string and the process's directory
+   otherwise. With no confinement every decision is exactly as it was before #1271 and nothing is
+   walked.
 3. `Edit`, `Write` and `NotebookEdit` (`WRITE_TOOLS`): `WRITE_DENIED`.
 4. Any other tool but `Bash` (MCP tools, `Task`, `Agent` and `WebFetch` included): `TOOL_DENIED`.
 5. A `Bash` call whose `tool_input` is not an object or whose `command` is not a string: `MALFORMED`.
@@ -54,9 +61,37 @@ this order:
 9. A command whose first word, by basename, is `git` or `gh` and was not admitted: `reads_denied`.
 10. Anything else is `NO_COMMANDS` when `allowed` is empty and `COMMAND_DENIED` otherwise.
 
+The confinement (#1271, ADR-console-075 D2). With a confinement the only file under its private
+directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
+(symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
+directory, lies inside it, or is an ancestor of it; a reach is `RECORDS_DENIED`. It applies to:
+
+- `Read`: `file_path`.
+- `Grep`: `path` (the client's directory when absent), then the traversal rule below on it; a `glob`
+  with a `..` component is `RECORDS_DENIED`.
+- `Glob`: `path` (or the client's directory) joined with the literal prefix of `pattern` (the
+  components before the first one holding `*`, `?`, `[` or `{`; an absolute pattern replaces the
+  directory), then the traversal rule; a `..` component after the literal prefix is `RECORDS_DENIED`.
+- An admitted `Bash` command (declared, git read or gh read): every word after the first, read every
+  way it could name a file (`_word_targets`: the word, the text after each `=` in it, the text after
+  the letter of a short option longer than two characters, each also without a leading `@`), by the
+  path rule, and each target that is an existing directory by the traversal rule. A command's file
+  operands cannot be told from its grammar, so this over-denies by design: git admits an option value
+  such as `git blame --contents=<path>` that prints the named file.
+
+The traversal rule (`_tree_reaches`) covers the client's search meeting the console's state later. The
+client's behaviour about symlinks while searching is not established, so the walk assumes it follows
+them: it walks the directory with `os.walk(followlinks=True)`, visiting each real directory once, and
+checks every symlink it meets by the path rule on the link's real path. Each entry listed counts toward
+`WALK_LIMIT`; past it the call is `SEARCH_UNCHECKED`, because a search that cannot be checked is not
+allowed. A non-symlink descendant of a directory that does not reach cannot lie inside the private
+directory, so only symlinks are checked.
+
 Output. Stdout is exactly one line, `json.dumps(output(decision, reason))`, the client's PreToolUse
-wire format. Exactly two arguments are required; a missing, extra or unparseable argument, or unreadable stdin (JSON nested deeper than the recursion limit included), prints the `MALFORMED`
-deny.
+wire format. Exactly two arguments (`<allowed> <repo>`) or exactly four (`<allowed> <repo> <private dir> <records
+file>`) are required; any other count, a four-argument form `parse_confinement` refuses, an unparseable
+argument, or unreadable stdin (JSON nested deeper than the recursion limit included), prints the
+`MALFORMED` deny.
 The exit status is 0 in every case. A hook process that gives no decision (a timeout, an
 interpreter that fails to start) is turned into a deny by `"onFailure": "block"` in the session's
 settings, not by this module.
@@ -65,10 +100,12 @@ settings, not by this module.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 READ_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob")
 WRITE_TOOLS: tuple[str, ...] = ("Edit", "Write", "NotebookEdit")
@@ -128,6 +165,38 @@ GH_WITH_REPO = (
 )
 GH_WITHOUT_REPO = "never: this project's contract names no GitHub repository"
 MALFORMED = "The question session's hook could not read this tool call, so it was refused."
+RECORDS_DENIED = (
+    "This session reads the console's own records only from its records file, {records}; the "
+    "console's other files, other questions' records included, are not read."
+)
+SEARCH_UNCHECKED = (
+    "This search covers more than {limit} files and directories, too many to check against the "
+    "console's own files, so it was refused: search a narrower path."
+)
+WALK_LIMIT = 100_000
+WILDCARDS = "*?[{"
+
+
+@dataclass(frozen=True)
+class Confinement:
+    """The console's private directory and the one file in it a session may read; absolute real paths."""
+
+    private: str
+    records: str
+
+
+def _inside(path: str, directory: str) -> bool:
+    return os.path.commonpath([path, directory]) == directory
+
+
+def parse_confinement(private: str, records: str) -> Confinement:
+    """The confinement of two paths; `ValueError` unless both are absolute and `records` is strictly inside."""
+    if not os.path.isabs(private) or not os.path.isabs(records):
+        raise ValueError("the confinement paths are not absolute")
+    real_private, real_records = os.path.realpath(private), os.path.realpath(records)
+    if real_records == real_private or not _inside(real_records, real_private):
+        raise ValueError("the records file is not inside the private directory")
+    return Confinement(real_private, real_records)
 
 
 def parse_allowed(text: str) -> tuple[tuple[str, ...], ...]:
@@ -275,8 +344,110 @@ def _decide_bash(
     return "deny", COMMAND_DENIED.format(commands=", ".join(shlex.join(argv) for argv in allowed))
 
 
+def _resolve(text: str, base: str) -> str:
+    return os.path.realpath(os.path.join(base, os.path.expanduser(text)))
+
+
+def _reaches(text: str, base: str, c: Confinement) -> bool:
+    """Whether `text`, a path read relative to `base`, reaches the console's state beyond its records."""
+    if not text:
+        return False
+    path = _resolve(text, base)
+    if path == c.records:
+        return False
+    return _inside(path, c.private) or _inside(c.private, path)
+
+
+def _word_targets(word: str) -> list[str]:
+    """Every reading of `word` that could name a file: itself, the text after each `=`, a short option's value."""
+    targets = [word]
+    for index, letter in enumerate(word):
+        if letter == "=":
+            targets.append(word[index + 1:])
+    if word.startswith("-") and not word.startswith("--") and len(word) > 2:
+        targets.append(word[2:])
+    for target in list(targets):
+        if target.startswith("@"):
+            targets.append(target[1:])
+    return list(dict.fromkeys(targets))
+
+
+def _tree_reaches(root: str, c: Confinement) -> str | None:
+    """The deny sentence when a search of `root` could meet the console's state, else None.
+
+    The walk follows symlinks because the client may; only symlinks can lead into the private directory.
+    """
+    root = os.path.realpath(root)
+    if not os.path.isdir(root):
+        return None
+    visited = {root}
+    listed = 0
+    for directory, dirnames, filenames in os.walk(root, followlinks=True, onerror=None):
+        for name in (*dirnames, *filenames):
+            listed += 1
+            if listed > WALK_LIMIT:
+                return SEARCH_UNCHECKED.format(limit=WALK_LIMIT)
+            full = os.path.join(directory, name)
+            if os.path.islink(full) and _reaches(os.path.realpath(full), "/", c):
+                return RECORDS_DENIED.format(records=c.records)
+        kept = []
+        for name in dirnames:
+            real = os.path.realpath(os.path.join(directory, name))
+            if real not in visited:
+                visited.add(real)
+                kept.append(name)
+        dirnames[:] = kept
+    return None
+
+
+def _search_reaches(root: str, base: str, c: Confinement) -> str | None:
+    if _reaches(root, base, c):
+        return RECORDS_DENIED.format(records=c.records)
+    return _tree_reaches(_resolve(root, base), c)
+
+
+def _confined(name: str, tool_input: dict, base: str, c: Confinement) -> str | None:
+    """The deny sentence of a Read, Grep or Glob call under the confinement, else None."""
+    denied = RECORDS_DENIED.format(records=c.records)
+    path = tool_input.get("path")
+    root = path if isinstance(path, str) else base
+    if name == "Read":
+        file_path = tool_input.get("file_path")
+        return denied if isinstance(file_path, str) and _reaches(file_path, base, c) else None
+    if name == "Grep":
+        pattern = tool_input.get("glob")
+        if isinstance(pattern, str) and ".." in pattern.split("/"):
+            return denied
+        return _search_reaches(root, base, c)
+    pattern = tool_input.get("pattern")
+    parts = pattern.split("/") if isinstance(pattern, str) else []
+    literal = 0
+    while literal < len(parts) and not any(mark in parts[literal] for mark in WILDCARDS):
+        literal += 1
+    if ".." in parts[literal:]:
+        return denied
+    prefix = "/".join(parts[:literal]) or ("/" if parts[:1] == [""] and literal else "")
+    return _search_reaches(os.path.join(root, prefix), base, c)
+
+
+def _confined_command(command: str, base: str, c: Confinement) -> str | None:
+    """The deny sentence of an admitted command whose words reach the console's state, else None."""
+    for word in [word for word in command.split(" ") if word][1:]:
+        for target in _word_targets(word):
+            if _reaches(target, base, c):
+                return RECORDS_DENIED.format(records=c.records)
+            if target and os.path.isdir(_resolve(target, base)):
+                found = _tree_reaches(_resolve(target, base), c)
+                if found:
+                    return found
+    return None
+
+
 def decide(
-    document: object, allowed: Sequence[Sequence[str]], repo: str | None = None
+    document: object,
+    allowed: Sequence[Sequence[str]],
+    repo: str | None = None,
+    confinement: Confinement | None = None,
 ) -> tuple[str, str]:
     """`("allow", ALLOWED)` or `("deny", <sentence>)` for one tool call."""
     if not isinstance(document, dict):
@@ -284,8 +455,19 @@ def decide(
     name = document.get("tool_name")
     if not isinstance(name, str) or not name:
         return "deny", MALFORMED
+    cwd = document.get("cwd")
+    base = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else os.getcwd()
     if name in READ_TOOLS:
-        return "allow", ALLOWED
+        if confinement is None:
+            return "allow", ALLOWED
+        tool_input = document.get("tool_input")
+        if not isinstance(tool_input, dict):
+            return "deny", MALFORMED
+        try:
+            found = _confined(name, tool_input, base, confinement)
+        except (OSError, ValueError):
+            return "deny", MALFORMED
+        return ("deny", found) if found else ("allow", ALLOWED)
     if name in WRITE_TOOLS:
         return "deny", WRITE_DENIED.format(tool=name)
     if name != "Bash":
@@ -293,7 +475,14 @@ def decide(
     tool_input = document.get("tool_input")
     if not isinstance(tool_input, dict) or not isinstance(tool_input.get("command"), str):
         return "deny", MALFORMED
-    return _decide_bash(tool_input["command"], allowed, repo)
+    decision = _decide_bash(tool_input["command"], allowed, repo)
+    if confinement is None or decision[0] != "allow":
+        return decision
+    try:
+        found = _confined_command(tool_input["command"], base, confinement)
+    except (OSError, ValueError):
+        return "deny", MALFORMED
+    return ("deny", found) if found else decision
 
 
 def output(decision: str, reason: str) -> dict:
@@ -310,15 +499,16 @@ def output(decision: str, reason: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
     try:
-        if len(arguments) != 2:
-            raise ValueError("the hook takes the allowed commands and the repository")
+        if len(arguments) not in (2, 4):
+            raise ValueError("the hook takes the allowed commands, the repository and a confinement")
         allowed = parse_allowed(arguments[0])
         repo = parse_repo(arguments[1])
+        confinement = parse_confinement(*arguments[2:]) if len(arguments) == 4 else None
         document = json.loads(sys.stdin.read())
     except (IndexError, ValueError, RecursionError):
         decision, reason = "deny", MALFORMED
     else:
-        decision, reason = decide(document, allowed, repo)
+        decision, reason = decide(document, allowed, repo, confinement)
     print(json.dumps(output(decision, reason)))
     return 0
 
