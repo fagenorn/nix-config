@@ -1440,7 +1440,7 @@ def _project_entries(shown):
 
 QUESTION_KEYS = {"id", "question", "asked_at", "state", "state_text", "answered_at", "answer",
                  "read_text", "ran_text", "unknown_text", "back_text", "back_choices",
-                 "production_text"}
+                 "production_text", "request_key"}
 
 
 class QuestionViewTest(unittest.TestCase):
@@ -2224,6 +2224,74 @@ class QuestionThreadServiceTest(QuestionCase):
         with self.assertRaises(project_question.Refused) as caught:
             again.ask_project_question(WHY, "more?", thread_id=first)
         self.assertEqual(str(caught.exception), project_question.THREAD_UNKNOWN)
+
+
+class QuestionRequestKeyTest(QuestionCase):
+    """A request may carry a key the console asks once per project (ADR-console-075 D9)."""
+
+    KEY = "0123456789abcdef" * 2
+
+    def test_a_keyed_body_is_parsed_and_a_bad_key_is_refused(self):
+        def body(**extra):
+            return json.dumps({"project_id": "p", "question": "q", **extra}).encode()
+        self.assertEqual(project_question.parse_keyed_request(body(request_key=self.KEY)),
+                         ("p", "q", None, self.KEY))
+        self.assertEqual(project_question.parse_request(body(request_key=self.KEY)), ("p", "q", None))
+        for key in (self.KEY[:31], self.KEY.upper(), 12, None):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                project_question.parse_keyed_request(body(request_key=key))
+
+    def test_a_repeated_key_asks_once(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        second = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.asked), 1)
+        asked, answered = self.question_rows()
+        self.assertEqual((asked[0], asked[2]["request_key"], answered[0]),
+                         ("project_question.asked", self.KEY, "project_question.answered"))
+        shown = {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
+        (question,) = [q for t in shown["questions"]["threads"] for q in t["questions"]
+                       if q["id"] == first]
+        self.assertEqual(question["request_key"], self.KEY)
+
+    def test_a_resent_keyed_follow_up_is_the_same_question(self):
+        held = []
+        svc = self.start(project_question_dispatch=held.append)
+        try:
+            first = svc.ask_project_question(WHY, "q?")
+            held.pop()()
+            follow = svc.ask_project_question(WHY, "and?", thread_id=first, request_key=self.KEY)
+            again = svc.ask_project_question(WHY, "and?", thread_id=first, request_key=self.KEY)
+            self.assertEqual(again, follow)
+            self.assertEqual((len(held), len(self.asked), svc._project_questions_open), (1, 1, 1))
+        finally:
+            while held:
+                held.pop()()
+        self.assertEqual((len(self.asked), svc._project_questions_open), (2, 0))
+
+    def test_the_same_key_on_another_project_is_its_own_question(self):
+        svc = self.start()
+        one = svc.ask_project_question("owner/p00", "q?", request_key=self.KEY)
+        two = svc.ask_project_question("owner/p01", "q?", request_key=self.KEY)
+        self.assertNotEqual(one, two)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_the_route_passes_the_request_key(self):
+        svc = self.start()
+        payload = json.dumps(
+            {"project_id": WHY, "question": "why?", "request_key": self.KEY}).encode()
+        status, _, body = support.post_page(
+            svc.address, QUESTION_ROUTE, self.own(svc, **JSON), payload)
+        self.assertEqual((status, body), (204, b""))
+        asked = self.question_rows()[0]
+        self.assertEqual((asked[0], asked[2]["request_key"]), ("project_question.asked", self.KEY))
+
+    def test_a_question_without_a_key_has_the_row_it_had(self):
+        svc = self.start()
+        svc.ask_project_question(WHY, "q?")
+        self.assertEqual(set(self.question_rows()[0][2]),
+                         {"question_id", "question", "profile", "session_id"})
 
 
 class QuestionRouteTest(QuestionCase):

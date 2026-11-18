@@ -1876,6 +1876,7 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> di
             "back_text": None if parts is None else said(ASK_BACK_TEXT, parts.back),
             "back_choices": None if parts is None else list(parts.choices),
             "production_text": None if parts is None else parts.production,
+            "request_key": question.request_key,
         }
 
     threads = project_question.threads(questions)

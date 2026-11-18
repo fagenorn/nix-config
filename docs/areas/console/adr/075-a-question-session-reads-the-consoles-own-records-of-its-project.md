@@ -25,6 +25,8 @@ The owner asked a project what costs the most tokens per issue, and the session 
 
 **D8. Spend is null before the first spend read.** Until the console's first spend poll there is no view, so the document's `spend` is null and the rest is written, and the prompt says so.
 
+**D9. A request key makes a question asked once.** A question request may carry `request_key`, 32 lowercase hex digits (`REQUEST_KEY`); any other value is a bad request. The service asks a key once per project: a key already on a folded question of the project returns that question's id and appends, counts and dispatches nothing, and the same key on another project is a separate question. The check runs under the ingest lock after the unregistered and question checks and before the follow-up check, so a re-sent keyed follow-up is not refused as a follow-up to an unanswered thread. The key is in the asked row's payload only when one is given, the fold keeps it only when it is well formed, and the published view's question carries it (null when absent). The POST answers 204 with no body, so the key is how a client that must judge exactly the question it asked finds it again, and a retry never starts a second paid session. A request without a key behaves and writes exactly as before.
+
 ## Considered Options
 
 - A Bash route printing the records: it needs a new admitted argv, for a copy the session's Read reaches anyway.

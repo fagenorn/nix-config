@@ -1416,14 +1416,15 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062)
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062) and an optional
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-075 D9)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
-`project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
+`project_question.parse_keyed_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text, thread_id=None)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None)` admits a question under the ingest
 lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
@@ -1432,7 +1433,7 @@ whose last question is not answered, a thread too long to carry), and no account
 start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
 accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
-`thread_id` it was given) and counts itself open in that same section. A follow-up's session gets
+`thread_id` and `request_key` it was given) and counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
@@ -1932,12 +1933,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question, thread_id = project_question.parse_request(body)
+            project_id, question, thread_id, request_key = project_question.parse_keyed_request(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question, thread_id)
+            console.ask_project_question(project_id, question, thread_id, request_key)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -3975,14 +3976,17 @@ class ConsoleService:
             self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str,
-                             thread_id: str | None = None) -> str:
+                             thread_id: str | None = None, request_key: str | None = None) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
         session runs on a job handed to `project_question_dispatch` outside it. A `thread_id`
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
-        turns go to the job. Refusals are `project_question.Refused` and append and count nothing.
+        turns go to the job. A `request_key` already on a folded question of the project returns
+        that question's id and appends, counts and dispatches nothing (ADR-console-075 D9); the
+        check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
+        `project_question.Refused` and append and count nothing.
         """
         with self._ingest:
             if self._project_asker is None:
@@ -3992,6 +3996,12 @@ class ConsoleService:
             if project_id not in self._states:
                 raise project_question.Refused(project_question.UNREGISTERED)
             text = project_question.checked_question(text)
+            if request_key is not None:
+                known = next((item.question_id
+                              for item in self._project_questions.get(project_id, ())
+                              if item.request_key == request_key), None)
+                if known is not None:
+                    return known
             thread = () if thread_id is None else project_question.follow_up(
                 self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
@@ -4004,6 +4014,8 @@ class ConsoleService:
                        "session_id": session_id}
             if thread_id is not None:
                 payload["thread_id"] = thread_id
+            if request_key is not None:
+                payload["request_key"] = request_key
             appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, payload)])
             self._apply(appended)
             self._project_questions_open += 1

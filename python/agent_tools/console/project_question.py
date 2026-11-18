@@ -49,7 +49,8 @@ run ends. `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph 
 thread text, only with records. No permission rule is added: Read is already admitted. A write that
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
-`parse_request` reads the page's strict JSON body of exactly `project_id` and `question`.
+`parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
+(`parse_keyed_request` also reads an optional `request_key`, ADR-console-075 D9).
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
@@ -121,8 +122,13 @@ after refusing, in this order, a `thread_id` that is not a thread's id (`THREAD_
 follow-up's own id is not one), a thread whose last question is not answered (`THREAD_UNANSWERED`)
 and a thread whose `thread_text` plus the question exceeds `MAX_THREAD_BYTES` UTF-8 bytes
 (`THREAD_TOO_LONG`): the prompt is one argv string and Linux refuses one past 131072 bytes.
-`parse_request` reads exactly `project_id` and `question`, or those with a non-empty string
-`thread_id`, and returns `(project_id, question, thread_id or None)`.
+`parse_keyed_request` reads exactly `project_id` and `question`, plus optionally a non-empty
+string `thread_id` and optionally a `request_key` (a string that fullmatches `REQUEST_KEY`, 32
+lowercase hex digits; any other is a `ValueError`), and returns
+`(project_id, question, thread_id or None, request_key or None)`; `parse_request` returns its
+first three. The key names one request: an asked row carries `request_key` only when one was
+given, the fold keeps it only when it is a string fullmatching `REQUEST_KEY`, and the service asks
+a key once per project (ADR-console-075 D9).
 """
 
 from __future__ import annotations
@@ -163,6 +169,7 @@ GIT_REPOSITORY_ENV = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
 HOOK_TIMEOUT = 10
 QUESTION_MARK = "The question: "
+REQUEST_KEY = re.compile(r"[0-9a-f]{32}")
 EARLIER_QUESTION = "Earlier question: "
 EARLIER_ANSWER = "Earlier answer: "
 MAX_THREAD_BYTES = 98304
@@ -401,25 +408,35 @@ def checked_question(text: str) -> str:
     return text
 
 
-def parse_request(body: bytes) -> tuple[str, str, str | None]:
+def parse_keyed_request(body: bytes) -> tuple[str, str, str | None, str | None]:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the body is nested too deeply") from error
-    if not isinstance(value, dict) or set(value) not in (
-            {"project_id", "question"}, {"project_id", "question", "thread_id"}):
+    required = {"project_id", "question"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | {
+            "thread_id", "request_key"}:
         raise ValueError(
-            "the body must be an object of project_id, question and an optional thread_id")
+            "the body must be an object of project_id, question, an optional thread_id and an "
+            "optional request_key")
     project_id, question = value["project_id"], value["question"]
     thread_id = value.get("thread_id")
     if "thread_id" in value and (not isinstance(thread_id, str) or not thread_id):
         raise ValueError("thread_id must be a non-empty string")
+    request_key = value.get("request_key")
+    if "request_key" in value and not (
+            isinstance(request_key, str) and REQUEST_KEY.fullmatch(request_key)):
+        raise ValueError("request_key must be 32 lowercase hex digits")
     if not isinstance(project_id, str) or not project_id:
         raise ValueError("project_id must be a non-empty string")
     if not isinstance(question, str):
         raise ValueError("question must be a string")
-    return project_id, question, thread_id
+    return project_id, question, thread_id, request_key
+
+
+def parse_request(body: bytes) -> tuple[str, str, str | None]:
+    return parse_keyed_request(body)[:3]
 
 
 def thread_text(thread: Sequence[Turn]) -> str:
@@ -628,6 +645,7 @@ class AskedQuestion:
     reason: str | None = None
     answered_at: str | None = None
     thread_id: str | None = None
+    request_key: str | None = None
 
 
 def _part(lines: list[str], key: str) -> str | None:
@@ -695,8 +713,10 @@ def asked_questions(events: Iterable[Event],
                 head = next((item for item in items if isinstance(named, str) and named
                              and item.question_id == named), None)
                 thread_id = (head.thread_id or head.question_id) if head else question_id
-                items.append(AskedQuestion(question_id, question, event.at, event.seq,
-                                           thread_id=thread_id))
+                key = payload.get("request_key")
+                items.append(AskedQuestion(
+                    question_id, question, event.at, event.seq, thread_id=thread_id,
+                    request_key=key if isinstance(key, str) and REQUEST_KEY.fullmatch(key) else None))
         elif event.kind == PROJECT_QUESTION_ANSWERED:
             if index is not None and items[index].state == WORKING:
                 items[index] = _answered(items[index], event)
