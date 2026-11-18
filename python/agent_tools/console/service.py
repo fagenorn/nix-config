@@ -6225,10 +6225,16 @@ class ConsoleService:
 
     def _revive_step(self, sprint: sprints.SprintState, now: int) -> str | None:
         """Under the ingest lock: the one bring-back decision for the sprint at `now` (milliseconds)."""
+        out = self._quota_wait(sprint) is not None
         return revive.next_step(
             sprint, self._waiting(sprint),
             self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
-            self._nudger is not None, self._quota_wait(sprint) is not None)
+            self._nudger is not None, out, out and self._room_elsewhere())
+
+    def _room_elsewhere(self) -> bool:
+        """Under the ingest lock: whether a new session would get an account with room (#1278)."""
+        return isinstance(manager.choose_profile(
+            capacity.capacity_view(self._profiles, self._capacity, self._clock()), self._use.last), str)
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""

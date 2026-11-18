@@ -380,6 +380,14 @@ class IdleQuotaTest(IdleCase):
         self.poll(svc, 3601)
         self.assertEqual(len(self.nudges), 1)
 
+    def test_a_gone_manager_on_an_account_that_is_out_moves_to_an_account_with_room(self):
+        svc, sid = self.start_out(listed=False)
+        self.gone(svc)
+        self.poll(svc, 600)
+        self.assertEqual(self.revives(), [])
+        self.assertEqual([call.profile for call in self.launches.calls], ["work", "home"])
+        self.assertIs(self.launches.calls[-1].takeover, True)
+
     def test_a_withdrawn_sprint_leaves_the_quota_mark(self):
         svc, sid = self.start_out()
         self.poll(svc, 300)
@@ -446,8 +454,10 @@ class IdleQuotaTest(IdleCase):
                 self.assertIs(row["ok"], True)
                 self.assertIs(row["resumed"], True)
 
-    def test_no_wake_while_the_account_is_out_and_the_wake_after_the_reset_resumes(self):
-        svc, sid = self.start_out(listed=False)
+    def test_no_wake_while_every_account_is_out_and_the_wake_after_the_reset_resumes(self):
+        svc, sid = self.start_out(listed=False, readings=False)
+        self.readings(svc, lambda p: self.exhausted(RESET))
+        svc.poll_sessions()
         self.gone(svc)
         for seconds in (120, 600, 3599):
             self.poll(svc, seconds)
