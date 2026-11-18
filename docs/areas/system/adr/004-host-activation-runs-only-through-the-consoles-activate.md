@@ -1,6 +1,6 @@
 # ADR-system-004 — Host activation runs only through the console's Activate
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-072
 - **Decided in:** #1193
 
 ## Context
