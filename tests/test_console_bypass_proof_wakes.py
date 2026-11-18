@@ -296,6 +296,20 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertEqual(world.scratch_entries(), [])
 
 
+@unittest.skipUnless(sys.platform == "darwin", "the darwin wake")
+class BypassProofWakesMacTest(unittest.TestCase):
+    def test_a_macos_wake_needs_no_systemd_run(self):
+        world = WakeProofWorld(self, systemd_run=False)
+
+        code, report, stderr, _ = world.run()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(report["outcome"], "passed")
+        self.assertEqual(verdicts(report), ["delivered", "delivered"])
+        self.assertFalse((world.bin / "systemd-run").exists())
+        self.assertTrue(all("systemd-run" not in argv[0] for argv in world.argv_log()))
+
+
 class BypassProofWakesPortableTest(unittest.TestCase):
     """What holds on every host: the refusals that come first, the arguments and the verdict rule."""
 
@@ -307,6 +321,25 @@ class BypassProofWakesPortableTest(unittest.TestCase):
                 bypass_proof._wake_refusal("work")
 
         self.assertEqual(str(refused.exception), manager.UNAVAILABLE_TEXT)
+
+    def refusal_on(self, platform):
+        def which(program):
+            return None if program == "systemd-run" else "/bin/" + program
+
+        with mock.patch.object(sys, "platform", platform), \
+                mock.patch.object(bypass_proof.shutil, "which", which), \
+                mock.patch.dict(os.environ, {}, clear=False) as environ:
+            environ.pop("CLAUDECODE", None)
+            return bypass_proof._wake_refusal("work")
+
+    def test_the_wake_proof_needs_no_systemd_run_on_macos(self):
+        self.assertEqual("work", self.refusal_on("darwin"))
+
+    def test_the_wake_proof_still_needs_systemd_run_on_linux(self):
+        with self.assertRaises(bypass_proof.ProofRefused) as refused:
+            self.refusal_on("linux")
+
+        self.assertIn("systemd-run is not on PATH", str(refused.exception))
 
     def test_a_profile_named_default_is_refused(self):
         with mock.patch.object(manager, "supported", return_value=True), \

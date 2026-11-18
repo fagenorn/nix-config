@@ -269,7 +269,7 @@ def _executable(path: Path, text: str) -> None:
 
 
 class WakeProofWorld:
-    def __init__(self, test_case: unittest.TestCase) -> None:
+    def __init__(self, test_case: unittest.TestCase, *, systemd_run: bool = True) -> None:
         tmp = tempfile.TemporaryDirectory()
         test_case.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name).resolve()
@@ -292,7 +292,8 @@ class WakeProofWorld:
             raise AssertionError("git is not on PATH; the wake proof world needs it")
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        _executable(self.bin / "systemd-run", FAKE_SYSTEMD_RUN.format(python=sys.executable))
+        if systemd_run:
+            _executable(self.bin / "systemd-run", FAKE_SYSTEMD_RUN.format(python=sys.executable))
         _executable(self.bin / "git", FAKE_GIT.format(python=sys.executable, real=real_git))
         _executable(self.bin / "claude-account", FAKE_CLIENT.format(
             python=sys.executable, profile=PROFILE, session_id=SESSION_ID,
