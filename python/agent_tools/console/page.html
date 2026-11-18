@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="console-token" id="console-token" content="__CONSOLE_TOKEN__">
+<meta name="console-door" id="console-door" content="owner">
 <meta name="color-scheme" content="dark">
 <link rel="icon" href="data:,">
 <title>Console</title>
@@ -66,6 +67,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 56px; }
+.top-in > [hidden] { display: none; }
+.top-who { color: var(--sub0); font-size: .8125rem; }
+.guest-items { list-style: none; display: grid; gap: 10px; margin-top: 10px; }
+.guest-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--sub0); }
+.guest-kind { display: inline-flex; gap: 7px; font-weight: 600; color: var(--lav); }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
 .nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; }
@@ -517,7 +523,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/spend">Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false">Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><span class="top-who" id="top-who" hidden></span><a class="nav" id="spend-link" href="/spend" hidden>Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false" hidden>Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -783,7 +789,7 @@ const BALL_LOOKS = new Map([
 function ballLook(sprint) {
   const look = BALL_LOOKS.get(sprint.ball);
   if (look === undefined) throw new Error("unknown sprint ball " + JSON.stringify(sprint.ball));
-  return look;
+  return guestDoor && look.tone === "needs" ? { ...look, tone: "st-wait" } : look;
 }
 function pipGroup(stage) {
   return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery";
@@ -986,11 +992,11 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
     head.appendChild(prog);
   }
-  const now = el("p", "sp-now", sprint.now_text);
-  now.setAttribute("title", sprint.now_text);
+  const now = el("p", "sp-now", ownerWords(sprint.now_text));
+  now.setAttribute("title", ownerWords(sprint.now_text));
   head.appendChild(now);
   const words = el("p", "sp-status");
-  words.appendChild(el("span", "sprint-ball " + look.tone, sprint.ball_text));
+  words.appendChild(el("span", "sprint-ball " + look.tone, ownerWords(sprint.ball_text)));
   if (typeof sprint.state_until === "string") {
     words.appendChild(timeEl("weekday", sprint.state_until, "until"));
   }
@@ -1011,7 +1017,7 @@ function drawSprint(item, entry, sprint) {
     const list = el("ul", "sprint-checks");
     for (const check of checks) {
       const line = el("li", "");
-      line.appendChild(actionButton("sprint-check btn-quiet btn-bare", check.text, () => openCheckCard(check)));
+      line.appendChild(actionButton("sprint-check btn-quiet btn-bare", ownerWords(check.text), () => openCheckCard(check)));
       list.appendChild(line);
     }
     for (const wait of waits) list.appendChild(waitLine(wait, "li"));
@@ -1033,7 +1039,7 @@ function drawSprint(item, entry, sprint) {
   if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
-  const stopButton = sprint.stoppable === true ? stopControls(item, entry, sprint) : null;
+  const stopButton = sprint.stoppable === true && !guestDoor ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
   }
@@ -1047,6 +1053,7 @@ function drawSprint(item, entry, sprint) {
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
+  if (guestDoor) return;
   const controls = el("div", "sprint-acts");
   controls.appendChild(tellBox(item, entry, sprint));
   const more = el("details", "sprint-more");
@@ -1859,6 +1866,10 @@ function noticeField(projectId) {
 // A redraw of the Work column that keeps every open fold open, as `render` does around its own redraw.
 function redrawNotices() {
   if (lastView === null) return;
+  if (guestDoor) {
+    renderGuest(lastView);
+    return;
+  }
   holdPictures(() => {
     const wasOpen = new Set();
     for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
@@ -2047,7 +2058,7 @@ function noticeLine(notice, projectId) {
 // One closed fold of a project's open notices, in the view's order and words, with the owner's post control at its foot while the project offers one; null when it has neither.
 function noticeFold(entry, afterLine) {
   const notices = Array.isArray(entry.notices) ? entry.notices : [];
-  const post = entry.notice_post === true;
+  const post = !guestDoor && entry.notice_post === true;
   if (notices.length === 0 && !post) return null;
   const item = el("li", afterLine ? "line notices after-line" : "line notices");
   const fold = el("details");
@@ -2096,7 +2107,6 @@ function askRows(entry) {
 function askIds(entry) {
   return askRows(entry).map((question) => question.id);
 }
-// Every submission still outstanding: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own row among the fresh ones (not held when the first of them was sent, oldest first) whose question carries the same text (the console stores it stripped), the oldest submission taking the oldest such row, so one question's row never stands for another.
 function matchSent(sent, post, fresh) {
   const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
   const taken = new Map();
@@ -2121,7 +2131,6 @@ function askOutstanding(projectId, entry) {
   const { submissions, taken } = askMatches(projectId, entry);
   return submissions.filter((submission) => !taken.has(submission));
 }
-// Drops the accepted submissions the view now shows and counts their rows as held, so a later submission is matched only to a row of its own. A question the view carries while its send is still in flight is revealed at once, and only once (its fold the owner closed since stays closed when the send answers).
 function askReconcile(projectId, entry) {
   const sent = askSent.get(projectId);
   if (sent === undefined) return;
@@ -2344,8 +2353,8 @@ function pendingRow(post) {
   row.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending\u2026" : "Working on it"));
   return row;
 }
-// A project's Ask block: the open box and the submissions the view does not carry yet, newest first, never a row the view carries. A project whose line is drawn has its button there and draws no block while it has nothing to hold; one without a line keeps its named block holding the button.
 function askBlock(entry, afterLine, lined) {
+  if (guestDoor) return null;
   const id = entry.project_id;
   const pending = askOutstanding(id, entry).reverse();
   if (lined && !askOpen.has(id) && pending.length === 0) return null;
@@ -2576,7 +2585,6 @@ function renderReading(view) {
   }
   const projectId = reading.project;
   const key = followKey(projectId, thread.id);
-  // Every frame rebuilds the panel, which detaches whatever control holds focus: focus returns to its twin in the new panel, or to the heading when that control is gone, so the inbox answer keys never see BODY.
   const heldPath = panelPath(section, document.activeElement);
   section.hidden = false;
   const head = el("div", "reading-head");
@@ -2602,6 +2610,7 @@ function renderReading(view) {
   }
 }
 function questionsFold(entry, afterLine) {
+  if (guestDoor) return null;
   const threads = askThreads(entry);
   if (threads.length === 0) return null;
   const item = el("li", afterLine ? "line questions after-line" : "line questions");
@@ -2698,8 +2707,6 @@ function settled(p) {
   return lapsedReset(p)
     ? {...p, state: "reset", week_left: null, five_hour_left: null, next_reset: null, out_until: null} : p;
 }
-// The capacity as the page's clock reads it: lapsed profiles settled and, when an out one lapsed, the
-// aggregates the server computed over them (tight, all_out, resumes_at) worked out again the way it does.
 function settledCapacity(source) {
   const cap = {...(source || {profiles: []})};
   const lapsedOut = cap.profiles.some((p) => p.state === "out" && lapsedReset(p));
@@ -3684,7 +3691,8 @@ function picksComplete(item, state) {
   return item.questions.every((_, i) => typeof state.picks[i] === "number");
 }
 function redraw() {
-  if (lastView !== null) {
+  if (guestDoor && lastView !== null) renderGuest(lastView);
+  else if (lastView !== null) {
     renderInbox(lastView);
     renderAccounts(lastView);
   }
@@ -4538,7 +4546,6 @@ function drawInbox(view) {
   const progress = open.filter(isProgress);
   const signins = open.filter(isSignin);
   const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
-  // A running sign-in with no inbox item (its status read failed) is recovered from the view's runs alone, so a page opened later still shows its link and code field; the add box keeps the profile it added.
   for (const [profile, run] of Object.entries(signinRuns)) {
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     if (profile === accountSignin || signins.some((item) => item.profile === profile)) continue;
@@ -4786,7 +4793,7 @@ function finishedLine(sprint) {
   summary.appendChild(el("span", "title-line", sprint.title));
   const closing = sprint.closing;
   const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
-  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : sprint.state_text));
+  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
   fold.appendChild(summary);
@@ -4863,7 +4870,7 @@ function drawProjects(view) {
     ? { id: active.dataset.followDraft, start: active.selectionStart, end: active.selectionEnd }
     : null;
   section.replaceChildren(heading);
-  const activation = activationLine(view);
+  const activation = guestDoor ? null : activationLine(view);
   if (activation !== null) section.appendChild(activation);
   const offering = new Set();
   const listed = new Set();
@@ -5750,6 +5757,10 @@ function renderGoal() {
 // The register's fold keeps its own state per repository (registerMore), so the key-wide restore below leaves it out.
 const draftMoreKey = "draft-more";
 function render(view) {
+  if (guestDoor) {
+    renderGuest(view);
+    return;
+  }
   holdPictures(() => {
     spendNow = spendIndex(view.spend);
     const wasOpen = new Set();
@@ -5779,21 +5790,104 @@ function tick() {
   const lapsed = lapsedNow(lastView);
   if (lapsed !== lapsedDrawn) {
     lapsedDrawn = lapsed;
-    renderStatement(lastView);
-    renderPromoted(lastView);
-    redrawAccounts();
+    if (guestDoor) renderGuest(lastView);
+    else {
+      renderStatement(lastView);
+      renderPromoted(lastView);
+      redrawAccounts();
+    }
   }
   setTimeout(tick, TICK_MS);
 }
 setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
+const GUEST_TOP = "The owner's console, shared with you to read";
+const STALE_LEAD = "The tracker could not be read for ";
+const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check"]);
+const OWNER_PARTS = ["spend-link", "goal", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
+  "sharing", "sharing-body", "promoted", "digest", "unmanaged", "register"];
+const guestDoor = document.getElementById("console-door").content !== "owner";
+if (guestDoor) {
+  for (const id of OWNER_PARTS) {
+    const part = document.getElementById(id);
+    if (part !== null) part.remove();
+  }
+  const who = document.getElementById("top-who");
+  who.textContent = GUEST_TOP;
+  who.hidden = false;
+} else {
+  document.getElementById("spend-link").hidden = false;
+  document.getElementById("sharing-open").hidden = false;
+}
+function ownerWords(text) {
+  if (!guestDoor) return text;
+  return text.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner");
+}
+function renderGuestStatement(view) {
+  const n = view.statement.inbox_items;
+  const nodes = [el("h1", "", n === 0 ? "Nothing waits on the owner" : n === 1 ? "1 thing waits on the owner" : n + " things wait on the owner")];
+  const sentence = view.statement.sentence;
+  if (typeof sentence === "string" && sentence.startsWith(STALE_LEAD)) nodes.push(el("p", "sub", ownerWords(sentence)));
+  document.getElementById("statement").replaceChildren(...nodes);
+}
+function renderGuestInbox(view) {
+  const cards = new Map();
+  const nodes = [];
+  if (view.inbox.open.length > 0) {
+    const list = el("ul", "guest-items");
+    for (const item of view.inbox.open) {
+      const row = el("li", "guest-item");
+      const [word, id] = kindOf(item);
+      const kind = el("span", "guest-kind");
+      kind.appendChild(icon(id));
+      kind.appendChild(el("span", "", word));
+      row.appendChild(kind);
+      if (typeof item.project_id === "string") row.appendChild(pathWords(el("span", "proj"), item.project_id));
+      row.appendChild(el("b", "guest-head", isBrief(item) ? item.title : item.headline));
+      row.appendChild(Number.isFinite(Date.parse(item.waiting_since))
+        ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
+        : el("span", "guest-wait", "Waiting on the owner"));
+      cards.set(stateId(item), row);
+      list.appendChild(row);
+    }
+    nodes.push(list);
+  }
+  inboxCards = cards;
+  document.getElementById("inbox").replaceChildren(...nodes);
+}
+function sweepGuest() {
+  for (const id of ["statement", "inbox", "projects"]) {
+    for (const tag of ["button", "input", "textarea", "select"]) {
+      for (const node of document.querySelectorAll("#" + id + " " + tag)) {
+        if (!GUEST_KEEPS.has(node.className.split(" ")[0])) node.remove();
+      }
+    }
+    for (const link of document.querySelectorAll("#" + id + " a")) {
+      if (!String(link.href).startsWith("https:")) link.remove();
+    }
+  }
+}
+function renderGuest(view) {
+  holdPictures(() => {
+    const wasOpen = new Set();
+    for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
+    lastView = view;
+    renderGuestStatement(view);
+    renderGuestInbox(view);
+    renderProjects(view);
+    for (const fold of document.querySelectorAll("details")) {
+      if (wasOpen.has(fold.dataset.key)) fold.open = true;
+    }
+    sweepGuest();
+  });
+}
 const LOOK_MS = 5000;
 let heldSince = document.hasFocus() ? Date.now() : null;
 function endHold() {
   if (heldSince === null) return;
   const held = Date.now() - heldSince;
   heldSince = null;
-  if (held > LOOK_MS) {
+  if (held > LOOK_MS && !guestDoor) {
     fetch("/api/looked", { method: "POST", headers: { "X-Console-Token": token }, keepalive: true }).catch(() => {});
   }
 }
@@ -5804,6 +5898,7 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;
   if (viewerKey(event)) return;
+  if (guestDoor) return;
   if (accountsOpen) {
     if (event.key === "Escape") {
       event.preventDefault();
