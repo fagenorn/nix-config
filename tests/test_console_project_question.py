@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shlex
@@ -568,7 +569,7 @@ class HookProcessTest(unittest.TestCase):
         self.assertEqual(json.loads(done.stdout), self.wire("allow", hook.ALLOWED))
 
 
-class LaunchTest(unittest.TestCase):
+class LaunchCase(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -608,6 +609,8 @@ class LaunchTest(unittest.TestCase):
         return project_question.run_question(
             ask or self.ask, cancel, platform=platform, run=run, environ=ENVIRON)
 
+
+class LaunchTest(LaunchCase):
     def test_a_session_with_a_repository_passes_it_to_its_hook_and_settings(self):
         ask = project_question.new_ask(
             "a" * 16, "owner/p01", str(self.root), "what shipped?", "work", self.routes,
@@ -735,6 +738,160 @@ class LaunchTest(unittest.TestCase):
                 self.assertFalse(self.ask.settings.exists())
                 if name in ("darwin", "root"):
                     self.assertEqual(self.calls, [])
+
+
+class RecordsLaunchTest(LaunchCase):
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.t = Path(directory.name)
+        self.state = self.t / "state" / "console"
+        self.settings_dir = self.state / project_question.SETTINGS_DIR
+        self.root = self.t / "srv" / "p01"
+        self.root.mkdir(parents=True)
+        self.records = '{\n "project_id": "owner/p01"\n}\n'
+        self.routes = (project_question.Route("nix-build", ("just", "build"), str(self.root)),)
+        self.ask = project_question.new_ask(
+            "a" * 16, "owner/p01", str(self.root), "what costs the most?", "work", self.routes,
+            self.settings_dir, session_id=SESSION_ID, records=self.records)
+        self.seen = {}
+
+    def capture(self, kwargs):
+        path = project_question.records_path(self.ask)
+        self.seen = {"text": path.read_text(), "mode": path.stat().st_mode & 0o777}
+
+    def hook_words(self, document):
+        return shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+
+    def test_the_prompt_names_the_records_file_and_what_it_holds(self):
+        self.start(self.fake(act=self.capture))
+        text = self.calls[0][0][-1]
+        path = str(project_question.records_path(self.ask))
+        self.assertIn(path, text)
+        for part in (
+            "spend over the last 30 days by day, delivery run, issue, phase and sprint",
+            "its delivery runs with each issue's stage",
+            "activation runs of it with how each ended and why",
+            "its held checks",
+            "Read it with Read, or Grep it",
+            "why a delivery or production run failed",
+            "name it under Read when you use it",
+        ):
+            with self.subTest(part):
+                self.assertIn(part, text)
+        self.assertEqual(
+            text, project_question.prompt(self.ask.question, self.routes, records=path))
+        self.assertLess(text.index(path), text.index(project_question.QUESTION_MARK))
+
+    def test_the_records_file_is_private_and_removed_and_only_the_hook_words_change(self):
+        self.start(self.fake(act=self.capture))
+        self.assertEqual(self.seen, {"text": self.records, "mode": 0o600})
+        self.assertEqual(project_question.records_path(self.ask).parent, self.ask.settings.parent)
+        self.assertEqual(project_question.private_dir(self.ask), self.state)
+        with_records = json.loads(self.settings["text"])
+        self.ask = dataclasses.replace(self.ask, records=None)
+        self.settings = {}
+        self.start(self.fake())
+        without = json.loads(self.settings["text"])
+        self.assertEqual(with_records["permissions"], without["permissions"])
+        self.assertEqual(
+            self.hook_words(with_records),
+            self.hook_words(without) + [
+                str(self.state), str(project_question.records_path(self.ask))])
+        self.assertFalse(project_question.records_path(self.ask).exists())
+        self.assertFalse(self.ask.settings.exists())
+
+    def test_two_overlapping_questions_each_read_only_their_own_records(self):
+        asks = {}
+        for number, letter in ((0, "a"), (1, "b")):
+            root = self.t / "srv" / f"p0{number}"
+            root.mkdir(parents=True, exist_ok=True)
+            asks[number] = project_question.new_ask(
+                letter * 16, f"owner/p0{number}", str(root), "what costs the most?", "work",
+                self.routes, self.settings_dir, session_id=SESSION_ID,
+                records='{"project_id": "owner/p0%d"}\n' % number)
+        first, second = asks[0], asks[1]
+        decisions = {}
+
+        def decide(own, other, name, tool_input):
+            command = self.hook_words(json.loads(own.settings.read_text()))
+            done = subprocess.run(
+                command, input=json.dumps(
+                    {"tool_name": name, "tool_input": tool_input, "cwd": own.root}),
+                capture_output=True, text=True, timeout=30)
+            result = json.loads(done.stdout)["hookSpecificOutput"]
+            return result["permissionDecision"], result["permissionDecisionReason"]
+
+        def inner(kwargs):
+            for own, other in ((first, second), (second, first)):
+                mine = str(project_question.records_path(own))
+                theirs = project_question.records_path(other)
+                self.assertEqual(Path(mine).read_text(), own.records)
+                self.assertEqual(theirs.read_text(), other.records)
+                refused = ("deny", hook.RECORDS_DENIED.format(records=os.path.realpath(mine)))
+                decisions[own.question_id] = {
+                    "own": decide(own, other, "Read", {"file_path": mine}),
+                    "search": decide(own, other, "Grep", {"pattern": "x"}),
+                    "other": decide(own, other, "Read", {"file_path": str(theirs)}),
+                    "settings": decide(own, other, "Read", {"file_path": str(other.settings)}),
+                    "glob": decide(
+                        own, other, "Glob", {"pattern": str(self.settings_dir) + "/*"}),
+                    "events": decide(
+                        own, other, "Read", {"file_path": str(self.state / "events.sqlite3")}),
+                    "write": decide(own, other, "Write", {"file_path": mine}),
+                    "edit": decide(own, other, "Edit", {"file_path": mine}),
+                    "refused": refused,
+                }
+
+        def outer(kwargs):
+            project_question.run_question(
+                second, None, platform="linux", run=self.fake_for(inner), environ=ENVIRON)
+
+        project_question.run_question(
+            first, None, platform="linux", run=self.fake_for(outer), environ=ENVIRON)
+        for own in (first, second):
+            seen = decisions[own.question_id]
+            with self.subTest(own.question_id):
+                self.assertEqual(seen["own"][0], "allow")
+                self.assertEqual(seen["search"][0], "allow")
+                for name in ("other", "settings", "glob", "events"):
+                    self.assertEqual(seen[name], seen["refused"], name)
+                for name in ("write", "edit"):
+                    self.assertEqual(
+                        seen[name],
+                        ("deny", hook.WRITE_DENIED.format(tool=name.capitalize())), name)
+            self.assertFalse(project_question.records_path(own).exists())
+            self.assertFalse(own.settings.exists())
+
+    def fake_for(self, act):
+        def run(argv, *, timeout, cancel=None, **kwargs):
+            act(kwargs)
+            return subprocess.CompletedProcess(argv, 0, stdout=SUCCESS, stderr=None)
+        return run
+
+    def test_a_records_write_that_fails_is_a_failed_outcome_with_no_session(self):
+        with mock.patch.object(
+                project_question, "_write_records", side_effect=OSError(13, "Permission denied")):
+            outcome = self.start(self.fake())
+        self.assertEqual(
+            outcome,
+            project_question.Outcome(
+                "failed", reason="cannot write the question's records: Permission denied"))
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.ask.settings.exists())
+
+    def test_a_question_without_records_has_the_prompt_argv_and_hook_it_had(self):
+        text = project_question.prompt("q", self.routes)
+        self.assertEqual(text, project_question.prompt("q", self.routes, records=None))
+        self.assertNotIn("console's own records", text)
+        ask = self.make_ask(self.routes)
+        self.assertEqual(
+            project_question.launch_command(ask, "linux")[-1],
+            project_question.prompt(ask.question, self.routes))
+        self.assertEqual(
+            project_question.hook_command(self.routes),
+            project_question.hook_command(self.routes, None, None))
 
 
 class DevenvRouteTest(unittest.TestCase):

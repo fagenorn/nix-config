@@ -40,6 +40,14 @@ command named in the answer), then a routes paragraph
 cannot be read), then the reads paragraph (the git reads with their examples, and either the gh
 reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
 thread text, then `QUESTION_MARK` and the question (ADR-console-065).
+
+Records (ADR-console-075). An `Ask` may carry `records`, the encoded document of the console's own
+records for the project (None: none). The session's file is `records_path(ask)`: `SETTINGS_DIR`'s
+directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
+settings file with exactly `ask.records`, and removed with the settings file on every path once the
+run ends. `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph and before the
+thread text, only with records. No permission rule is added: Read is already admitted. A write that
+fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`.
 
@@ -51,7 +59,8 @@ when the project has a GitHub repository, the `GH_READ_RULES`; the deny list is 
 which wins over any allow; `--tools` removes every other built-in tool, and Bash is always a tool
 (the git reads need it even with no route). On top of those, a PreToolUse command hook
 (`project_question_hook`, run through `siblings.sibling_argv`, given the allowed argv and the
-repository) admits only reads, the bare declared commands and the plain git and gh reads;
+repository, and with records also `private_dir(ask)`, the console's state directory, and
+`records_path(ask)`, which confine its reads to that one file: ADR-console-075) admits only reads, the bare declared commands and the plain git and gh reads;
 `"onFailure": "block"` makes the pinned client treat a hook that errors, fails
 to start or times out as a block, because without it such a hook is non-blocking and the call would
 fall to the permission rules. The file lives in `SETTINGS_DIR` under the console's state (a 0700
@@ -66,7 +75,8 @@ the question's transcript (ADR-console-059). No `systemd-run` scope is used.
 
 Runner. `run_question` never raises for these cases and removes the settings file once written, in
 this order: no launch command (`UNAVAILABLE_TEXT`); a root that is not a directory; a settings
-write that fails; the run itself with `TIMEOUT_SECONDS`, the `cancel` event, `stdin` closed and
+write that fails; a records write that fails (`RECORDS_UNWRITABLE`, only with records, after the
+settings write); the run itself with `TIMEOUT_SECONDS`, the `cancel` event, `stdin` closed and
 stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-account`; a set
 `cancel` (`STOPPED_TEXT`); a non-zero exit (the last non-empty stderr line); then the JSON on
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
@@ -146,6 +156,7 @@ TIMEOUT_SECONDS = 300
 MAX_QUESTION_CHARS = 2000
 SETTINGS_DIR = "project-question-settings"
 SETTINGS_SUFFIX = ".settings.json"
+RECORDS_SUFFIX = ".records.json"
 HOOK_MODULE = "console.project_question_hook"
 GIT_REPOSITORY_ENV = (
     "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
@@ -174,6 +185,17 @@ NO_PRODUCTION_LINE = (
     "Production cannot be read for this project: its contract declares no read-only command that "
     "runs from its root."
 )
+RECORDS_UNWRITABLE = "cannot write the question's records: {detail}"
+RECORDS_TEXT = (
+    "The console's own records for this project are in the file {path}: its spend over the last "
+    "30 days by day, delivery run, issue, phase and sprint, in tokens and estimated dollars; its "
+    "sprints; its delivery runs with each issue's stage; this host's activation runs of it with "
+    "how each ended and why; and its held checks. Read it with Read, or Grep it for an issue "
+    "number, a run id or a commit, whenever the question is about cost, time, effort, what was "
+    "delivered or is live, sprints, checks, or why a delivery or production run failed, and name "
+    "it under Read when you use it. The console wrote it for this project when this question "
+    "started; its spend is null until the console's first spend read. The console's other files "
+    "are not readable from this session.\n\n")
 CONTRACT_UNREADABLE = "the project's contract could not be resolved, so no session was started: {detail}"
 UNAVAILABLE_TEXT = "questions are not available on this host yet"
 UNREGISTERED = "this project is not registered"
@@ -278,6 +300,7 @@ class Ask:
     thread: tuple[Turn, ...] = ()
     repo: str | None = None
     unset: tuple[str, ...] = ()
+    records: str | None = None
 
 
 @dataclass(frozen=True)
@@ -353,10 +376,19 @@ def new_session_id() -> str:
 def new_ask(question_id: str, project_id: str, root: str, question: str, profile: str,
             routes: Sequence[Route], settings_dir: Path, *, session_id: str,
             thread: Sequence[Turn] = (), repo: str | None = None,
-            unset: Sequence[str] = ()) -> Ask:
+            unset: Sequence[str] = (), records: str | None = None) -> Ask:
     return Ask(question_id, project_id, root, question, profile, tuple(routes),
                Path(settings_dir) / (question_id + SETTINGS_SUFFIX), session_id, tuple(thread), repo,
-               tuple(unset))
+               tuple(unset), records)
+
+
+def records_path(ask: Ask) -> Path:
+    return ask.settings.with_name(ask.question_id + RECORDS_SUFFIX)
+
+
+def private_dir(ask: Ask) -> Path:
+    """The console's state directory: it holds the settings directory, the event log and the page token."""
+    return ask.settings.parent.parent
 
 
 def checked_question(text: str) -> str:
@@ -415,26 +447,31 @@ def reads_paragraph(repo: str | None) -> str:
 
 
 def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), *,
-           repo: str | None = None) -> str:
+           repo: str | None = None, records: str | None = None) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
     else:
         paragraph = ("This project declares no read-only command, so production cannot be read: "
                      "answer from the code, the docs and the reads below.\n\n")
-    return LEAD + paragraph + reads_paragraph(repo) + thread_text(thread) + QUESTION_MARK + question
+    held = RECORDS_TEXT.format(path=records) if records is not None else ""
+    return (LEAD + paragraph + reads_paragraph(repo) + held + thread_text(thread) + QUESTION_MARK
+            + question)
 
 
 def tools(routes: Sequence[Route]) -> str:
     return "Read,Grep,Glob,Bash"
 
 
-def hook_command(routes: Sequence[Route], repo: str | None = None) -> str:
+def hook_command(routes: Sequence[Route], repo: str | None = None,
+                 confinement: tuple[str, str] | None = None) -> str:
     allowed = json.dumps([list(route.argv) for route in routes], separators=(",", ":"))
-    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or ""])
+    return shlex.join([*siblings.sibling_argv(HOOK_MODULE), allowed, repo or "",
+                       *(confinement or ())])
 
 
-def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
+def settings_document(routes: Sequence[Route], repo: str | None = None,
+                      confinement: tuple[str, str] | None = None) -> dict:
     return {
         "permissions": {
             "defaultMode": PERMISSION_MODE,
@@ -443,7 +480,7 @@ def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
             "deny": list(DENIED_RULES),
         },
         "hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{
-            "type": "command", "command": hook_command(routes, repo),
+            "type": "command", "command": hook_command(routes, repo, confinement),
             "timeout": HOOK_TIMEOUT, "onFailure": "block",
         }]}]},
     }
@@ -455,7 +492,8 @@ def launch_command(ask: Ask, platform: str) -> list[str] | None:
     return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
-            prompt(ask.question, ask.routes, ask.thread, repo=ask.repo)]
+            prompt(ask.question, ask.routes, ask.thread, repo=ask.repo,
+                   records=str(records_path(ask)) if ask.records is not None else None)]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:
@@ -472,15 +510,32 @@ def session_environment(ask: Ask, environ: Mapping[str, str]) -> dict[str, str]:
 
 
 def _write_settings(ask: Ask) -> None:
+    confinement = ((str(private_dir(ask)), str(records_path(ask)))
+                   if ask.records is not None else None)
     directory = ask.settings.parent
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(settings_document(ask.routes, ask.repo), handle)
+            json.dump(settings_document(ask.routes, ask.repo, confinement), handle)
         os.chmod(temporary, 0o600)
         os.replace(temporary, ask.settings)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def _write_records(ask: Ask) -> None:
+    directory = ask.settings.parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(ask.records)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, records_path(ask))
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
@@ -506,6 +561,12 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
     except OSError as error:
         return Outcome(FAILED, reason=f"cannot write the question's settings: {error.strerror or error}")
     try:
+        if ask.records is not None:
+            try:
+                _write_records(ask)
+            except OSError as error:
+                return Outcome(
+                    FAILED, reason=RECORDS_UNWRITABLE.format(detail=error.strerror or error))
         with tempfile.TemporaryFile() as stderr:
             try:
                 done = run(argv, timeout=TIMEOUT_SECONDS, cancel=cancel, cwd=ask.root,
@@ -524,6 +585,7 @@ def run_question(ask: Ask, cancel: threading.Event | None = None, *, platform: s
         return _outcome_of(done.stdout, ask.routes)
     finally:
         ask.settings.unlink(missing_ok=True)
+        records_path(ask).unlink(missing_ok=True)
 
 
 def _outcome_of(stdout: bytes | None, routes: Sequence[Route]) -> Outcome:
