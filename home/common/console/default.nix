@@ -16,14 +16,16 @@
 # `PATH` carries gh because the tracker poll runs `gh` by name (not by store path), and
 # a user service starts with a bare `PATH`. `/usr/bin:/bin` follows it for the system tools.
 # The manager launch (issue 888) runs `systemd-run` and `claude-account` by name,
-# `claude-account` runs coreutils by name, and the manager is an agent that needs the
-# owner's tools, so on Linux the unit also carries the user profile (`claude-account` and
-# the tools a terminal session has) and the system profile (coreutils, bash and `systemd-run`)
-# between gh and `/usr/bin:/bin`.
+# `claude-account` runs coreutils by name, the page's activation runs `just` by name (#1290),
+# and the manager is an agent that needs the owner's tools, so both platforms carry the owner's
+# profile (`claude-account`, `just` and the tools a terminal session has) and the system profile
+# (coreutils, bash, and `systemd-run` on Linux) between gh and `/usr/bin:/bin`. On darwin the
+# owner's profile is `/etc/profiles/per-user/<user>` (`useUserPackages`) and the system profile
+# is nix-darwin's `/run/current-system/sw`.
 #
-# On Linux `/run/wrappers/bin` comes first after gh, before the system profile, so the
-# `sudo` the page's activation runs (`just switch` runs `sudo nixos-rebuild switch` by name)
-# is the setuid wrapper. The `sudo` in `/run/current-system/sw/bin` is the plain binary and
+# Only Linux carries the setuid wrappers: `/run/wrappers/bin` comes first after gh, before the
+# owner's profile, so the `sudo` the page's activation runs (`just switch` runs
+# `sudo nixos-rebuild switch` by name) is the setuid wrapper. The `sudo` in `/run/current-system/sw/bin` is the plain binary and
 # fails with "must be owned by uid 0 and have the setuid bit set". The activation the console
 # starts runs in its own transient user scope (`systemd-run --user --scope`), so the unit's
 # restart during the switch (`KillMode=control-group`) does not end it, and the restarted
@@ -55,12 +57,10 @@ let
 
   path = lib.concatStringsSep ":" (
     [ (lib.makeBinPath [ config.programs.gh.package ]) ]
-    ++ lib.optionals pkgs.stdenv.isLinux [
-      "/run/wrappers/bin"
+    ++ lib.optionals pkgs.stdenv.isLinux [ "/run/wrappers/bin" ]
+    ++ [
       "${config.home.profileDirectory}/bin"
       "/run/current-system/sw/bin"
-    ]
-    ++ [
       "/usr/bin"
       "/bin"
     ]
@@ -86,7 +86,7 @@ in
     path = lib.mkOption {
       type = lib.types.str;
       readOnly = true;
-      description = "The PATH the console service runs with: gh's bin, on Linux the setuid wrappers (sudo), the user and system profiles, then the system tools.";
+      description = "The PATH the console service runs with: gh's bin, on Linux the setuid wrappers (sudo), the owner's and system profiles, then the system tools.";
     };
   };
 

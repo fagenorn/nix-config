@@ -81,15 +81,22 @@ class ReloadStep(unittest.TestCase):
         return done, calls.read_text().splitlines() if calls.exists() else []
 
     def hosts(self):
-        for host in units.DarwinHosts.HOSTS:
+        # Only a login host reloads user agents; a boot host has none (issue 1290).
+        for host in units.DarwinHosts.LOGIN_HOSTS:
             with self.subTest(host=host):
                 yield self.got[host], self.agents[host]
 
-    def test_each_host_installs_the_console_and_verify_pending_agents(self):
-        for host in units.DarwinHosts.HOSTS:
+    def test_a_login_host_installs_the_console_and_verify_pending_agents(self):
+        for host in units.DarwinHosts.LOGIN_HOSTS:
             with self.subTest(host=host):
                 self.assertEqual(self.agents[host],
                                  ["org.nixos.agent-console.plist", "org.nixos.verify-pending.plist"])
+
+    def test_a_boot_host_installs_no_user_agent(self):
+        for host in units.DarwinHosts.BOOT_HOSTS:
+            with self.subTest(host=host):
+                self.assertEqual(self.agents[host], [])
+                self.assertNotIn("reloading user service", self.got[host])
 
     def test_the_guard_wraps_the_step_and_the_step_calls_bare_launchctl_asuser(self):
         guard = GUARD.read_text()

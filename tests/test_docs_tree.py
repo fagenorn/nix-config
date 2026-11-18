@@ -494,6 +494,32 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("issue 1211", context.split("**Look approval**:")[1].split("**Look file set**:")[0])
         self.assertIn("| Look file set | Delivery |", (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text())
 
+    def test_adr_verification_008_records_the_boot_host_amendment(self):
+        path = "docs/areas/verification/adr/008-macs-verify-only-while-logged-in.md"
+        raw = (REPO_ROOT / path).read_text()
+        doc = self.doc(path)
+        self.assertIn("\n- **Status:** accepted; amended in #1290\n", raw)
+        for needle in ("ownerServices.atBoot", "eleven-m5", "system/org.nixos.verify-pending",
+                       "hosts file", "mbp"):
+            self.assertIn(needle, doc)
+        self.assertNotIn("There is no LaunchDaemon form and no credential outside the keychain.", doc)
+
+    def test_adr_hosts_009_records_the_owners_boot_services(self):
+        path = ("docs/areas/hosts/adr/"
+                "009-a-mac-reached-only-over-ssh-runs-the-owners-services-at-boot.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-hosts-009 \u2014 A Mac reached only over SSH runs the owner's services at boot")
+        doc = self.doc(path)
+        for needle in ("org.nixos.agent-console", "org.nixos.sops-nix", "org.nixos.claude-cache-proxy",
+                       "org.nixos.verify-pending", "UserName", "#1290", "ADR-verification-008"):
+            self.assertIn(needle, doc)
+
+    def test_the_cache_proxy_readme_names_the_boot_daemon(self):
+        doc = self.doc("home/common/claude-code/README.md")
+        self.assertIn("org.nixos.claude-cache-proxy", doc)
+        self.assertIn("ownerServices.atBoot", doc)
+
     def test_the_console_reads_a_kept_look_approval(self):
         path = ("docs/areas/console/adr/"
                 "054-a-held-issue-whose-only-open-criterion-is-an-owner-review-gets-an-owner-check-card.md")
