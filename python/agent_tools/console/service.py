@@ -3000,7 +3000,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, "application/json", self.server.console.view_bytes)
         elif route == STREAM_PATH:
             console = self.server.console
-            self._stream(lambda seen: console.wait_for_change(seen, KEEPALIVE_SECONDS))
+            self._stream(lambda seen: console.wait_for_change(seen, KEEPALIVE_SECONDS),
+                         console.delivered)
         elif route == STATUS_PATH:
             self._status_request()
         elif route == PROFILE_PATH:
@@ -3040,7 +3041,13 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(404, "this picture is not known")
         self._send(200, "image/png", data, cache="private")
 
-    def _stream(self, wait: Callable[[int], tuple[int, bytes | None] | None]):
+    def _stream(self, wait: Callable[[int], tuple[int, bytes | None] | None],
+                delivered: Callable[[int], None] | None = None):
+        """Write views as they publish; `delivered` hears each version once written.
+
+        Only the owner's stream passes it: a guest view never carries the evidence card, so a frame
+        written to a colleague shows the owner nothing (ADR-console-071 D4).
+        """
         console = self.server.console
         self.close_connection = True
         self.send_response(200)
@@ -3062,7 +3069,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                 if view is None:
                     return
                 self.wfile.write(b"event: view\ndata: " + view + b"\n\n")
-                console.delivered(seen)
+                if delivered is not None:
+                    delivered(seen)
         except OSError:
             return
 
