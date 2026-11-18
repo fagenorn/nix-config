@@ -67,6 +67,23 @@ at `path` as `serve status --json` (no shell, no other argument, `SERVE_TIMEOUT_
 the parsed JSON, or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it
 never raises.
 
+A guest's writes (#1263) are decided by `write_refusal(access, actor, project_id)`, where `actor` is
+a `GuestActor` (the login and the tailnet name the request was admitted under). The checks run in
+this order and the first that fails gives its text: sharing is off (`SHARING_OFF_TEXT`); the tailnet
+in force is not the one the request was admitted under, because the owner renamed it meanwhile
+(`HOST_TEXT`); the login is no longer listed (`NOT_SHARED_TEXT`); the project is not on the
+login's list (`NOT_YOUR_PROJECT_TEXT`); otherwise None. `steer_refusal(login, started_by)` is None
+exactly when the sprint was started by that login (`NOT_YOUR_SPRINT_TEXT`; a sprint with no starter
+is the owner's). A question that carries a before-and-after pair is a look before merge and stays
+the owner's (`is_look`, `OWNER_LOOK_TEXT`); tracker items (release confirmations, paid approvals,
+production holds) are never steerable. The service answers a write refused on these merits as
+`409`. No text names a project or a login.
+
+`mark_steer(view, login)` returns a copy of a scrubbed guest view in which every sprint mapping
+gains `steer` (started by that login) and every `inbox.open` and `inbox.answered` item gains `steer`
+(a brief or a question started by that login that is not a look). The marks are the server's and
+are applied to a scrubbed guest view only; it adds the login nowhere and never mutates its argument.
+
 `parse_tailnet`, `parse_colleague` and `parse_removal` read the owner's write bodies as strict
 JSON (a duplicate key, a non-object or an extra or missing key is refused) and raise
 `ValueError` on a malformed body. Whether each project of a colleague is registered is checked by
@@ -106,6 +123,9 @@ SHARING_OFF_TEXT = "Sharing is off on this console."
 HOST_TEXT = "This console is shared only at its tailnet name."
 NOT_SHARED_TEXT = "This console is not shared with you. Ask its owner to add your Tailscale login."
 OWNER_ONLY_TEXT = "Only the console's owner can do that."
+NOT_YOUR_PROJECT_TEXT = "That project is not shared with you."
+NOT_YOUR_SPRINT_TEXT = "You can steer only the sprints you started."
+OWNER_LOOK_TEXT = "Only the console's owner answers a look before merge."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest port.")
 
@@ -134,6 +154,14 @@ class Access:
 
 
 NO_ACCESS = Access(None, MappingProxyType({}))
+
+
+@dataclass(frozen=True)
+class GuestActor:
+    """Who acts on the guest port: the login and the tailnet name the request was admitted under."""
+
+    login: str
+    tailnet: str
 
 
 def valid_tailnet(text: object) -> bool:
@@ -228,6 +256,26 @@ def admit(access: Access, hosts: Sequence[str],
     return login, None
 
 
+def write_refusal(access: Access, actor: GuestActor, project_id: str) -> str | None:
+    if access.tailnet is None:
+        return SHARING_OFF_TEXT
+    if access.tailnet != actor.tailnet:
+        return HOST_TEXT
+    if actor.login not in access.colleagues:
+        return NOT_SHARED_TEXT
+    if project_id not in access.colleagues[actor.login]:
+        return NOT_YOUR_PROJECT_TEXT
+    return None
+
+
+def steer_refusal(login: str, started_by: str | None) -> str | None:
+    return None if started_by == login else NOT_YOUR_SPRINT_TEXT
+
+
+def is_look(pairs: Iterable[str | None]) -> bool:
+    return any(pair is not None for pair in pairs)
+
+
 def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
             forwarded: Sequence[str], probes: Sequence[str]) -> dict:
     """What one guest-port request showed, for the owner's `sharing.last_request`; never a login."""
@@ -307,6 +355,33 @@ def scrub(view: Mapping) -> dict:
                      "registration": None, "digest": None, "activation": None, "spend": None,
                      "capacity": dict(EMPTY)})
     return scrubbed
+
+
+def mark_steer(view: Mapping, login: str) -> dict:
+    def steers(item: Mapping) -> bool:
+        reason = item.get("reason")
+        return (reason in ("brief", "question") and item.get("started_by") == login
+                and not (reason == "question"
+                         and is_look(picture.get("pair") for picture in item.get("pictures", []))))
+
+    def copy(node: object) -> object:
+        if isinstance(node, Mapping):
+            result = {key: copy(member) for key, member in node.items()}
+            if node.get("type") == "sprint":
+                result["steer"] = node.get("started_by") == login
+            return result
+        if isinstance(node, list):
+            return [copy(member) for member in node]
+        return node
+
+    marked = copy(view)
+    inbox = view.get("inbox")
+    if isinstance(inbox, Mapping):
+        for part in ("open", "answered"):
+            if part in inbox:
+                marked["inbox"][part] = [
+                    {**copy(item), "steer": steers(item)} for item in inbox[part]]
+    return marked
 
 
 def picture_ids(view: object) -> frozenset[str]:
