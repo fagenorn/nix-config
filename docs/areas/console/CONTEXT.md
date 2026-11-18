@@ -50,7 +50,7 @@ The one agent a sprint has: it writes the brief and the reports and never writes
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
-What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux, else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after 5 min, with what the owner can do about it. A brief approval shows only until the manager picks it up; a reply to it shows as the manager's own line, with no approval line above it. The owner's words read "You: <words>" and the manager's reply "Manager: <reply>". Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
+What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux or macOS (ADR-console-075), else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after 5 min, with what the owner can do about it. A brief approval shows only until the manager picks it up; a reply to it shows as the manager's own line, with no approval line above it. The owner's words read "You: <words>" and the manager's reply "Manager: <reply>". Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
 _Avoid_: chat, comment
 
 **Question round**:
@@ -122,7 +122,7 @@ The console's second page, at `/spend`, opened from the "Spend" link in the desk
 _Avoid_: metrics page, dashboard
 
 **Limit reading**:
-The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
+The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux and macOS the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
 _Avoid_: usage
 
 **Limit stop**:
@@ -142,7 +142,7 @@ The one line at the head of the Work column when origin's integration branch car
 _Avoid_: deploy banner, update notice
 
 **Sign-in state**:
-Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025). The reading also keeps the account name (address) the status command reports; the profile's row of the accounts panel shows it and flags two profiles on one account as "same account as <other>" (ADR-console-022, ADR-console-023).
+Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux and macOS. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025). The reading also keeps the account name (address) the status command reports; the profile's row of the accounts panel shows it and flags two profiles on one account as "same account as <other>" (ADR-console-022, ADR-console-023).
 _Avoid_: login expiry
 
 **Excluded profile**:
@@ -154,7 +154,7 @@ The one account the owner pins with Pin in the accounts panel (Unpin while pinne
 _Avoid_: favourite profile, default account
 
 **Console service**:
-The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS.
+The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS, whose job also leaves its children's process groups alone (`AbandonProcessGroup`, ADR-console-075), so a manager started in its own session outlives a restart of the console.
 _Avoid_: daemon
 
 **Registration**:

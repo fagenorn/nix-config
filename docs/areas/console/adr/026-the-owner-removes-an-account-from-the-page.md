@@ -1,6 +1,6 @@
 # ADR-console-026 — The owner removes an account from the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-075
 - **Decided in:** #842, #1030, #1039
 
 ## Context
@@ -23,7 +23,7 @@ ADR-console-025 let the owner add an account from the page, but taking one away 
 
 **D6. The page.** This amends ADR-console-002. Remove sits on each account's row of the accounts panel. It opens a confirmation that says how many sessions run under the profile and that they are not stopped, asks for the profile's name typed, and enables the removal only when the typed text is the name. The typed name is a draft whose text, selection and focus survive every frame. A failed removal shows its reason beside the control. The unprofiled `~/.claude` is not a listed profile, so it is never on the strip and never offers Remove.
 
-**D7. Linux only.** The console removes an account only where it signs one out and runs the launcher, which is Linux. The macOS half is held on #894.
+**D7. Linux and macOS.** The console removes an account only where it signs one out and runs the launcher, which is Linux and macOS (amended by ADR-console-075, #894). The Mac half's host evidence is #894's own `console-page-account` check, which adds and removes a throwaway profile through the page.
 
 ## Consequences
 
