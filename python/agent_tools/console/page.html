@@ -99,6 +99,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-open { flex: 0 0 auto; }
+.share-line, .share-last, .share-none { margin-top: 6px; }
+.share-tailnet-row, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-people { list-style: none; }
+.share-person { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--hair); }
+.share-who { color: var(--sub1); overflow-wrap: anywhere; }
+.share-refused { color: var(--sub0); }
 .acct-pin-note { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); font-size: .8125rem; color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
@@ -510,7 +517,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/spend">Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/spend">Spend</a><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap btn-quiet btn-bare" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><button type="button" class="share-open btn-quiet" id="sharing-open" aria-haspopup="dialog" aria-controls="sharing" aria-expanded="false">Sharing</button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section><section class="acct-panel share-panel" id="sharing" role="dialog" aria-label="Sharing" tabindex="-1" hidden><div class="share-body" id="sharing-body"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -2928,6 +2935,7 @@ function anySigninLive() {
 }
 function openAccounts() {
   if (lastView === null) return;
+  if (sharingOpen) closeSharing();
   accountsReturn = document.activeElement;
   accountsOpen = true;
   if (anySigninLive()) renderInbox(lastView);
@@ -2954,6 +2962,193 @@ function closeAccounts() {
 document.getElementById("capacity").addEventListener("click", () => {
   if (accountsOpen) closeAccounts();
   else openAccounts();
+});
+let sharingOpen = false;
+let sharingReturn = null;
+let tailnetDraft = null;
+let loginDraft = "";
+const sharePicks = new Set();
+const sharePosts = new Map();
+const SHARE_LINES = new Map([
+  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest port."],
+  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest port."],
+  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest port."],
+]);
+const SHARE_WHY = new Map([
+  ["sharing_off", "sharing is off"], ["host", "the Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+function shareLine(sharing) {
+  const words = SHARE_LINES.get(sharing.state);
+  return sharing.tailnet === null || words === undefined ? "Sharing is off: no tailnet name is set." : words(sharing.tailnet);
+}
+function shareLast(r) {
+  if (r === null || typeof r !== "object") return "No request has come to the guest port yet.";
+  const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
+  const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
+  const why = SHARE_WHY.get(r.reason);
+  return "Last request on the guest port: " + host + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
+}
+function shareTailnet(tailnet) {
+  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ tailnet }) });
+}
+async function postShare(key, send, done, cls) {
+  const current = sharePosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", cls };
+  sharePosts.set(key, state);
+  renderSharing(lastView);
+  let reason;
+  try {
+    reason = await ownerAnswer(await send());
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (sharePosts.get(key) !== state) return;
+  if (reason === null) {
+    sharePosts.delete(key);
+    done();
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  renderSharing(lastView);
+}
+function shareAct(parent, key, cls, label, onClick, off) {
+  const state = sharePosts.get(key);
+  const button = actionButton(cls, label, onClick);
+  button.disabled = off || (state !== undefined && state.phase === "sending");
+  markBusy(button, state !== undefined && state.phase === "sending" && state.cls === cls.split(" ")[0]);
+  parent.appendChild(button);
+  if (state !== undefined && state.phase === "failed" && state.cls === cls.split(" ")[0]) {
+    parent.appendChild(el("span", "share-refused", "The console refused: " + state.reason + "."));
+  }
+}
+function findShare(node, row, login, cls, project) {
+  const here = node.dataset !== undefined && node.dataset.login !== undefined ? node.dataset.login : row;
+  const own = node.dataset !== undefined && node.dataset.project !== undefined ? node.dataset.project : "";
+  if (node.className === cls && here === login && own === project) return node;
+  for (const child of node.children || []) {
+    const found = findShare(child, here, login, cls, project);
+    if (found !== null) return found;
+  }
+  return null;
+}
+function renderSharing(view) {
+  const body = document.getElementById("sharing-body");
+  document.getElementById("sharing").hidden = !sharingOpen;
+  document.getElementById("sharing-open").setAttribute("aria-expanded", sharingOpen ? "true" : "false");
+  if (!sharingOpen) {
+    body.replaceChildren();
+    return;
+  }
+  const sharing = view.sharing || { tailnet: null, colleagues: [], state: "off", last_request: null };
+  const projects = view.recent_projects || [];
+  for (const id of [...sharePicks]) if (!projects.includes(id)) sharePicks.delete(id);
+  let kept = null;
+  for (let n = document.activeElement; n; n = n.parentNode) {
+    if (n !== body) continue;
+    const at = document.activeElement;
+    kept = { cls: at.className, login: "", project: at.dataset.project || "", start: at.selectionStart, end: at.selectionEnd };
+    for (let m = at; m !== body; m = m.parentNode) if (m.dataset !== undefined && m.dataset.login !== undefined) kept.login = m.dataset.login;
+    break;
+  }
+  const head = el("div", "acct-head");
+  head.appendChild(el("h2", "sec-h", "Sharing"));
+  head.appendChild(actionButton("share-close btn-quiet", "Close", closeSharing));
+  const row = el("div", "share-tailnet-row");
+  const tailnet = accountField("share-tailnet field-line", "Tailnet name", "<host>.<tailnet>.ts.net");
+  const typed = tailnetDraft === null ? sharing.tailnet || "" : tailnetDraft;
+  tailnet.value = typed;
+  tailnet.addEventListener("input", () => {
+    tailnetDraft = tailnet.value;
+    renderSharing(lastView);
+  });
+  row.appendChild(tailnet);
+  shareAct(row, "tailnet", "share-tailnet-save btn-quiet", "Save", () => postShare("tailnet", () => shareTailnet(typed.trim()), () => { if (tailnetDraft === typed) tailnetDraft = null; }, "share-tailnet-save"), typed.trim() === "");
+  if (sharing.tailnet !== null) {
+    shareAct(row, "tailnet", "share-off btn-danger", "Turn sharing off", () => postShare("tailnet", () => shareTailnet(null), () => {}, "share-off"), false);
+  }
+  const parts = [head, el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row];
+  if (sharing.colleagues.length === 0) parts.push(el("p", "share-none", "No colleague has access."));
+  else {
+    const list = el("ul", "share-people");
+    for (const c of sharing.colleagues) {
+      const item = el("li", "share-person");
+      item.dataset.login = c.login;
+      item.appendChild(el("b", "share-who", c.login));
+      item.appendChild(el("span", "share-projects", c.projects.join(", ")));
+      item.appendChild(actionButton("share-edit btn-quiet", "Change projects", () => {
+        loginDraft = c.login;
+        sharePicks.clear();
+        for (const id of c.projects) sharePicks.add(id);
+        renderSharing(lastView);
+        const field = findShare(body, "", "", "share-login field-line", "");
+        if (field !== null) field.focus({ preventScroll: true });
+      }));
+      shareAct(item, "login\n" + c.login, "share-remove btn-danger", "Remove", () => postShare("login\n" + c.login, () => fetch("/api/share-remove", {
+        method: "POST", headers: ownerHeaders(), body: JSON.stringify({ login: c.login }),
+      }), () => {}, "share-remove"), false);
+      list.appendChild(item);
+    }
+    parts.push(list);
+  }
+  const form = el("div", "share-form");
+  const login = accountField("share-login field-line", "Colleague's Tailscale login", "name@example.com");
+  login.value = loginDraft;
+  login.addEventListener("input", () => {
+    loginDraft = login.value;
+    renderSharing(lastView);
+  });
+  form.appendChild(login);
+  for (const id of projects) {
+    const pick = actionButton("share-project btn-quiet", id, () => {
+      if (!sharePicks.delete(id)) sharePicks.add(id);
+      renderSharing(lastView);
+    });
+    pick.dataset.project = id;
+    pick.setAttribute("aria-pressed", sharePicks.has(id) ? "true" : "false");
+    form.appendChild(pick);
+  }
+  const name = loginDraft.trim().toLowerCase();
+  const listed = sharing.colleagues.some((c) => c.login === name);
+  shareAct(form, "login\n" + name, "share-add btn-quiet", listed ? "Save projects" : "Add", () => {
+    const sent = loginDraft;
+    const picks = [...sharePicks].sort();
+    postShare("login\n" + name, () => fetch("/api/share-colleague", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ login: sent.trim(), projects: picks }),
+    }), () => {
+      if (loginDraft === sent && [...sharePicks].sort().join("\n") === picks.join("\n")) {
+        loginDraft = "";
+        sharePicks.clear();
+      }
+    }, "share-add");
+  }, name === "" || sharePicks.size === 0);
+  parts.push(form);
+  body.replaceChildren(...parts);
+  const again = kept === null ? null : findShare(body, "", kept.login, kept.cls, kept.project);
+  if (again !== null) {
+    again.focus({ preventScroll: true });
+    if (again.tagName === "INPUT") again.setSelectionRange(kept.start, kept.end);
+  }
+}
+function openSharing() {
+  if (lastView === null) return;
+  if (accountsOpen) closeAccounts();
+  sharingReturn = document.activeElement;
+  sharingOpen = true;
+  renderSharing(lastView);
+  document.getElementById("sharing").focus();
+}
+function closeSharing() {
+  sharingOpen = false;
+  if (lastView !== null) renderSharing(lastView);
+  const back = sharingReturn;
+  sharingReturn = null;
+  (back !== null && back.isConnected ? back : document.getElementById("sharing-open")).focus();
+}
+document.getElementById("sharing-open").addEventListener("click", () => {
+  if (sharingOpen) closeSharing();
+  else openSharing();
 });
 function renderPromoted(view) {
   const box = document.getElementById("promoted");
@@ -5566,6 +5761,7 @@ function render(view) {
     renderAccountAdd(view);
     renderInbox(view);
     renderAccounts(view);
+    renderSharing(view);
     renderDigest(view);
     renderProjects(view);
     renderUnmanaged(view);
@@ -5609,6 +5805,13 @@ document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
       closeAccounts();
+    }
+    return;
+  }
+  if (sharingOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeSharing();
     }
     return;
   }

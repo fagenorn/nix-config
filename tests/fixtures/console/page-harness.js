@@ -67,7 +67,7 @@
 // other name="value" attribute (attributes) and a bare hidden (hidden); an Elem holds hidden
 // and an isConnected getter (true when its parentNode chain reaches the root). A snapshot
 // node carries hidden (bool) and expanded (its aria-expanded attribute, null when unset), and
-// the snapshot adds accounts and accounts_body (each a node or null) beside account_add.
+// the snapshot adds accounts and accounts_body (each a node or null) beside account_add, and sharing, sharing_body and sharing_open the same way.
 // A fetch of a URL starting /api/picture/ is answered by the harness itself: it is recorded
 // in posts like every fetch but never takes from the replies queue or a hold, and answers
 // {status, ok, text(), blob()} with the status of the latest {picture_reply: {id, status}}
@@ -588,6 +588,9 @@ async function run() {
         register: byId("register") ? node(byId("register")) : null,
         accounts: byId("accounts") ? node(byId("accounts")) : null,
         accounts_body: byId("accounts-body") ? node(byId("accounts-body")) : null,
+        sharing: byId("sharing") ? node(byId("sharing")) : null,
+        sharing_body: byId("sharing-body") ? node(byId("sharing-body")) : null,
+        sharing_open: byId("sharing-open") ? node(byId("sharing-open")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
         reading: byId("reading") ? node(byId("reading")) : null,
         viewer: byId("viewer") ? node(byId("viewer")) : null,

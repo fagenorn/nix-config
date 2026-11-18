@@ -281,6 +281,7 @@ agent-workflow-tests *args:
     tests/test_console_spend_page.py \
     tests/test_console_guest.py \
     tests/test_console_guest_service.py \
+    tests/test_console_guest_page.py \
     tests/test_console_units.py \
     tests/test_system_packages.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
