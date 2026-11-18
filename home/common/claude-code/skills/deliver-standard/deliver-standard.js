@@ -2263,7 +2263,8 @@ if (MARKED && LOOK_ANSWER && LOOK_ANSWER.answer === 'approve') {
 ${RENEW_FIRST}
 Then read the head of PR #${P}, changing nothing: run ${UNSET}gh pr view ${P} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
 ${RULES}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(LOOK_HEAD_SCHEMA) }), r => r.renew)
-  const UNREAD = { details: `${NOT_RECORDED}: PR #${P}'s head could not be read; the verified head is ${V0}`, result: hd }
+  // A failed read says nothing about whether the owner recorded the approval: report the read, never a missing approval.
+  const UNREAD = { details: `the approval of ${A} could not be checked: PR #${P}'s head could not be read; the verified head is ${V0}`, result: hd }
   if (!hd) return stop('look-approve', UNREAD)
   const lostLook = renewed(hd.renew, 'look-approve')
   if (lostLook) return lostLook

@@ -1048,7 +1048,12 @@ class ManagerContractTest(unittest.TestCase):
         section = " ".join(
             text.partition("## A look before merge\n")[2].partition("\n## ")[0].split())
         for needle in ("`look`", "`issue`", "`pr`", "`head`", "`approve`",
-                       "the console records the approval", "never record an approval yourself"):
+                       "the console records the approval", "never record an approval yourself",
+                       "an approve with the owner's words is an ordinary answer",
+                       "whenever the head of a pull request changes while its look card is open",
+                       "replace that card at once with `replaces`",
+                       "A look card you opened without a `look` member",
+                       "a fresh look card for the same head that carries `look`"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)

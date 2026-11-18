@@ -78,7 +78,9 @@ round is
      "blocker": true | false}                   (blocker optional, default false)
 
 `look` is optional and marks the question as the owner's look at a pull request before merge: the console
-checks it and records the owner's approval itself when that option is picked (see the manager contract).
+checks it and records the owner's approval itself when that option is picked with no words typed beside it
+(see the manager contract). A question with a `look` must carry a picture marked `"pair": "before"` and one marked
+`"pair": "after"`, whatever its words say.
 
 `needs_words` is optional and holds the exact text of each option that needs the owner's own words:
 the page refuses that option until the owner writes what to change, the console checks it

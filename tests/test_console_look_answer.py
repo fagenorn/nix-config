@@ -17,6 +17,7 @@ from .forge_world import ForgeWorld
 from .test_console_answer import view_of
 from .test_console_messages import GOAL_TEXT, PARTS
 from .test_console_questions import JSON, Q0, QuestionRoutes, withdraw
+from .test_console_reports import CHECKED
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SLUG = "owner/p01"
@@ -33,6 +34,15 @@ LOOK_Q = {"question": "Does the settings page look right?", "blocks": "the merge
           "options": ["Approve this head", "Approve with one fix", "Ask for changes"],
           "recommended": "Approve this head",
           "look": {"issue": ISSUE, "pr": PR, "head": HEAD, "approve": "Approve this head"}}
+
+
+def with_pictures(svc, sid, secret, question=None):
+    """The look question with the before and after pictures a look card must carry, stored for the sprint."""
+    before = svc.store_picture(sid, secret, support.PIXEL)
+    after = svc.store_picture(sid, secret, support.WIDE)
+    return {**(LOOK_Q if question is None else question), "pictures": [
+        {"picture": before, "line": "The settings page before", "pair": "before"},
+        {"picture": after, "line": "The settings page now", "pair": "after"}]}
 
 
 def gh_argvs(world):
@@ -68,9 +78,12 @@ class LookAnswerTest(QuestionRoutes):
         self.assertEqual(status, 200)
         messages = json.loads(body)["messages"]
         self.assertEqual([m["kind"] for m in messages], ["approved"])
-        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [LOOK_Q]})
+        status, _, body = self.ask(svc, sid, self.secret(sid), self.look_round(svc, sid))
         self.assertEqual(status, 200, body)
         return sid, json.loads(body)["round"]
+
+    def look_round(self, svc, sid):
+        return {"questions": [with_pictures(svc, sid, self.secret(sid))]}
 
     def approve(self, svc, sid, round_id):
         return self.reply(svc, self.answer_body(sid, round_id, 0, choice=0))
@@ -144,7 +157,7 @@ class LookAnswerTest(QuestionRoutes):
                 entry = self.entry(svc, sid)
                 self.assertIs(entry["answered"], False)
                 self.assertEqual(entry["look"], {"issue": ISSUE, "pr": PR, "head": HEAD,
-                                                 "state": "moved", "line": line})
+                                                 "state": "moved", "line": line, "approve_index": 0})
                 self.assertEqual([m for m in self.answers(svc, sid)], [])
 
     def test_a_failed_post_stays_on_the_card_with_retry_and_retry_posts_once(self):
@@ -207,7 +220,7 @@ class LookAnswerTest(QuestionRoutes):
 
     def replace_round(self, svc, sid, round_id, head):
         """The manager's replacement of the reopened look card, for the head the pull request has now."""
-        question = {**LOOK_Q, "look": {**LOOK_Q["look"], "head": head},
+        question = {**with_pictures(svc, sid, self.secret(sid)), "look": {**LOOK_Q["look"], "head": head},
                     "replaces": {"round": round_id, "index": 0}}
         status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [question]})
         self.assertEqual(status, 200, body)
@@ -227,7 +240,7 @@ class LookAnswerTest(QuestionRoutes):
         entry = self.entry(svc, sid)
         self.assertIs(entry["answered"], False)
         self.assertEqual(entry["look"], {"issue": ISSUE, "pr": PR, "head": HEAD,
-                                         "state": "moved", "line": line})
+                                         "state": "moved", "line": line, "approve_index": 0})
         self.assertEqual(self.answers(svc, sid), [])
         status, _, body = self.retry(svc, sid, round_id)
         self.assertEqual((status, body), (409, answer.LOOK_NOT_PENDING.encode() + b"\n"))
@@ -343,13 +356,13 @@ class LookAnswerTest(QuestionRoutes):
     def test_an_open_look_card_names_what_its_approving_option_records(self):
         svc = self.open()
         sid = self.approved(svc)
-        question = {**LOOK_Q, "recommended": "Approve this head",
+        question = {**with_pictures(svc, sid, self.secret(sid)), "recommended": "Approve this head",
                     "look": {**LOOK_Q["look"], "approve": "Ask for changes"}}
         status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [question]})
         self.assertEqual(status, 200, body)
         self.assertEqual(
             self.entry(svc, sid)["look"],
-            {"issue": ISSUE, "pr": PR, "head": HEAD, "state": "open",
+            {"issue": ISSUE, "pr": PR, "head": HEAD, "state": "open", "approve_index": 2,
              "line": 'Choosing "Ask for changes" records your approval of aaaaaaa, '
                      'pull request #12, on issue #7.'})
 
@@ -398,6 +411,80 @@ class LookAnswerTest(QuestionRoutes):
         self.assertIn("gh_failed", line)
         self.assertIn("HTTP 503", line)
 
+    def test_the_approve_option_with_the_owners_words_is_an_ordinary_answer(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull()
+        words = "approve, but make the heading bold"
+        self.assertEqual(
+            self.reply(svc, self.answer_body(sid, round_id, 0, choice=0, text=words))[0], 204)
+        self.assertEqual(gh_argvs(self.world), [])
+        self.assertEqual(self.world.stored(), [])
+        self.assertEqual(self.rows("look.recorded"), [])
+        (answered,) = self.rows("question.answered")
+        self.assertNotIn("look", answered)
+        self.assertEqual((answered["chosen"], answered["words"]), ("Approve this head", words))
+        (message,) = [m for m in self.answers(svc, sid) if m["kind"] == "answer"]
+        self.assertEqual(message["id"], answered["seq"])
+        self.assertEqual([i for i in view_of(svc)["inbox"]["open"] if i["reason"] == "question"], [])
+
+    def test_a_head_that_moves_after_the_post_gives_the_question_back(self):
+        reads = iter([("open", HEAD), ("open", MOVED)])
+        svc = self.open(look_reader=lambda slug, pr: next(reads))
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull()
+        line = answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7])
+        status, _, body = self.approve(svc, sid, round_id)
+        self.assertEqual((status, body), (409, line.encode() + b"\n"))
+        (answered,) = self.rows("question.answered")
+        (moved,) = self.rows("look.recorded")
+        self.assertEqual((moved["outcome"], moved["message"], moved["found"], moved["state"]),
+                         ("moved", answered["seq"], MOVED, "open"))
+        (marker,) = self.world.stored()
+        self.assertEqual(marker["body"], self.marker_for(answered["seq"]))
+        self.assertEqual(self.answers(svc, sid), [])
+        self.assertIs(self.entry(svc, sid)["answered"], False)
+
+    def test_a_failed_final_read_keeps_the_answer_held_with_retry(self):
+        calls = []
+
+        def reader(slug, pr):
+            calls.append(pr)
+            if len(calls) == 2:
+                raise ForgeError("gh_failed", "gh: Server Error (HTTP 502)", transient=False)
+            return "open", HEAD
+
+        svc = self.open(look_reader=reader)
+        sid, round_id = self.asked(svc)
+        self.store_comments()
+        self.pull()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        (failed,) = self.rows("look.recorded")
+        self.assertEqual((failed["outcome"], failed["reason"]), ("failed", answer.FORGE_DOWN))
+        self.assertEqual(self.answers(svc, sid), [])
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        self.assertEqual(len(self.world.stored()), 1)
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "posted"])
+        (row,) = self.rows("question.answered")
+        self.assertEqual([m["id"] for m in self.answers(svc, sid)], [row["seq"]])
+
+    def test_a_failed_approval_keeps_retry_after_the_manager_reported_done(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        svc.send_report(sid, self.secret(sid), {**CHECKED, "phase": "done"})
+        self.store_comments(fail_once=("post",) * (len(answer.RETRY_DELAYS) + 1))
+        self.pull()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed"])
+        self.store_comments()
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "posted"])
+        self.assertEqual(len(self.world.stored()), 1)
+
     def test_a_changes_answer_posts_nothing_and_reaches_the_manager(self):
         svc = self.open()
         sid, round_id = self.asked(svc)
@@ -409,7 +496,7 @@ class LookAnswerTest(QuestionRoutes):
                 self.assertEqual(gh_argvs(self.world), [])
                 (message,) = self.answers(svc, sid)
                 self.assertEqual((message["kind"], message["round"]), ("answer", round_id))
-                status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [LOOK_Q]})
+                status, _, body = self.ask(svc, sid, self.secret(sid), self.look_round(svc, sid))
                 self.assertEqual(status, 200, body)
                 round_id = json.loads(body)["round"]
 
@@ -564,7 +651,7 @@ class LookNudgeTest(QuestionRoutes):
         svc.send_brief(sid, self.secret(sid), PARTS)
         svc.approve_brief("owner/p01", sid, 1)
         self.queued.run_next()
-        state["round"], _ = svc.ask_questions(sid, self.secret(sid), {"questions": [LOOK_Q]})
+        state["round"], _ = svc.ask_questions(sid, self.secret(sid), {"questions": [with_pictures(svc, sid, self.secret(sid))]})
         self.world.comment_store(SLUG, ISSUE, [], labels=[],
                                  fail_once=("post",) * (len(answer.RETRY_DELAYS) + 1))
         self.world.respond_json("gh", PULL, {"number": PR, "state": "open", "merged": False,

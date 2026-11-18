@@ -304,10 +304,12 @@ is none. Its entry is
                     "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
-                     "line": <str>},
+                     "line": <str>, "approve_index": <int> | null},
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
 
-`look` (#1260) is null for a question that carries no look. For one that does, `state` is `open`
+`look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
+among the logged options of the option that approves the head (the page never starts that option picked, so
+an approval is always the owner's own choice), and `state` is `open`
 (`line` is `answer.LOOK_APPROVES`: the console's own words naming the option that approves, the head and
 pull request it approves, so a manager's option text cannot hide that choosing it approves), `moved` (the pull request moved or ended before the owner approved; `line` is
 `answer.LOOK_MOVED`, or `answer.LOOK_CLOSED` when the found state is not open), `posting` (`line` is
@@ -1987,7 +1989,9 @@ def _look_entry(question: Question) -> dict | None:
         state, line = "posting", owner_answer.LOOK_RECORDING.format(head=look.head[:7], issue=look.issue)
     elif question.look_state == "failed":
         state, line = "failed", question.look_reason
-    return {"issue": look.issue, "pr": look.pr, "head": look.head, "state": state, "line": line}
+    approve = question.options.index(look.approve) if look.approve in question.options else None
+    return {"issue": look.issue, "pr": look.pr, "head": look.head, "state": state, "line": line,
+            "approve_index": approve}
 
 
 def _question_entry(sprint: SprintState, question: Question) -> dict:

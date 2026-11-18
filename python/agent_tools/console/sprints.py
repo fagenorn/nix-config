@@ -357,7 +357,10 @@ and `index`, an int that is not a bool and at least 0). The picture checks follo
 fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after
 stripping), `LINE_TOO_LONG` (over `MAX_PICTURE_LINE_CHARS`), `PICTURE_MEMBER` for `line` again (a
 line break, or over `MAX_LINE_CHARS`) and `PICTURE_MEMBER` for `pair` (present and not in `PAIRS`);
-after the loop `PAIR_TWICE` for the first `pair` given twice, then (#1092) `LOOK_WITHOUT_PICTURE`
+after the loop `PAIR_TWICE` for the first `pair` given twice, then (#1260) `LOOK_PAIR` for a question
+with a `look` whose pictures lack a member marked `before` or one marked `after` (a card
+that approves a head shows the owner the pair, whatever its words say; a round read back from the log
+or a check with `files_withheld=True` skips it), then (#1092) `LOOK_WITHOUT_PICTURE`
 for a question that has no picture while its ask or context matches `LOOK_WORDS` (the word
 screenshot or screenshots in any case, also written "screen shot", a `.png` file or a folder with a
 `screenshots` segment), naming the question's number and ask; a round read back from the log
@@ -606,7 +609,7 @@ Each row changes only an open sprint:
 
 `ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
 is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING`, no question is open and the
-report's phase is `done` (the route that predates the closing report; a newer brief drops that
+report's phase is `done` and no answered look question still waits for its approval to be posted (`pending_looks`, #1260: a failed post keeps its Retry) (the route that predates the closing report; a newer brief drops that
 done report when it is sent, so a replaced sprint is not ended again by the old report); else `None`. A sprint has ended when `ended_at` is not `None`.
 
 `stop_due(state, now_ms)` is true when `stop_at` is set, `stopped_at` is `None`, the closing is set
@@ -796,6 +799,8 @@ QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, o
                   "recommended, pictures, look and replaces")
 LOOK_SHAPE = "question {n}'s look is not an object of issue, pr, head and approve"
 LOOK_APPROVE = "question {n}'s look approve is not one of its options"
+LOOK_PAIR = ('question {n} is a look card and needs a picture marked "pair": "before" and one '
+             'marked "pair": "after": attach the pictures with pictures')
 REPLACES_SHAPE = "question {n}'s replaces is not an object of round and index"
 REPLACES_TWICE = "question {n} replaces a question another question of the round replaces"
 REPLACES_REFUSED = "question {n} cannot replace round {round} question {index}: {reason}"
@@ -1492,6 +1497,9 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
     pictures = _checked_pictures(n, question["pictures"], limits) if "pictures" in question else []
+    if (limits and not files_withheld and "look" in question
+            and not set(PAIRS) <= {member.get("pair") for member in pictures}):
+        raise Refused(LOOK_PAIR.format(n=n))
     if (limits and not files_withheld and not pictures
             and any(LOOK_WORDS.search(part) for part in (text, context) if part)):
         raise Refused(LOOK_WITHOUT_PICTURE.format(n=n, ask=text.strip()))
@@ -2116,7 +2124,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         if (question.answer is not None or question.withdrawn_at is not None
                 or (chosen is not None and chosen not in question.options)):
             return state
-        held = _approves_look(question, chosen, payload.get("look"))
+        held = "words" not in payload and _approves_look(question, chosen, payload.get("look"))
         words = payload.get("words")
         answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
                            differs=chosen != question.recommended, words=words,
@@ -2467,7 +2475,7 @@ def ended_at(state: SprintState) -> str | None:
     if state.closing is not None:
         return state.closing.at
     if (state.state == STARTING and state.report is not None and state.report.phase == DONE
-            and not open_questions(state)):
+            and not open_questions(state) and not pending_looks(state)):
         return state.report.at
     return None
 

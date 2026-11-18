@@ -2009,7 +2009,8 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         self.assertLess(exception, step1.index("`forge-claim acquire"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         status = land[land.index(self.STATUS):land.index("`forge-claim land acquire")]
-        self.assertIn("`unmarked`: go on; else follow " + LOOK_RULES_POINTER + "; `needed` stops.", status)
+        self.assertIn("`unmarked`: go on, not on a resume; else follow "
+                      + LOOK_RULES_POINTER + "; `needed` stops.", status)
         self.assertNotIn("`needed`: stop", status)
 
     def test_a_session_resuming_after_an_approval_still_acquires_and_follows_the_standard(self):
@@ -2066,6 +2067,20 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         for form in ("look-approval post", "--answer approved"):
             with self.subTest(absent=form):
                 self.assertNotIn(form, approve)
+
+    def test_a_resume_never_takes_the_unmarked_go_on_of_step_six(self):
+        resume = self.section("Resume")
+        self.assertIn("step 6's go-on for `unmarked` never applies to it", resume)
+        self.assertLess(resume.index("step 6's go-on"), resume.index("It is one of three"))
+
+    def test_an_approve_for_a_pull_request_that_is_no_longer_open_reports_its_state(self):
+        approve = self.bullet(self.section("Resume"), "approve")
+        closed = approve[approve.index("if it is not `OPEN`"):approve.index("only while it is `OPEN`")]
+        for form in ("merge nothing", "`forge-claim release`", "report its state"):
+            with self.subTest(form=form):
+                self.assertIn(form, closed)
+        self.assertLess(approve.index(self.STATE_READ), approve.index("if it is not `OPEN`"))
+        self.assertLess(approve.index("if it is not `OPEN`"), approve.index(self.STATUS))
 
     def test_an_approve_read_that_errors_or_finds_no_marker_is_reported_not_called_a_missing_approval(self):
         approve = self.bullet(self.section("Resume"), "approve")

@@ -199,7 +199,9 @@ exception is `console: look_retry_failed <Type>: <message>` and 500 `look retry 
 `204`.
 
 Approving a look card (#1260, ADR-console-073). An answer that chooses the `look.approve` option of a question
-that carries a `look` is recorded by the console on the issue itself, in this order. The project's repository
+that carries a `look` and carries no words of the owner's (`text` absent: an option picked with words typed beside
+it is an ordinary answer that reaches the manager as it is, because those words may ask for a fix) is recorded by
+the console on the issue itself, in this order. The project's repository
 is `slug_of(root)`; none is `sprints.Refused(LOOK_NO_REPOSITORY)` with nothing read or appended. The slot
 `(sprint, round, index)` is reserved (a second approval or retry meanwhile is `LOOK_SENDING`), and the pull
 request is read through `look_reader` with `answer.with_retries`, outside the ingest lock and before anything
@@ -223,7 +225,12 @@ card's head, so no attempt, an automatic retry included, posts a stale approval)
 request closed, merged or at another head (`answer.LookMoved`, on the first attempt or on a retry) appends
 `look.recorded moved` with the answer's id: the fold takes the answer back and the question is open again for the
 manager to replace, so the answer or the retry is a 409 with `LOOK_MOVED` or `LOOK_CLOSED` after logging
-`console: look_post_moved <sprint> <round> <index>: <reason>`. `retry_look` also refuses `ENDED` once the sprint
+`console: look_post_moved <sprint> <round> <index>: <reason>`. Every post is followed by one more read of the pull
+request (`look_reader`, retried the same way): a pull request that moved or closed between the read before the
+post and the post is recorded as `moved` the same way, and a failed final read is recorded `failed` (a retry finds
+the marker and reads again), so the answer is released to the manager only for a head still the card's at the last
+read. The tracker cannot make the read and the post one step, so a push landing after that last read still leaves
+a marker that names the head the owner looked at, which the merge guard judges against the head it then sees. `retry_look` also refuses `ENDED` once the sprint
 has ended or stopped, and posts nothing. The manager's answer message is
 held until `posted`. At `start()`, before the threads, each approval left `posting` by a stopped console gets
 `look.recorded failed` with `LOOK_INTERRUPTED`. An answer that does not approve a look card is unchanged. `POST /api/signin`, `POST /api/signin-code` and
@@ -6718,7 +6725,8 @@ class ConsoleService:
                 chosen, said = None, sprints.checked_message(text)
             extra = {} if words is None else {"words": words}
             look = asked.look
-            if look is None or chosen != look.approve:
+            plain = look is None or chosen != look.approve or words is not None
+            if plain:
                 appended = self.log.append([self._answered_row(
                     project_id, sprint, asked, chosen, said, **extra)])
                 self._apply(appended)
@@ -6730,7 +6738,7 @@ class ConsoleService:
                 if slot in self._look_sending:
                     raise sprints.Refused(answer.LOOK_SENDING)
                 self._look_sending.add(slot)
-        if look is None or chosen != look.approve:
+        if plain:
             if reserved:
                 self._dispatch_nudge(sprint_id)
             return appended[-1].seq
@@ -6791,6 +6799,13 @@ class ConsoleService:
             comment = answer.with_retries(
                 lambda: self._look_recorder(slug, look.issue, look.pr, look.head, str(seq)),
                 clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
+            # The tracker offers no way to make the read and the post one step, so the pull request is
+            # read once more before the answer is declared recorded (ADR-console-073 D10).
+            state, found = answer.with_retries(
+                lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
+                sleep=self._write_sleep, on_retry=on_retry)
+            if state != "open" or found != look.head:
+                raise answer.LookMoved(state, found, look.head)
         except answer.LookMoved as error:
             print(f"console: look_post_moved {key}: {error}", file=sys.stderr)
             with self._ingest:

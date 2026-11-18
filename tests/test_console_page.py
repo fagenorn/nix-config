@@ -5662,7 +5662,7 @@ FAILED_LINE = "GitHub had a problem and did not take the answer. Try again in a 
 
 
 def look_of(state: str, line: str | None) -> dict:
-    return {"issue": 12, "pr": 34, "head": "a" * 40, "state": state, "line": line}
+    return {"issue": 12, "pr": 34, "head": "a" * 40, "state": state, "line": line, "approve_index": 0}
 
 
 def look_answered(state: str, line: str | None) -> dict:
@@ -5728,10 +5728,28 @@ class PageLookTest(unittest.TestCase):
         moved_card = question(0, "May this merge?", options, "approve", look=look_of("moved", MOVED_LINE))
         (snap,) = render([START, {"frame": frame([open_card])},
                           {"respond": {"status": 409, "text": MOVED_LINE + "\n"}},
-                          {"key": "Enter"}, {"clock": 5000}, {"frame": frame([moved_card])},
+                          {"key": "1"}, {"key": "Enter"}, {"clock": 5000}, {"frame": frame([moved_card])},
                           {"snapshot": True}])
         self.assertEqual(full(snap["inbox"]).count(MOVED_LINE), 1)
         self.assertNotIn("Could not send", full(snap["inbox"]))
+
+    def test_a_look_card_never_starts_its_approving_option_picked(self) -> None:
+        open_card = question(0, "May this merge?", ["approve", "ask for changes"], "approve",
+                             look=look_of("open", "Choosing approve records it."))
+        (nothing, typed, picked) = render([
+            START, {"frame": frame([open_card])}, {"key": "Enter"}, {"clock": 5000},
+            {"snapshot": True},
+            {"type": {"class": "words-text", "text": "please change the heading"}},
+            {"click": "send"}, {"clock": 10000}, {"snapshot": True},
+            {"frame": frame([open_card])},
+            {"click": "opt", "nth": 0}, {"click": "send"}, {"clock": 15000}, {"snapshot": True},
+        ])
+        self.assertEqual(round_posts(nothing), [])
+        (post,) = round_posts(typed)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0,
+            "text": "please change the heading"})
+        self.assertEqual([posted(p) for p in round_posts(picked)][-1]["choice"], 0)
 
     def test_a_failed_retry_says_why(self) -> None:
         failed = look_answered("failed", FAILED_LINE)

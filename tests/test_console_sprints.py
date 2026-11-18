@@ -2759,10 +2759,12 @@ class NoticeParseTest(unittest.TestCase):
 
 
 LOOK = {"issue": 7, "pr": 12, "head": "a" * 40, "approve": "Approve this head"}
+PAIR = [{"picture": "1" * 64, "line": "before", "pair": "before"},
+        {"picture": "2" * 64, "line": "after", "pair": "after"}]
 LOOK_QUESTION = {"question": "Does the settings page look right?",
                  "blocks": "the settings slice",
                  "options": ["Approve this head", "Ask for changes"],
-                 "recommended": "Approve this head", "look": LOOK}
+                 "recommended": "Approve this head", "look": LOOK, "pictures": PAIR}
 LOOKED = {"issue": 7, "pr": 12, "head": "a" * 40, "repo": "owner/p00"}
 
 
@@ -2820,6 +2822,43 @@ class LookCardTest(unittest.TestCase):
             sprints.checked_round(
                 {"questions": [dict(LOOK_QUESTION, look={**LOOK, "approve": "Approve it"})]})
         self.assertEqual(str(caught.exception), sprints.LOOK_APPROVE.format(n=1))
+
+    def test_a_look_card_without_its_before_and_after_pictures_is_refused(self):
+        bare = {key: value for key, value in LOOK_QUESTION.items() if key != "pictures"}
+        for name, pictures in {"none": None, "empty": [],
+                               "only before": PAIR[:1], "only after": PAIR[1:],
+                               "unmarked": [{k: v for k, v in m.items() if k != "pair"} for m in PAIR]
+                               }.items():
+            with self.subTest(name), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_round({"questions": [
+                    bare if pictures is None else dict(bare, pictures=pictures)]})
+            self.assertEqual(str(caught.exception), sprints.LOOK_PAIR.format(n=1))
+        for kw in ({"limits": False}, {"files_withheld": True}):
+            with self.subTest(kw):
+                self.assertIn("look", sprints.checked_round({"questions": [bare]}, **kw)["questions"][0])
+        extra = {"picture": "3" * 64, "line": "more"}
+        sprints.checked_round({"questions": [dict(LOOK_QUESTION, pictures=[*PAIR, extra])]})
+
+    def test_an_answer_with_words_is_not_held_as_an_approval(self):
+        state = self.state(look_answer(6, words="but make the heading bold"))
+        self.assertIsNone(self.look_question(state).look_state)
+        self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+
+    def test_a_sprint_whose_look_approval_is_not_posted_has_not_ended(self):
+        done = row(6, event_log.SPRINT_REPORTED,
+                   {"goal": "one", "report": {**REPORT, "phase": "done"}})
+
+        def ended(*more):
+            return sprints.ended_at(self.state(done, *more))
+
+        self.assertIsNone(ended())
+        self.assertIsNone(ended(look_answer(7)))
+        self.assertIsNone(ended(look_answer(7), look_record(8, "failed", message=7, reason="x")))
+        self.assertTrue(sprints.takes_questions(self.state(done, look_answer(7))))
+        self.assertEqual(ended(look_answer(7), look_record(8, "posted", message=7, comment_id=1)),
+                         at(6))
+        plain = look_answer(7, answer="Ask for changes", chosen="Ask for changes")
+        self.assertEqual(ended(plain), at(6))
 
     def test_an_approval_names_the_repository_it_was_read_for(self):
         state = self.state(look_answer(6))

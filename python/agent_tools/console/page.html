@@ -1833,7 +1833,7 @@ function projectLine(entry) {
   if (buttons > 0) line.appendChild(acts);
   return line;
 }
-// A not-due owner check (#1129, ADR-console-055): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
+// A not-due owner check (#1129, ADR-console-055): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment.
 function waitLine(wait, tag) {
   const line = el(tag, "wait");
   if (typeof wait.until === "string") {
@@ -2212,7 +2212,7 @@ function askBox(projectId, entry) {
   box.appendChild(reason);
   return box;
 }
-// An answer's text as block nodes (#1226, D6): fenced code, bullet and numbered lists and paragraphs, built with el() only. A fence runs to the closing fence or the end; every other markup stays text.
+// An answer's text as block nodes (#1226, D6): fenced code, lists and paragraphs, built with el() only; every other markup stays text.
 function answerBlocks(text) {
   const lines = String(text).split("\n").map((line) => line.replace(/\r$/, ""));
   const blocks = [];
@@ -2260,7 +2260,7 @@ function answerBlocks(text) {
   endPara();
   return blocks;
 }
-// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong, and its text may span inline code; the rest is span text, an unmatched marker included.
+// Inline nodes for a text (#1226, D6): a backtick pair is code.md-code, verbatim; outside it a non-empty **x** is strong; the rest is span text.
 function inlineNodes(text) {
   const value = String(text);
   const spans = [];
@@ -2298,7 +2298,7 @@ function inlineNodes(text) {
   emit(push, at, value.length);
   return nodes;
 }
-// One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, the closed sources fold, Make it a goal, then the call-out, which is last.
+// One question of the open thread (#1226, D5, D8): the first question is the panel's heading, so its row omits it. An answered row reads answer, quiet lines, sources fold, Make it a goal, call-out.
 function askRow(projectId, question, first, last, thread) {
   const row = el("li", "ask");
   if (!first) row.appendChild(phrase("p", "ask-question", question.question, timeEl("ago", question.asked_at, "ask-age")));
@@ -2327,7 +2327,7 @@ function askRow(projectId, question, first, last, thread) {
   if (typeof question.back_text === "string") row.appendChild(askCallout(projectId, question, last, thread));
   return row;
 }
-// The question back to the owner: its text, then its choices as buttons only on the thread's last question while answered and with no follow-up outstanding, then the reason a refused choice gives.
+// The question back to the owner: its text, then its choices as buttons only on the thread's last question while answered with no follow-up outstanding, then the reason a refused choice gives.
 function askCallout(projectId, question, last, thread) {
   const callout = el("div", "ask-callout");
   callout.setAttribute("role", "group");
@@ -3484,13 +3484,18 @@ function recommendedIndex(q) {
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
+// A look card's approving option (#1260) never starts picked: an approval is the owner's own choice.
+function approvingIndex(item) {
+  const look = isQuestion(item) ? item.look : null;
+  return look && Number.isInteger(look.approve_index) ? look.approve_index : -1;
+}
 function startPicks(item) {
   if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
     const recommended = recommendedIndex(q);
-    return recommended >= 0 ? recommended : null;
+    return recommended >= 0 && recommended !== approvingIndex(item) ? recommended : null;
   });
 }
 function answerState(item) {

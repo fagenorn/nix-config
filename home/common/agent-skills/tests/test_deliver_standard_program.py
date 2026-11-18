@@ -10737,10 +10737,11 @@ class LookResumeTest(unittest.TestCase):
             got = labels(calls)
             self.assertEqual(result["stage"], "look-approve")
             self.assertEqual(result["details"], self.UNREAD)
+            self.assertNotIn("not recorded", result["details"])
             for label in ("look-read", "look-post", "look-pr", "pr", "merge"):
                 self.assertNotIn(label, got)
 
-    UNREAD = "the approval of " + SHA + " was not recorded: PR #42's head could not be read; the verified head is " + SHA
+    UNREAD = "the approval of " + SHA + " could not be checked: PR #42's head could not be read; the verified head is " + SHA
 
     # #1246: an approve answer is verified and recorded for the pull request head, else the stop names both heads.
     NOT_RECORDED = " was not recorded: "
