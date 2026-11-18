@@ -116,6 +116,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
+.card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -3153,6 +3154,61 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
+// A look card's one line (#1260): why nothing was recorded, or what the console is doing about the approval; an open look has none.
+function lookLine(item) {
+  if (!isQuestion(item) || item.look === null || typeof item.look !== "object" || typeof item.look.line !== "string") return null;
+  return el("p", "look-line", item.look.line);
+}
+// An approval the owner gave that the console has not yet put on the tracker: its line, and Retry once the post failed.
+function isLookCard(item) {
+  return isQuestion(item) && item.answered === true && item.look !== null && typeof item.look === "object";
+}
+const lookPosts = new Map();
+async function lookRetry(item) {
+  const id = itemId(item);
+  const current = lookPosts.get(id);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  lookPosts.set(id, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/look-retry", {
+      method: "POST", headers: stallHeaders(),
+      body: JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index }),
+    });
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (lookPosts.get(id) !== state) return;
+  if (reason === null) lookPosts.delete(id);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function lookCard(item) {
+  const card = el("article", "card look-card");
+  card.appendChild(headLine(item));
+  card.appendChild(pathWords(el("h2", "q"), item.headline));
+  const line = lookLine(item);
+  if (line !== null) card.appendChild(line);
+  if (item.look.state === "failed") {
+    const again = lookPosts.get(itemId(item));
+    const sending = again !== undefined && again.phase === "sending";
+    const retry = actionButton("look-retry btn-primary", "Retry", () => lookRetry(item));
+    if (sending) retry.setAttribute("disabled", "");
+    markBusy(retry, sending);
+    const act = el("div", "act");
+    act.appendChild(retry);
+    if (again !== undefined && again.phase === "failed") act.appendChild(el("span", "fail", "Could not retry: " + again.reason));
+    card.appendChild(act);
+  }
+  return card;
+}
 // The shared gallery for any card (ADR-console-038), also drawn by the brief card and the report (ADR-console-041): each picture is fetched once with the page token and shown from an object URL.
 const pictureCache = new Map();
 function pictureSequence(pictures) {
@@ -3627,7 +3683,7 @@ function postPlanAnswer(body) {
 const NO_REASON = "the console did not say why.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
-    && !state.pending.round && !state.pending.retry && !state.pending.plan;
+    && !state.pending.retry && !state.pending.plan;
 }
 function sendAgain(item, state) {
   if (state.phase !== "failed" || state.again !== true || !trackerAnswer(state)) return false;
@@ -4179,6 +4235,8 @@ function leadItem(item) {
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
+  const lookWords = lookLine(item);
+  if (lookWords !== null) card.appendChild(lookWords);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -4221,6 +4279,8 @@ function itemLine(item) {
   }
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
+  const lookWords = lookLine(item);
+  if (lookWords !== null) line.appendChild(lookWords);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);
@@ -4335,12 +4395,16 @@ function drawInbox(view) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isLookCard(item));
+  const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
     const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
       : key.startsWith("start-retry\n") || key.startsWith("start-withdraw\n") ? starts : stalls;
     if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+  }
+  for (const id of [...lookPosts.keys()]) {
+    if (lookPosts.get(id).phase !== "sending" && !looks.some((item) => itemId(item) === id)) lookPosts.delete(id);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
   const profiles = view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
@@ -4424,6 +4488,7 @@ function drawInbox(view) {
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
+  for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);
     cardOf.set(stateId(tracked[0]), lead);

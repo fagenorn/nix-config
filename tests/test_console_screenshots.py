@@ -99,15 +99,16 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_eight_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 28)
+    def test_the_set_is_thirty_one_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 31)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-10:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-13:], ("goal-open", "goal-near", "goal-over", "inbox-card",
+                                              "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
@@ -116,7 +117,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight"}
+                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine",
+                 30: "thirty", 31: "thirty-one"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)

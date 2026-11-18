@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twenty-eight screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty-one screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -27,7 +27,12 @@ Contract:
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
-  two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
+  two options and an owner check beside it; `look-card` is a look card on an approved `owner/web`
+  sprint, open, with its three options (#1260); `look-moved` is that card after an approval found
+  the pull request at another head, so its line says nothing was recorded and to ask for a new look,
+  the options still there; `look-failed` is that card answered with the approval and its
+  tracker post failed, so the card holds the headline, the reason and a Retry button and no
+  options; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
   lines) and one question still working, each its own thread, the Questions fold and both
@@ -54,7 +59,7 @@ Contract:
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 56 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 62 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -118,6 +123,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_tools.console import capacity, event_log, manager, sessions, signin
+from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
@@ -129,7 +135,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
-          "inbox-card", "accounts-panel", "ask-box", "questions-closed", "questions-open",
+          "inbox-card", "look-card", "look-moved", "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -138,6 +144,9 @@ GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
+LOOK_APPROVE = "Approve this head"
+LOOK_HEAD = "3f9c1d27a05be84c61d9f0273b8e5a14c7d0962e"
+LOOK_FOUND = "8e41b0a6d2c7f35918ae04b7c6d1259f3e0a7b84"
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -370,6 +379,30 @@ class _Seed:
             "the trust prompt, then retry.")})
         return sid, goal
 
+    def look(self, project: str, sid: str, goal: str, *, moved: bool = False,
+             failed: bool = False) -> None:
+        """One look question on `sid`: open, found moved to another head, or approved with the post failed."""
+        base = {"sprint_id": sid, "goal": goal}
+        asked = self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
+            "question": "Does the settings page look right?",
+            "blocks": "the merge of issue 12",
+            "context": "The before and after of the settings page, from the same pull request.",
+            "options": [LOOK_APPROVE, "Approve with one fix", "Ask for changes"],
+            "recommended": LOOK_APPROVE,
+            "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "approve": LOOK_APPROVE}}]})
+        where = {"round": asked.seq, "index": 0}
+        if moved:
+            self.put(MINUTE * 2, "look.recorded", project, {
+                **base, **where, "outcome": "moved", "found": LOOK_FOUND, "state": "open"})
+        if failed:
+            answered = self.put(MINUTE * 3, "question.answered", project, {
+                **base, **where, "question": "Does the settings page look right?",
+                "answer": LOOK_APPROVE, "chosen": LOOK_APPROVE, "recommended": LOOK_APPROVE,
+                "differs": False, "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD}})
+            self.put(MINUTE * 2, "look.recorded", project, {
+                **base, **where, "outcome": "failed", "message": answered.seq,
+                "reason": FORGE_DOWN})
+
     def check(self, project: str, issue: int, ago: float) -> None:
         """One open `verify-ask` inbox item on `issue`, which blocks none of the manager's work."""
         self.put(ago, "inbox.seen", project, {
@@ -457,6 +490,9 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
                     asks=True)
         seed.check(web, 11, 3 * MINUTE)
+    elif state in ("look-card", "look-moved", "look-failed"):
+        sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
+        seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
     elif state == "accounts-panel":
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
