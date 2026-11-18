@@ -3016,8 +3016,11 @@ async function postShare(key, send, done, cls) {
 function shareAct(parent, key, cls, label, onClick, off) {
   const state = sharePosts.get(key);
   const button = actionButton(cls, label, onClick);
-  button.disabled = off || (state !== undefined && state.phase === "sending");
-  markBusy(button, state !== undefined && state.phase === "sending" && state.cls === cls.split(" ")[0]);
+  const sending = state !== undefined && state.phase === "sending";
+  button.disabled = off;
+  // aria-disabled, not disabled, while the post is held: a disabled button cannot take the focus the rebuild restores to it; postShare ignores a second click.
+  if (sending) button.setAttribute("aria-disabled", "true");
+  markBusy(button, sending && state.cls === cls.split(" ")[0]);
   parent.appendChild(button);
   if (state !== undefined && state.phase === "failed" && state.cls === cls.split(" ")[0]) {
     parent.appendChild(el("span", "share-refused", "The console refused: " + state.reason + "."));

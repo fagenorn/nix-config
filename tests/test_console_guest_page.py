@@ -200,7 +200,7 @@ class SharingPanelTest(unittest.TestCase):
             {"hold": True}, {"click": "share-add"}, SNAP,
             {"release": {"status": 409, "text": "owner/p09 is not registered\n"}}, SNAP])
         (add,) = named(sending["sharing_body"], "share-add")
-        self.assertIs(add["disabled"], True)
+        self.assertEqual(add["aria_disabled"], "true")
         self.assertEqual(add["busy"], "true")
         (add,) = named(refused["sharing_body"], "share-add")
         self.assertIs(add["disabled"], False)
@@ -208,6 +208,23 @@ class SharingPanelTest(unittest.TestCase):
         self.assertEqual(
             [full(n) for n in named(refused["sharing_body"], "share-refused")],
             ["The console refused: owner/p09 is not registered."])
+
+    def test_a_busy_sharing_control_keeps_the_focus(self) -> None:
+        sending, refused, done = harness([
+            *OPEN, {"focus_on": "share-remove", "nth": 1}, {"hold": True},
+            {"click": "share-remove", "nth": 1}, SNAP,
+            {"release": {"status": 409, "text": "no"}}, SNAP,
+            {"hold": True}, {"click": "share-remove", "nth": 1}, {"release": NO_REPLY}, SNAP])
+        for snap in (sending, refused, done):
+            (focused,) = [n for n in nodes(snap["sharing_body"]) if n["focused"]]
+            self.assertTrue(has_class(focused, "share-remove"))
+            (owner,) = [p for p in named(snap["sharing_body"], "share-person")
+                        if any(n["focused"] for n in nodes(p))]
+            self.assertEqual(full(named(owner, "share-who")[0]), SECOND)
+        (focused,) = [n for n in nodes(sending["sharing_body"]) if n["focused"]]
+        self.assertEqual(focused["busy"], "true")
+        self.assertEqual(focused["aria_disabled"], "true")
+        self.assertIs(focused["disabled"], False)
 
     def test_a_frame_keeps_the_typed_login_and_its_focus(self) -> None:
         (snap,) = harness([
@@ -241,13 +258,14 @@ class SharingPanelTest(unittest.TestCase):
             {"click": "share-edit", "nth": 1}, {"hold": True}, {"click": "share-add"}, SNAP,
             {"click": "share-remove", "nth": 1}, {"release": NO_REPLY}, SNAP])
         body = held["sharing_body"]
-        self.assertEqual([named(body, c)[0]["disabled"] for c in ("share-off", "share-tailnet-save")],
-                         [True, True])
+        self.assertEqual(
+            [named(body, c)[0]["aria_disabled"] for c in ("share-off", "share-tailnet-save")],
+            ["true", "true"])
         self.assertEqual(writes(released), [
             (service.SHARE_TAILNET_PATH, '{"tailnet":"other.invented-tailnet.ts.net"}')])
         self.assertEqual(named(released["sharing_body"], "share-tailnet")[0]["value"], typed)
         removes = named(sending["sharing_body"], "share-remove")
-        self.assertEqual([n["disabled"] for n in removes], [False, True])
+        self.assertEqual([n["aria_disabled"] for n in removes], [None, "true"])
         paths = [url for url, _ in writes(done)]
         self.assertEqual(paths.count(service.SHARE_COLLEAGUE_PATH), 1)
         self.assertNotIn(service.SHARE_REMOVE_PATH, paths)
