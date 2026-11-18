@@ -1424,7 +1424,8 @@ exception is `console: project_question_failed <Type>: <message>` and 500 `quest
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
 once it is answered. `ask_project_question(project_id, text, thread_id=None)` admits a question under the ingest
-lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
+lock, in this order: a credential-shaped text is `Refused` first (#1272, `project_question.CREDENTIAL`,
+before the lock and every check below, never repeating the text), no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
 `project_question.follow_up` against the project's folded questions (an unknown thread, a thread
@@ -3980,7 +3981,10 @@ class ConsoleService:
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
         turns go to the job. Refusals are `project_question.Refused` and append and count nothing.
+        A credential-shaped text is refused first, before every other check (#1272).
         """
+        if project_question.credential_shaped(text):
+            raise project_question.Refused(project_question.CREDENTIAL)
         with self._ingest:
             if self._project_asker is None:
                 raise project_question.Refused(project_question.UNAVAILABLE_TEXT)

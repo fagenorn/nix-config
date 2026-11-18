@@ -5,6 +5,8 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shlex
@@ -22,7 +24,7 @@ from unittest import mock
 
 from agent_tools.console import (
     account_remove, event_log, project_question, project_question_hook as hook, service, signin, sprints,
-    view)
+    view, write_guard)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
 
@@ -682,6 +684,23 @@ QUESTION_ROUTE = "/api/project-question"
 JSON = {"Content-Type": "application/json"}
 WHY = "owner/p01"
 
+FAKE_CREDENTIALS = {
+    "github": "gh" + "p_" + "a1b2c3" * 6,
+    "github_pat": "github" + "_pat_" + "11ab" * 6,
+    "hugging_face": "h" + "f_" + "abcd12" * 5,
+    "sk_key": "s" + "k-ant-api03-" + "ab1x" * 8,
+    "age_secret_key": "AGE-SECRET" + "-KEY-1" + "QZ7" * 18,
+    "private_key_block": "-----BEGIN OPENSSH " + "PRIVATE KEY-----",
+    "bearer": "Authorization: Bear" + "er " + "abcdefgh" * 3,
+    "aws_key_id": "AK" + "IA" + "ABCDEFGHIJKLMNOP",
+    "slack": "xo" + "xb-" + "1234567890-abc",
+    "gitlab": "gl" + "pat-" + "x1y2" * 5,
+    "jwt": "ey" + "JhbGciOiJIUzI1NiJ9." + "ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0." + "dozjgNryP4J3jVmNHl0w5N",
+    "assignment": "GH_TO" + "KEN=" + "abc123def456",
+    "console_token": "Ab3dE5fG7hJ9kL1mN2pQr" + "-" + "s4T6uV8wX0yZ2aB4cD6eF",
+    "base64_run": "Zx9Qw8Er7Ty6Ui5Op4" + "As3Df2Gh1Jk0LmNb",
+}
+
 
 def wait_until(predicate):
     deadline = time.monotonic() + 5
@@ -1229,6 +1248,43 @@ class QuestionThreadViewTest(unittest.TestCase):
         self.assertIsNone(bare["entries"][0]["questions"])
 
 
+class CredentialShapeTest(unittest.TestCase):
+    def test_each_known_prefix_and_key_shape_is_caught_by_its_own_shape_alone(self):
+        for name, token in FAKE_CREDENTIALS.items():
+            with self.subTest(name=name):
+                text = f"why does {token} fail?"
+                matched = [n for n, p in project_question.CREDENTIAL_SHAPES if p.search(text)]
+                self.assertEqual(matched, [name])
+                self.assertIs(project_question.credential_shaped(text), True)
+        self.assertEqual([n for n, _ in project_question.CREDENTIAL_SHAPES], list(FAKE_CREDENTIALS))
+        self.assertIsNotNone(write_guard._TOKEN.fullmatch(FAKE_CREDENTIALS["console_token"] + "\n"))
+
+    def test_ordinary_text_with_similar_words_is_not_credential_shaped(self):
+        texts = (
+            "how do I rotate the GitHub token in HF_TOKEN?",
+            "what does the ghp_ prefix mean?",
+            "where is the AGE-SECRET-KEY kept?",
+            "is a Bearer token sent by gh?",
+            "password: is one needed for the sops file?",
+            "What does HF_TOKEN: required mean?",
+            "is GH_TOKEN=$(gh auth token) safe here?",
+            "what did commit 8d2074d161ce5682ca14e8466d58bd679a07d308 merge?",
+            "why is /nix/store/0c9bx8w5l6s2a1k3mzj4q7v9y2r8d1fh-claude-code-2.1.0 rebuilt?",
+            "why is /nix/store/0c9bx8w5l6s2a1k3mzj4q7v9y2r8d1fh-SDL2-2.30.0 rebuilt?",
+            "session 123e4567-e89b-12d3-a456-426614174000 failed",
+            "does sk-learn run here?",
+            "what does docs/areas/console/adr/062-a-follow-up-carries-its-thread say?",
+            "why does the hash sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU= mismatch?",
+            "is narHash sha512-" + "Ab1Cd2Ef3Gh4" * 7 + "== stale?",
+            "where is console/ProjectQuestion2Test/ReadingPanel3View/DeleteThread4Case defined?",
+            "what does MAX_PROJECT_QUESTION_DELETE_BYTES limit?",
+            "what does tests.test_console_project_question.QuestionDeleteServiceTest cover?",
+        )
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertIs(project_question.credential_shaped(text), False)
+
+
 class QuestionCase(Case):
     """A service whose question session is a stub: the asker records each call and returns an outcome."""
 
@@ -1446,6 +1502,80 @@ class QuestionServiceTest(QuestionCase):
         finally:
             while held:
                 held.pop()()
+
+    def test_a_credential_shaped_question_or_follow_up_is_refused_and_nothing_of_it_is_kept(self):
+        svc = self.start()
+        first = svc.ask_project_question(WHY, "what does the build check?")
+        before = self.question_rows()
+        asked_before = len(self.asked)
+        token = FAKE_CREDENTIALS["hugging_face"]
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            for args in ((WHY, f"my key is {token}"), (WHY, f"and {token}?", first)):
+                with self.subTest(args=len(args)):
+                    with self.assertRaises(project_question.Refused) as caught:
+                        svc.ask_project_question(*args)
+                    self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+        self.assertEqual(self.question_rows(), before)
+        self.assertEqual(len(self.asked), asked_before)
+        self.assertEqual(svc._project_questions_open, 0)
+        self.assertNotIn(token, errors.getvalue())
+        for path in self.store.parent.glob(self.store.name + "*"):
+            self.assertNotIn(token.encode(), path.read_bytes())
+
+    def test_a_credential_is_refused_before_every_other_refusal(self):
+        token = FAKE_CREDENTIALS["github"]
+        svc = self.start()
+        before = self.question_rows()
+
+        def refused(service, *args):
+            with self.assertRaises(project_question.Refused) as caught:
+                service.ask_project_question(*args)
+            self.assertEqual(str(caught.exception), project_question.CREDENTIAL)
+            self.assertEqual(self.question_rows(), before)
+            self.assertEqual(len(self.asked), 0)
+
+        with self.subTest(case="unregistered"):
+            refused(svc, "owner/p99", f"key {token}")
+        with self.subTest(case="too long"):
+            refused(svc, WHY, "x" * 2001 + " " + token)
+        with self.subTest(case="unknown thread"):
+            refused(svc, WHY, f"and {token}", "nope")
+        with self.subTest(case="stopping"):
+            svc._stop.set()
+            refused(svc, WHY, f"key {token}")
+        svc.close()
+        with self.subTest(case="unavailable"):
+            none = self.start(project_asker=None)
+            refused(none, WHY, f"key {token}")
+
+    def test_a_follow_up_to_a_thread_that_holds_a_credential_is_refused(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([
+                (event_log.PROJECT_QUESTION_ASKED, WHY, {
+                    "question_id": "q0", "question": "my key " + FAKE_CREDENTIALS["hugging_face"],
+                    "profile": "work", "session_id": SESSION_ID}),
+                (event_log.PROJECT_QUESTION_ANSWERED, WHY, {
+                    "question_id": "q0", "outcome": "answered", "answer": "Answer: noted."}),
+                (event_log.PROJECT_QUESTION_ASKED, WHY, {
+                    "question_id": "q5", "question": "what runs?", "profile": "work",
+                    "session_id": SESSION_ID}),
+                (event_log.PROJECT_QUESTION_ANSWERED, WHY, {
+                    "question_id": "q5", "outcome": "answered",
+                    "answer": "Answer: it echoed " + FAKE_CREDENTIALS["github"]})])
+        finally:
+            log.close()
+        svc = self.start()
+        before = self.question_rows()
+        for thread, text in (("q0", "and what about darwin?"), ("q5", "and darwin?")):
+            with self.subTest(thread=thread):
+                with self.assertRaises(project_question.Refused) as caught:
+                    svc.ask_project_question(WHY, text, thread)
+                self.assertEqual(str(caught.exception), project_question.THREAD_CREDENTIAL)
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.question_rows(), before)
 
     def test_questions_survive_a_restart(self):
         svc = self.start()
@@ -1758,6 +1888,19 @@ class QuestionRouteTest(QuestionCase):
                     svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
                 self.assertEqual((got[0], got[2]), (status, text))
         self.assertEqual(self.asked, [])
+
+    def test_the_route_refuses_a_credential_with_409_and_keeps_nothing(self):
+        svc = self.start()
+        token = FAKE_CREDENTIALS["github"]
+        body = {"project_id": WHY, "question": f"why does {token} fail?"}
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            got = self.assert_unchanged(svc, lambda: self.post(svc, body, self.own(svc, **JSON)))
+        self.assertEqual((got[0], got[2]), (409, (project_question.CREDENTIAL + "\n").encode()))
+        self.assertEqual(self.asked, [])
+        self.assertEqual(
+            errors.getvalue(), f"console: project_question_refused {project_question.CREDENTIAL}\n")
+        self.assertNotIn(token, errors.getvalue())
 
     def test_a_question_from_the_page_is_answered_into_the_log(self):
         svc = self.start()

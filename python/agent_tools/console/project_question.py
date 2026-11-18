@@ -42,6 +42,11 @@ reads pinned to `--repo <repo>` with their examples or the sentence that gh cann
 thread text, then `QUESTION_MARK` and the question (ADR-console-065).
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`.
+A credential-shaped text (#1272) is refused first, with `CREDENTIAL`, before it is stored or sent:
+`credential_shaped(text)` is true when any pattern of `CREDENTIAL_SHAPES` (known token prefixes,
+key blocks, a `Bearer` value, a JWT, a `TOKEN`/`SECRET`/`PASSWORD`-style assignment with a real
+value, the console's own page token, and a long base64 run that is not an SRI hash or a path)
+searches it. The refusal text never holds any of the question's text.
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
@@ -111,6 +116,8 @@ after refusing, in this order, a `thread_id` that is not a thread's id (`THREAD_
 follow-up's own id is not one), a thread whose last question is not answered (`THREAD_UNANSWERED`)
 and a thread whose `thread_text` plus the question exceeds `MAX_THREAD_BYTES` UTF-8 bytes
 (`THREAD_TOO_LONG`): the prompt is one argv string and Linux refuses one past 131072 bytes.
+Between the last two, a thread any of whose questions or answers is credential-shaped is refused
+(`THREAD_CREDENTIAL`, #1272): the turns are the text the next session's prompt would carry.
 `parse_request` reads exactly `project_id` and `question`, or those with a non-empty string
 `thread_id`, and returns `(project_id, question, thread_id or None)`.
 """
@@ -228,6 +235,39 @@ THREAD_LEAD = (
 THREAD_UNKNOWN = "this thread is not one of the project's questions"
 THREAD_UNANSWERED = "a follow-up continues a thread whose last question was answered"
 THREAD_TOO_LONG = "this thread is too long to continue: ask a new question"
+CREDENTIAL = "this looks like a password, token or key, so it was not kept or sent: take it out and ask again"
+THREAD_CREDENTIAL = (
+    "this thread holds a password, token or key, so it was not continued: delete the thread and ask again")
+
+CREDENTIAL_SHAPES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (name, re.compile(pattern, re.ASCII)) for name, pattern in (
+        ("github", r"\bgh[pousr]_[A-Za-z0-9]{36,}"),
+        ("github_pat", r"\bgithub_pat_[A-Za-z0-9_]{22,}"),
+        ("hugging_face", r"\bhf_[A-Za-z0-9]{30,}"),
+        ("sk_key", r"\bsk-[A-Za-z0-9_-]{32,}"),
+        ("age_secret_key", r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"),
+        ("private_key_block", r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+        ("bearer", r"\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+        ("aws_key_id", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        ("slack", r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
+        ("gitlab", r"\bglpat-[A-Za-z0-9_-]{20,}"),
+        ("jwt", r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+        ("assignment",
+         r"\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|ACCESS_KEY)\s*[=:]\s*[\"']?"
+         r"(?![$<{])(?=[^\s\"']*[0-9])(?=[^\s\"']*[A-Za-z])[^\s\"']{8,}"),
+        ("console_token",
+         r"(?<![A-Za-z0-9_-])(?=(?:[A-Za-z0-9_-]*?[A-Z]){2})(?=(?:[A-Za-z0-9_-]*?[a-z]){2})"
+         r"(?=[A-Za-z0-9_-]*?[0-9])[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
+        ("base64_run",
+         r"(?<![A-Za-z0-9+/=])(?<!sha1-)(?<!sha256-)(?<!sha384-)(?<!sha512-)"
+         r"(?!(?:[A-Za-z0-9+=]*/){3})(?=(?:[A-Za-z0-9+/]*?[A-Z]){2})(?=(?:[A-Za-z0-9+/]*?[a-z]){2})"
+         r"(?=(?:[A-Za-z0-9+/]*?[0-9]){2})[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=])"),
+    ))
+
+
+def credential_shaped(text: str) -> bool:
+    """True when `text` looks like a password, token or key (#1272); the text is never repeated."""
+    return any(pattern.search(text) for _, pattern in CREDENTIAL_SHAPES)
 
 HEADINGS: tuple[tuple[str, str], ...] = (
     ("answer", "Answer"), ("read", "Read"), ("ran", "Ran"),
@@ -656,6 +696,8 @@ def follow_up(questions: Sequence[AskedQuestion], thread_id: str, question: str)
     if thread[-1].state != ANSWERED:
         raise Refused(THREAD_UNANSWERED)
     turns = tuple(Turn(q.question, q.answer or "") for q in thread)
+    if any(credential_shaped(turn.question) or credential_shaped(turn.answer) for turn in turns):
+        raise Refused(THREAD_CREDENTIAL)
     if len(thread_text(turns).encode("utf-8")) + len(question.encode("utf-8")) > MAX_THREAD_BYTES:
         raise Refused(THREAD_TOO_LONG)
     return turns
