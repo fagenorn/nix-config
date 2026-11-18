@@ -72,6 +72,9 @@ directory, lies inside it, or is an ancestor of it; a reach is `RECORDS_DENIED`.
 - `Glob`: `path` (or the client's directory) joined with the literal prefix of `pattern` (the
   components before the first one holding `*`, `?`, `[` or `{`; an absolute pattern replaces the
   directory), then the traversal rule; a `..` component after the literal prefix is `RECORDS_DENIED`.
+  Brace groups are expanded first (`_brace_expansions`) and each spelling is checked, so `{..,x}` or
+  `{.,x}{.,x}` is the `..` component it can become; past `BRACE_LIMIT` spellings the call is
+  `BRACES_UNCHECKED`. A `Grep` `glob` is expanded the same way for its `..` rule.
 - An admitted `Bash` command (declared, git read or gh read): every word after the first, read every
   way it could name a file (`_word_targets`: the word, the text after each `=` in it, the text after
   the letter of a short option longer than two characters, each also without a leading `@`), by the
@@ -81,10 +84,13 @@ directory, lies inside it, or is an ancestor of it; a reach is `RECORDS_DENIED`.
 
 The traversal rule (`_tree_reaches`) covers the client's search meeting the console's state later. The
 client's behaviour about symlinks while searching is not established, so the walk assumes it follows
-them: it walks the directory with `os.walk(followlinks=True)`, visiting each real directory once, and
-checks every symlink it meets by the path rule on the link's real path. Each entry listed counts toward
-`WALK_LIMIT`; past it the call is `SEARCH_UNCHECKED`, because a search that cannot be checked is not
-allowed. A non-symlink descendant of a directory that does not reach cannot lie inside the private
+them: it lists with `os.scandir`, descends each real directory once (a symlinked directory too), and
+checks every symlink it meets by the path rule on the link's real path. It does not descend a symlinked
+directory lying under `IMMUTABLE_ROOTS` (`/nix/store`): a store path is read-only, so a console link
+cannot be added to it, and a devenv or nix checkout's `result` and `.devenv/profile` links lead into a
+closure of millions of entries that no search could be listed within the hook's timeout. Each entry
+listed counts toward `WALK_LIMIT` and the walk has `WALK_SECONDS` of time; past either the call is
+`SEARCH_UNCHECKED`, because a search that cannot be checked is not allowed. A non-symlink descendant of a directory that does not reach cannot lie inside the private
 directory, so only symlinks are checked.
 
 Output. Stdout is exactly one line, `json.dumps(output(decision, reason))`, the client's PreToolUse
@@ -104,6 +110,7 @@ import os
 import re
 import shlex
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -170,10 +177,17 @@ RECORDS_DENIED = (
     "console's other files, other questions' records included, are not read."
 )
 SEARCH_UNCHECKED = (
-    "This search covers more than {limit} files and directories, too many to check against the "
-    "console's own files, so it was refused: search a narrower path."
+    "This search is too large to check against the console's own files (over {limit} files and "
+    "directories, or too slow to list), so it was refused: search a narrower path."
+)
+BRACES_UNCHECKED = (
+    "This pattern names more than {limit} brace alternatives, too many to check against the "
+    "console's own files, so it was refused: use fewer alternatives."
 )
 WALK_LIMIT = 100_000
+WALK_SECONDS = 5.0
+BRACE_LIMIT = 64
+IMMUTABLE_ROOTS: tuple[str, ...] = ("/nix/store",)
 WILDCARDS = "*?[{"
 
 
@@ -376,28 +390,77 @@ def _tree_reaches(root: str, c: Confinement) -> str | None:
     """The deny sentence when a search of `root` could meet the console's state, else None.
 
     The walk follows symlinks because the client may; only symlinks can lead into the private directory.
+    It lists with `os.scandir` (no realpath per directory), descends a symlinked directory once, never
+    into one under `IMMUTABLE_ROOTS` (a store path cannot be given a new link), and gives up past
+    `WALK_LIMIT` entries or `WALK_SECONDS` seconds, which keeps it inside the hook's own timeout.
     """
     root = os.path.realpath(root)
     if not os.path.isdir(root):
         return None
+    unchecked = SEARCH_UNCHECKED.format(limit=WALK_LIMIT)
+    deadline = time.monotonic() + WALK_SECONDS
     visited = {root}
+    pending = [root]
     listed = 0
-    for directory, dirnames, filenames in os.walk(root, followlinks=True, onerror=None):
-        for name in (*dirnames, *filenames):
-            listed += 1
-            if listed > WALK_LIMIT:
-                return SEARCH_UNCHECKED.format(limit=WALK_LIMIT)
-            full = os.path.join(directory, name)
-            if os.path.islink(full) and _reaches(os.path.realpath(full), "/", c):
-                return RECORDS_DENIED.format(records=c.records)
-        kept = []
-        for name in dirnames:
-            real = os.path.realpath(os.path.join(directory, name))
-            if real not in visited:
+    while pending:
+        if time.monotonic() > deadline:
+            return unchecked
+        try:
+            with os.scandir(pending.pop()) as scan:
+                entries = list(scan)
+        except OSError:
+            continue
+        listed += len(entries)
+        if listed > WALK_LIMIT:
+            return unchecked
+        for entry in entries:
+            if entry.is_symlink():
+                real = os.path.realpath(entry.path)
+                if _reaches(real, "/", c):
+                    return RECORDS_DENIED.format(records=c.records)
+                walk = os.path.isdir(real) and not any(_inside(real, top) for top in IMMUTABLE_ROOTS)
+            else:
+                real, walk = entry.path, entry.is_dir(follow_symlinks=False)
+            if walk and real not in visited:
                 visited.add(real)
-                kept.append(name)
-        dirnames[:] = kept
+                pending.append(real)
     return None
+
+
+def _brace_expansions(pattern: str) -> list[str] | None:
+    """Every spelling of `pattern` with its brace groups expanded, or None past `BRACE_LIMIT`.
+
+    A group with one alternative expands to its text alone; an unclosed `{` stays literal. The pattern
+    itself is always among the spellings.
+    """
+    done, pending = [pattern], [pattern]
+    while pending:
+        text = pending.pop()
+        for start, letter in enumerate(text):
+            if letter != "{":
+                continue
+            depth, cuts = 0, [start]
+            for end in range(start, len(text)):
+                if text[end] == "{":
+                    depth += 1
+                elif text[end] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        cuts.append(end)
+                        break
+                elif text[end] == "," and depth == 1:
+                    cuts.append(end)
+            else:
+                continue
+            for first, second in zip(cuts, cuts[1:]):
+                spelling = text[:start] + text[first + 1:second] + text[cuts[-1] + 1:]
+                if spelling not in done:
+                    done.append(spelling)
+                    pending.append(spelling)
+            break
+        if len(done) > BRACE_LIMIT:
+            return None
+    return done
 
 
 def _search_reaches(root: str, base: str, c: Confinement) -> str | None:
@@ -416,18 +479,30 @@ def _confined(name: str, tool_input: dict, base: str, c: Confinement) -> str | N
         return denied if isinstance(file_path, str) and _reaches(file_path, base, c) else None
     if name == "Grep":
         pattern = tool_input.get("glob")
-        if isinstance(pattern, str) and ".." in pattern.split("/"):
+        spellings = _brace_expansions(pattern) if isinstance(pattern, str) else []
+        if spellings is None:
+            return BRACES_UNCHECKED.format(limit=BRACE_LIMIT)
+        if any(".." in spelling.split("/") for spelling in spellings):
             return denied
         return _search_reaches(root, base, c)
     pattern = tool_input.get("pattern")
-    parts = pattern.split("/") if isinstance(pattern, str) else []
-    literal = 0
-    while literal < len(parts) and not any(mark in parts[literal] for mark in WILDCARDS):
-        literal += 1
-    if ".." in parts[literal:]:
-        return denied
-    prefix = "/".join(parts[:literal]) or ("/" if parts[:1] == [""] and literal else "")
-    return _search_reaches(os.path.join(root, prefix), base, c)
+    spellings = _brace_expansions(pattern) if isinstance(pattern, str) else []
+    if spellings is None:
+        return BRACES_UNCHECKED.format(limit=BRACE_LIMIT)
+    prefixes = []
+    for spelling in spellings:
+        parts = spelling.split("/")
+        literal = 0
+        while literal < len(parts) and not any(mark in parts[literal] for mark in WILDCARDS):
+            literal += 1
+        if ".." in parts[literal:]:
+            return denied
+        prefixes.append("/".join(parts[:literal]) or ("/" if parts[:1] == [""] and literal else ""))
+    for prefix in dict.fromkeys(prefixes):
+        found = _search_reaches(os.path.join(root, prefix), base, c)
+        if found:
+            return found
+    return None
 
 
 def _confined_command(command: str, base: str, c: Confinement) -> str | None:

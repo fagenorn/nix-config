@@ -423,6 +423,46 @@ class HookConfinementTest(unittest.TestCase):
                     hook.decide(self.doc(name, tool_input, cwd=clean), DECLARED, None, self.c),
                     self.denied)
 
+    def test_a_brace_group_that_expands_to_a_parent_component_is_denied(self):
+        for name, tool_input in (
+            ("Glob", {"pattern": "{../..,x}/state/console/*"}),
+            ("Glob", {"pattern": "{..,x}/{..,x}/state/console/*"}),
+            ("Glob", {"pattern": "{.,x}{.,x}/{.,x}{.,x}/state/console/*"}),
+            ("Glob", {"pattern": "*/{..,x}/{..,x}/{..,x}/state/console/*"}),
+            ("Grep", {"pattern": "x", "glob": "{..,x}/{..,x}/state/**"}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+        for name, tool_input in (
+            ("Glob", {"pattern": "**/*.{nix,md}"}),
+            ("Grep", {"pattern": "x", "glob": "*.{nix,md}"}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.allowed)
+
+    def test_a_search_does_not_walk_into_an_immutable_tree_reached_through_a_link(self):
+        store = self.t / "store"
+        (store / "closure").mkdir(parents=True)
+        (store / "closure" / "back").symlink_to(self.P)
+        (self.root / "result").symlink_to(store)
+        tool_input = {"pattern": "x"}
+        self.assertEqual(
+            hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.denied)
+        with mock.patch.object(hook, "IMMUTABLE_ROOTS", (str(store),)):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.allowed)
+            (self.root / "direct").symlink_to(self.P)
+            self.assertEqual(
+                hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.denied)
+
+    def test_a_search_that_outruns_its_time_budget_is_refused(self):
+        with mock.patch.object(hook, "WALK_SECONDS", -1.0):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=hook.WALK_LIMIT)))
+
     def test_a_search_too_large_to_check_is_refused(self):
         with mock.patch.object(hook, "WALK_LIMIT", 2):
             self.assertEqual(
