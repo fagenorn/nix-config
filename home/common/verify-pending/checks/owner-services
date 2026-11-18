@@ -1,0 +1,12 @@
+#!/bin/sh
+# Verify check for issue 1290: the owner's services (console, cache proxy, secrets decryption, verify-pending)
+# run at boot with nobody logged in at the screen.
+# Run it from the repository root at the block's commit. The wrapper starts under the managed
+# interpreter its installed ~/.agents/bin/verify-pending launcher names, never the parent shell's python3.
+launcher="$HOME/.agents/bin/verify-pending"
+python=$(sed -n 's|^exec \(/[^ ]*python3\) -I .*|\1|p' "$launcher" 2>/dev/null | head -n 1)
+if [ -z "$python" ] || [ ! -x "$python" ]; then
+  echo "owner-services: no managed interpreter in $launcher" >&2
+  exit 2
+fi
+PYTHONPATH=python exec "$python" -m agent_tools.verification.verify_checks owner-services "$@"

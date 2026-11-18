@@ -111,7 +111,14 @@ class LinuxUnits(unittest.TestCase):
 
 class DarwinHosts(unittest.TestCase):
     HOSTS = ("mbp", "eleven-m5")
+    # A login host runs the job as a user agent in gui/<uid>; a boot host (issue 1290) as a
+    # system daemon of the owner.
+    LOGIN_HOSTS = ("mbp",)
+    BOOT_HOSTS = ("eleven-m5",)
     APPLY = """c: u: {
+          atBoot = c.ownerServices.atBoot;
+          user = u.home.username;
+          home = u.home.homeDirectory;
           command = u.verifyPending.command;
           label = u.verifyPending.label;
           kickScript = u.verifyPending.kick;
@@ -119,8 +126,11 @@ class DarwinHosts(unittest.TestCase):
           probe = u.verifyPending.probe;
           kickText = u.verifyPending.kickText;
           homeKick = u.home.activation ? verifyPendingKick;
-          agentCommand = c.launchd.user.agents.verify-pending.command;
-          plist = c.environment.userLaunchAgents."org.nixos.verify-pending.plist".text;
+          agentCommand = if c.launchd.user.agents ? verify-pending then c.launchd.user.agents.verify-pending.command else null;
+          daemonCommand = if c.launchd.daemons ? verify-pending then c.launchd.daemons.verify-pending.command else null;
+          inUserAgents = c.environment.userLaunchAgents ? "org.nixos.verify-pending.plist";
+          inDaemons = c.environment.launchDaemons ? "org.nixos.verify-pending.plist";
+          plist = (c.environment.userLaunchAgents // c.environment.launchDaemons)."org.nixos.verify-pending.plist".text;
         }"""
     # The activation scripts embed the home-manager activation package, whose evaluation
     # imports from a derivation built for darwin (the catppuccin starship theme), so only a
@@ -143,19 +153,53 @@ class DarwinHosts(unittest.TestCase):
                 check_command(self, self.got[host]["command"], host)
                 self.assertEqual(self.got[host]["label"], LABEL)
 
+    def test_only_eleven_m5_runs_the_owners_services_at_boot(self):
+        self.assertEqual({host: self.got[host]["atBoot"] for host in self.HOSTS},
+                         {"mbp": False, "eleven-m5": True})
+
+    def test_a_login_host_runs_the_job_as_a_user_agent(self):
+        for host in self.LOGIN_HOSTS:
+            with self.subTest(host=host):
+                got = self.got[host]
+                self.assertIs(got["inUserAgents"], True)
+                self.assertIs(got["inDaemons"], False)
+                self.assertEqual(got["agentCommand"], got["command"])
+                self.assertIsNone(got["daemonCommand"])
+
+    def test_a_boot_host_runs_the_job_as_a_daemon_of_the_owner(self):
+        for host in self.BOOT_HOSTS:
+            with self.subTest(host=host):
+                got = self.got[host]
+                self.assertIs(got["inDaemons"], True)
+                self.assertIs(got["inUserAgents"], False)
+                self.assertEqual(got["daemonCommand"], got["command"])
+                self.assertIsNone(got["agentCommand"])
+                plist = self.plist(host)
+                self.assertEqual(plist["UserName"], got["user"])
+                self.assertEqual(plist["EnvironmentVariables"], {"HOME": got["home"]})
+
     def test_the_kick_starts_the_agent_without_killing_a_running_round(self):
         for host in self.HOSTS:
             with self.subTest(host=host):
                 check_kick(self, self.got[host]["kickScript"])
-                self.assertEqual(self.got[host]["start"], f"/bin/launchctl kickstart gui/$(id -u)/{LABEL}")
+                if host in self.BOOT_HOSTS:
+                    expected = f"/usr/bin/sudo -n /bin/launchctl kickstart system/{LABEL}"
+                else:
+                    expected = f"/bin/launchctl kickstart gui/$(id -u)/{LABEL}"
+                self.assertEqual(self.got[host]["start"], expected)
                 self.assertIs(self.got[host]["homeKick"], False,
                               "on darwin the kick runs from nix-darwin postActivation, not home-manager")
 
-    def test_the_kick_probes_the_job_in_the_gui_domain(self):
-        # A host with nobody logged in at the console has no gui/<uid> domain (issue 668).
+    def test_the_kick_probes_the_job_in_its_domain(self):
+        # A login host with nobody logged in at the console has no gui/<uid> domain (issue 668);
+        # a boot host's job lives in the system domain (issue 1290).
         for host in self.HOSTS:
             with self.subTest(host=host):
-                self.assertEqual(self.got[host]["probe"], f"/bin/launchctl print gui/$(id -u)/{LABEL}")
+                if host in self.BOOT_HOSTS:
+                    expected = f"/bin/launchctl print system/{LABEL}"
+                else:
+                    expected = f"/bin/launchctl print gui/$(id -u)/{LABEL}"
+                self.assertEqual(self.got[host]["probe"], expected)
                 check_kick_text(self, self.got[host])
 
     def plist(self, host):
@@ -165,7 +209,8 @@ class DarwinHosts(unittest.TestCase):
         for host in self.HOSTS:
             with self.subTest(host=host):
                 command = self.got[host]["command"]
-                self.assertEqual(self.got[host]["agentCommand"], command)
+                key = "daemonCommand" if host in self.BOOT_HOSTS else "agentCommand"
+                self.assertEqual(self.got[host][key], command)
                 plist = self.plist(host)
                 self.assertEqual(plist["ProgramArguments"],
                                  ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
@@ -179,7 +224,10 @@ class DarwinHosts(unittest.TestCase):
                 self.assertEqual(plist["Label"], LABEL)
                 self.assertEqual(plist["StartInterval"], 900)
                 self.assertIs(plist["RunAtLoad"], True)
-                self.assertEqual(set(plist), {"Label", "ProgramArguments", "StartInterval", "RunAtLoad"})
+                keys = {"Label", "ProgramArguments", "StartInterval", "RunAtLoad"}
+                if host in self.BOOT_HOSTS:
+                    keys |= {"UserName", "EnvironmentVariables"}
+                self.assertEqual(set(plist), keys)
 
     def test_the_agent_has_no_watch_paths(self):
         for host in self.HOSTS:
@@ -200,6 +248,8 @@ class DarwinActivation(unittest.TestCase):
 
     def kick_line(self, host):
         user, kick = self.got[host]["user"], self.got[host]["kickScript"]
+        if host in DarwinHosts.BOOT_HOSTS:
+            return f'sudo -u {user} --set-home {kick} "$(readlink -f "$systemConfig")" || true'
         return f'launchctl asuser "$(id -u {user})" sudo -u {user} --set-home {kick} "$(readlink -f "$systemConfig")" || true'
 
     def test_the_switch_trigger_is_the_activation_kick_after_home_manager(self):
@@ -208,6 +258,13 @@ class DarwinActivation(unittest.TestCase):
                 post, line = self.got[host]["post"], self.kick_line(host)
                 self.assertEqual(post.count(line), 1, post)
                 self.assertLess(post.index("Activating home-manager configuration"), post.index(line))
+
+    def test_a_boot_host_kicks_without_the_gui_domain(self):
+        for host in DarwinHosts.BOOT_HOSTS:
+            with self.subTest(host=host):
+                user, kick = self.got[host]["user"], self.got[host]["kickScript"]
+                asuser = f'launchctl asuser "$(id -u {user})" sudo -u {user} --set-home {kick}'
+                self.assertNotIn(asuser, self.got[host]["post"])
 
     def test_the_kick_names_the_new_system_which_is_made_current_after_it(self):
         # The kick cannot run after the repoint (no hook does), so it hands the pass the

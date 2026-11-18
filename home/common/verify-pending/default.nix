@@ -30,16 +30,18 @@
 # `owner-actions refresh`, and the pass always exits 0; what runs unattended is decided by
 # `verify-pending run` itself (see `agent_tools.verification.verify_exec`).
 #
-# Every Mac is logged-in only (issue 668): the darwin job is a launchd user agent in `gui/<uid>`,
-# and gh reads its token from the login keychain, so neither exists while nobody is logged in at
-# the console. On such a host the agent never loads and no pass runs; the kick still writes the
+# A login Mac (issue 668) runs the darwin job as a launchd user agent in `gui/<uid>`, and gh reads
+# its token from the login keychain, so neither exists while nobody is logged in at the
+# console. On such a host the agent never loads and no pass runs; the kick still writes the
 # switch request, then prints one `verify-pending-kick:` notice instead of starting the job, and
-# the switch exits 0. The host's held checks surface through the stale-check owner prompt
+# the switch exits 0. A boot host (`ownerServices.atBoot`, issue 1290) runs the job as a
+# system daemon of the owner instead, so `launchdDomain` is `system` and the kick probes and
+# starts it there (`sudo -n launchctl kickstart system/<label>`). The host's held checks surface through the stale-check owner prompt
 # (`verify-stale-check`, cause `silent`), which another host's pass posts once the host has not
 # reported for 7 days. nix-darwin's user-agent reload step is guarded the same way, with or without
 # a tty (issue 705): `hosts/common/darwin-user-agent-reload-guard.sh` skips its `launchctl asuser`
 # calls with one log line when `gui/<uid>` is absent, and the plist is still installed for the next
-# login. There is no LaunchDaemon form and no credential outside the keychain; NixOS is unaffected.
+# login. NixOS is unaffected.
 {
   config,
   lib,
@@ -51,15 +53,26 @@
 let
   label = "org.nixos.verify-pending";
 
+  domain = config.verifyPending.launchdDomain;
+
   start =
     if pkgs.stdenv.isDarwin then
       # No -k: never kills a running round; no -p. Returns once launchd has the request.
-      "/bin/launchctl kickstart gui/$(id -u)/${label}"
+      # A system daemon is started through the owner's passwordless sudo.
+      if domain == "system" then
+        "/usr/bin/sudo -n /bin/launchctl kickstart system/${label}"
+      else
+        "/bin/launchctl kickstart gui/$(id -u)/${label}"
     else
       "env XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\" ${pkgs.systemd}/bin/systemctl --user start --no-block verify-pending.service";
 
-  # The job is loaded in gui/<uid> only while the user is logged in at the console (issue 668).
-  probe = if pkgs.stdenv.isDarwin then "/bin/launchctl print gui/$(id -u)/${label}" else "true";
+  # A user agent is loaded in gui/<uid> only while the user is logged in at the console (issue
+  # 668); a boot host's daemon is in the system domain from boot (issue 1290).
+  probe =
+    if pkgs.stdenv.isDarwin then
+      "/bin/launchctl print ${if domain == "system" then "system" else "gui/$(id -u)"}/${label}"
+    else
+      "true";
 
   path = lib.concatStringsSep ":" [
     (lib.makeBinPath [
@@ -120,6 +133,11 @@ in
     start = readOnlyStr "The line the kick script runs to start the job without waiting.";
     probe = readOnlyStr "The line the kick script runs to check the job is loaded before starting it.";
     kickText = readOnlyStr "The kick script's text after its placeholders are substituted.";
+    launchdDomain = lib.mkOption {
+      type = lib.types.enum [ "gui" "system" ];
+      default = "gui";
+      description = "The launchd domain of the darwin job: gui (a user agent, loaded while the owner is logged in at the console) or system (a daemon of the owner, loaded at boot; issue 1290). Ignored on NixOS.";
+    };
   };
 
   config = lib.mkMerge [

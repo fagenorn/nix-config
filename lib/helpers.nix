@@ -89,6 +89,7 @@ in
         ../hosts/common/darwin-github-runners.nix
         ../hosts/common/darwin-verify-pending.nix
         ../hosts/common/darwin-console.nix
+        ../hosts/common/darwin-owner-services.nix
         customConf
         inputs.home-manager.darwinModules.home-manager
         {
