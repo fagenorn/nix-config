@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twenty-eight screens the sprint block, the finished list, the message life, the
+- `STATES` names the twenty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -48,13 +48,20 @@ Contract:
   question back with three choices; on a page with the reading panel (`READING_PANEL`) the
   Questions fold and the thread's line are clicked, so the answer reads in the main column, and
   on a page without it the fold and the thread's summary are clicked, which is the before
-  picture, its reading None). On a page with the reading panel the other ask states click
+  picture, its reading None). `activation-line` is the desk with no sprint and an activation reading
+  of two merged changes this host is built from, one under `python/` and one in the host
+  configuration, neither a console file, so its one line reads `ACTIVATION_SHOWN` (the
+  host-configuration wording, the longest of the plain-words wordings, and one Activate button;
+  the page draws one activation line, so one picture shows one wording); it is shot with a
+  stand-in reading, no run and no activator. On a page that cannot read `other` the reading holds
+  no change, the line is absent and its reading is `ACTIVATION_BASE`, which is the before
+  picture. On a page with the reading panel the other ask states click
   through it: `ask-box` the fold and `owner/web`'s answered thread's line (its reading is then
   `HEAD_ASK`: the field shown, the working question's line, the panel's Read line), `ask-goal`
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 56 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 58 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -77,6 +84,7 @@ Contract:
   the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the `ASK_OPEN`
   button does not show `owner/web`'s open field, its working question and its answered question's
   Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a
+  `activation-line` shot reads neither `ACTIVATION_SHOWN` nor `ACTIVATION_BASE`; or when a
   `question-read` shot on a page with the panel does not read `READ_SHOWN` (`READ_READING`: the
   panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
   the script), the answer holding bold,
@@ -118,6 +126,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_tools.console import capacity, event_log, manager, sessions, signin
+from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
@@ -130,7 +139,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read")
+          "ask-goal", "question-read", "activation-line")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -170,6 +179,19 @@ BASE_THREAD = (False, FOLLOW_READ_LINE, False)
 DESK_OUTSIDE = "outside-1136"
 DEAF_MANAGER = "manager-1229"
 READING_PANEL = "section#reading"
+ACTIVATION_COMMIT = "1258" * 10
+ACTIVATION_PATHS = ("python/agent_tools/system/util.py", "hosts/common/common-packages.nix")
+ACTIVATION_SHOWN = ("A change to the host configuration merged at 125812581258 and is not active "
+                    "on this host.", 1)
+ACTIVATION_BASE = (None, 0)
+ACTIVATION_READING = """(() => {
+  const line = document.querySelector('#projects p.activation');
+  if (!line || line.getClientRects().length === 0) return [null, 0];
+  const text = line.querySelector('span');
+  const buttons = Array.from(line.querySelectorAll('button.activate')).filter(
+    (button) => button.getClientRects().length > 0);
+  return [text ? text.textContent.trim() : null, buttons.length];
+})()"""
 HEAD_ASK = (True, ASK_WORKING_QUESTION, ASK_READ_LINE)
 READ_QUESTION = "What was done in the last 7 days, and what is in production?"
 READ_FENCED_LINE = "Read: git log --since=7.days"
@@ -269,6 +291,7 @@ class Fixture:
     projects: tuple[Path, ...]
     holding: tuple[int, ...] = ()
     deaf: bool = False
+    activating: bool = False
 
 
 @dataclass(frozen=True)
@@ -287,6 +310,7 @@ class Shot:
     acts: tuple[str, ...] = ()
     thread: tuple[bool, str | None, bool] | None = None
     reading: tuple[bool, int, bool, bool, int] | None = None
+    activation: tuple[str | None, int] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -525,7 +549,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "session_id": DESK_OUTSIDE, "cwd": web_root, "repo": web_root,
             "state": "working", "name": "importer run"})
         return running, ended
-    elif state != "nothing-running":
+    elif state not in ("nothing-running", "activation-line"):
         raise ValueError(f"unknown state {state!r}")
     return ()
 
@@ -636,7 +660,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         root=root, store=console / "events.sqlite3", registry=state_dir / "fleet" / "registry.json",
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
-        holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear")
+        holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
+        activating=state == "activation-line")
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -675,6 +700,12 @@ def _seed_lock_run(service: ConsoleService, fixture: Fixture, now_s: float) -> N
     service.poll_deliveries()
 
 
+def _activation_reader(roots):
+    """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
+    other = {"other": ACTIVATION_PATHS} if "other" in Activation.__dataclass_fields__ else {}
+    return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
+
+
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
@@ -686,6 +717,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
     if fixture.holding:
         forge["pull_reader"] = lambda slug, pattern, *, cancelled: (
             PullRequest(7, frozenset(fixture.holding), False, None, True),)
+    if fixture.activating:
+        forge["activation_reader"] = _activation_reader
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
@@ -697,6 +730,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
     service.start()
     service.poll_spend()
+    if fixture.activating:
+        service.poll_activation()
     if fixture.holding:
         _seed_lock_run(service, fixture, now_s)
         service.poll_movement()
@@ -943,6 +978,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             elif page.query_selector(ASK_FOLD):
                 for selector in (ASK_FOLD, READ_BASE_THREAD):
                     page.click(selector)
+        activation = None
+        if state == "activation-line":
+            activation = tuple(page.evaluate(ACTIVATION_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
@@ -955,7 +993,8 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
-                short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading)
+                short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
+                activation=activation)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1022,6 +1061,11 @@ def main(argv: list[str] | None = None) -> int:
                    else shot.reading not in shown)]
     for shot in unread:
         print(f"console-screenshots: {shot.path.name} does not show the answer in the main column")
+    unlined = [shot for shot in taken if shot.state == "activation-line"
+               and shot.activation not in (ACTIVATION_SHOWN, ACTIVATION_BASE)]
+    for shot in unlined:
+        print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
+              "Activate button")
     offrow = [shot for shot in taken if shot.acts]
     for shot in offrow:
         print(f"console-screenshots: {shot.path.name} puts Ask a question on another row than "
@@ -1035,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or offrow or scrolled or short) else 0
+                 or unlined or offrow or scrolled or short) else 0
 
 
 if __name__ == "__main__":
