@@ -17,10 +17,13 @@ still apply, and a `git -c` option a command adds comes after them and wins.
 
 Scratch directory (issue 1283). Members write their temporary files where `TMPDIR` points.
 Unless `SUITE_RUNNER_SCRATCH` says otherwise the runner creates one `suite-runner-tmp-*`
-directory per run under `/dev/shm` when that is a writable directory, sets every member's
+directory per run under `/dev/shm` when that is a directory with 2 GiB free where a script
+runs (`usable_memory_root`: a `noexec` mount would make tests skip their fake commands), sets every member's
 `TMPDIR` to it and removes it when the run ends, so a test's files, forced flushes included,
 stay in memory. `SUITE_RUNNER_SCRATCH=disk` keeps the inherited `TMPDIR`; any other value is the
 directory the run's scratch directory is created in. A host without `/dev/shm` runs as before.
+A run killed before its cleanup leaves its directory; the next run removes this user's
+`suite-runner-tmp-*` directories there that are a day old (`sweep_stale_scratch`).
 
 Bytecode cache (issue 499). It is one directory per run. Before the first member starts the
 runner creates a `suite-runner-pycache-*` directory in the default temporary directory, sets
@@ -91,6 +94,7 @@ import contextlib
 import json
 import math
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -114,6 +118,11 @@ INTERRUPT_EXIT = 130
 SCRATCH_ENV = "SUITE_RUNNER_SCRATCH"
 SCRATCH_DISK = "disk"
 MEMORY_ROOT = "/dev/shm"
+SCRATCH_PREFIX = "suite-runner-tmp-"
+# The default is taken only with this much free there: a full memory directory fails writes
+# the disk would have taken.
+SCRATCH_FREE_BYTES = 2 * 1024 ** 3
+SCRATCH_STALE_SECONDS = 24 * 3600
 # Appended to every member's GIT_CONFIG_PARAMETERS, in the form `git -c` exports
 # (issue 496).
 SUITE_GIT_CONFIG = "'maintenance.auto'='false' 'gc.auto'='0'"
@@ -222,19 +231,63 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
 def scratch_root(environ: Mapping[str, str], memory_root: str = MEMORY_ROOT) -> str | None:
     """The directory a run's scratch directory is created in, None to keep the inherited TMPDIR.
 
-    `SUITE_RUNNER_SCRATCH` decides: `disk` is None; any other non-empty value is that directory,
-    as given; unset or empty is `memory_root` when it is a directory this process can write and
-    search, else None (issue 1283: the suite's forced flushes kept the host's disk busy, and a
-    file there costs a flush where one in memory costs nothing).
+    `SUITE_RUNNER_SCRATCH` decides: `disk` is None; any other non-empty value is that directory
+    as an absolute path, so a nested runner started from another directory finds it; unset or
+    empty is `memory_root` when `usable_memory_root` accepts it, else None (issue 1283: the
+    suite's forced flushes kept the host's disk busy, and a file in memory costs no flush).
     """
     choice = environ.get(SCRATCH_ENV, "")
     if choice == SCRATCH_DISK:
         return None
     if choice:
-        return choice
-    if os.path.isdir(memory_root) and os.access(memory_root, os.W_OK | os.X_OK):
-        return memory_root
-    return None
+        return os.path.abspath(choice)
+    return memory_root if usable_memory_root(memory_root) else None
+
+
+def usable_memory_root(root: str, free_bytes: int = SCRATCH_FREE_BYTES) -> bool:
+    """Whether the suite can use `root` for its files without changing what a test sees.
+
+    It must be a directory with at least `free_bytes` free, and a script written there must
+    run: members put fake commands in their temporary directories ahead of `PATH`, and on a
+    `noexec` mount the shell would skip them and run the host's real commands. Any error is
+    False.
+    """
+    try:
+        usage = os.statvfs(root)
+        if usage.f_bavail * usage.f_frsize < free_bytes:
+            return False
+        with tempfile.TemporaryDirectory(prefix="suite-runner-probe-", dir=root) as probe:
+            script = os.path.join(probe, "probe")
+            with open(script, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+            os.chmod(script, 0o700)
+            return _runs(script)
+    except OSError:
+        return False
+
+
+def _runs(script: str) -> bool:
+    """Whether the kernel executes `script`. It is spawned directly, not through `subprocess`,
+    whose launches the runner counts and guards against SIGINT for its members."""
+    pid = os.posix_spawn(script, [script], {})
+    return os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) == 0
+
+
+def sweep_stale_scratch(root: str, now: float, older_than: float = SCRATCH_STALE_SECONDS) -> None:
+    """Remove this user's `suite-runner-tmp-*` directories in `root` not modified for
+    `older_than` seconds: what a run killed before its cleanup left behind. Errors are ignored."""
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            status = entry.stat(follow_symlinks=False)
+            if (entry.name.startswith(SCRATCH_PREFIX) and entry.is_dir(follow_symlinks=False)
+                    and status.st_uid == os.getuid() and now - status.st_mtime >= older_than):
+                shutil.rmtree(entry.path, ignore_errors=True)
+        except OSError:
+            continue
 
 
 def validate_members(members: Sequence[str], cwd: Path) -> None:
@@ -496,8 +549,9 @@ def run_suite(members: Sequence[str], *, jobs: int, out: BinaryIO,
             contextlib.ExitStack() as stack:
         environment = member_environment(os.environ, cache)
         if root is not None:
+            sweep_stale_scratch(root, time.time())
             environment["TMPDIR"] = stack.enter_context(
-                tempfile.TemporaryDirectory(prefix="suite-runner-tmp-", dir=root))
+                tempfile.TemporaryDirectory(prefix=SCRATCH_PREFIX, dir=root))
         started = time.monotonic()
         if jobs == 1:
             results = _run_serial(members, environment, output)

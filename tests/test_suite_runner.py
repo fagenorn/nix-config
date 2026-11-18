@@ -24,6 +24,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -1065,14 +1066,43 @@ class ScratchRootTest(unittest.TestCase):
                 ({"SUITE_RUNNER_SCRATCH": "disk"}, memory, None),
                 ({"SUITE_RUNNER_SCRATCH": "/named/dir"}, memory, "/named/dir"),
                 ({"SUITE_RUNNER_SCRATCH": "/named/dir"}, missing, "/named/dir"),
+                ({"SUITE_RUNNER_SCRATCH": "relative/dir"}, missing,
+                 os.path.abspath("relative/dir")),
             ]
             for environ, root, expected in table:
                 with self.subTest(environ=environ, root=root):
                     self.assertEqual(suite_runner.scratch_root(environ, root), expected)
 
-    def test_a_file_is_not_a_memory_directory(self):
+    def test_a_memory_directory_is_usable_only_with_room_and_where_a_script_runs(self):
+        with tempfile.TemporaryDirectory() as memory:
+            self.assertIs(suite_runner.usable_memory_root(memory, 1), True)
+            self.assertIs(suite_runner.usable_memory_root(memory, 2 ** 62), False)
+            self.assertIs(suite_runner.usable_memory_root(os.path.join(memory, "absent"), 1), False)
+            with mock.patch.object(suite_runner, "_runs", return_value=False):
+                self.assertIs(suite_runner.usable_memory_root(memory, 1), False)
+            with mock.patch.object(suite_runner.os, "posix_spawn",
+                                   side_effect=PermissionError("noexec")):
+                self.assertIs(suite_runner.usable_memory_root(memory, 1), False)
+            self.assertEqual(os.listdir(memory), [])
         with tempfile.NamedTemporaryFile() as handle:
-            self.assertIsNone(suite_runner.scratch_root({}, handle.name))
+            self.assertIs(suite_runner.usable_memory_root(handle.name, 1), False)
+
+    def test_only_this_users_day_old_run_directories_are_swept(self):
+        with tempfile.TemporaryDirectory() as root:
+            now = time.time()
+            made = {}
+            for name, age in (("suite-runner-tmp-old", 90000), ("suite-runner-tmp-new", 60),
+                              ("other-old", 90000)):
+                made[name] = Path(root, name)
+                made[name].mkdir()
+                (made[name] / "file").write_text("x")
+                os.utime(made[name], (now - age, now - age))
+            Path(root, "suite-runner-tmp-file").write_text("x")
+            os.utime(Path(root, "suite-runner-tmp-file"), (now - 90000, now - 90000))
+            suite_runner.sweep_stale_scratch(root, now)
+            self.assertEqual(sorted(os.listdir(root)),
+                             ["other-old", "suite-runner-tmp-file", "suite-runner-tmp-new"])
+            suite_runner.sweep_stale_scratch(os.path.join(root, "absent"), now)
 
 
 class ScratchDirectoryTest(RunnerCase):
