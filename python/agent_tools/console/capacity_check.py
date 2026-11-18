@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion | --account-names]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion | --account-names] [--after-seq N] [--log PATH]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -69,6 +69,10 @@ object is `{"status": "not_deployed"}`, exit 75; one whose `inbox.open` is not a
 the page yet). Otherwise a profile of S not in O is `{"status": "met", "profiles": <S minus O,
 sorted>}`, exit 0, and when every profile of S is in O `{"status": "not_met", "profiles": <S,
 sorted>}`, exit 1.
+`--after-seq N` reads only log rows whose `seq` is above N (a log carried over from another host
+keeps its rows below N), and for `--page-signin` it also requires a `signin.ended` row with outcome
+`signed_in` for the profile above N, read from `--log` or the console's own log (`{"status":
+"no_log"}`, exit 75, when it cannot be read).
 
 `--page-add` (#1027, #1037, exclusive with the other modes, `--max-age` ignored) meets when the
 console's own event log shows an account added from the page whose sign-in the page then started.
@@ -83,6 +87,8 @@ so any such row is from a console that has that merge. A non-empty set is `{"sta
 "profiles": [<set, sorted>]}`, exit 0; an empty one `{"status": "pending"}`, exit 75. A log that is
 missing, is not a database or lacks the `events` table is `{"status": "no_log"}`, exit 75. It never
 exits 1: a row that is not there yet may still be recorded.
+For `--page-add`, `--after-seq N` reads only log rows whose `seq` is above N (a log carried over
+from another host keeps its rows below N), and the add and the start must both be above N.
 
 `--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
 manager has started under a profile while the owner's page pin of that profile was in force. It
@@ -117,7 +123,9 @@ names it and `profiles_dir() / P` does not exist (`os.path.lexists`), where `pro
 `$CLAUDE_ACCOUNTS_DIR` or else `~/.claude-accounts`, then `/profiles`. Some gone is `{"status":
 "met", "profiles": [<gone, sorted>]}`, exit 0; otherwise `{"status": "not_met", "profiles":
 [<removed, sorted>]}`, exit 1. It writes nothing, sends one GET at most and touches the accounts
-directory only to look for a name.
+directory only to look for a name. `--after-seq N` reads only log rows whose `seq` is above N (a
+log carried over from another host keeps its rows below N), so the add and the removal must both be
+above N.
 
 `--account-names` (#1036, exclusive with the other modes, `--max-age` ignored) meets when every
 signed-in profile carries the name its client reports and the Sign in again action. It decides in
@@ -349,8 +357,10 @@ def exclusion_verdict(rows: list[tuple[str, object]], chosen: object) -> tuple[i
     return 0, {"status": "met", **result}
 
 
-def page_signin_verdict(body: bytes) -> tuple[int, dict]:
-    """Met when a profile signed in from the page has no open sign-in item, else not yet or not met."""
+def page_signin_verdict(body: bytes, signed_in_after: set[str] | None = None) -> tuple[int, dict]:
+    """Met when a profile signed in from the page has no open sign-in item, else not yet or not met.
+
+    A set `signed_in_after` limits the signed-in profiles to those it holds."""
     try:
         document = json.loads(body)
     except ValueError:
@@ -363,6 +373,8 @@ def page_signin_verdict(body: bytes) -> tuple[int, dict]:
         return NOT_YET, {"status": "no_inbox"}
     signed_in = sorted(name for name, run in runs.items()
                        if isinstance(run, dict) and run.get("state") == "signed_in")
+    if signed_in_after is not None:
+        signed_in = [name for name in signed_in if name in signed_in_after]
     if not signed_in:
         return NOT_YET, {"status": "pending"}
     cleared = [name for name in signed_in if f"signin/{name}" not in asks]
@@ -409,8 +421,44 @@ def profiles_dir() -> Path:
     return Path(root) / "profiles"
 
 
-def page_add_verdict(log: Path) -> tuple[int, dict]:
+def _after(after_seq: int | None) -> tuple[str, tuple[int, ...]]:
+    """The SQL tail and its parameters that keep only rows above `after_seq`."""
+    if after_seq is None:
+        return "", ()
+    return " AND seq > ?", (after_seq,)
+
+
+def signed_in_after(log: Path, after_seq: int) -> set[str] | None:
+    """The profiles with a `signin.ended` `signed_in` row above `after_seq`; None if unreadable."""
+    try:
+        connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT payload FROM events WHERE kind = 'signin.ended' AND seq > ? ORDER BY seq",
+            (after_seq,)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    profiles: set[str] = set()
+    for (text,) in rows:
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            continue
+        profile = payload.get("profile") if isinstance(payload, dict) else None
+        if (isinstance(payload, dict) and payload.get("outcome") == "signed_in"
+                and isinstance(profile, str) and profile):
+            profiles.add(profile)
+    return profiles
+
+
+def page_add_verdict(log: Path, after_seq: int | None = None) -> tuple[int, dict]:
     """Met when the log holds an owner `account.added` row and a later page sign-in start of it."""
+    tail, bound = _after(after_seq)
     try:
         connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
     except (sqlite3.Error, OSError):
@@ -418,8 +466,8 @@ def page_add_verdict(log: Path) -> tuple[int, dict]:
     try:
         connection.execute("PRAGMA query_only = ON")
         rows = connection.execute(
-            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'signin.acted') "
-            "ORDER BY seq").fetchall()
+            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'signin.acted')"
+            f"{tail} ORDER BY seq", bound).fetchall()
     except sqlite3.Error:
         return NOT_YET, {"status": "no_log"}
     finally:
@@ -448,8 +496,9 @@ REMOVED_OUTCOMES = ("removed", "removed_signed_out_already")
 
 
 def page_remove_verdict(log: Path, body_of: Callable[[], bytes | None],
-                        profiles: Path) -> tuple[int, dict]:
+                        profiles: Path, after_seq: int | None = None) -> tuple[int, dict]:
     """Met when the log shows an owner add then removal of a profile the view and disk lack."""
+    tail, bound = _after(after_seq)
     try:
         connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
     except (sqlite3.Error, OSError):
@@ -457,8 +506,8 @@ def page_remove_verdict(log: Path, body_of: Callable[[], bytes | None],
     try:
         connection.execute("PRAGMA query_only = ON")
         rows = connection.execute(
-            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'account.removal') "
-            "ORDER BY seq").fetchall()
+            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'account.removal')"
+            f"{tail} ORDER BY seq", bound).fetchall()
     except sqlite3.Error:
         return NOT_YET, {"status": "no_log"}
     finally:
@@ -544,8 +593,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="require every signed-in profile to carry the account name its client "
                            "reports and the Sign in again action; prints no name")
     parser.add_argument("--log", type=Path, default=None,
-                        help="the console event log for --page-add and --page-remove "
-                             "(default: the console's own)")
+                        help="the console event log for --page-add and --page-remove, and for "
+                             "--page-signin with --after-seq (default: the console's own)")
+    parser.add_argument("--after-seq", type=_positive, default=None,
+                        help="read only log rows whose seq is above this, for --page-signin, "
+                             "--page-add and --page-remove")
     return parser
 
 
@@ -564,14 +616,17 @@ def _exclusion(url: str, body: bytes) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.after_seq is not None and not (args.page_signin or args.page_add or args.page_remove):
+        parser.error("--after-seq applies to --page-signin, --page-add and --page-remove only")
     if args.page_add:
-        code, result = page_add_verdict(args.log or default_log())
+        code, result = page_add_verdict(args.log or default_log(), args.after_seq)
         print(json.dumps(result, sort_keys=True))
         return code
     if args.page_remove:
         code, result = page_remove_verdict(args.log or default_log(), lambda: fetch(args.url),
-                                           profiles_dir())
+                                           profiles_dir(), args.after_seq)
         print(json.dumps(result, sort_keys=True))
         return code
     body = fetch(args.url)
@@ -582,6 +637,14 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
+    if args.page_signin and args.after_seq is not None:
+        ended = signed_in_after(args.log or default_log(), args.after_seq)
+        if ended is None:
+            print(json.dumps({"status": "no_log"}, sort_keys=True))
+            return NOT_YET
+        code, result = page_signin_verdict(body, ended)
+        print(json.dumps(result, sort_keys=True))
+        return code
     if args.exclusion:
         return _exclusion(args.url, body)
     if args.account_names:

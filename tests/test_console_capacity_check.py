@@ -553,7 +553,7 @@ class CapacityCheckTest(unittest.TestCase):
                                    "kind": "removed"}),
     ]
 
-    def page_remove(self, rows, document=None, *, directories=(), url=None):
+    def page_remove(self, rows, document=None, *, directories=(), url=None, extra=()):
         """Run `--page-remove` over a log of `rows`, a stub console and a profiles directory
         holding `directories`; returns (exit code, parsed output)."""
         home, log = self.log_home(rows)
@@ -562,9 +562,87 @@ class CapacityCheckTest(unittest.TestCase):
             (accounts / "profiles" / name).mkdir(parents=True)
         if url is None:
             url = serve(self, document if document is not None else view(("work", ago(5))))
-        code, out = self.run_check("--page-remove", "--url", url,
+        code, out = self.run_check("--page-remove", "--url", url, *extra,
                                    env={"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(accounts)})
         return code, json.loads(out)
+
+    # `--after-seq` (#894): a log carried over from another host keeps its rows below the watermark.
+    def signed_in_view(self):
+        return view(("work", ago(5)), asks=[],
+                    runs={"work": {"state": "signed_in", "at": ago(60)}})
+
+    def test_page_signin_after_a_watermark_ignores_a_carried_over_sign_in(self):
+        home, log = self.log_home([("signin.ended", None, {"attempt": 1, "outcome": "signed_in",
+                                                            "profile": "work"})])
+        url = serve(self, self.signed_in_view())
+        code, out = self.run_check("--url", url, "--page-signin", "--after-seq", "1",
+                                   "--log", str(log))
+        self.assertEqual((code, json.loads(out)), (75, {"status": "pending"}))
+        code, out = self.run_check("--url", url, "--page-signin")
+        self.assertEqual((code, json.loads(out)), (0, {"status": "met", "profiles": ["work"]}))
+
+    def test_page_signin_after_a_watermark_counts_a_later_sign_in(self):
+        for outcome, expected in (("signed_in", (0, {"status": "met", "profiles": ["work"]})),
+                                  ("cancelled", (75, {"status": "pending"}))):
+            with self.subTest(outcome=outcome):
+                home, log = self.log_home([
+                    ("signin.ended", None, {"attempt": 1, "outcome": "signed_in",
+                                            "profile": "work"}),
+                    ("signin.ended", None, {"attempt": 2, "outcome": outcome,
+                                            "profile": "work"})])
+                code, out = self.run_check("--url", serve(self, self.signed_in_view()),
+                                           "--page-signin", "--after-seq", "1",
+                                           "--log", str(log))
+                self.assertEqual((code, json.loads(out)), expected)
+
+    def test_page_add_after_a_watermark_ignores_carried_over_rows(self):
+        self.assertEqual(self.page_add(self.ZZCHECK, "--after-seq", "4"),
+                         (75, {"status": "pending"}))
+        with self.subTest("a later add and start"):
+            rows = [*self.ZZCHECK,
+                    ("account.added", None, {"by": "owner", "profile": "mac"}),
+                    ("signin.acted", None, {"action": "start", "by": "owner",
+                                            "outcome": "started", "profile": "mac"})]
+            self.assertEqual(self.page_add(rows, "--after-seq", "4"),
+                             (0, {"profiles": ["mac"], "status": "met"}))
+        with self.subTest("add below, start above"):
+            rows = [self.ZZCHECK[0],
+                    ("signin.acted", None, {"action": "start", "by": "owner",
+                                            "outcome": "started", "profile": "zzcheck"})]
+            self.assertEqual(self.page_add(rows, "--after-seq", "1"),
+                             (75, {"status": "pending"}))
+
+    def test_page_remove_after_a_watermark_ignores_carried_over_rows(self):
+        self.assertEqual(self.page_remove(self.REMOVED, extra=("--after-seq", "2")),
+                         (75, {"status": "pending"}))
+        with self.subTest("add below, removal above"):
+            rows = [self.REMOVED[0],
+                    ("account.added", None, {"by": "owner", "profile": "other"}),
+                    self.REMOVED[1]]
+            self.assertEqual(self.page_remove(rows, extra=("--after-seq", "2")),
+                             (75, {"status": "pending"}))
+        with self.subTest("both above"):
+            rows = [("account.added", None, {"by": "owner", "profile": "old"}), *self.REMOVED]
+            self.assertEqual(self.page_remove(rows, extra=("--after-seq", "1")),
+                             (0, {"profiles": ["zzgone"], "status": "met"}))
+
+    def test_page_signin_after_a_watermark_without_a_log_is_not_yet(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        code, out = self.run_check("--url", serve(self, self.signed_in_view()), "--page-signin",
+                                   "--after-seq", "1", env={"HOME": tmp.name})
+        self.assertEqual((code, json.loads(out)), (75, {"status": "no_log"}))
+
+    def test_after_seq_belongs_to_the_page_modes(self):
+        for argv, message in ((["--every", "--after-seq", "1"], "--after-seq applies to"),
+                              (["--after-seq", "1"], "--after-seq applies to"),
+                              (["--page-add", "--after-seq", "0"], None)):
+            with self.subTest(argv=argv):
+                done = subprocess.run([ROOT / WRAPPER, *argv], cwd=ROOT, capture_output=True,
+                                      text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                if message:
+                    self.assertIn(message, done.stderr)
 
     def test_page_remove_is_met_when_an_added_profile_was_removed_and_is_gone(self):
         self.assertEqual(self.page_remove(self.REMOVED),
