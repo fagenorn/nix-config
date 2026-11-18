@@ -58,7 +58,10 @@ const document = {
     if (id.endsWith("-icon")) {
       return {content: {firstElementChild: {cloneNode: () => new Node("svg")}}};
     }
-    if (!(id in ELEMENTS)) ELEMENTS[id] = new Node("div");
+    if (!(id in ELEMENTS)) {
+      ELEMENTS[id] = new Node("div");
+      if (id === "console-door") ELEMENTS[id].content = process.argv[5];
+    }
     return ELEMENTS[id];
   },
   querySelector: () => null,
@@ -101,12 +104,13 @@ def render_page(view: dict, clock_ms: int | None = None) -> dict:
     html = PAGE.read_text(encoding="utf-8")
     script = re.search(r"(?s)<script>(.*?)</script>", html).group(1)
     ids = re.findall(r'id="([^"]+)"', html)
+    door = re.search(r'id="console-door" content="([^"]*)"', html).group(1)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "render.js"
         frozen = "" if clock_ms is None else f"Date.now = () => {int(clock_ms)};\n"
         path.write_text(INBOX_HARNESS + frozen + script + TAIL, encoding="utf-8")
         done = subprocess.run(
-            [node, str(path), "-", json.dumps(ids), json.dumps(view)],
+            [node, str(path), "-", json.dumps(ids), json.dumps(view), door],
             capture_output=True, text=True, timeout=30, check=False,
             env={**os.environ, "TZ": "UTC"},
         )
@@ -211,8 +215,10 @@ class PageTest(unittest.TestCase):
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
         self.assertEqual(self.text.count('href="/spend"'), 1)
-        self.assertEqual(header.count('<a class="nav" href="/spend">Spend</a>'), 1)
-        self.assertIn('<span class="brand">Console</span><a class="nav" href="/spend">Spend</a>', header)
+        self.assertEqual(header.count('<a class="nav" id="spend-link" href="/spend" hidden>Spend</a>'), 1)
+        self.assertIn(
+            '<span class="brand">Console</span><span class="top-who" id="top-who" hidden></span>'
+            '<a class="nav" id="spend-link" href="/spend" hidden>Spend</a>', header)
         self.assertEqual(re.findall(r'\shref="([^"]*)"', header), ["/spend"])
         self.assertEqual(
             re.findall(r'\shref="([^"]*)"', self.text[:self.text.index("<script>")]),
@@ -312,7 +318,8 @@ class PageTest(unittest.TestCase):
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
-             "/api/activate"},
+             "/api/activate", "/api/share-tailnet", "/api/share-colleague",
+             "/api/share-remove"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -321,7 +328,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 42)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 45)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )

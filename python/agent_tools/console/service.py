@@ -74,7 +74,8 @@ by `X-Console-Probe` arrived as a login header, and never repeats a login. After
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
 its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
-scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the page carrying the guest token, `GET
+scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
+read-only layout) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague, the tailnet name or the
 sharing is gone, and a picture read needs the guest token, an `Origin` (when sent) of `https://<tailnet>`
@@ -1506,6 +1507,9 @@ CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
 PAGE: bytes = Path(__file__).with_name("page.html").read_bytes()
+DOOR_OWNER = b'<meta name="console-door" id="console-door" content="owner">'
+DOOR_GUEST = b'<meta name="console-door" id="console-door" content="guest">'
+GUEST_PAGE: bytes = PAGE.replace(DOOR_OWNER, DOOR_GUEST)
 SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
@@ -3516,7 +3520,7 @@ class ConsoleService:
                 self._guest_token = write_guard.load_token(
                     Path(store).with_name(write_guard.GUEST_TOKEN_FILE)
                     if guest_token_path is None else guest_token_path)
-                self._guest_page = PAGE.replace(
+                self._guest_page = GUEST_PAGE.replace(
                     write_guard.TOKEN_SLOT, self._guest_token.encode("ascii"))
             self.log = EventLog(store, clock=log_clock)
             self.log.retain()
