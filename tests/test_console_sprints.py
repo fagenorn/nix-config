@@ -2726,7 +2726,7 @@ LOOK_QUESTION = {"question": "Does the settings page look right?",
                  "blocks": "the settings slice",
                  "options": ["Approve this head", "Ask for changes"],
                  "recommended": "Approve this head", "look": LOOK}
-LOOKED = {"issue": 7, "pr": 12, "head": "a" * 40}
+LOOKED = {"issue": 7, "pr": 12, "head": "a" * 40, "repo": "owner/p00"}
 
 
 def row(seq, kind, payload):
@@ -2783,6 +2783,30 @@ class LookCardTest(unittest.TestCase):
             sprints.checked_round(
                 {"questions": [dict(LOOK_QUESTION, look={**LOOK, "approve": "Approve it"})]})
         self.assertEqual(str(caught.exception), sprints.LOOK_APPROVE.format(n=1))
+
+    def test_an_approval_names_the_repository_it_was_read_for(self):
+        state = self.state(look_answer(6))
+        self.assertEqual(self.look_question(state).look_repo, "owner/p00")
+        for name, logged in {"no repository": {k: v for k, v in LOOKED.items() if k != "repo"},
+                             "a blank repository": {**LOOKED, "repo": " "},
+                             "a repository that is no string": {**LOOKED, "repo": 3}}.items():
+            with self.subTest(name):
+                state = self.state(look_answer(6, look=logged))
+                self.assertIsNone(self.look_question(state).look_state)
+                self.assertIsNone(self.look_question(state).look_repo)
+                self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+
+    def test_a_nudge_marks_delivered_only_the_messages_it_covered(self):
+        rows = [look_answer(6), row(7, event_log.SPRINT_MESSAGED, {"text": "hello"}),
+                look_record(8, "posted", message=6, comment_id=501)]
+        state = self.state(*rows, row(9, event_log.SPRINT_NUDGED, {
+            "through": 7, "covers": [7], "ok": True, "route": "relay"}))
+        delivered = {m.message_id: m.delivered_at is not None for m in state.messages}
+        self.assertEqual(delivered, {3: False, 6: False, 7: True})
+        state = self.state(*rows, row(9, event_log.SPRINT_NUDGED, {
+            "through": 7, "ok": True, "route": "relay"}))
+        self.assertEqual({m.message_id: m.delivered_at is not None for m in state.messages},
+                         {3: True, 6: True, 7: True})
 
     def test_a_folded_question_keeps_its_look(self):
         self.assertEqual(self.look_question(self.state()).look,

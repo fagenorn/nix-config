@@ -2065,6 +2065,14 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
             with self.subTest(absent=form):
                 self.assertNotIn(form, approve)
 
+    def test_an_approve_read_that_errors_is_reported_not_called_a_missing_approval(self):
+        approve = self.bullet(self.section("Resume"), "approve")
+        self.assertIn("on `error`", approve)
+        self.assertLess(approve.index("on `error`"), approve.index("Never record an approval yourself"))
+        self.assertIn("apply the `error` rule below", approve)
+        self.assertIn("On `error`, merge nothing: run `forge-claim release` and report it.",
+                      self.section("Land"))
+
     def test_fix_posts_only_for_the_unchanged_head(self):
         fix = self.bullet(self.section("Resume"), "fix")
         self.assertIn(self.HEAD_READ, fix)

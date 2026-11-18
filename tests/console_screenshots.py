@@ -425,7 +425,8 @@ class _Seed:
             answered = self.put(MINUTE * 3, "question.answered", project, {
                 **base, **where, "question": "Does the settings page look right?",
                 "answer": LOOK_APPROVE, "chosen": LOOK_APPROVE, "recommended": LOOK_APPROVE,
-                "differs": False, "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD}})
+                "differs": False,
+                "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "repo": "owner/web"}})
             self.put(MINUTE * 2, "look.recorded", project, {
                 **base, **where, "outcome": "failed", "message": answered.seq,
                 "reason": FORGE_DOWN})

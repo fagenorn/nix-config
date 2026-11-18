@@ -55,7 +55,10 @@ returns `("merged", sha)` when `merged` is true, else `("open", sha)` or `("clos
 `record_look(slug, issue, pr, head, message)` writes the owner's look approval of `head` on issue `issue` and
 returns its comment id. It lists the issue's trusted markers (`look_marker.TRUSTED`); a live `look` marker whose
 `issue`, `pr`, `head`, `answer=approved` and `message` all equal the given ones is returned and nothing is posted,
-so a retry after a lost reply posts no second marker. Otherwise it posts `look_marker.approval_body(issue, pr, head,
+so a retry after a lost reply posts no second marker, and one a trusted end marker withdrew is settled too: the
+retry never undoes a withdrawal. Otherwise it reads the pull request once more (`look_head`): one that is not open
+(`Refused(LOOK_CLOSED)`) or not at `head` (`Refused(LOOK_MOVED)`) is not approved, so no attempt posts a stale
+approval. Then it posts `look_marker.approval_body(issue, pr, head,
 "approved", message)` and lists the trusted markers again: the new comment must be among them, else
 `Refused(LOOK_UNTRUSTED)` (GitHub took it, but not as the owner or a member, so the merge would not count it).
 
@@ -153,6 +156,8 @@ UNEXPECTED_FAILURE = "the console ran into a problem it did not expect. Try agai
 LOOK_MOVED = ("Nothing was recorded: the pull request is now at {found}, not at {head}, the head "
               "these pictures show. Ask for a new look.")
 LOOK_CLOSED = "Nothing was recorded: the pull request is {state}."
+LOOK_APPROVES = ("Choosing \"{option}\" records your approval of {head}, pull request #{pr}, on "
+                 "issue #{issue}.")
 LOOK_RECORDING = "Recording your approval of {head} on issue #{issue}."
 LOOK_UNTRUSTED = ("GitHub took the approval, but not as the repository's owner or a member, so the "
                   "merge would not count it. Sign gh in as the owner, then Retry.")
@@ -295,9 +300,14 @@ def record_look(slug: str, issue: int, pr: int, head: str, message: str) -> int:
               "message": message}
     markers = fm.list_markers(slug, issue, look_marker.TRUSTED)
     for marker in markers:
-        if (marker.kind == look_marker.KIND and fm.is_live(marker, markers)
+        if (marker.kind == look_marker.KIND
                 and all(marker.fields.get(key) == value for key, value in wanted.items())):
             return marker.comment_id
+    state, found = look_head(slug, pr)
+    if state != "open":
+        raise Refused(LOOK_CLOSED.format(state=state))
+    if found != head:
+        raise Refused(LOOK_MOVED.format(found=found[:7], head=head[:7]))
     posted = fm.post(slug, issue, look_marker.approval_body(issue, pr, head, "approved", message))
     if not any(marker.comment_id == posted for marker in fm.list_markers(slug, issue, look_marker.TRUSTED)):
         raise Refused(LOOK_UNTRUSTED)

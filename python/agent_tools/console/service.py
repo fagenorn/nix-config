@@ -153,14 +153,16 @@ is appended; a failed read appends nothing, logs `console: look_head_failed <spr
 <detail>` and is the 502 above. A head that is not the card's, or a pull request that is closed or merged,
 appends one `look.recorded moved` row and is a 409 with `LOOK_MOVED` or `LOOK_CLOSED`; the question stays open.
 Otherwise the refusals of any answer are checked again (a question withdrawn or answered meanwhile is refused
-and nothing is posted), one `question.answered` row is appended with its `look` member, and the approval is
+and nothing is posted), one `question.answered` row is appended with its `look` member (the repository too), and the approval is
 posted through `look_recorder` with `str(<that row's seq>)` as the message, outside the lock, retrying
 transient failures (each retry logs `console: look_post_retry <sprint> <round> <index> <attempt> <code>:
 <detail>`). It then appends `look.recorded posted` and nudges the manager, or `look.recorded failed` with the
 plain reason after logging `console: look_post_failed <sprint> <round> <index> <code>: <detail>` (`refused:
 <reason>` for `answer.Refused`); the answer is still 204 and the card stays on the page with Retry
-(`retry_look` posts again, refusing `NOT_OPEN`, `UNKNOWN_QUESTION`, `LOOK_NOT_PENDING` and `LOOK_SENDING`, and a
-trusted marker already posted for that message is found, never posted twice). The manager's answer message is
+(`retry_look` posts again, refusing `NOT_OPEN`, `UNKNOWN_QUESTION`, `LOOK_NOT_PENDING` and `LOOK_SENDING`; it posts to the repository kept in the answer's row, never to the
+checkout's repository now, and `answer.record_look` finds a trusted marker already posted for that message,
+ended or not, and posts nothing, else reads the pull request again and posts nothing when it is not open at the
+card's head, so no attempt, an automatic retry included, posts a stale approval). The manager's answer message is
 held until `posted`. At `start()`, before the threads, each approval left `posting` by a stopped console gets
 `look.recorded failed` with `LOOK_INTERRUPTED`. An answer that does not approve a look card is unchanged. `POST /api/signin`, `POST /api/signin-code` and
 `POST /api/signin-cancel` (#1026) run the same checks with `MAX_SIGNIN_BYTES` (4096) and
@@ -1150,9 +1152,10 @@ it lists the sessions named `manager.session_name(project, sprint)`: a listed on
 there is no nudger call and the reason is `nudge.UNKNOWN_SESSION` with a null route; a `NudgeFailed`
 gives its text and any other exception (the listing's included) `<Type>: <message>`. Under the lock
 again it releases the reservation and, while the sprint is open and the service is not stopping,
-appends one `sprint.nudged {sprint_id, through: the last unread id, route, ok[, reason]}` (a failure
+appends one `sprint.nudged {sprint_id, through: the last unread id, covers: the unread ids, route, ok[, reason]}` (a failure
 also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
-`_nudge_again` and now holds an unread message above `through`, it is reserved and dispatched once
+`_nudge_again` and now holds an unread message `covers` does not list (one above `through`, or an approval
+released while the nudge ran), it is reserved and dispatched once
 more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
 failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
@@ -5457,7 +5460,8 @@ class ConsoleService:
 
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
                       reason: str | None, listing_failed: str | None = None,
-                      written: permission.Permission | None = None) -> None:
+                      written: permission.Permission | None = None,
+                      covers: list[int] | None = None) -> None:
         """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
         sprint = self._sprints.get(sprint_id)
         if sprint is None or self._stop.is_set():
@@ -5467,7 +5471,8 @@ class ConsoleService:
             if not unread:
                 return
             through = unread[-1].message_id
-        payload = {"sprint_id": sprint_id, "through": through, "route": route,
+            covers = [message.message_id for message in unread]
+        payload = {"sprint_id": sprint_id, "through": through, "covers": covers, "route": route,
                    "ok": reason is None}
         if reason is not None:
             payload["reason"] = reason
@@ -5532,6 +5537,7 @@ class ConsoleService:
                 sprint, unread = found
                 covered = self._notice_due.pop(sprint_id, None)
                 through = unread[-1].message_id
+                heard = {message.message_id for message in unread}
                 name = manager.session_name(sprint.project_id, sprint_id)
                 profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
         if found is None or project is None:
@@ -5554,12 +5560,13 @@ class ConsoleService:
             self._settled[sprint_id] = int(self._clock() * 1000)
             wanted = sprint_id in self._nudge_again
             self._nudge_again.discard(sprint_id)
-            self._record_nudge(sprint_id, through, route, reason, listing_failed, written)
+            self._record_nudge(sprint_id, through, route, reason, listing_failed, written,
+                               sorted(heard))
             if covered is not None and reason is not None:
                 self._notice_due[sprint_id] = max(covered, self._notice_due.get(sprint_id, 0))
             found = self._nudgeable(sprint_id)
-            if wanted and found is not None and found[1][-1].message_id > through \
-                    and not self._stop.is_set():
+            if wanted and found is not None and not self._stop.is_set() \
+                    and any(message.message_id not in heard for message in found[1]):
                 self._nudging.add(sprint_id)
                 again = True
             else:
@@ -6366,7 +6373,7 @@ class ConsoleService:
                     else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
             appended = self.log.append([self._answered_row(
                 project_id, sprint, asked, look.approve, said,
-                look={"issue": look.issue, "pr": look.pr, "head": look.head})])
+                look={"issue": look.issue, "pr": look.pr, "head": look.head, "repo": slug})])
             self._apply(appended)
         seq = appended[-1].seq
         try:
@@ -6429,11 +6436,9 @@ class ConsoleService:
                 raise sprints.Refused(answer.LOOK_NOT_PENDING)
             if slot in self._look_sending:
                 raise sprints.Refused(answer.LOOK_SENDING)
-            state = self._states.get(project_id)
-            slug = self._slug_of(state.root) if state is not None else None
+            look, seq, slug = asked.look, asked.look_message, asked.look_repo
             if slug is None:
-                raise sprints.Refused(answer.LOOK_NO_REPOSITORY)
-            look, seq = asked.look, asked.look_message
+                raise sprints.Refused(answer.LOOK_NOT_PENDING)
             self._look_sending.add(slot)
         try:
             self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)

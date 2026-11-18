@@ -7,13 +7,15 @@ import io
 import json
 import threading
 
-from agent_tools.console import answer, sprints
+from agent_tools.claims import forge_markers
+from agent_tools.console import answer, manager, sessions, sprints
 from agent_tools.delivery import look_marker
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
 from .forge_world import ForgeWorld
 from .test_console_answer import view_of
+from .test_console_messages import GOAL_TEXT, PARTS
 from .test_console_questions import JSON, Q0, QuestionRoutes, withdraw
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -107,7 +109,7 @@ class LookAnswerTest(QuestionRoutes):
         self.assertEqual(self.approve(svc, sid, round_id)[0], 204)
         (answered,) = self.rows("question.answered")
         seq = answered["seq"]
-        self.assertEqual(answered["look"], {"issue": ISSUE, "pr": PR, "head": HEAD})
+        self.assertEqual(answered["look"], {"issue": ISSUE, "pr": PR, "head": HEAD, "repo": SLUG})
         (comment,) = self.world.stored()
         self.assertEqual(comment["body"], self.marker_for(seq))
         facts = look_marker.IssueFacts(ISSUE, MARKED_BODY, tuple(self.world.stored()))
@@ -193,6 +195,8 @@ class LookAnswerTest(QuestionRoutes):
 
     def test_record_look_refuses_a_comment_not_counted_as_the_owner(self):
         world = ForgeWorld(self)
+        world.respond_json("gh", PULL, {"number": PR, "state": "open", "merged": False,
+                                        "head": {"sha": HEAD}})
         world.respond_json("gh", COMMENTS, [[]])
         world.respond_json(
             "gh", ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/comments", "-f",
@@ -200,6 +204,90 @@ class LookAnswerTest(QuestionRoutes):
         with self.assertRaises(answer.Refused) as caught:
             answer.record_look(SLUG, ISSUE, PR, HEAD, "41")
         self.assertEqual(str(caught.exception), answer.LOOK_UNTRUSTED)
+
+    def test_a_retry_after_the_head_moved_posts_nothing_and_says_why(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        before = len(posts(self.world))
+        self.pull(sha=MOVED)
+        status, _, body = self.retry(svc, sid, round_id)
+        self.assertEqual((status, body), (
+            502, answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]).encode() + b"\n"))
+        self.assertEqual(len(posts(self.world)), before)
+        self.assertEqual(self.world.stored(), [])
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "failed"])
+        self.assertEqual(self.entry(svc, sid)["look"]["line"],
+                         answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]))
+        self.assertEqual(self.answers(svc, sid), [])
+        self.pull(state="closed")
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 502)
+        self.assertEqual(self.world.stored(), [])
+
+    def test_a_post_whose_head_moved_between_attempts_is_not_made(self):
+        with self.assertRaises(answer.Refused) as caught:
+            self.store_comments()
+            self.pull(sha=MOVED)
+            answer.record_look(SLUG, ISSUE, PR, HEAD, "41")
+        self.assertEqual(str(caught.exception),
+                         answer.LOOK_MOVED.format(found=MOVED[:7], head=HEAD[:7]))
+        self.assertEqual(posts(self.world), [])
+
+    def test_a_retry_posts_to_the_repository_the_approval_was_read_for(self):
+        repository = {"slug": SLUG}
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(slug_of=lambda root: repository["slug"],
+                         write_sleep=lambda seconds: False)
+        sid, round_id, seq = self.failed_post(svc)
+        (answered,) = self.rows("question.answered")
+        self.assertEqual(answered["look"]["repo"], SLUG)
+        repository["slug"] = "elsewhere/other"
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        (comment,) = self.world.stored()
+        self.assertEqual(comment["body"], self.marker_for(seq))
+        self.assertTrue(all("elsewhere/other" not in " ".join(argv) for argv in gh_argvs(self.world)))
+
+    def test_a_retry_does_not_undo_a_withdrawn_approval(self):
+        svc = self.open()
+        sid, round_id, seq = self.failed_post(svc)
+        before = len(posts(self.world))
+        stamp = {"author_association": "OWNER", "created_at": "2026-11-06T10:00:00Z",
+                 "updated_at": "2026-11-06T10:00:00Z"}
+        self.world.append_comment({"id": 900, "body": self.marker_for(seq), **stamp})
+        self.world.append_comment({"id": 901, "body": forge_markers.end_body(900, "withdrawn"),
+                                   **stamp})
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        self.assertEqual(len(posts(self.world)), before)
+        self.assertEqual(len(self.world.stored()), 2)
+        (posted,) = [r for r in self.rows("look.recorded") if r["outcome"] == "posted"]
+        self.assertEqual(posted["comment_id"], 900)
+
+    def test_an_open_look_card_names_what_its_approving_option_records(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        question = {**LOOK_Q, "recommended": "Approve this head",
+                    "look": {**LOOK_Q["look"], "approve": "Ask for changes"}}
+        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [question]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            self.entry(svc, sid)["look"],
+            {"issue": ISSUE, "pr": PR, "head": HEAD, "state": "open",
+             "line": 'Choosing "Ask for changes" records your approval of aaaaaaa, '
+                     'pull request #12, on issue #7.'})
+
+    def test_a_held_approval_is_not_shown_as_sent_or_not_picked_up(self):
+        moment = {"now": 1_800_000_000.0}
+        svc = self.open(clock=lambda: moment["now"])
+        sid, round_id, seq = self.failed_post(svc)
+        moment["now"] += 3600
+        svc.refresh()
+        sprint = next(s for e in view_of(svc)["entries"] for s in e["sprints"]
+                      if s["sprint_id"] == sid)
+        self.assertEqual([m["id"] for m in sprint["messages"] if m["kind"] == "answer"], [])
+        self.assertEqual(self.retry(svc, sid, round_id)[0], 204)
+        svc.refresh()
+        sprint = next(s for e in view_of(svc)["entries"] for s in e["sprints"]
+                      if s["sprint_id"] == sid)
+        self.assertEqual([m["id"] for m in sprint["messages"] if m["kind"] == "answer"], [seq])
 
     def test_look_head_reads_the_pull_request(self):
         for state, merged, expected in (("open", False, "open"), ("closed", False, "closed"),
@@ -255,7 +343,8 @@ class LookAnswerTest(QuestionRoutes):
                 "sprint_id": sid, "goal": svc._sprints[sid].goal, "round": round_id, "index": 0,
                 "question": asked.question, "answer": "Approve this head",
                 "chosen": "Approve this head", "recommended": asked.recommended,
-                "differs": False, "look": {"issue": ISSUE, "pr": PR, "head": HEAD}})])
+                "differs": False,
+                "look": {"issue": ISSUE, "pr": PR, "head": HEAD, "repo": SLUG}})])
         seq = appended[-1].seq
         svc.close()
         again = self.start(slug_of=lambda root: SLUG, write_sleep=lambda seconds: False)
@@ -355,3 +444,70 @@ class LookAnswerTest(QuestionRoutes):
         svc.close()
         again = self.open()
         self.assertEqual(self.answers(again, sid), [])
+
+
+class LookNudgeTest(QuestionRoutes):
+    """A look approval released while a nudge runs is still told of (#1260)."""
+
+    def setUp(self):
+        super().setUp()
+        self.world = ForgeWorld(self)
+        support.write_registry(self.registry, support.entries(2))
+        self.queued = support.Queued()
+        self.nudges = []
+        self.listed = {}
+
+    def nudged(self):
+        return [json.loads(row[4]) for row in support.log_rows(self.store)
+                if row[2] == "sprint.nudged"]
+
+    def test_an_approval_released_during_a_nudge_gets_its_own_nudge(self):
+        support.sign_in(self.store, "work")
+        state = {}
+
+        def nudger(sent):
+            self.nudges.append(sent)
+            if state.get("armed"):
+                state["armed"] = False
+                self.world.comment_store(SLUG, ISSUE, [], labels=[])
+                self.assertEqual(state["svc"].retry_look("owner/p01", state["sid"],
+                                                         state["round"], 0), state["seq"])
+
+        svc = state["svc"] = self.start(
+            launcher=support.Launches(), profile_dirs=[support.profile_dir(self.store, "work")],
+            dispatch=self.queued, nudger=nudger, listing=lambda: dict(self.listed),
+            slug_of=lambda root: SLUG, write_sleep=lambda seconds: False,
+            clock=lambda: 1_800_000_000.0, session_poll_seconds=3600)
+        sid = state["sid"] = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.queued.run_next()
+        name = manager.session_name("owner/p01", sid)
+        self.listed["s-1"] = sessions.Observation("s-1", "/srv/p01", 1, "idle", None, name, None)
+        svc.send_brief(sid, self.secret(sid), PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        self.queued.run_next()
+        state["round"], _ = svc.ask_questions(sid, self.secret(sid), {"questions": [LOOK_Q]})
+        self.world.comment_store(SLUG, ISSUE, [], labels=[],
+                                 fail_once=("post",) * (len(answer.RETRY_DELAYS) + 1))
+        self.world.respond_json("gh", PULL, {"number": PR, "state": "open", "merged": False,
+                                             "head": {"sha": HEAD}})
+        with contextlib.redirect_stderr(io.StringIO()):
+            state["seq"] = svc.answer_question("owner/p01", sid, state["round"], 0, 0, None)
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed"])
+        settled = len(self.nudges)
+        state["armed"] = True
+        text = svc.send_message("owner/p01", sid, "hello")
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.queued.run_next()
+        self.assertEqual([r["outcome"] for r in self.rows("look.recorded")], ["failed", "posted"])
+        self.assertEqual(len(self.nudges), settled + 1)
+        self.assertEqual(len(self.queued.jobs), 1, "the released approval is nudged for")
+        self.queued.run_next()
+        self.assertEqual(len(self.nudges), settled + 2)
+        first, second = self.nudged()[-2:]
+        self.assertEqual(first["through"], text)
+        self.assertIn(text, first["covers"])
+        self.assertNotIn(state["seq"], first["covers"])
+        self.assertIn(state["seq"], second["covers"])
+        self.assertTrue(second["ok"])
+        self.assertEqual([m for m in sprints.unread(svc._sprints[sid])
+                          if m.delivered_at is None], [])

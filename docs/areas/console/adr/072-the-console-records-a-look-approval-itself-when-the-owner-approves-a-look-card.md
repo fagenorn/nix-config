@@ -9,7 +9,7 @@ On 17 Nov the owner approved a look card and the approval never reached the issu
 
 ## Decision
 
-**D1. The card names its look.** A round question may carry `look` `{issue, pr, head, approve}`: the issue, the pull request, the full 40-hex head its pictures show and the exact text of the one option that approves that head. Only that option, picked as an option and not typed words, records an approval; every other answer to a look card reaches the manager as before.
+**D1. The card names its look.** A round question may carry `look` `{issue, pr, head, approve}`: the issue, the pull request, the full 40-hex head its pictures show and the exact text of the one option that approves that head. Only that option, picked as an option and not typed words, records an approval; every other answer to a look card reaches the manager as before. The open card carries the console's own line naming that option, the head and the pull request it approves, so the manager's wording of an option cannot hide that choosing it approves.
 
 **D2. Approve only.** The console records `answer=approved`. The other approving answer, approve with one fix, keeps the delivery's agent-written post (`look-approval post --answer fix`), because a round answer is an option or the owner's words, never both, so the card cannot carry a fix with its words yet. That is a known gap against "no agent session writes an approval", tracked by #1261.
 
@@ -17,9 +17,9 @@ On 17 Nov the owner approved a look card and the approval never reached the issu
 
 **D4. One kept record kind, schema 11.** `look.recorded` (outcome `moved`, `posted` or `failed`) joins the kept kinds, so the event log goes to schema 11 with the trigger rebuilt from `KEPT_KINDS` and every row kept.
 
-**D5. The manager hears an approval only once it is recorded.** The answered row of an approving answer carries the look, and its message is held, not unread and not nudged, until a `look.recorded` of outcome `posted` names it. No read or nudge watermark consumes a held approval, so it is delivered exactly once after the post, on replay too.
+**D5. The manager hears an approval only once it is recorded.** The answered row of an approving answer carries the look, and its message is held, not unread and not nudged, until a `look.recorded` of outcome `posted` names it. No read or nudge watermark consumes a held approval, so it is delivered exactly once after the post, on replay too. The sprint panel leaves a held approval out, because it was never offered to the manager and is neither sent nor unpicked-up, and a nudge row names the messages it covered, so an approval released while a nudge ran is nudged for on its own.
 
-**D6. A failed post stays with Retry.** A failed post is recorded as `failed` with its reason, the card stays in the owner's open items with that reason and offers Retry. A retry first looks for a trusted marker already posted with that message id and head, so it never posts twice. A post a stopped console left without an outcome reads failed at the next start.
+**D6. A failed post stays with Retry.** A failed post is recorded as `failed` with its reason, the card stays in the owner's open items with that reason and offers Retry. A retry first looks for a trusted marker already posted with that message id and head, so it never posts twice, a marker a trusted end marker withdrew included. Every attempt, an automatic retry too, reads the pull request again before it posts and posts nothing for a head that is not open and the card's, and the answer's row keeps the repository, which the retry posts to whatever the checkout's origin is now. A post a stopped console left without an outcome reads failed at the next start.
 
 **D7. The delivery reads, never writes, an approve.** The approve resume runs `look-approval status` and lands only on `approved`. The global look-before-merge standard's stop says the owner has not recorded the approval, because it is read in projects with no console; the owner records it wherever they look, never the session.
 

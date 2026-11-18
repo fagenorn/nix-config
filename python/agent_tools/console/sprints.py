@@ -242,10 +242,11 @@ on `SprintState.messages`. Four rows carry them, the first three kept (`event_lo
     sprint.messaged {"sprint_id", "goal": <str>, "text": <str>}
     sprint.read     {"sprint_id", "through": <int message id>}
     sprint.answered {"sprint_id", "message": <int message id>, "reply": <str>}
-    sprint.nudged   {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": true,
-                     "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
-                    {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": false,
-                     "reason": <str>, "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
+    sprint.nudged   {"sprint_id", "through": <int>, "covers"?: [<int message id>], "route": "relay" |
+                     "wake" | null, "ok": true, "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
+                    {"sprint_id", "through": <int>, "covers"?: [<int message id>], "route": "relay" |
+                     "wake" | null, "ok": false, "reason": <str>, "listing_failed"?: <str>,
+                     "permission"?: {"mode", "reason"}}
 
 A message's id is the `seq` of the row that made it. A `brief.approved` row that approves the open
 brief makes a `MESSAGE_APPROVED` message (`version` the brief's, no text); a `brief.replied` row
@@ -255,7 +256,9 @@ repeated decision, which `_folded_brief` ignores, makes none. `sprint.read` with
 `through` sets `read_at` (the row's `at`) on every message up to that id still unread and resets
 `failed_nudges`. `sprint.nudged` with a bool `ok` and an int `through` sets `last_nudge_at` and
 `last_nudge_ok`; `ok` true sets `delivered_at` on every message up to `through` without one and
-resets `failed_nudges`, `ok` false adds one to it. `sprint.answered` with an int `message` naming one
+resets `failed_nudges` (when the row carries `covers`, a list of ids, on exactly the listed messages
+instead: a message released after the nudge began, a look approval the console had held, was not told
+of), `ok` false adds one to it. `sprint.answered` with an int `message` naming one
 of the sprint's messages and a string `reply` sets that message's `reply` and `reply_at` (the latest
 row wins). Every other such row changes nothing, and a withdrawn sprint keeps nothing.
 
@@ -301,7 +304,7 @@ console did about a look card's approval:
     question.answered {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                        "question": <str>, "answer": <str>, "chosen": <str> | null,
                        "recommended": <str>, "differs": <bool>,
-                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>}}
+                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>, "repo": <str>}}
     look.recorded     {"sprint_id", "round": <int>, "index": <int>, "outcome": "moved" | "posted" |
                        "failed", ...}  moved: "found": <40 hex> | null, "state": "open" | "closed"
                        | "merged"; posted: "message": <int>, "comment_id": <int>;
@@ -407,8 +410,9 @@ its `chosen` is null or one of the question's options: the question then keeps `
 `differs` is not trusted; the owner's own words, `chosen` null, always differ), and the sprint gains
 a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). An answer
 on a question with a `look` whose `chosen` equals `look.approve` and whose row's `look` equals the
-question's `(issue, pr, head)` sets `look_state` to `"posting"` (and `look_message` to the row's
-`seq`) and its message is `held`: `unread` leaves a held message out and no `sprint.read` or
+question's `(issue, pr, head)` and names a `repo` (`owner/name`, the repository the console read it
+for) sets `look_state` to `"posting"` (and `look_message` to the row's `seq`, `look_repo` to the
+`repo`, which a retry posts to) and its message is `held`: `unread` leaves a held message out and no `sprint.read` or
 `sprint.nudged` watermark marks it read or delivered, so the approval reaches the manager only after
 the console has posted it; any other answer to a look question is an ordinary answer (`look_state`
 None, not held). A `look.recorded` row names a question by its `round` and `index`: `posted`
@@ -1013,6 +1017,7 @@ class Question:
     look_found_state: str | None = None
     look_comment: int | None = None
     look_message: int | None = None
+    look_repo: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2000,11 +2005,16 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
         through, ok = payload.get("through"), payload.get("ok")
         if _id(through) and isinstance(ok, bool):
             messages = state.messages
+            covers = payload.get("covers")
+            covered = (set(covers) if isinstance(covers, list) and all(_id(item) for item in covers)
+                       else None)
             if ok:
                 messages = tuple(
                     replace(message, delivered_at=event.at)
                     if (message.message_id <= through and message.delivered_at is None
-                        and not message.held) else message for message in messages)
+                        and not message.held
+                        and (covered is None or message.message_id in covered)) else message
+                    for message in messages)
             return replace(state, messages=messages, last_nudge_at=event.at, last_nudge_ok=ok,
                            failed_nudges=0 if ok else state.failed_nudges + 1)
     elif event.kind == SPRINT_ANSWERED:
@@ -2065,7 +2075,8 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                            differs=chosen != question.recommended,
                            look_state=LOOK_POSTING if held else None,
                            look_found=None, look_found_state=None,
-                           look_message=event.seq if held else None)
+                           look_message=event.seq if held else None,
+                           look_repo=payload["look"]["repo"] if held else None)
         questions = (*state.questions[:position], answered, *state.questions[position + 1:])
         return _with_message(
             replace(state, questions=questions),
@@ -2078,8 +2089,8 @@ def _approves_look(question: Question, chosen: object, logged: object) -> bool:
     """Whether an answer approves the head its look card names: the approve option and that head."""
     look = question.look
     return (look is not None and chosen == look.approve and isinstance(logged, dict)
-            and set(logged) == {"issue", "pr", "head"}
-            and _id(logged["issue"]) and _id(logged["pr"])
+            and set(logged) == {"issue", "pr", "head", "repo"}
+            and _id(logged["issue"]) and _id(logged["pr"]) and _text(logged["repo"])
             and (logged["issue"], logged["pr"], logged["head"]) == (look.issue, look.pr, look.head))
 
 

@@ -289,11 +289,12 @@ is none. Its entry is
                     "recommended": "<option>", "recommended_index": <int>}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
      "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
-                     "line": <str> | null},
+                     "line": <str>},
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
 
 `look` (#1260) is null for a question that carries no look. For one that does, `state` is `open`
-(`line` null), `moved` (the pull request moved or ended before the owner approved; `line` is
+(`line` is `answer.LOOK_APPROVES`: the console's own words naming the option that approves, the head and
+pull request it approves, so a manager's option text cannot hide that choosing it approves), `moved` (the pull request moved or ended before the owner approved; `line` is
 `answer.LOOK_MOVED`, or `answer.LOOK_CLOSED` when the found state is not open), `posting` (`line` is
 `answer.LOOK_RECORDING`) or `failed` (`line` is the recorded reason). Each question of
 `sprints.pending_looks` (an approval answered but not yet on the tracker) is an entry too, with
@@ -621,7 +622,7 @@ a session waiting for an answer or a permission reads "waiting for an answer" or
 permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`)
 and every older one whose reply is `new`, oldest first (so a reply to an old message is never
-cut); an approval the manager picked up without a reply is left out and takes no slot, while one
+cut); a look approval the console still holds (`Message.held`, #1260) and an approval the manager picked up without a reply are left out and take no slot, while one
 it replied to stays, its reply `new` until a later look and listed in `new_replies`. `approval` is the sprint's earliest approval message as one `messages` entry (same members), whether or not `messages` shows it, else null: the read receipt the verify check reads, which the presentation filter must not hide. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
 sent, else `sent`; a nudge never changes it. The pick-up is the minute form (`PICKUP_MINUTE_TEXT`)
 exactly when `derive_view(..., nudges=True)` (default; the service passes whether it has a nudger)
@@ -1608,9 +1609,11 @@ def _is_new(message: Message, looked: str | None) -> bool:
 
 def _shown_messages(messages: Sequence[Message], looked: str | None) -> list[Message]:
     """The `SHOWN_MESSAGES` newest messages, plus any older one whose reply is new (#1086), once
-    every approval the manager picked up without a reply is left out: it takes no slot."""
-    kept = [m for m in messages
-            if not (m.kind == MESSAGE_APPROVED and m.read_at is not None and m.reply is None)]
+    every approval the manager picked up without a reply is left out: it takes no slot. A held look
+    approval (#1260) is left out too: it was never offered to the manager, so it is neither sent nor
+    unpicked-up until it is released."""
+    kept = [m for m in messages if not m.held
+            and not (m.kind == MESSAGE_APPROVED and m.read_at is not None and m.reply is None)]
     first = len(kept) - SHOWN_MESSAGES
     return [m for i, m in enumerate(kept) if i >= first or _is_new(m, looked)]
 
@@ -1947,7 +1950,8 @@ def _look_entry(question: Question) -> dict | None:
     look = question.look
     if look is None:
         return None
-    state, line = "open", None
+    state, line = "open", owner_answer.LOOK_APPROVES.format(
+        option=cut(look.approve, MAX_OPTION_CHARS), head=look.head[:7], pr=look.pr, issue=look.issue)
     if question.look_state == "moved":
         state = "moved"
         line = (owner_answer.LOOK_MOVED.format(found=(question.look_found or "")[:7], head=look.head[:7])
