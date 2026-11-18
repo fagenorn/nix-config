@@ -1845,7 +1845,7 @@ function waitLine(wait, tag) {
     line.appendChild(timeEl("day", wait.until, ""));
     line.appendChild(el("span", "", ": " + wait.text + " "));
   } else {
-    line.appendChild(el("span", "", wait.text + " "));
+    line.appendChild(el("span", "", ownerWords(wait.text, true) + " "));
   }
   if (isHttps(wait.url)) {
     const link = el("a", "wait-issue", "#" + wait.issue);
@@ -3025,7 +3025,7 @@ function shareAct(parent, key, cls, label, onClick, off) {
   const button = actionButton(cls, label, onClick);
   const sending = state !== undefined && state.phase === "sending";
   button.disabled = off;
-  // aria-disabled, not disabled, while held: a disabled button cannot take the restored focus; postShare ignores a second click.
+  // aria-disabled: a disabled button cannot take the restored focus.
   if (sending) button.setAttribute("aria-disabled", "true");
   markBusy(button, sending && state.cls === cls.split(" ")[0]);
   parent.appendChild(button);
@@ -5821,9 +5821,9 @@ if (guestDoor) {
 function ownerSays(text) {
   return guestDoor ? text.replace(/^You$/, "The owner").replace(/^for you$/, "for the owner") : text;
 }
-function ownerWords(text) {
+function ownerWords(text, whole) {
   if (!guestDoor) return text;
-  const [lead, ...rest] = text.split(": ");
+  const [lead, ...rest] = whole ? [text] : text.split(": ");
   return [lead.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner"), ...rest].join(": ");
 }
 function renderGuestStatement(view) {

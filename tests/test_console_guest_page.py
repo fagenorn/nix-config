@@ -18,6 +18,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 from .test_console_guest import guest_inputs
 from .test_console_page import (
     ACTIVATION, CHECK, CHECK_ITEM, F3, HANDOFF_W, HARNESS, HEADSUP_W, OWNER_W, PAGE, REPORTED, SPRINT, START,
+    UNDATED_WAIT,
     box_open, full, has_class, message_entry, nodes, project, role, view, with_check, with_notices,
     with_sprints)
 
@@ -399,6 +400,19 @@ class GuestPageTest(unittest.TestCase):
         balls = [n for n in nodes(snap["projects"]) if has_class(n, "sprint-ball")]
         self.assertTrue(balls)
         self.assertFalse(any(has_class(ball, "needs") for ball in balls))
+
+    def test_the_guest_reads_every_waiting_check_as_the_owner_s(self) -> None:
+        self.assertTrue(consoleview.WAIT_TEXT)
+        for reason, text in consoleview.WAIT_TEXT.items():
+            with self.subTest(reason=reason):
+                wait = {**UNDATED_WAIT, "text": text}
+                frame = view([{**project(1, []), "waits": [wait]}])
+                shown = full(page_of(GUEST, [START, {"frame": frame}])["projects"])
+                self.assertIn(text.split(" you")[0], shown)
+                self.assertIsNone(SECOND_PERSON.search(shown), shown)
+        dated = {**UNDATED_WAIT, "until": "2026-11-18T12:00:00+00:00", "text": "Read what you filed."}
+        shown = full(page_of(GUEST, [START, {"frame": view([{**project(1, []), "waits": [dated]}])}])["projects"])
+        self.assertIn("Read what you filed.", shown)
 
     def test_the_guest_statement_counts_what_the_server_counts(self) -> None:
         base = view([project(1, [])])
