@@ -479,7 +479,8 @@ class NudgeServiceTest(MessageRouteTest):
         last = support.log_rows(self.store)[-1]
         self.assertEqual((last[2], json.loads(last[4])), (
             "sprint.nudged",
-            {"sprint_id": sid, "through": message.message_id, "route": "relay", "ok": True}))
+            {"sprint_id": sid, "through": message.message_id, "covers": [message.message_id],
+             "route": "relay", "ok": True}))
         self.assertIsNotNone(message.delivered_at)
         self.assertEqual(self.queued.jobs, [])
 
@@ -818,8 +819,8 @@ class NudgeServiceTest(MessageRouteTest):
             self.queued.run_next()
         self.assertEqual(self.nudges, [])
         ((_, row),) = self.nudged()
-        self.assertEqual(row, {"sprint_id": sid, "through": message, "route": None, "ok": False,
-                               "reason": "the manager's session is not known"})
+        self.assertEqual(row, {"sprint_id": sid, "through": message, "covers": [message],
+                               "route": None, "ok": False, "reason": "the manager's session is not known"})
         self.assertIn(f"console: nudge_failed {sid} the manager's session is not known",
                       stderr.getvalue())
 
@@ -981,7 +982,8 @@ class NudgeServiceTest(MessageRouteTest):
         message = self.sprint_state(svc, sid).messages[-1]
         reason = "the nudge could not start: RuntimeError: no thread"
         self.assertEqual((rows[-1][2], json.loads(rows[-1][4])), (
-            "sprint.nudged", {"sprint_id": sid, "through": message.message_id, "route": None,
+            "sprint.nudged", {"sprint_id": sid, "through": message.message_id,
+                              "covers": [message.message_id], "route": None,
                               "ok": False, "reason": reason}))
         self.assertIn(f"console: nudge_failed {sid} {reason}", stderr.getvalue())
         self.assertNotIn(TEXT, stderr.getvalue())

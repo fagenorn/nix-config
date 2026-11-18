@@ -111,6 +111,11 @@ class ClaudeSettingsInstalledTest(unittest.TestCase):
                          {"commit": "", "pr": "", "sessionUrl": False})
         self.assertNotIn("includeCoAuthoredBy", self.settings)
 
+    def test_transcripts_are_kept_for_180_days(self):
+        # Issue 1275: Claude Code's 30-day default deletes session transcripts; every account
+        # profile links this one settings file (ADR-hosts-005), so one value covers them all.
+        self.assertEqual(self.settings.get("cleanupPeriodDays"), 180)
+
     def test_the_owners_default_mode_stays_auto(self):
         self.assertEqual(
             self.settings["permissions"]["defaultMode"], "auto",

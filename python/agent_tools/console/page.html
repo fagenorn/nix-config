@@ -129,6 +129,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
+.card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -3332,6 +3333,37 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
+function lookOf(item) {
+  return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
+}
+function lookLine(node, item) {
+  const look = lookOf(item);
+  if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
+}
+function isLookCard(item) {
+  return item.answered === true && lookOf(item) !== null;
+}
+function lookCard(item) {
+  const card = el("article", "card look-card");
+  card.appendChild(headLine(item));
+  card.appendChild(pathWords(el("h2", "q"), item.headline));
+  lookLine(card, item);
+  if (item.look.state === "failed") {
+    const again = stallPosts.get("look-retry\n" + itemId(item));
+    const sending = again !== undefined && again.phase === "sending";
+    const retry = actionButton("look-retry btn-primary", "Retry", () => stallPost({ sprint_id: itemId(item) }, "look-retry", "Could not retry: ", () => fetch("/api/look-retry", {
+      method: "POST", headers: stallHeaders(),
+      body: JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index }),
+    })));
+    if (sending) retry.setAttribute("disabled", "");
+    markBusy(retry, sending);
+    const act = el("div", "act");
+    act.appendChild(retry);
+    if (again !== undefined && again.phase === "failed") act.appendChild(el("span", "fail", again.failure + again.reason));
+    card.appendChild(act);
+  }
+  return card;
+}
 const pictureCache = new Map();
 function pictureSequence(pictures) {
   if (!Array.isArray(pictures)) return [];
@@ -3622,13 +3654,18 @@ function recommendedIndex(q) {
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
+// A look card's approving option (#1260) never starts picked: an approval is the owner's own choice.
+function approvingIndex(item) {
+  const look = lookOf(item);
+  return look !== null && Number.isInteger(look.approve_index) ? look.approve_index : -1;
+}
 function startPicks(item) {
   if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
     const recommended = recommendedIndex(q);
-    return recommended >= 0 ? recommended : null;
+    return recommended >= 0 && recommended !== approvingIndex(item) ? recommended : null;
   });
 }
 function answerState(item) {
@@ -3825,7 +3862,7 @@ const NO_REASON = "the console did not say why.";
 const WORDS_NEEDED_NOTICE = "Say what to change.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
-    && !state.pending.round && !state.pending.retry && !state.pending.plan;
+    && !state.pending.retry && !state.pending.plan;
 }
 function sendAgain(item, state) {
   if (state.phase !== "failed" || state.again !== true || !trackerAnswer(state)) return false;
@@ -4156,7 +4193,8 @@ function statusLine(act, state, item) {
     act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") {
-      act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+      const look = lookOf(item);
+      if (look === null || look.state !== "moved" || look.line !== state.reason) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
         act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
       }
@@ -4398,6 +4436,7 @@ function leadItem(item) {
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
+  lookLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -4439,6 +4478,7 @@ function itemLine(item) {
   }
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
+  lookLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);
@@ -4552,12 +4592,13 @@ function drawInbox(view) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isLookCard(item));
+  const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
-    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
+    const shown = key.startsWith("look-retry\n") ? looks : key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
       : key.startsWith("start-retry\n") || key.startsWith("start-withdraw\n") ? starts : stalls;
-    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id || itemId(item) === id)) stallPosts.delete(key);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
   const profiles = view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
@@ -4644,6 +4685,7 @@ function drawInbox(view) {
     if (!present.has(id) && keptWords(state)) section.appendChild(keptWordsCard(id, state));
   }
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
+  for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);
     cardOf.set(stateId(tracked[0]), lead);

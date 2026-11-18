@@ -116,8 +116,8 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_six_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 36)
+    def test_the_set_is_thirty_nine_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 39)
         self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
@@ -127,8 +127,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-18:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-21:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
+                                              "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
                                               "activation-tooling", "activation-host",
@@ -141,7 +142,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
                  27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
                  31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
-                 35: "thirty-five", 36: "thirty-six"}
+                 35: "thirty-five", 36: "thirty-six", 37: "thirty-seven", 38: "thirty-eight",
+                 39: "thirty-nine"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -903,6 +905,24 @@ class ScreenshotFixtureTest(unittest.TestCase):
             finally:
                 svc.close()
             self.assertEqual([d["total"]["dollars"] for d in days if d["total"]["dollars"]], [])
+
+    def test_each_look_state_carries_a_before_and_an_after_picture_the_console_serves(self) -> None:
+        for state in ("look-card", "look-moved", "look-failed"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp), state, now_s)
+                svc = shots.start_service(fixture, now_s)
+                try:
+                    view = json.loads(svc.view_bytes)
+                    pictures_dir = svc.pictures_dir
+                finally:
+                    svc.close()
+                card = view["inbox"]["open"][0]
+                self.assertEqual([p["pair"] for p in card["pictures"]], ["before", "after"])
+                self.assertEqual(len({p["id"] for p in card["pictures"]}), 2)
+                for picture in card["pictures"]:
+                    data = (pictures_dir / picture["id"]).read_bytes()
+                    self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_each_fixture_view_shows_its_state(self) -> None:
         for state in shots.STATES:

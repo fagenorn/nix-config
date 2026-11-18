@@ -190,8 +190,58 @@ line `console: stop_refused <reason>` and 409 with the reason, any other excepti
 stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`. `POST /api/round-answer` (#891) runs the same checks with
 `MAX_ROUND_ANSWER_BYTES` (16384) and `sprints.parse_round_answer`: 400 `bad round answer`,
 `sprints.Refused` is one stderr line `console: round_answer_refused <reason>` and 409 with the
-reason, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
-answer failed`; success is an empty `204`. `POST /api/signin`, `POST /api/signin-code` and
+reason, a `ForgeError` (the read of a look card's pull request, below) is 502 with
+`answer.tracker_words`, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
+answer failed`; success is an empty `204`. `POST /api/look-retry` (#1260) runs the same checks with
+`MAX_LOOK_RETRY_BYTES` (4096) and `sprints.parse_look_retry`: 400 `bad look retry`, `sprints.Refused` is one
+stderr line `console: look_retry_refused <reason>` and 409 with the reason, a `ForgeError` or `answer.Refused`
+from the post is 502 with the plain reason recorded for it (`tracker_words`, or the refusal's text), any other
+exception is `console: look_retry_failed <Type>: <message>` and 500 `look retry failed`; success is an empty
+`204`.
+
+Approving a look card (#1260, ADR-console-074). An answer that chooses the `look.approve` option of a question
+that carries a `look` and carries no words of the owner's (`text` absent: an option picked with words typed beside
+it is an ordinary answer that reaches the manager as it is, because those words may ask for a fix) is recorded by
+the console on the issue itself, in this order. The project's repository
+is `slug_of(root)`; none is `sprints.Refused(LOOK_NO_REPOSITORY)` with nothing read or appended. The slot
+`(sprint, round, index)` is reserved (a second approval or retry meanwhile is `LOOK_SENDING`), and the pull
+request is read through `look_reader` with `answer.with_retries`, outside the ingest lock and before anything
+is appended; a failed read appends nothing, logs `console: look_head_failed <sprint> <round> <index> <code>:
+<detail>` and is the 502 above. A head that is not the card's, or a pull request that is closed or merged,
+appends one `look.recorded moved` row and is a 409 with `LOOK_MOVED` or `LOOK_CLOSED`; the question stays open.
+The repository is the one the card was issued for: `ask_questions` writes the project's `slug_of(root)` into the
+round's `questions.asked` row as `look_repo` when a question carries a look, and an answer reads and posts to
+that, never to the checkout's origin at answer time (a card issued without one is `LOOK_NO_REPOSITORY`).
+Otherwise the refusals of any answer are checked again (a question withdrawn or answered meanwhile is refused
+and nothing is posted), one `question.answered` row is appended with its `look` member (the repository too), and the approval is
+posted through `look_recorder` with `str(<that row's seq>)` as the message, outside the lock, retrying
+transient failures (each retry logs `console: look_post_retry <sprint> <round> <index> <attempt> <code>:
+<detail>`). It then appends `look.recorded posted` and nudges the manager, or `look.recorded failed` with the
+plain reason after logging `console: look_post_failed <sprint> <round> <index> <code>: <detail>` (`refused:
+<reason>` for `answer.Refused`); the answer is still 204 and the card stays on the page with Retry
+(`retry_look` posts again, refusing `NOT_OPEN`, `UNKNOWN_QUESTION`, `ENDED`, `LOOK_NOT_PENDING` and `LOOK_SENDING`; it posts to the repository kept in the answer's row, never to the
+checkout's repository now, and `answer.record_look` finds a trusted marker already posted for that message,
+ended or not, and posts nothing, else reads the pull request again and posts nothing when it is not open at the
+card's head, so no attempt, an automatic retry included, posts a stale approval). A post that finds the pull
+request closed, merged or at another head (`answer.LookMoved`, on the first attempt or on a retry) appends
+`look.recorded moved` with the answer's id: the fold takes the answer back and the question is open again for the
+manager to replace, so the answer or the retry is a 409 with `LOOK_MOVED` or `LOOK_CLOSED` after logging
+`console: look_post_moved <sprint> <round> <index>: <reason>`. Every post is followed by one more read of the pull
+request (`look_reader`, retried the same way): a pull request that moved or closed between the read before the
+post and the post is recorded as `moved` the same way, and a failed final read is recorded `failed` (a retry finds
+the marker and reads again), so the answer is released to the manager only for a head still the card's at the last
+read. A pull request found moved or closed at that last read has the approval already on the issue, so the console
+ends it with a trusted `end` marker (`answer.end_look` through `look_ender`, retried the same way) before it records
+`moved`: no later head that keeps the approved changes can pass the merge guard on it; an end that fails is a failed
+post with Retry, whose attempt finds the marker, reads the head again and ends it. The tracker cannot make the read and
+the post one step, so a push landing after that last read still leaves a marker that names the head the owner looked at,
+which the merge guard judges against the head it then sees. Every attempt of a post, an automatic retry after a backoff
+included, first finds the sprint still taking questions, else it posts nothing and records `failed` with `ENDED`.
+Every `look.recorded moved` row, first read or last, reserves a nudge, so an idle manager is told by the sprint's
+`look-moved` message (`sprints.MESSAGE_LOOK_MOVED`) that its card is stale. `retry_look` also refuses `ENDED` once the sprint
+has ended or stopped, and posts nothing. The manager's answer message is
+held until `posted`. At `start()`, before the threads, each approval left `posting` by a stopped console gets
+`look.recorded failed` with `LOOK_INTERRUPTED`. An answer that does not approve a look card is unchanged. `POST /api/signin`, `POST /api/signin-code` and
 `POST /api/signin-cancel` (#1026) run the same checks with `MAX_SIGNIN_BYTES` (4096) and
 `signin_run.parse_profile_request` (start and cancel) or `signin_run.parse_code_request`: 400 `bad
 sign-in`, `bad code` or `bad cancel`; a refusal is one stderr line `console: signin_refused <profile>
@@ -1192,9 +1242,10 @@ it lists the sessions named `manager.session_name(project, sprint)`: a listed on
 there is no nudger call and the reason is `nudge.UNKNOWN_SESSION` with a null route; a `NudgeFailed`
 gives its text and any other exception (the listing's included) `<Type>: <message>`. Under the lock
 again it releases the reservation and, while the sprint is open and the service is not stopping,
-appends one `sprint.nudged {sprint_id, through: the last unread id, route, ok[, reason]}` (a failure
+appends one `sprint.nudged {sprint_id, through: the last unread id, covers: the unread ids, route, ok[, reason]}` (a failure
 also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
-`_nudge_again` and now holds an unread message above `through`, it is reserved and dispatched once
+`_nudge_again` and now holds an unread message `covers` does not list (one above `through`, or an approval
+released while the nudge ran), it is reserved and dispatched once
 more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
 failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
@@ -1479,7 +1530,7 @@ from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
-    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
+    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
@@ -1550,6 +1601,7 @@ ACTIVATE_RUNNING = "an activation is already running"
 ACTIVATE_MOVED = "that commit is no longer the tip of origin's integration branch"
 ACTIVATE_UNREADABLE = "the tip of origin's integration branch could not be read"
 ROUND_ANSWER_PATH = "/api/round-answer"
+LOOK_RETRY_PATH = "/api/look-retry"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
 SIGNIN_CODE_PATH = "/api/signin-code"
@@ -1578,7 +1630,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
-    SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
+    LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1621,6 +1673,7 @@ MAX_OWNER_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
 MAX_ACTIVATE_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
+MAX_LOOK_RETRY_BYTES = 4096
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
 MAX_MESSAGE_REPLY_BYTES = 16384
@@ -2587,10 +2640,41 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: round_answer_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
             return False
+        except ForgeError as error:
+            self._refuse(502, answer.tracker_words(error))
+            return False
         except Exception as error:
             print(f"console: round_answer_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
             self._refuse(500, "round answer failed")
+            return False
+        return True
+
+    def _look_retry_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's retry of a look approval; False when it was refused."""
+        body = self._json_body(MAX_LOOK_RETRY_BYTES)
+        if body is None:
+            return False
+        try:
+            parsed = sprints.parse_look_retry(body)
+        except ValueError:
+            self._refuse(400, "bad look retry")
+            return False
+        try:
+            console.retry_look(*parsed)
+        except sprints.Refused as error:
+            print(f"console: look_retry_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except ForgeError as error:
+            self._refuse(502, answer.tracker_words(error))
+            return False
+        except answer.Refused as error:
+            self._refuse(502, str(error))
+            return False
+        except Exception as error:
+            print(f"console: look_retry_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "look retry failed")
             return False
         return True
 
@@ -2915,6 +2999,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == ROUND_ANSWER_PATH:
             self.close_connection = True
             if not self._round_answer_request(console):
+                return
+        elif route == LOOK_RETRY_PATH:
+            self.close_connection = True
+            if not self._look_retry_request(console):
                 return
         elif route == STOP_PATH:
             self.close_connection = True
@@ -3286,6 +3374,9 @@ class ConsoleService:
                  criterion_path: Callable[..., None] = answer.answer_criterion,
                  write_sleep: Callable[[float], object] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
+                 look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
+                 look_recorder: Callable[[str, int, int, str, str], int] = answer.record_look,
+                 look_ender: Callable[[str, int, int], None] = answer.end_look,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
@@ -3477,6 +3568,10 @@ class ConsoleService:
         self._stop = threading.Event()
         self._write_sleep = self._stop.wait if write_sleep is None else write_sleep
         self._monotonic = monotonic
+        self._look_reader = look_reader
+        self._look_recorder = look_recorder
+        self._look_ender = look_ender
+        self._look_sending: set[tuple[str, int, int]] = set()
         self._watcher: threading.Thread | None = None
         self._signature = None
         self.log: EventLog | None = None
@@ -5758,7 +5853,8 @@ class ConsoleService:
 
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
                       reason: str | None, listing_failed: str | None = None,
-                      written: permission.Permission | None = None) -> None:
+                      written: permission.Permission | None = None,
+                      covers: list[int] | None = None) -> None:
         """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
         sprint = self._sprints.get(sprint_id)
         if sprint is None or self._stop.is_set():
@@ -5768,7 +5864,8 @@ class ConsoleService:
             if not unread:
                 return
             through = unread[-1].message_id
-        payload = {"sprint_id": sprint_id, "through": through, "route": route,
+            covers = [message.message_id for message in unread]
+        payload = {"sprint_id": sprint_id, "through": through, "covers": covers, "route": route,
                    "ok": reason is None}
         if reason is not None:
             payload["reason"] = reason
@@ -5833,6 +5930,7 @@ class ConsoleService:
                 sprint, unread = found
                 covered = self._notice_due.pop(sprint_id, None)
                 through = unread[-1].message_id
+                heard = {message.message_id for message in unread}
                 name = manager.session_name(sprint.project_id, sprint_id)
                 profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
         if found is None or project is None:
@@ -5855,12 +5953,13 @@ class ConsoleService:
             self._settled[sprint_id] = int(self._clock() * 1000)
             wanted = sprint_id in self._nudge_again
             self._nudge_again.discard(sprint_id)
-            self._record_nudge(sprint_id, through, route, reason, listing_failed, written)
+            self._record_nudge(sprint_id, through, route, reason, listing_failed, written,
+                               sorted(heard))
             if covered is not None and reason is not None:
                 self._notice_due[sprint_id] = max(covered, self._notice_due.get(sprint_id, 0))
             found = self._nudgeable(sprint_id)
-            if wanted and found is not None and found[1][-1].message_id > through \
-                    and not self._stop.is_set():
+            if wanted and found is not None and not self._stop.is_set() \
+                    and any(message.message_id not in heard for message in found[1]):
                 self._nudging.add(sprint_id)
                 again = True
             else:
@@ -6126,10 +6225,31 @@ class ConsoleService:
 
     def _revive_step(self, sprint: sprints.SprintState, now: int) -> str | None:
         """Under the ingest lock: the one bring-back decision for the sprint at `now` (milliseconds)."""
+        out = self._quota_wait(sprint) is not None
         return revive.next_step(
             sprint, self._waiting(sprint),
             self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
-            self._nudger is not None, self._quota_wait(sprint) is not None)
+            self._nudger is not None, out, out and self._room_elsewhere(sprint))
+
+    def _room_elsewhere(self, sprint: sprints.SprintState) -> bool:
+        """Under the ingest lock: whether a takeover would land on another account with room (#1278).
+
+        The view is the launch's own (`_prepared_launch`: signed in, not removing, the owner's
+        exclusions and pin), so the decision and the launch agree. The chosen profile must not be
+        the manager's, must share no account with it, and must read as having room: an unread
+        profile or the launcher's last-used fallback is no reason to leave a session that only waits.
+        """
+        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned)
+        choice = manager.choose_profile(view, self._use.last)
+        mine = sprint.manager.profile if sprint.manager else None
+        if not isinstance(choice, str) or choice == mine:
+            return False
+        entries = {entry["profile"]: entry for entry in view["profiles"]}
+        chosen = entries.get(choice)
+        if chosen is None or chosen["state"] not in ("ok", "reset") or chosen["excluded"]:
+            return False
+        return mine not in chosen["same_account_as"] and chosen.get("duplicate_of") != mine
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
@@ -6500,6 +6620,11 @@ class ConsoleService:
                        "questions": checked["questions"]}
             if listed := sprints.round_pictures(checked):
                 payload["pictures"] = listed
+            if any("look" in question for question in checked["questions"]):
+                state = self._states.get(sprint.project_id)
+                bound = self._slug_of(state.root) if state is not None else None
+                if bound is not None:
+                    payload["look_repo"] = bound
             appended = self.log.append([(QUESTIONS_ASKED, sprint.project_id, payload)])
             self._apply(appended)
             return appended[-1].seq, len(checked["questions"])
@@ -6603,44 +6728,220 @@ class ConsoleService:
             self._apply(appended)
             return notice_id
 
+    def _open_question(self, project_id: str, sprint_id: str, round_id: int,
+                       index: int) -> tuple[sprints.SprintState, sprints.Question]:
+        """Under the ingest lock: the sprint and the unanswered question, or the usual refusal."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or sprint.project_id != project_id:
+            raise sprints.Refused(sprints.NOT_OPEN)
+        asked = next((question for question in sprint.questions
+                      if (question.round_id, question.index) == (round_id, index)), None)
+        if asked is not None and asked.withdrawn_at is not None:
+            raise sprints.Refused(sprints.TAKEN_BACK)
+        if not sprints.takes_questions(sprint):
+            raise sprints.Refused(sprints.ENDED)
+        if asked is None:
+            raise sprints.Refused(sprints.UNKNOWN_QUESTION)
+        if asked.answer is not None:
+            raise sprints.Refused(sprints.ANSWERED_ALREADY)
+        return sprint, asked
+
+    def _answered_row(self, project_id: str, sprint: sprints.SprintState, asked: sprints.Question,
+                      chosen: str | None, text: str, **extra) -> tuple:
+        return (QUESTION_ANSWERED, project_id, {
+            "sprint_id": sprint.sprint_id, "goal": sprint.goal, "round": asked.round_id,
+            "index": asked.index, "question": asked.question, "answer": text, "chosen": chosen,
+            "recommended": asked.recommended, "differs": chosen != asked.recommended, **extra})
+
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
                         choice: int | None, text: str | None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
+        slot = (sprint_id, round_id, index)
+        with self._ingest:
+            sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
+            words = None
+            if choice is not None:
+                if not 0 <= choice < len(asked.options):
+                    raise sprints.Refused(sprints.NOT_AN_OPTION)
+                chosen = said = asked.options[choice]
+                if text is not None:
+                    words = sprints.checked_message(text)
+                elif chosen in asked.needs_words:
+                    raise sprints.Refused(sprints.WORDS_NEEDED)
+            else:
+                chosen, said = None, sprints.checked_message(text)
+            extra = {} if words is None else {"words": words}
+            look = asked.look
+            plain = look is None or chosen != look.approve or words is not None
+            if plain:
+                appended = self.log.append([self._answered_row(
+                    project_id, sprint, asked, chosen, said, **extra)])
+                self._apply(appended)
+                reserved = self._reserve_nudge(sprint_id)
+            else:
+                slug = look.repo
+                if slug is None:
+                    raise sprints.Refused(answer.LOOK_NO_REPOSITORY)
+                if slot in self._look_sending:
+                    raise sprints.Refused(answer.LOOK_SENDING)
+                self._look_sending.add(slot)
+        if plain:
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            return appended[-1].seq
+        try:
+            return self._approve_look(project_id, sprint_id, round_id, index, slug, look, said, extra)
+        finally:
+            with self._ingest:
+                self._look_sending.discard(slot)
+
+    def _approve_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
+                      look: sprints.QuestionLook, said: str, extra: dict) -> int:
+        """Read the pull request head, record the answer when it is the head shown, then post it."""
+        key = f"{sprint_id} {round_id} {index}"
+        try:
+            state, head = answer.with_retries(
+                lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
+                sleep=self._write_sleep)
+        except ForgeError as error:
+            print(f"console: look_head_failed {key} {error.code}: {' '.join(error.detail.split())}",
+                  file=sys.stderr)
+            raise
+        with self._ingest:
+            sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
+            moved = state != "open" or head != look.head
+            if moved:
+                appended = self.log.append([(LOOK_RECORDED, project_id, {
+                    "sprint_id": sprint_id, "round": round_id, "index": index,
+                    "outcome": sprints.LOOK_MOVED, "found": head, "state": state})])
+                self._apply(appended)
+                reserved = self._reserve_nudge(sprint_id)
+            else:
+                appended = self.log.append([self._answered_row(
+                    project_id, sprint, asked, look.approve, said,
+                    look={"issue": look.issue, "pr": look.pr, "head": look.head, "repo": slug}, **extra)])
+                self._apply(appended)
+        if moved:
+            # The manager is told the card is stale (an idle one would never ask), outside the lock.
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            raise sprints.Refused(
+                answer.LOOK_CLOSED.format(state=state) if state != "open"
+                else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
+        seq = appended[-1].seq
+        try:
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+        except answer.LookMoved as error:
+            raise sprints.Refused(str(error)) from None
+        except (ForgeError, answer.Refused):
+            pass
+        return seq
+
+    def _post_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
+                   look: sprints.QuestionLook, seq: int) -> None:
+        """Post the approval of the answer `seq` and record the outcome; a failure is raised after it is recorded.
+
+        A pull request found closed or at another head is recorded as `moved` with the answer's id, which
+        takes the answer back and opens the question again; `answer.LookMoved` is raised after it."""
+        key = f"{sprint_id} {round_id} {index}"
+
+        def on_retry(attempt: int, error: ForgeError) -> None:
+            print(f"console: look_post_retry {key} {attempt} {error.code}: "
+                  f"{' '.join(error.detail.split())}", file=sys.stderr)
+
+        def record() -> int:
+            # Every attempt, an automatic retry after a backoff included, finds the sprint still taking
+            # questions: a sprint the manager closed meanwhile posts nothing.
+            with self._ingest:
+                current = self._sprints.get(sprint_id)
+                if current is None or not sprints.takes_questions(current):
+                    raise answer.Refused(sprints.ENDED)
+            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq))
+
+        try:
+            comment = answer.with_retries(
+                record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
+            # The tracker offers no way to make the read and the post one step, so the pull request is
+            # read once more before the answer is declared recorded (ADR-console-074 D10).
+            state, found = answer.with_retries(
+                lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
+                sleep=self._write_sleep, on_retry=on_retry)
+            if state != "open" or found != look.head:
+                # The marker is already on the issue: end it, so a later head that keeps the approved
+                # changes cannot pass the merge guard on it. A failed end is a failed post with Retry,
+                # whose next attempt finds the marker, reads the head again and ends it.
+                answer.with_retries(
+                    lambda: self._look_ender(slug, look.issue, comment), clock=self._monotonic,
+                    sleep=self._write_sleep, on_retry=on_retry)
+                raise answer.LookMoved(state, found, look.head)
+        except answer.LookMoved as error:
+            print(f"console: look_post_moved {key}: {error}", file=sys.stderr)
+            reserved = False
+            with self._ingest:
+                if not self._stop.is_set():
+                    self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                        "sprint_id": sprint_id, "round": round_id, "index": index,
+                        "outcome": sprints.LOOK_MOVED, "message": seq, "found": error.found,
+                        "state": error.state})]))
+                    reserved = self._reserve_nudge(sprint_id)
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            raise
+        except (ForgeError, answer.Refused) as error:
+            if isinstance(error, ForgeError):
+                print(f"console: look_post_failed {key} {error.code}: "
+                      f"{' '.join(error.detail.split())}", file=sys.stderr)
+                reason = answer.tracker_words(error)
+            else:
+                print(f"console: look_post_failed {key} refused: {error}", file=sys.stderr)
+                reason = str(error)
+            with self._ingest:
+                if not self._stop.is_set():
+                    self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                        "sprint_id": sprint_id, "round": round_id, "index": index,
+                        "outcome": sprints.LOOK_FAILED, "message": seq, "reason": reason})]))
+            raise
+        with self._ingest:
+            if self._stop.is_set():
+                return
+            self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                "sprint_id": sprint_id, "round": round_id, "index": index,
+                "outcome": sprints.LOOK_POSTED, "message": seq, "comment_id": comment})]))
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
+
+    def retry_look(self, project_id: str, sprint_id: str, round_id: int, index: int) -> int:
+        """Post a look approval again; the id of the answer it records. See the module docstring."""
+        slot = (sprint_id, round_id, index)
         with self._ingest:
             sprint = self._sprints.get(sprint_id)
             if sprint is None or sprint.project_id != project_id:
                 raise sprints.Refused(sprints.NOT_OPEN)
             asked = next((question for question in sprint.questions
                           if (question.round_id, question.index) == (round_id, index)), None)
-            if asked is not None and asked.withdrawn_at is not None:
-                raise sprints.Refused(sprints.TAKEN_BACK)
-            if not sprints.takes_questions(sprint):
-                raise sprints.Refused(sprints.ENDED)
             if asked is None:
                 raise sprints.Refused(sprints.UNKNOWN_QUESTION)
-            if asked.answer is not None:
-                raise sprints.Refused(sprints.ANSWERED_ALREADY)
-            words = None
-            if choice is not None:
-                if not 0 <= choice < len(asked.options):
-                    raise sprints.Refused(sprints.NOT_AN_OPTION)
-                chosen = answer = asked.options[choice]
-                if text is not None:
-                    words = sprints.checked_message(text)
-                elif chosen in asked.needs_words:
-                    raise sprints.Refused(sprints.WORDS_NEEDED)
-            else:
-                chosen, answer = None, sprints.checked_message(text)
-            appended = self.log.append([(QUESTION_ANSWERED, project_id, {
-                "sprint_id": sprint_id, "goal": sprint.goal, "round": round_id, "index": index,
-                "question": asked.question, "answer": answer, "chosen": chosen,
-                "recommended": asked.recommended, "differs": chosen != asked.recommended,
-                **({} if words is None else {"words": words})})])
-            self._apply(appended)
-            reserved = self._reserve_nudge(sprint_id)
-        if reserved:
-            self._dispatch_nudge(sprint_id)
-        return appended[-1].seq
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
+            if (asked.look is None or asked.answer is None
+                    or asked.look_state not in (sprints.LOOK_POSTING, sprints.LOOK_FAILED)
+                    or asked.look_message is None):
+                raise sprints.Refused(answer.LOOK_NOT_PENDING)
+            if slot in self._look_sending:
+                raise sprints.Refused(answer.LOOK_SENDING)
+            look, seq, slug = asked.look, asked.look_message, asked.look_repo
+            if slug is None:
+                raise sprints.Refused(answer.LOOK_NOT_PENDING)
+            self._look_sending.add(slot)
+        try:
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+        except answer.LookMoved as error:
+            raise sprints.Refused(str(error)) from None
+        finally:
+            with self._ingest:
+                self._look_sending.discard(slot)
+        return seq
 
     def sprint_status(self, sprint_id: str) -> dict:
         """What became of a sprint's brief: its decision, version and the reply asking for changes."""
@@ -7577,7 +7878,20 @@ class ConsoleService:
             else:
                 self._signature = current
 
+    def _settle_looks(self) -> None:
+        """Mark each approval a stopped console left posting as failed, so it shows Retry."""
+        with self._ingest:
+            rows = [(LOOK_RECORDED, sprint.project_id, {
+                        "sprint_id": sprint.sprint_id, "round": question.round_id,
+                        "index": question.index, "outcome": sprints.LOOK_FAILED,
+                        "message": question.look_message, "reason": answer.LOOK_INTERRUPTED})
+                    for sprint in self._sprints.values() for question in sprints.pending_looks(sprint)
+                    if question.look_state == sprints.LOOK_POSTING]
+            if rows:
+                self._apply(self.log.append(rows))
+
     def start(self) -> None:
+        self._settle_looks()
         self._resume_activation()
         self._watcher = threading.Thread(target=self._watch, name=WATCH_THREAD, daemon=True)
         self._watcher.start()

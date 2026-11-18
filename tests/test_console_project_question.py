@@ -1424,7 +1424,7 @@ class QuestionServiceTest(QuestionCase):
         self.assertEqual(event_log.PROJECT_QUESTION_ANSWERED, ANSWERED_KIND)
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
-        self.assertEqual(event_log.SCHEMA_VERSION, 10)
+        self.assertEqual(event_log.SCHEMA_VERSION, 11)
 
     def shown(self, svc):
         return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]

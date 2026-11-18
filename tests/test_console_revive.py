@@ -182,6 +182,10 @@ class NextStepTest(unittest.TestCase):
         later = BASE + 120_000
         self.assertEqual(revive.next_step(state, 0, BASE, later, True), "wake")
         self.assertIsNone(revive.next_step(state, 0, BASE, later, True, out=True))
+        self.assertEqual(
+            revive.next_step(state, 0, BASE, later, True, out=True, room_elsewhere=True), "takeover")
+        self.assertEqual(
+            revive.next_step(state, 0, BASE, later, True, out=False, room_elsewhere=True), "wake")
         state = with_rows(lambda rows: [], session=False)
         self.assertEqual(revive.next_step(state, 0, BASE, later, True, out=True), "takeover")
 

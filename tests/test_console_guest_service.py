@@ -57,7 +57,7 @@ TABLE = {
     "/api/register-cancel": "owner", "/api/owner-notice": "owner",
     "/api/owner-notice-withdraw": "owner", "/api/project-question": "owner",
     "/api/activate": "owner", "/api/share-tailnet": "owner", "/api/share-colleague": "owner",
-    "/api/share-remove": "owner",
+    "/api/share-remove": "owner", "/api/look-retry": "owner",
     "/api/brief": "owner", "/api/report": "owner", "/api/close": "owner", "/api/inbox": "owner",
     "/api/message-reply": "owner", "/api/recap": "owner", "/api/ask": "owner",
     "/api/withdraw-question": "owner", "/api/notice": "owner", "/api/notices": "owner",

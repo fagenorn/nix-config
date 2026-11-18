@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty-six screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -36,7 +36,13 @@ Contract:
   page without the words box (`WORDS_BOX`) but with the question's options nothing is picked, typed or
   sent, which is the before picture (the question is seeded without `needs_words` where the service
   does not keep it, `NEEDS_WORDS_KEPT`), while a page with neither shows no question card at all, which
-  fails; `accounts-panel` is the accounts panel opened over
+  fails; `look-card` is a look card on an approved `owner/web`
+  sprint, open, with its three options and the before and after pictures every look card carries (#1260); `look-moved` is that card after an approval found
+  the pull request at another head, so its line says nothing was recorded and that the manager will send the new
+  pictures,
+  the options still there; `look-failed` is that card answered with the approval and its
+  tracker post failed, so the card holds the headline, the reason and a Retry button and no
+  options; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
   lines) and one question still working, each its own thread, the Questions fold and both
@@ -89,7 +95,7 @@ Contract:
   page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
   picture, and any other reading fails.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 72 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 78 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -149,17 +155,20 @@ import argparse
 import http.client
 import json
 import os
+import struct
 import sys
 import tempfile
 import threading
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import capacity, contract_draft, event_log, manager, sessions, signin
+from agent_tools.console import capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
+from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
@@ -171,9 +180,10 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
-          "inbox-card", "question-words", "question-refused", "accounts-panel", "ask-box",
-          "questions-closed", "questions-open", "ask-goal", "question-read", "activation-tooling",
-          "activation-host", "register-apply", "register-draft", "sharing-panel", "guest-page")
+          "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
+          "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
+          "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
+          "register-draft", "sharing-panel", "guest-page")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -181,6 +191,9 @@ GOAL_OVER_CHARS = 2100
 MINUTE = 60.0
 PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
+LOOK_APPROVE = "Approve this head"
+LOOK_HEAD = "3f9c1d27a05be84c61d9f0273b8e5a14c7d0962e"
+LOOK_FOUND = "8e41b0a6d2c7f35918ae04b7c6d1259f3e0a7b84"
 TAILNET = "desk.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 SHARING_STATES = ("sharing-panel", "guest-page")
@@ -414,6 +427,18 @@ def sandbox_environ(root: Path) -> dict[str, str]:
             "XDG_CONFIG_HOME": str(root / "xdg-config")}
 
 
+def _solid_png(colour: tuple[int, int, int], width: int = 96, height: int = 60) -> bytes:
+    """A small RGB PNG of one colour, so a picture gallery has something to draw."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        body = kind + data
+        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
+
+    row = b"\x00" + bytes(colour) * width
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(row * height)) + chunk(b"IEND", b""))
+
+
 def _iso(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="microseconds")
 
@@ -421,8 +446,9 @@ def _iso(seconds: float) -> str:
 class _Seed:
     """One event log whose every row carries the time its writer chose, `ago` seconds before now."""
 
-    def __init__(self, log: EventLog, at: list[str], now_s: float):
+    def __init__(self, log: EventLog, at: list[str], now_s: float, pictures_dir: Path | None = None):
         self.log = log
+        self.pictures_dir = pictures_dir
         self._at = at
         self.now_s = now_s
         self.count = 0
@@ -491,6 +517,46 @@ class _Seed:
             "Workspace not trusted. Run `claude` in /home/owner/Projects/web once and accept "
             "the trust prompt, then retry.")})
         return sid, goal
+
+    def look_pictures(self, project: str, sid: str) -> list[dict]:
+        """The before and after pictures of a look question: two stored PNGs of one size, in two colours."""
+        stored = []
+        for pair, line, colour in (("before", "Before, 1440 px", (222, 226, 232)),
+                                   ("after", "After, 1440 px", (196, 224, 205))):
+            picture, _ = pictures.store(self.pictures_dir, _solid_png(colour))
+            self.put(MINUTE * 5, *pictures.entry(project, sid, picture))
+            stored.append({"picture": picture, "line": line, "pair": pair})
+        return stored
+
+    def look(self, project: str, sid: str, goal: str, *, moved: bool = False,
+             failed: bool = False) -> None:
+        """One look question on `sid`: open, found moved to another head, or approved with the post failed.
+        It carries the two pictures a real look card always has, marked before and after."""
+        base = {"sprint_id": sid, "goal": goal}
+        shown = self.look_pictures(project, sid)
+        question = {
+            "question": "Does the settings page look right?",
+            "blocks": "the merge of issue 12",
+            "context": "The before and after of the settings page, from the same pull request.",
+            "options": [LOOK_APPROVE, "Approve with one fix", "Ask for changes"],
+            "recommended": LOOK_APPROVE, "pictures": shown,
+            **({"needs_words": ["Approve with one fix", "Ask for changes"]} if NEEDS_WORDS_KEPT else {}),
+            "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "approve": LOOK_APPROVE}}
+        asked = self.put(MINUTE * 4, "questions.asked", project, {
+            **base, "blocker": False, "look_repo": "owner/web", "questions": [question]})
+        where = {"round": asked.seq, "index": 0}
+        if moved:
+            self.put(MINUTE * 2, "look.recorded", project, {
+                **base, **where, "outcome": "moved", "found": LOOK_FOUND, "state": "open"})
+        if failed:
+            answered = self.put(MINUTE * 3, "question.answered", project, {
+                **base, **where, "question": "Does the settings page look right?",
+                "answer": LOOK_APPROVE, "chosen": LOOK_APPROVE, "recommended": LOOK_APPROVE,
+                "differs": False,
+                "look": {"issue": 12, "pr": 34, "head": LOOK_HEAD, "repo": "owner/web"}})
+            self.put(MINUTE * 2, "look.recorded", project, {
+                **base, **where, "outcome": "failed", "message": answered.seq,
+                "reason": FORGE_DOWN})
 
     def check(self, project: str, issue: int, ago: float) -> None:
         """One open `verify-ask` inbox item on `issue`, which blocks none of the manager's work."""
@@ -608,6 +674,9 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
                     asks=True)
         seed.check(web, 11, 3 * MINUTE)
+    elif state in ("look-card", "look-moved", "look-failed"):
+        sid, goal = seed.sprint(web, "Fix the settings page", started=30 * MINUTE, report=6 * MINUTE)
+        seed.look(web, sid, goal, moved=state == "look-moved", failed=state == "look-failed")
     elif state in ("question-words", "question-refused"):
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
                     look=True)
@@ -797,7 +866,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
     at = [_iso(now_s)]
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
-        sprint_ids = _seed_state(_Seed(log, at, now_s), state, str(projects[0]), read=read)
+        sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read)
     finally:
         log.close()
     if state == "accounts-panel":

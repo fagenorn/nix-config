@@ -10,7 +10,7 @@ command, and merges only after the real lifecycle guard, run from source, admits
 1. a batch of one marked and one unmarked issue; 2. the unmarked one lands, the marked one
 awaits the owner's look; 3. the guard refuses a direct merge of the marked pull request;
 4. a changes answer moves its head; 5. an approval of the old head is stale and posts nothing;
-6. an approval of the new head posts and merges.
+6. an approval of the new head, recorded as the console records it, lets the delivery merge.
 
 Decisions: P1 the actor merges only on the guard's exit 0; P2 every push goes to the bare
 origin by its path so the clone's origin URL stays the github one the guard reads; P3 a
@@ -388,6 +388,11 @@ class LookGateWorld:
         proc = self.look_approval(*line.split()[1:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
+    def _look_read(self, message, match):
+        line = re.search(r"Run alone and exactly: (look-approval status[^\n]*)", message["prompt"]).group(1)
+        proc = self.look_approval(*line.split()[1:])
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
     def _close_out(self, message, match):
         out = {"issue_state": "CLOSED", "branch_deleted": True, "released": True, "decision_ended": True,
                "notes": "ok", "release": {"verdict": "released"}}
@@ -449,6 +454,7 @@ class LookGateWorld:
             (r"^(look-push|land-push-.*)$", self._push),
             (r"^look-head$", self._look_head),
             (r"^look-post$", self._look_post),
+            (r"^look-read$", self._look_read),
             (r"^(merge|land-merge-\d+)$", self._merge),
             (r"^land-unlock", const({"verdict": "released"})),
             (r"^land-(re)?lock-", self._lock),
@@ -590,13 +596,19 @@ def play_scenario(test_case: unittest.TestCase, guard_source: Path = GUARD_SOURC
     if through < 6:
         return out
 
-    # 6: an approval of the new head posts and merges.
+    # 6: the owner's approval of the new head, recorded as the console records it, lets the delivery merge.
+    recorded = world.look_approval("post", "--repo", SLUG, "--issue", str(MARKED), "--pr", str(100 + MARKED),
+                                   "--head", h2, "--answer", "approved", "--message", "1")
+    answered = json.loads(recorded.stdout.strip().splitlines()[-1]) if recorded.stdout.strip() else {}
+    expect(6, recorded.returncode == 0 and answered.get("verdict") == "posted",
+           f"the approval of the new head was not posted: {recorded.stdout} {recorded.stderr}")
     approve, labels = resume(res_stale["cont"], {"answer": "approve", "head": h2})
     out["approve"] = approve
     final = approve["result"] or {}
     expect(6, approve["error"] is None, f"the approving run threw: {approve['error']}")
     expect(6, final.get("stage") == "done", f"the approving run stopped at {final.get('stage')}: {final}")
-    expect(6, labels.count("look-post") == 1, f"look-post ran {labels.count('look-post')} times")
+    expect(6, labels.count("look-read") == 1, f"look-read ran {labels.count('look-read')} times")
+    expect(6, "look-post" not in labels, f"the approving run posted: {labels}")
     last = world.look_comments()
     first_line = str(last[-1]["body"]).split("\n", 1)[0] if len(last) == comments + 1 else ""
     expect(6, f"head={h2}" in first_line and "answer=approved" in first_line,
