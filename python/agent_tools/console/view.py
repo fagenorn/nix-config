@@ -71,14 +71,16 @@ ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "fail
 `Activation.pending` is true; `activation_run` is the newest run (`activation_run.LastRun`). The first
 match wins: a `running` run is `running` (ACTIVATING_TEXT, its commit, no Activate); a settled run is
 `activated` (ACTIVATED_TEXT) or `failed` (ACTIVATION_FAILED_TEXT with its reason and next step) when
-`offers_activate` holds for that very commit, or when nothing is pending and it finished less than
+`offers_activate` holds for that very commit (a `failed` run only: a reading that still names a pending
+change after an `activated` run is a fresh one, such as a rollback, and is `pending`; the service
+reads again before it records a run's end), or when nothing is pending and it finished less than
 OUTCOME_MS before `now_ms`, and only a `failed` one for the reading's commit has `activate` true (so
 nothing pending clears a failed run's line OUTCOME_MS after it finished, Activate included); a
 pending change is `pending` (the reading's commit, `activate` true); otherwise null. `offers_activate`
 is the one rule the service's admission of Activate shares: a reading with a pending change, or a
 `failed` run whose commit is the reading's and that finished less than OUTCOME_MS before `now_ms`, even
 with nothing pending, because the host's revision can reach the commit before the switch fails
-(ADR-system-004 D5); a day later, with the host at that commit, the line goes (ADR-console-072 D5). The pending text is ACTIVATION_TEXT when
+(ADR-system-004 D5); a day later, with the host at that commit, the line goes (ADR-console-073 D5). The pending text is ACTIVATION_TEXT when
 the reading names a changed console file; else ACTIVATION_TOOLING_TEXT when every other path starts
 with a member of AGENT_TOOLING (`python/`, `home/common/agent-`, `home/common/claude-code/`,
 `home/common/codex/`, `patches/agent-plugins/`, `lib/agent-`); else ACTIVATION_CONFIGURATION_TEXT.
@@ -2388,7 +2390,8 @@ def _activation_line(activation: Activation | None, run: LastRun | None, now_ms:
     if run is not None and run.state == "running":
         return line(ACTIVATING_TEXT.format(commit=run.commit[:12]), "running", run.commit, run.root, False)
     if run is not None and run.state in ("activated", "failed"):
-        same = activation is not None and activation.commit == run.commit and offers_activate(activation, run, now_ms)
+        same = (activation is not None and activation.commit == run.commit
+                and (run.state == "failed" or not pending) and offers_activate(activation, run, now_ms))
         recent = (not pending and now_ms is not None and run.finished_ms is not None
                   and now_ms - run.finished_ms < OUTCOME_MS)
         if same or recent:

@@ -22,7 +22,8 @@ configuration is built from but that are not console files: the paths `git diff-
 the host's configuration revision (the `base`, with a trailing `-dirty` removed) and the reading's
 commit, kept when `host_built(path)` holds, minus every path of `running` and every path under
 `python/agent_tools/console/` (console status is decided by blobs only). `host_built` is False
-exactly for a path under a `NOT_BUILT_DIRS` directory (`docs/`, `tests/`, `.github/`, `.agents/`) or
+exactly for a path under a `NOT_BUILT_DIRS` directory (`docs/`, `tests/`, `.github/`, `.agents/`, and the
+skills' evaluation harness `home/common/agent-skills/evals/`, which only the checkout runs) or
 equal to a `NOT_BUILT_FILES` file (the root documents and `justfile`, `.gitignore`, `.sops.yaml`, and
 the Nix-module READMEs no `.nix` file reads); every other path is counted. The host's revision is
 read on every reading, through the `revision` seam, so a later activation clears `other` by itself;
@@ -72,7 +73,7 @@ ENTRY = "python/agent_tools/console/console.py"
 _PACKAGE = "agent_tools"
 _CONSOLE_DIR = f"{SOURCE_DIR}/{_PACKAGE}/console/"
 _GIT_SECONDS = 30
-NOT_BUILT_DIRS = ("docs/", "tests/", ".github/", ".agents/")
+NOT_BUILT_DIRS = ("docs/", "tests/", ".github/", ".agents/", "home/common/agent-skills/evals/")
 NOT_BUILT_FILES = (
     "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
     "home/common/claude-code/README.md", "home/common/agent-skills/README.md",

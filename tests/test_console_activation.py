@@ -197,7 +197,8 @@ class ActivationReadingTest(Trees):
         for path in ("docs/notes.md", "tests/test_x.py", ".github/workflows/ci.yaml", ".agents/project.json",
                      "README.md", "CLAUDE.md", "AGENTS.md", "justfile", ".gitignore", ".sops.yaml",
                      "home/common/claude-code/README.md", "home/common/agent-skills/README.md",
-                     "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md"):
+                     "home/linux/claude-local/README.md", "hosts/darwin/eleven-m5/README.md",
+                     "home/common/agent-skills/evals/README.md", "home/common/agent-skills/evals/run-eval.sh"):
             with self.subTest(path=path):
                 self.assertFalse(activation.host_built(path))
         for path in (SKILL, "home/common/agent-skills/skills/grill-with-docs/ADR-FORMAT.md",
@@ -206,6 +207,7 @@ class ActivationReadingTest(Trees):
                      "patches/agent-plugins/codex-plugin-cc.patch", "hosts/common/common-packages.nix",
                      "flake.lock", "flake.nix", "secrets/secrets.yaml", "data/zshrc/common/50-aliases",
                      "python/README.md", "home/common/claude-code/README.md.orig", "newdir/README.md",
+                     "home/common/agent-skills/evals-notes.md", "home/common/agent-skills/tests/test_x.py",
                      "newdir/file"):
             with self.subTest(path=path):
                 self.assertTrue(activation.host_built(path))
@@ -224,7 +226,8 @@ class ActivationReadingTest(Trees):
 
     def test_a_module_readme_only_change_names_nothing(self):
         self.advance({"home/common/claude-code/README.md": "r\n", "home/common/agent-skills/README.md": "r\n",
-                      "home/linux/claude-local/README.md": "r\n", "hosts/darwin/eleven-m5/README.md": "r\n"})
+                      "home/linux/claude-local/README.md": "r\n", "hosts/darwin/eleven-m5/README.md": "r\n",
+                      "home/common/agent-skills/evals/README.md": "r\n"})
         result = self.read()
         self.assertEqual(result.other, ())
         self.assertIs(result.pending, False)
@@ -414,6 +417,13 @@ class ActivationViewTest(Trees):
                 self.assertIsNone(view.derive_view(
                     [], activation=Activation("/srv/cfg", (), C), activation_run=run,
                     now_ms=now)["activation"])
+
+    def test_a_pending_change_after_an_activated_run_for_its_commit_is_pending_again(self):
+        run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
+        for reading_ in (Activation("/srv/cfg", (), C, (SKILL,)), READ):
+            with self.subTest(reading=reading_):
+                line = view.derive_view([], activation=reading_, activation_run=run, now_ms=NOW)["activation"]
+                self.assertEqual((line["state"], line["commit"], line["activate"]), ("pending", C, True))
 
     def test_an_activated_run_with_nothing_pending_offers_nothing(self):
         run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
@@ -743,6 +753,25 @@ class ActivatePageWriteTest(Trees):
         self.release.touch()
         self.await_finished()
         self.assertEqual(self.ran.read_text().splitlines(), [self.commit])
+
+    def test_a_rollback_after_an_activated_run_offers_activate_again(self):
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        current = [pending]
+        svc = self.open(reader=lambda roots: current[0])
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+        self.assertEqual(self.post(svc)[0], 204)
+        current[0] = None
+        self.release.touch()
+        self.await_finished()
+        deadline = time.monotonic() + 20
+        while shown(svc) is None or shown(svc)["state"] != "activated":
+            self.assertLess(time.monotonic(), deadline, shown(svc))
+            time.sleep(0.05)
+        self.assertIs(shown(svc)["activate"], False)
+        current[0] = pending
+        svc.poll_activation()
+        line = shown(svc)
+        self.assertEqual((line["state"], line["commit"], line["activate"]), ("pending", self.commit, True))
 
     def test_a_failed_run_stays_retryable_after_the_hosts_revision_reached_the_tip(self):
         before = self.commit

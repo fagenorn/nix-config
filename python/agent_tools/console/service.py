@@ -882,7 +882,9 @@ failed write then kills the process group), a thread `ACTIVATE_THREAD` that runs
 `console: activation_run_failed <Type>: <message>` and the claim released. The claim lasts until
 `wait` returns an `Outcome`, which it does only once the run's whole process tree is gone, not when
 its first process exits: then one `activation.finished {root, commit, ok, reason, next_step}` row is
-appended, the claim released and the view published. `Stopped` (the service is closing) appends
+appended, the claim released and the view published; the activation reading is read again just
+before the row is appended (`poll_activation`), so the line never pairs a finished run with a reading taken
+before it. `Stopped` (the service is closing) appends
 nothing and keeps the claim; the run goes on. Any other exception from `wait` is one stderr line
 `console: activation_wait_failed <Type>: <message>`, no row, the claim kept. The newest started and
 finished rows are folded (`activation_run.fold`) into `_activation_run`, at construction and in
@@ -6808,6 +6810,7 @@ class ConsoleService:
         except Exception as error:
             print(f"console: activation_wait_failed {type(error).__name__}: {error}", file=sys.stderr)
             return
+        self.poll_activation()
         try:
             self._finish_activation(run.root, outcome)
         except Exception as error:

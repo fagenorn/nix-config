@@ -1956,11 +1956,11 @@ class DocsTreeTest(unittest.TestCase):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
 
-    def test_the_host_built_activation_decision_is_recorded_as_adr_072(self):
-        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("072-*.md"))
+    def test_the_host_built_activation_decision_is_recorded_as_adr_073(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("073-*.md"))
         self.assertEqual(len(found), 1, [p.name for p in found])
         first = found[0].read_text().splitlines()[0]
-        self.assertTrue(first.startswith("# ADR-console-072 \u2014 "), first)
+        self.assertTrue(first.startswith("# ADR-console-073 \u2014 "), first)
         adr = self.doc("docs/areas/console/adr/" + found[0].name)
         needles = ["#1258", "ADR-console-043", "ADR-system-004", "configuration revision",
                    "git diff-tree", "-dirty", "is a failed read",
@@ -1982,17 +1982,17 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(
             status("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-host-"
                    "is-one-line-in-the-work-column.md"),
-            "- **Status:** accepted; amended by ADR-system-004, ADR-console-072")
+            "- **Status:** accepted; amended by ADR-system-004, ADR-console-073")
         self.assertEqual(
             status("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
                    "activate.md"),
-            "- **Status:** accepted; amended by ADR-console-072")
-        self.assertIn("ADR-console-072 D5 amends it",
+            "- **Status:** accepted; amended by ADR-console-073")
+        self.assertIn("ADR-console-073 D5 amends it",
                       self.doc("docs/areas/system/adr/004-host-activation-runs-only-through-the-"
                                "consoles-activate.md"))
         lines = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         entry = lines[lines.index("**Activation line**:") + 1]
-        self.assertIn("ADR-console-072", entry)
+        self.assertIn("ADR-console-073", entry)
         self.assertNotIn("carries a console change this host does not run", entry)
 
     def test_make_it_a_goal_is_recorded(self):
