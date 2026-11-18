@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -390,18 +391,54 @@ class ContractDraftTest(unittest.TestCase):
                 fields = cd.draft(str(root), reading)
                 self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
 
+    def scoped_environment(self, values):
+        """Set (a string) or remove (None) each named variable until the test ends."""
+        for name, value in values.items():
+            saved = os.environ.get(name)
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+            self.addCleanup(os.environ.pop if saved is None else os.environ.__setitem__,
+                            name, *([None] if saved is None else [saved]))
+
+    UNTRUSTED_HOST = {
+        "GIT_CONFIG_NOSYSTEM": None, "GIT_CONFIG_COUNT": None, "GIT_CONFIG_PARAMETERS": None,
+        "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+
     def test_the_hooks_are_found_in_a_checkout_trusted_only_through_the_global_configuration(self):
         root = self.environment_checkout()
         config = self.parent / "trust.gitconfig"
         config.write_text(f"[safe]\n\tdirectory = {root}\n")
-        for name, value in (("GIT_CONFIG_GLOBAL", str(config)), ("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")):
-            saved = os.environ.get(name)
-            os.environ[name] = value
-            self.addCleanup(os.environ.pop if saved is None else os.environ.__setitem__,
-                            name, *([] if saved is None else [saved]))
+        self.scoped_environment({
+            **self.UNTRUSTED_HOST, "GIT_CONFIG_GLOBAL": str(config), "GIT_CONFIG_SYSTEM": os.devnull})
         self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
         config.write_text("")
         self.assertEqual(cd.read(str(root))["hooks"], [])
+
+    def test_the_hooks_are_found_in_a_checkout_trusted_only_through_the_system_configuration(self):
+        root = self.environment_checkout()
+        system = self.parent / "trust-system.gitconfig"
+        system.write_text(f"[safe]\n\tdirectory = {root}\n")
+        self.scoped_environment({
+            **self.UNTRUSTED_HOST, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": str(system)})
+        self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        system.write_text("")
+        self.assertEqual(cd.read(str(root))["hooks"], [])
+
+    def test_a_scoped_environment_is_restored_after_the_test(self):
+        self.scoped_environment({"GIT_CONFIG_COUNT": "0", "GIT_CONFIG_GLOBAL": "known"})
+
+        class Inner(unittest.TestCase):
+            scoped_environment = ContractDraftTest.scoped_environment
+
+            def test_it(self):
+                self.scoped_environment({"GIT_CONFIG_GLOBAL": "x", "GIT_CONFIG_COUNT": None})
+
+        done = unittest.TextTestRunner(stream=io.StringIO()).run(Inner("test_it"))
+        self.assertTrue(done.wasSuccessful())
+        self.assertEqual(os.environ["GIT_CONFIG_COUNT"], "0")
+        self.assertEqual(os.environ["GIT_CONFIG_GLOBAL"], "known")
 
     def test_a_directory_named_like_an_environment_file_is_not_that_file(self):
         root = sample(self.parent / "dir", remote=True)
