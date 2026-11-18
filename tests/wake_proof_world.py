@@ -37,6 +37,7 @@ from pathlib import Path
 from agent_tools.console import manager
 
 from .guard_policy_world import MANIFEST, REPO_ROOT
+from .process_liveness import process_alive
 
 PROFILE = "work"
 MANAGER_HOST = unittest.skipUnless(manager.supported(sys.platform), manager.UNAVAILABLE_TEXT)
@@ -363,8 +364,4 @@ class WakeProofWorld:
 
     @staticmethod
     def _running(pid: int) -> bool:
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        except OSError:
-            return False
-        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+        return process_alive(pid)

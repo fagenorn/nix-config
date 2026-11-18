@@ -25,7 +25,8 @@ finish in the expected case; a run that spends its budget keeps its state file a
 `{"status": "waiting", "sprints": [{"sprint_id", "manager_state", "manager_until"}]}`, and the next
 approved run resumes. `start` has no time bound of its own: a brief that has not arrived, a manager
 still working and a sprint parked `waiting` on quota are all 75 however long ago `stated_at` was,
-and the hold's expiry bounds the wait. Without a state file: a console that does not answer is 75
+and the hold's expiry bounds the wait. A resumed run that has no outcome yet makes the same ownership check before it reads the view, so a
+console that is not the job is 75 `console_not_the_job` with the state file kept. Without a state file: a console that does not answer is 75
 `not_running`, one whose view has no `managers` key is 75 `not_deployed`, a console on the port that is
 not the console's launchd job (macOS) is 75 `console_not_the_job`, no readable token is 75
 `no_token`, and `managers` false is 1 `managers_unavailable`; nothing is posted in any of them.
@@ -41,7 +42,7 @@ not met here.
 
 Once both briefs are version 1, `start` restarts the console (on Linux `systemctl --user restart
 agent-console`; on macOS, only when the pid `launchctl print` reports for `org.nixos.agent-console` in
-`gui/<uid>`, else `system`, serves the port, it sends that pid SIGTERM and waits up to 60 seconds for
+`gui/<uid>`, else `system`, serves the port (that job's domain is the one polled for the new pid), it sends that pid SIGTERM and waits up to 60 seconds for
 launchd's `KeepAlive` to bring a new pid of the job back on the port; a console on the port that is not
 the job is never signalled and the run is 75 `waiting` with `NOT_THE_JOB_TEXT`, the sprints kept), waits 10 seconds and reads the session registry up to three times 5 seconds apart
 until each sprint's manager (`manager.session_name`) is listed. The registry is read fresh from the
@@ -251,15 +252,22 @@ class NotTheJob(Exception):
     """The console on the port is not the console's launchd job, so it is not restarted."""
 
 
-def job_pid(platform: str, *, run=subprocess.run, uid=os.getuid) -> int | None:
-    """The pid `launchctl print` reports for the console's job in `gui/<uid>`, else `system`."""
+def job_pid(domain: str, *, run=subprocess.run) -> int | None:
+    """The pid `launchctl print` reports for the console's job in `domain`, None when it has none."""
+    answer = run(["launchctl", "print", f"{domain}/{CONSOLE_LABEL}"], capture_output=True,
+                 text=True, timeout=30, check=False)
+    if answer.returncode != 0:
+        return None
+    found = PID_LINE.search(answer.stdout or "")
+    return int(found.group(1)) if found else None
+
+
+def serving_job(port: int, *, run=subprocess.run, uid=os.getuid) -> tuple[str, int] | None:
+    """The domain (`gui/<uid>`, else `system`) and pid of the console's job that serves `port`."""
     for domain in (f"gui/{uid()}", "system"):
-        answer = run(["launchctl", "print", f"{domain}/{CONSOLE_LABEL}"], capture_output=True,
-                     text=True, timeout=30, check=False)
-        if answer.returncode == 0:
-            found = PID_LINE.search(answer.stdout or "")
-            if found:
-                return int(found.group(1))
+        pid = job_pid(domain, run=run)
+        if pid is not None and serves(pid, port, run=run):
+            return domain, pid
     return None
 
 
@@ -290,8 +298,7 @@ def default_owner(platform: str = sys.platform, *, port: int = 27184, run=subpro
     if platform.startswith("linux"):
         return True
     if platform == "darwin":
-        pid = job_pid(platform, run=run, uid=uid)
-        return pid is not None and serves(pid, port, run=run)
+        return serving_job(port, run=run, uid=uid) is not None
     return False
 
 
@@ -302,14 +309,15 @@ def default_restart(platform: str = sys.platform, *, port: int = 27184, run=subp
         return
     if platform != "darwin":
         raise RuntimeError(f"no console restart on {platform}")
-    old = job_pid(platform, run=run, uid=uid)
-    if old is None or not serves(old, port, run=run):
+    found = serving_job(port, run=run, uid=uid)
+    if found is None:
         raise NotTheJob()
+    domain, old = found
     kill(old, signal.SIGTERM)
     deadline = clock() + RETURN_SECONDS
     while True:
         sleep(2)
-        new = job_pid(platform, run=run, uid=uid)
+        new = job_pid(domain, run=run)
         if new is not None and new != old and serves(new, port, run=run):
             return
         if clock() >= deadline:
@@ -422,6 +430,9 @@ def _start(args, restart, owner, registry, stop, remove, clock, sleep) -> int:
             return NOT_YET
         if outcome is not None:
             return close(outcome[0], outcome[1], outcome[2], outcome[3])
+        if not unresolved and not owner():
+            _print({"status": "console_not_the_job"})
+            return NOT_YET
     if not state_file.exists() or unresolved:
         view = console.state()
         if view is None:

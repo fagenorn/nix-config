@@ -235,8 +235,16 @@ class VerdictTest(Layout):
         self.assertEqual(raised.exception.code, 2)
 
     def test_the_check_asks_the_url_it_is_given(self):
-        self.main("--url", "http://127.0.0.1:9999")
-        self.assertEqual(self.fetched, "http://127.0.0.1:9999")
+        self.main("--url", "http://localhost:27184")
+        self.assertEqual(self.fetched, "http://localhost:27184")
+
+    def test_a_console_the_installed_launcher_cannot_ask_is_refused(self):
+        for url in ("http://127.0.0.1:9999", "http://127.0.0.1", "http://localhost:27185"):
+            with self.subTest(url=url):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                    self.main("--url", url)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertEqual(self.calls, [])
 
     def test_the_check_writes_nothing_outside_its_directory(self):
         before = (snapshot(self.accounts), snapshot(self.home))
@@ -247,13 +255,28 @@ class VerdictTest(Layout):
             for key in ("LAUNCH_PROFILE_OUT", "HOME", "CLAUDE_ACCOUNTS_DIR"):
                 self.assertFalse(Path(kw["env"][key]).parent.exists(), key)
 
-    def test_the_choice_file_is_copied_into_the_isolated_root(self):
-        (self.accounts / "chosen-profile").write_text("home\n")
+    def test_the_isolated_fallback_names_a_profile_other_than_the_consoles(self):
+        # the console keeps chosen-profile in step with its answer: here both name "work"
+        (self.accounts / "chosen-profile").write_text("work\n")
         seen = []
-        self.writes["claude"] = lambda acc: (seen.append((acc / "chosen-profile").read_text()),
-                                             acc / "profiles" / "work")[1]
-        self.main()
-        self.assertEqual(seen, ["home\n"])
+        for kind in ("claude", "mod"):
+            self.writes[kind] = (lambda kind: lambda acc: (
+                seen.append((kind, (acc / "chosen-profile").read_text())),
+                acc / "profiles" / ("work" if kind == "claude" else "home"))[1])(kind)
+        code, _ = self.main()
+        self.assertEqual((code, seen), (0, [("claude", "home\n"), ("mod", "home\n")]))
+
+    def test_a_launcher_that_falls_back_while_the_console_answers_is_not_met(self):
+        (self.accounts / "chosen-profile").write_text("work\n")
+        # a launcher ignoring /api/profile starts under the isolated choice file's profile
+        self.writes["claude"] = lambda acc: acc / "profiles" / (acc / "chosen-profile").read_text().strip()
+        code, out = self.main()
+        self.assertEqual((code, out["reason"]), (1, "the launch did not use the console's profile"))
+
+    def test_a_console_profile_that_is_the_only_one_is_not_yet(self):
+        shutil.rmtree(self.accounts / "profiles" / "home")
+        self.assertEqual(self.main(), (75, {"status": "one_profile"}))
+        self.assertEqual(self.calls, [])
 
 
 class InstalledLayoutTest(Layout):
@@ -267,7 +290,7 @@ class InstalledLayoutTest(Layout):
         self.assertEqual(found, self.mod.resolve())
         t = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, t, True)
-        accounts, names = check.isolated_accounts(self.accounts, t)
+        accounts, names = check.isolated_accounts(self.accounts, t, "home")
         self.assertEqual(names, ["home", "work"])
         client = check.stub_client(t)
         (t / "work").mkdir()

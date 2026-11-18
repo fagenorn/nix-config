@@ -2,13 +2,16 @@
 
 `python -m agent_tools.console.launch_profile_check [--url URL]` asks the console which profile a new
 session takes (`GET <url>/api/profile`, default `http://127.0.0.1:27184`, which equals the installed
-launcher's constant; `http` on `127.0.0.1` or `localhost`, else exit 2) and launches `claude` twice, each
+launcher's constant; `http` on `127.0.0.1` or `localhost` at port 27184, the only console the installed
+launcher can ask, else exit 2) and launches `claude` twice, each
 time with a stub in place of the real client, so no model is reached and nothing of the owner's is written.
 
 Isolation. Every launch runs from an empty working directory in one temporary directory that is removed
 at the end, with `HOME` there, `CLAUDE_ACCOUNTS_DIR` there (an empty directory for each of the real
-accounts root's named profiles, the names matching `[a-z0-9_-]+` other than `default`, and a copy of its
-`chosen-profile` file), `CLAUDE_BIN` the stub, `CLAUDE_CACHE_PROXY=0`, and `CLAUDE_ACCOUNT`,
+accounts root's named profiles, the names matching `[a-z0-9_-]+` other than `default`, and a
+`chosen-profile` file naming the first of them that is not the console's profile, so the launcher's
+fallback differs from the console's answer and a launch that ignores `/api/profile` cannot pass on the
+fallback), `CLAUDE_BIN` the stub, `CLAUDE_CACHE_PROXY=0`, and `CLAUDE_ACCOUNT`,
 `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_PLUGIN_DIRS`, `CONSOLE_SPRINT_ID` and `CONSOLE_SPRINT_SECRET` removed.
 The stub writes the `CLAUDE_CONFIG_DIR` it was started with, as one line, to the file the launch names.
 
@@ -26,7 +29,7 @@ Exits: 0 met; 1 not met (`the console's profile is not a configured profile`, `t
 answer is malformed`, `the launcher's mod is not found`, `the launcher's console address line is not
 found`, `the online launch exited <rc>`, `the offline launch exited <rc>`, `the launch did not reach the
 client`, `the launch did not use the console's profile`, `the launch with the console stopped did not use
-a named profile`); 75 not yet, with `{"status": ...}` alone: `no_profiles` (no named profile), `not_running`
+a named profile`); 75 not yet, with `{"status": ...}` alone: `no_profiles` (no named profile), `one_profile` (the only named profile is the console's, so no fallback can differ from it), `not_running`
 (no 200 answer), `no_profile_chosen` (the answer `{"profile": null}`, ADR-console-023 D2), `not_installed`
 (no `claude`, or no `claude-account` on `PATH`); 2 a bad argument.
 
@@ -47,11 +50,13 @@ import tempfile
 import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from agent_tools.console import manager_check
 
 DEFAULT_URL = manager_check.DEFAULT_URL
 NOT_YET = manager_check.NOT_YET
+LAUNCHER_PORT = 27184
 TIMEOUT = 60
 FETCH_SECONDS = 5
 NAME = re.compile(r"[a-z0-9_-]+")
@@ -81,16 +86,14 @@ def named_profiles(root: Path) -> list[str]:
         return []
 
 
-def isolated_accounts(real_root: Path, into: Path) -> tuple[Path, list[str]]:
-    """`into/accounts`: an empty directory per named profile of `real_root` and a copy of its choice file."""
+def isolated_accounts(real_root: Path, into: Path, choice: str) -> tuple[Path, list[str]]:
+    """`into/accounts`: an empty directory per named profile of `real_root` and a choice file naming `choice`."""
     names = named_profiles(real_root)
     accounts = into / "accounts"
     for name in names:
         (accounts / "profiles" / name).mkdir(parents=True)
     accounts.mkdir(exist_ok=True)
-    choice = real_root / "chosen-profile"
-    if choice.is_file():
-        shutil.copyfile(choice, accounts / "chosen-profile")
+    (accounts / "chosen-profile").write_text(choice + "\n")
     return accounts, names
 
 
@@ -155,9 +158,18 @@ def _print(document: dict) -> None:
     manager_check._print(document)
 
 
+def _launcher_url(text: str) -> str:
+    """A loopback URL at the port the installed launcher asks, the only console this check can read."""
+    url = manager_check._loopback_url(text)
+    if urlsplit(url).port != LAUNCHER_PORT:
+        raise argparse.ArgumentTypeError(
+            f"the installed launcher asks port {LAUNCHER_PORT} only, so no other console can be checked")
+    return url
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="launch_profile_check", description=__doc__.splitlines()[0])
-    parser.add_argument("--url", type=manager_check._loopback_url, default=DEFAULT_URL)
+    parser.add_argument("--url", type=_launcher_url, default=DEFAULT_URL)
     return parser
 
 
@@ -209,9 +221,13 @@ def main(argv: list[str] | None = None, *, run: Callable = subprocess.run,
     report["console_profile"] = console
     if console not in names:
         return not_met("the console's profile is not a configured profile")
+    decoy = next((name for name in names if name != console), None)
+    if decoy is None:
+        _print({"status": "one_profile"})
+        return NOT_YET
     with tempfile.TemporaryDirectory() as made:
         t = Path(made)
-        accounts, _ = isolated_accounts(real_root, t)
+        accounts, _ = isolated_accounts(real_root, t, decoy)
         (t / "home").mkdir()
         (t / "work").mkdir()
         client = stub_client(t)

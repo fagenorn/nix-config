@@ -11,8 +11,13 @@ rule (else exit 2).
 This check writes to the owner's console: it adds a profile and removes it, so it is an `effects: live`
 check, run only where the verify runner has an approval for it, never against the live console unasked.
 
-Met first. The reading is made before anything else; when it is already met the check prints its line and
-exits 0, posting nothing and not reading the token file, so a second run after the first adds no profile.
+Met first. The reading is made before anything else. When it is already met and its profiles do not
+include NAME with a profile of that name still on disk, the check prints its line and exits 0, posting
+nothing and not reading the token file, so a second run after the first adds no profile. When it is met,
+names NAME and the profile is still on disk, an earlier run's clean-up did not finish (the log rows above
+the watermark are the evidence that run created it): the token file is read (unreadable: `no_token`, exit
+75), the clean-up below is run, and then the met line is printed and the exit is 0. A clean-up that does
+not finish is 75 or not met as below.
 
 Round trip. Otherwise the token file is read (unreadable: `{"status": "no_token"}`, exit 75, nothing
 posted) and the check posts, with the page's write headers, `/api/account-add` `{"name": NAME}`, then
@@ -25,16 +30,17 @@ token.
 
 The add's answers. 200 goes on to the clean-up; the console not answering is `{"status": "not_running"}`
 and a console without the account gates (409 `adding an account is not available on this host`) is
-`{"status": "not_available"}`, both exit 75 with nothing else posted; a leftover profile of the same
-name (409 `... already exists`, from a stopped earlier run) is cleaned up and the add posted once more,
-a second one being not met; a 502 (`the account was added; its sign-in could not start`) is cleaned up
+`{"status": "not_available"}`, both exit 75 with nothing else posted; a profile of the same
+name that was there before (409 `... already exists`) is never touched: nothing in this run created it, so
+the check is not met with a reason naming it, and the owner removes it or passes another `--name` (the name
+must be one the owner does not use); a 502 (`the account was added; its sign-in could not start`) is cleaned up
 and then not met with the console's text; any other answer is not met with its status and text, nothing
 having been created.
 
 Outputs. One stdout line of JSON with sorted keys (the delegated reading prints its own); not met is
 `{"reason": ..., "status": "not_met"}`. Exit 0 met, 1 not met, 75 not yet, 2 a bad argument. A clean-up
-that cannot reach the console is 75, and the next run clears the leftover through the rule above; one the
-console refuses is not met.
+that cannot reach the console is 75, and the next run finishes it through the met-first rule above; one
+the console refuses is not met.
 """
 from __future__ import annotations
 
@@ -43,6 +49,7 @@ import contextlib
 import http.client
 import io
 import json
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -96,6 +103,17 @@ def reading(mode: str, after_seq: int, url: str) -> tuple[int, str]:
     return code, out.getvalue().strip()
 
 
+def lingering(name: str, line: str) -> bool:
+    """True when the met reading's profiles name `name` and a profile of that name is still on disk."""
+    try:
+        document = json.loads(line)
+    except ValueError:
+        return False
+    profiles = document.get("profiles") if isinstance(document, dict) else None
+    return (isinstance(profiles, list) and name in profiles
+            and os.path.lexists(capacity_check.profiles_dir() / name))
+
+
 def _name(text: str) -> str:
     if not account_add.NAME.fullmatch(text):
         raise argparse.ArgumentTypeError("not a valid account name")
@@ -143,10 +161,12 @@ def _cleanup(client, name: str, sleep: Callable[[float], None]) -> int | None:
 
 
 def main(argv: list[str] | None = None, *, client=PageClient, read=reading,
-         sleep: Callable[[float], None] = time.sleep) -> int:
+         sleep: Callable[[float], None] = time.sleep, left=lingering) -> int:
     args = build_parser().parse_args(argv)
+    name = args.name
     code, line = read(args.mode, args.after_seq, args.url)
-    if code == 0:
+    unfinished = code == 0 and left(name, line)
+    if code == 0 and not unfinished:
         print(line)
         return 0
     token_file = args.token_file or agent_platform.state_root() / "console" / "page-token"
@@ -155,25 +175,24 @@ def main(argv: list[str] | None = None, *, client=PageClient, read=reading,
     except (OSError, UnicodeDecodeError):
         return _finish({"status": "no_token"}, NOT_YET)
     page = client(args.url, token)
-    name = args.name
-    for attempt in (1, 2):
-        status, text = page.post("/api/account-add", {"name": name})
-        if status is None:
-            return _finish({"status": "not_running"}, NOT_YET)
-        if status == 200:
-            break
-        if status == 409 and text == NOT_AVAILABLE_TEXT:
-            return _finish({"status": "not_available"}, NOT_YET)
-        if status == 409 and text == f"account {name} already exists":
-            if attempt == 2:
-                return _not_met(f"the throwaway profile {name} could not be cleared")
-            cleared = _cleanup(page, name, sleep)
-            if cleared is not None:
-                return cleared
-            continue
-        if status == 502 and text.startswith(SIGNIN_FAILED_TEXT):
-            cleared = _cleanup(page, name, sleep)
-            return _not_met(text) if cleared is None else cleared
+    if unfinished:
+        cleared = _cleanup(page, name, sleep)
+        if cleared is not None:
+            return cleared
+        print(line)
+        return 0
+    status, text = page.post("/api/account-add", {"name": name})
+    if status is None:
+        return _finish({"status": "not_running"}, NOT_YET)
+    if status == 409 and text == NOT_AVAILABLE_TEXT:
+        return _finish({"status": "not_available"}, NOT_YET)
+    if status == 409 and text == f"account {name} already exists":
+        return _not_met(f"a profile named {name} already exists and this check did not create "
+                        "it, so it is left alone; remove it or pass another --name")
+    if status == 502 and text.startswith(SIGNIN_FAILED_TEXT):
+        cleared = _cleanup(page, name, sleep)
+        return _not_met(text) if cleared is None else cleared
+    if status != 200:
         return _not_met(f"the add answered {status}: {text}")
     cleared = _cleanup(page, name, sleep)
     if cleared is not None:

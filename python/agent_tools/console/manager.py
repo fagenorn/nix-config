@@ -74,7 +74,8 @@ so `auto`. `settings_document(env, permission)` is that content and `write_setti
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
 stopped or removed session (`service._refresh_settings`).
 
-Runner. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
+Runner. On macOS `run_launch` runs it with `run_in_own_group`, so a launch that times out ends the
+wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
 device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
 open cannot hold the launch), in its own session, in the project root, within `LAUNCH_TIMEOUT`
 seconds. The client's environment (`client_environment(profile, environ)`, shared with the nudge
@@ -92,7 +93,10 @@ The view never shows a reason as given: `plain_reason` maps it to one of `PLAIN_
 substrings, in order, first hit wins), while the `manager.failed` row and the `console:
 manager_failed` stderr line keep it as given.
 
-Stopping. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
+Stopping. A stop command runs with `run_stop` (`run_in_own_group` in its own session, registered), and
+`reap_stops()`, which the console calls as it closes, kills every one still in flight, so a hung stop
+does not outlive a console restart whose launchd job leaves process groups alone (ADR-console-075);
+managers are not touched. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
 session (ADR-console-018), so a check that states a real goal still stops its test manager first and
 the withdrawal's own stop finds nothing listed (ADR-console-016).
 `stop_session(session_id, profile)` runs `claude-account run stop <short id>` under the session's own
@@ -520,7 +524,46 @@ def _kill_group(process: subprocess.Popen) -> None:
     process.wait()
 
 
-def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.run,
+_STOPS_LOCK = threading.Lock()
+_STOPS: set[threading.Event] = set()
+
+
+def run_stop(argv: list[str], *, timeout: float, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
+    """`run_in_own_group` for a stop command, registered so `reap_stops` can end it.
+
+    A stop in the console's own process group would survive the console on macOS, where the
+    console's launchd job sets `AbandonProcessGroup` for the sake of its managers, and no timeout
+    would be left to end it; in its own group it is one the console can find and kill.
+    """
+    cancel = threading.Event()
+    with _STOPS_LOCK:
+        _STOPS.add(cancel)
+    try:
+        return run_in_own_group(argv, timeout=timeout, check=check, cancel=cancel,
+                                start_new_session=True, **kwargs)
+    finally:
+        with _STOPS_LOCK:
+            _STOPS.discard(cancel)
+
+
+def reap_stops(wait: float = 2.0) -> None:
+    """End every stop command in flight (its whole group), waiting up to `wait` seconds for each to be reaped.
+
+    The console calls it as it closes; the managers themselves are not touched.
+    """
+    with _STOPS_LOCK:
+        pending = set(_STOPS)
+    for cancel in pending:
+        cancel.set()
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        with _STOPS_LOCK:
+            if not pending & _STOPS:
+                return
+        time.sleep(0.02)
+
+
+def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
                environ: Mapping[str, str] = os.environ) -> None:
     secret = launch.env[SECRET_ENV]
 
@@ -537,6 +580,10 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
     except LaunchFailed as error:
         raise fail(str(error)) from error
     env = client_environment(launch.profile, environ)
+    if run is None:
+        # On macOS the account wrapper waits for its client; a timeout must end that whole group,
+        # or the client could still start a manager after the failure is recorded.
+        run = run_in_own_group if platform == "darwin" else subprocess.run
     with tempfile.TemporaryFile() as err:
         try:
             result = run(argv, cwd=launch.cwd, env=env, stdin=subprocess.DEVNULL,
@@ -557,7 +604,7 @@ def short_id(session_id: str) -> str:
     return session_id[:SHORT_ID_LENGTH]
 
 
-def stop_session(session_id: str, profile: str, *, run=subprocess.run,
+def stop_session(session_id: str, profile: str, *, run=run_stop,
                  environ: Mapping[str, str] = os.environ) -> None:
     argv = ["claude-account", "run", "stop", short_id(session_id)]
     with tempfile.TemporaryFile() as err:

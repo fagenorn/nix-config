@@ -8006,6 +8006,7 @@ class ConsoleService:
             if self._guest_thread is not None:
                 self._guest_server.shutdown()
             self._guest_server.server_close()
+        manager.reap_stops()
         with self._ingest:
             while self._grants_running:
                 self._grants_done.wait()

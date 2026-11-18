@@ -7,7 +7,6 @@ import io
 import json
 import os
 import socket
-import sys
 import tempfile
 import textwrap
 import threading
@@ -23,10 +22,10 @@ from agent_tools.console.signin_run import (
     Ended, NotRunning, SignIns, Started, StartFailed, acted, ended, ended_state, login_command,
     login_environment, parse_code_request, parse_profile_request, runs_for, valid_link)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .process_liveness import process_alive
 
 LINK = "https://claude.example/oauth/authorize?state=SENTINEL-LINK-7f3a"
 CODE = "SENTINEL-CODE-91c2#x"
-LINUX = sys.platform.startswith("linux")
 
 FAKE = textwrap.dedent('''\
     #!%(python)s
@@ -205,11 +204,7 @@ class RunTest(unittest.TestCase):
         return found[0]
 
     def alive(self, pid):
-        try:
-            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        except OSError:
-            return False
-        return fields[0] != "Z"
+        return process_alive(pid)
 
     def test_the_link_the_client_hands_its_browser_is_returned(self):
         self.arrange("code")
@@ -248,7 +243,6 @@ class RunTest(unittest.TestCase):
         self.assertEqual(runs.wait_link("work"), LINK)
         self.assertEqual(len([line for line in self.lines() if "argv" in line]), 1)
 
-    @unittest.skipUnless(LINUX, "reads /proc")
     def test_a_run_past_its_deadline_is_killed_with_its_group_and_its_port_released(self):
         self.arrange("hang")
         runs = self.make()
@@ -267,7 +261,6 @@ class RunTest(unittest.TestCase):
         self.assertEqual(runs.start("work"), Started(2, True))
         until(self, lambda: len([line for line in self.lines() if "argv" in line]) == 2)
 
-    @unittest.skipUnless(LINUX, "reads /proc")
     def test_a_cancelled_run_is_killed_with_its_group(self):
         self.arrange("hang")
         runs = self.make()

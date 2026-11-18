@@ -189,6 +189,20 @@ class MacosRestartTest(unittest.TestCase):
                     host.restart()
                 self.assertEqual(host.kills, [])
 
+    def test_the_job_that_serves_the_port_is_the_one_restarted_in_its_own_domain(self):
+        host = Host(gui=[(0, job_text(4242))], system=[(0, job_text(777)), (0, job_text(778))],
+                    lsof=["777\n", "777\n", "778\n"])
+        host.restart()
+        self.assertEqual(host.kills, [(777, signal.SIGTERM)])
+        self.assertEqual(host.printed(), [f"gui/501/{JOB}", f"system/{JOB}", f"system/{JOB}"])
+        with self.subTest("another domain's job appearing while polling is not the return"):
+            host = Host(gui=[(0, job_text(4242)), (0, job_text(5151))],
+                        system=[(0, job_text(777))], lsof=["777\n", "777\n", "5151\n"], ps={})
+            with self.assertRaisesRegex(
+                    RuntimeError, "the console did not come back under its launchd job"):
+                host.restart()
+            self.assertEqual(host.kills, [(777, signal.SIGTERM)])
+
     def test_a_foreign_listener_is_never_signalled(self):
         host = Host(gui=[(0, job_text(4242)), (0, job_text(5151))],
                     lsof=["9999\n", "5151\n"], ps={9999: 1})
@@ -561,6 +575,16 @@ class ManagerCheckTest(unittest.TestCase):
                 self.assertEqual(self.posts, [])
                 self.assertFalse(self.state_file.exists())
                 self.assertEqual(self.restarts, [])
+
+    def test_a_resumed_run_on_a_console_that_is_not_the_job_tears_nothing_down(self):
+        # saved sprint ids the hand-run console's view lacks: without the preflight this is
+        # "the sprint is gone", an exit 1 and a withdrawal
+        code, out = self.start([view([])], resume=True, owner=lambda: False)
+        self.assertEqual((code, out), (75, {"status": "console_not_the_job"}))
+        self.assertTrue(self.state_file.exists())
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertEqual((self.calls, self.restarts), ([], []))
+        self.assertFalse(self.result_file.exists())
 
     def test_a_restart_that_finds_another_console_keeps_the_sprints(self):
         def other():

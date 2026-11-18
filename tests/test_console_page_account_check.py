@@ -142,17 +142,46 @@ class PageAccountCheckTest(unittest.TestCase):
         self.assertEqual((code, out), (0, MET[1] + "\n"))
         self.assertEqual(world.slept, [5])
 
-    def test_a_leftover_throwaway_profile_is_cleared_first(self):
-        world = World(self, {ADD: [LEFTOVER, OK_ADD], CANCEL: [(204, "")], REMOVE: [(204, "")]})
+    def test_a_profile_that_was_already_there_is_left_alone(self):
+        world = World(self, {ADD: [LEFTOVER], CANCEL: [(204, "")], REMOVE: [(204, "")]})
         code, out = world.run(*self.ARGS)
-        self.assertEqual((code, out), (0, MET[1] + "\n"))
-        self.assertEqual(world.paths(), [ADD, CANCEL, REMOVE, ADD, CANCEL, REMOVE])
-        with self.subTest("still there"):
-            world = World(self, {ADD: [LEFTOVER], CANCEL: [(204, "")], REMOVE: [(204, "")]})
-            code, out = world.run(*self.ARGS)
-            self.assertEqual((code, json.loads(out)), (1, {
-                "reason": f"the throwaway profile {NAME} could not be cleared",
-                "status": "not_met"}))
+        document = json.loads(out)
+        self.assertEqual((code, document["status"]), (1, "not_met"))
+        self.assertIn(f"a profile named {NAME} already exists", document["reason"])
+        self.assertEqual(world.paths(), [ADD])
+        self.assertEqual(len(world.reads), 1)
+
+    def test_an_unfinished_cleanup_is_resumed_before_the_met_reading_is_accepted(self):
+        world = World(self, {CANCEL: [(204, "")], REMOVE: [(204, "")]}, reads=[MET])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = page_account_check.main(
+                [*self.ARGS, "--token-file", str(world.token_file)], client=world.client,
+                read=world.read, sleep=world.slept.append, left=lambda name, line: True)
+        self.assertEqual((code, out.getvalue()), (0, MET[1] + "\n"))
+        self.assertEqual(world.posts, [(CANCEL, {"profile": NAME}),
+                                       (REMOVE, {"profile": NAME, "typed": NAME})])
+        with self.subTest("the cleanup cannot reach the console"):
+            world = World(self, {CANCEL: [(None, "the console did not answer")]}, reads=[MET])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = page_account_check.main(
+                    [*self.ARGS, "--token-file", str(world.token_file)], client=world.client,
+                    read=world.read, sleep=world.slept.append, left=lambda name, line: True)
+            self.assertEqual((code, json.loads(out.getvalue())), (75, {"status": "not_running"}))
+
+    def test_a_lingering_profile_needs_the_reading_and_the_disk_to_name_it(self):
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(directory.rmdir)
+        (directory / "profiles").mkdir()
+        self.addCleanup((directory / "profiles").rmdir)
+        with mock.patch.object(capacity_check, "profiles_dir", lambda: directory / "profiles"):
+            self.assertFalse(page_account_check.lingering(NAME, MET[1]))
+            (directory / "profiles" / NAME).mkdir()
+            self.addCleanup((directory / "profiles" / NAME).rmdir)
+            self.assertTrue(page_account_check.lingering(NAME, MET[1]))
+            self.assertFalse(page_account_check.lingering(NAME, '{"profiles": ["other"], "status": "met"}'))
+            self.assertFalse(page_account_check.lingering(NAME, "not json"))
 
     def test_bad_arguments_exit_2(self):
         bad = [(), ("--page-add", "--page-remove", "--after-seq", "1"), ("--page-add",),

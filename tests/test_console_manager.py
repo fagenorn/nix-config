@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -31,6 +32,14 @@ PROMPT = LEAD + "make it resumable"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
            "`sprint ask`.")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def cap(*rows, all_out=False, resumes_at=None):
@@ -222,6 +231,32 @@ class RunTest(Case):
         self.assertEqual(kwargs["cwd"], str(self.root))
         self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
                                          "CLAUDE_ACCOUNT": "work"})
+
+    def fake_client(self, body):
+        """A `claude-account` on its own PATH that runs `body`; returns the environ for `run_launch`."""
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        client = bin_dir / "claude-account"
+        client.write_text("#!/bin/sh\n" + body)
+        client.chmod(0o755)
+        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "PIDFILE": str(self.tmp / "pid")}
+
+    def wait_dead(self, pid, seconds=5.0):
+        end = time.monotonic() + seconds
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        return not alive(pid)
+
+    def test_a_macos_launch_that_times_out_ends_the_whole_group(self):
+        environ = self.fake_client('sh -c \'echo $$ > "$PIDFILE"; exec sleep 60\' &\nwait\n')
+        launch = self.launch(root=str(self.root))
+        with mock.patch.object(manager, "LAUNCH_TIMEOUT", 1):
+            with self.assertRaises(manager.LaunchFailed) as raised:
+                manager.run_launch(launch, platform="darwin", environ=environ)
+        self.assertEqual(str(raised.exception), "the launch did not return within 1 s")
+        pid = int((self.tmp / "pid").read_text())
+        self.addCleanup(lambda: os.kill(pid, 9) if alive(pid) else None)
+        self.assertTrue(self.wait_dead(pid), "the client the wrapper waited for is still running")
 
     def test_the_identity_is_written_to_a_private_settings_file(self):
         self.run_fake()
@@ -643,6 +678,39 @@ class StopTest(unittest.TestCase):
         self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(kwargs["timeout"], 60)
+
+    def test_a_stop_in_flight_is_ended_with_its_group_when_the_console_closes(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        client = tmp / "claude-account"
+        client.write_text('#!/bin/sh\nsh -c \'echo $$ > "$PIDFILE"; exec sleep 60\' &\nwait\n')
+        client.chmod(0o755)
+        environ = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": str(tmp), "PIDFILE": str(tmp / "pid")}
+        outcome = []
+
+        def stop():
+            try:
+                manager.stop_session(self.FULL, "work", environ=environ)
+                outcome.append(None)
+            except manager.StopFailed as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=stop, daemon=True)
+        worker.start()
+        end = time.monotonic() + 5
+        while not (tmp / "pid").exists() and time.monotonic() < end:
+            time.sleep(0.02)
+        pid = int((tmp / "pid").read_text())
+        self.addCleanup(lambda: os.kill(pid, 9) if alive(pid) else None)
+        self.assertTrue(alive(pid))
+        manager.reap_stops()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertIsInstance(outcome[0], manager.StopFailed)
+        end = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid))
 
     def test_a_failed_stop_raises_its_one_line_reason(self):
         def failing(argv, **kwargs):

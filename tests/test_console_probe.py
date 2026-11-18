@@ -17,6 +17,7 @@ from pathlib import Path
 from agent_tools.console import manager, nudge, probe
 from agent_tools.console.probe import Probe
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .process_liveness import process_alive
 
 SID = "0b6f5a3e-2c1d-4e8f-9a7b-1c2d3e4f5a6b"
 CREDENTIAL_NAMES = {".credentials.json", ".claude.json"}
@@ -126,7 +127,6 @@ class ProbeCommandTest(unittest.TestCase):
         self.assertIs(probe.prober_for("darwin"), probe.run_probe)
         self.assertIsNone(probe.prober_for("win32"))
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "reads /proc")
     def test_a_timed_out_probe_leaves_no_process_behind(self):
         with tempfile.TemporaryDirectory() as home:
             launcher = Path(home) / ".agents" / "bin" / "claude-account"
@@ -235,15 +235,7 @@ class ProbeCommandTest(unittest.TestCase):
 
     @staticmethod
     def alive(pid):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        try:
-            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        except OSError:
-            return False
-        return state != "Z"
+        return process_alive(pid)
 
     def test_one_group_killing_runner_serves_nudges_and_probes(self):
         for function in (probe.run_probe, nudge.run_nudge, nudge.read_full_entries,

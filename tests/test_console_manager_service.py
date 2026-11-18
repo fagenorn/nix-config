@@ -507,6 +507,12 @@ class ManagerServiceTest(Case):
         self.assertNotEqual(sprint["manager_text"], manager.UNAVAILABLE_TEXT)
         svc.close()
 
+    def test_closing_the_console_ends_the_stops_in_flight(self):
+        svc = self.start()
+        with mock.patch.object(manager, "reap_stops") as reaped:
+            svc.close()
+        reaped.assert_called_once_with()
+
     def test_main_passes_the_platform_launcher(self):
         recorded = {}
 
