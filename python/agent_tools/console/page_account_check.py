@@ -19,7 +19,8 @@ posted) and the check posts, with the page's write headers, `/api/account-add` `
 cleans up, then reads again and exits with that reading's exit and prints its line. The clean-up posts
 `/api/signin-cancel` `{"profile": NAME}` (any answer accepted) then `/api/account-remove`
 `{"profile": NAME, "typed": NAME}`, which is retried after 5 seconds while the console answers that the
-profile is still being read, at most 6 posts in all. The add's sign-in link is never printed, nor is the
+profile is still being read or that its cancelled sign-in is still running (the run leaves the console's
+running set a moment after the cancel answers), at most 6 posts in all. The add's sign-in link is never printed, nor is the
 token.
 
 The add's answers. 200 goes on to the clean-up; the console not answering is `{"status": "not_running"}`
@@ -60,6 +61,7 @@ REMOVE_POSTS = 6
 NOT_AVAILABLE_TEXT = "adding an account is not available on this host"
 SIGNIN_FAILED_TEXT = "the account was added; its sign-in could not start"
 BUSY_SUFFIX = "try again in a moment"
+RUNNING_SUFFIX = "cancel it first"
 
 
 class PageClient:
@@ -133,7 +135,8 @@ def _cleanup(client, name: str, sleep: Callable[[float], None]) -> int | None:
             return None
         if status is None:
             return _finish({"status": "not_running"}, NOT_YET)
-        if status != 409 or not text.endswith(BUSY_SUFFIX) or post == REMOVE_POSTS - 1:
+        if (status != 409 or not text.endswith((BUSY_SUFFIX, RUNNING_SUFFIX))
+                or post == REMOVE_POSTS - 1):
             break
         sleep(RETRY_SECONDS)
     return _not_met(f"the throwaway profile {name} was not removed: {status} {text}")

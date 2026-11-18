@@ -27,6 +27,7 @@ CANCEL = "/api/signin-cancel"
 REMOVE = "/api/account-remove"
 OK_ADD = (200, '{"attempt": 7, "link": "https://example.invalid/x", "profile": "zzcheck-mac"}')
 BUSY = (409, "zzcheck-mac is still being read; try again in a moment")
+RUNNING = (409, "a sign-in is running for zzcheck-mac; cancel it first")
 LEFTOVER = (409, "account zzcheck-mac already exists")
 
 
@@ -134,6 +135,12 @@ class PageAccountCheckTest(unittest.TestCase):
             self.assertEqual(world.paths().count(REMOVE), 6)
             self.assertEqual(world.slept, [5] * 5)
             self.assertEqual(len(world.reads), 1)
+
+    def test_a_cancelled_sign_in_still_running_is_waited_for_then_removed(self):
+        world = World(self, {ADD: [OK_ADD], CANCEL: [(204, "")], REMOVE: [RUNNING, (204, "")]})
+        code, out = world.run(*self.ARGS)
+        self.assertEqual((code, out), (0, MET[1] + "\n"))
+        self.assertEqual(world.slept, [5])
 
     def test_a_leftover_throwaway_profile_is_cleared_first(self):
         world = World(self, {ADD: [LEFTOVER, OK_ADD], CANCEL: [(204, "")], REMOVE: [(204, "")]})
