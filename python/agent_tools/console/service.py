@@ -859,7 +859,8 @@ The owner's Activate (#1193): `POST /api/activate`, a page write whose body is e
 object `{"commit": <40 lowercase hex>}` of at most `MAX_ACTIVATE_BYTES` (the `_json_body` 411, 415
 and 413 rules apply; any other body is 400 `bad activation`). It is answered 409 `text/plain`, one
 line, appending nothing, in this order: `nothing to activate` (no `activator`, no reading, or a
-reading with nothing pending, `Activation.pending` false); `an activation is already running`;
+reading with nothing pending whose commit is not that of a failed run, `view.offers_activate`);
+`an activation is already running`;
 `that commit is no longer the tip of origin's integration branch` (the body's commit is not the
 shown reading's); then a fresh
 `activator.tip(root)`, read outside the ingest lock, that cannot be read (`the tip of origin's
@@ -1418,8 +1419,8 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, project_for, project_states, read_states, registry_changes, sprint_absent_managers,
-    sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
+    is_waiting, offers_activate, project_for, project_states, read_states, registry_changes,
+    sprint_absent_managers, sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -6730,7 +6731,7 @@ class ConsoleService:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
         with self._ingest:
             reading = self._activation
-            if self._activator is None or reading is None or not reading.pending:
+            if self._activator is None or not offers_activate(reading, self._activation_run):
                 raise sprints.Refused(ACTIVATE_NOTHING)
             if self._activating:
                 raise sprints.Refused(ACTIVATE_RUNNING)
