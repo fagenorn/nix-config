@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty-two screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -27,7 +27,16 @@ Contract:
   characters typed, so the count reads near the limit; `goal-over` is it with 2100 characters
   typed, so the count reads over the limit, Send is unavailable and the hint beside it says how much to cut (#1214);
   `inbox-card` is `owner/web`'s question card with
-  two options and an owner check beside it; `accounts-panel` is the accounts panel opened over
+  two options and an owner check beside it; `question-words` and `question-refused` are
+  `owner/web`'s look-check question card (Approve, Approve with one fix, Ask for changes, the last
+  two marked as needing words) with Ask for changes picked: `question-words` with the words
+  `LOOK_WORDS` typed in the card's words box (`WORDS_CARD`: the picked option, the words, the one
+  send enabled, no refusal), `question-refused` with the one send clicked and no words
+  (`REFUSED_CARD`: the picked option, an empty box, and the card's own "Say what to change."); on a
+  page without the words box (`WORDS_BOX`) but with the question's options nothing is picked, typed or
+  sent, which is the before picture (the question is seeded without `needs_words` where the service
+  does not keep it, `NEEDS_WORDS_KEPT`), while a page with neither shows no question card at all, which
+  fails; `accounts-panel` is the accounts panel opened over
   two signed-in profiles, `work-main` and `work-spare`, each with one capacity reading;
   `ask-box` is `owner/web`'s Ask box opened over one answered question (its answer, Read and Ran
   lines) and one question still working, each its own thread, the Questions fold and both
@@ -62,7 +71,7 @@ Contract:
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 60 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 64 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -92,7 +101,8 @@ Contract:
   a list, inline code and a block of code, the call-out last in its row after the answer, three
   choices visible); or when a `questions-open` shot reads neither `OPEN_THREAD` (the fold
   opened, the follow-up's Read line shown, a follow-up button visible) nor `BASE_THREAD` (a page
-  without the fold that still lists the follow-up and its answer, the before picture), or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
+  without the fold that still lists the follow-up and its answer, the before picture), or when a `question-words` or `question-refused` shot's reading is not its `WORDS_CARD` or
+  `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
   closed, the wrong text or project, or the field clipping the filled text); or when any
   shot has a visible project line whose Ask a question button sits on another row than its Give it
   a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
@@ -122,7 +132,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -131,7 +141,7 @@ from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
 
 from .console_test_support import hook_body, write_registry
 
@@ -139,8 +149,9 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
-          "inbox-card", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read", "activation-tooling", "activation-host")
+          "inbox-card", "question-words", "question-refused", "accounts-panel", "ask-box",
+          "questions-closed", "questions-open", "ask-goal", "question-read", "activation-tooling",
+          "activation-host")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -273,6 +284,30 @@ READ_READING = """((needle) => {
 READ_SHOWN = (True, 1, True, True, 3)
 READING_GOAL = "#reading button.ask-goal"
 READ_BASE_THREAD = 'details[data-key="thread:owner/web:1226a1"] > summary'
+LOOK_QUESTION = "Does the new line read right?"
+LOOK_OPTIONS = ["Approve", "Approve with one fix", "Ask for changes"]
+LOOK_WORDS = "Make the first line shorter and keep the second one as it is."
+WORDS_BOX = "textarea.words-text"
+LOOK_OPTION = ".lead ul.opts li:nth-child(3) button.opt"
+CARD_SEND = ".lead button.send"
+# The raised card's picked option, the words box's text, whether its one send is enabled and the
+# refusal line beside the send (None when the card shows none).
+CARD_READING = """(() => {
+  const card = document.querySelector('.lead');
+  if (!card) return [null, null, null, null];
+  const pick = card.querySelector('button.opt[aria-pressed="true"] .ot');
+  const words = card.querySelector('textarea.words-text');
+  const send = card.querySelector('button.send');
+  const notice = Array.from(card.querySelectorAll('.act span')).map(
+    (span) => span.textContent.trim()).filter((text) => text.startsWith('Say what'));
+  return [pick ? pick.textContent.trim() : null, words ? words.value : null,
+          Boolean(send && !send.disabled), notice.length ? notice[0] : null];
+})()"""
+WORDS_CARD = ("Ask for changes", LOOK_WORDS, True, None)
+REFUSED_CARD = ("Ask for changes", "", True, "Say what to change.")
+# A service whose questions have no `needs_words` rejects the key and discards the question, so the
+# look-check question is seeded with it only where the service keeps it (the base commit's is not).
+NEEDS_WORDS_KEPT = "needs_words" in {field.name for field in fields(Question)}
 READ_SESSION = "7c2f9d4e-1a8b-4e63-b5d0-9f3a6c1e8b27"
 
 
@@ -318,6 +353,7 @@ class Shot:
     thread: tuple[bool, str | None, bool] | None = None
     reading: tuple[bool, int, bool, bool, int] | None = None
     activation: tuple[str | None, int] | None = None
+    card: tuple[str | None, str | None, bool | None, str | None] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -348,7 +384,8 @@ class _Seed:
 
     def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
                landed: bool = False, asks: bool = False, close: float | None = None,
-               stop: float | None = None, held: bool = False) -> tuple[str, str]:
+               stop: float | None = None, held: bool = False,
+               look: bool = False) -> tuple[str, str]:
         """One approved sprint with a started manager; returns `(sprint_id, goal)`."""
         self.count += 1
         sid = f"{self.count:016x}"
@@ -379,6 +416,11 @@ class _Seed:
                 "blocks": "the first slice",
                 "options": ["the existing database", "a new file"],
                 "recommended": "the existing database"}]})
+        if look:
+            self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
+                "question": LOOK_QUESTION, "blocks": "the first slice",
+                "options": LOOK_OPTIONS, "recommended": LOOK_OPTIONS[0],
+                **({"needs_words": LOOK_OPTIONS[1:]} if NEEDS_WORDS_KEPT else {})}]})
         if close is not None:
             self.put(close, "sprint.closed", project, {**base, "closing": {
                 "summary": f"{title} landed.\nBoth slices merged and the checks are green.",
@@ -488,6 +530,9 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
                     asks=True)
         seed.check(web, 11, 3 * MINUTE)
+    elif state in ("question-words", "question-refused"):
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
+                    look=True)
     elif state == "accounts-panel":
         seed.account("work-main", 0.4)
         seed.account("work-spare", 0.9)
@@ -978,6 +1023,17 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                                  else (ASK_FOLD, NEWEST_THREAD)):
                     page.click(selector)
             thread = tuple(page.evaluate(THREAD_READING))
+        card = None
+        if state in ("question-words", "question-refused"):
+            if page.query_selector(WORDS_BOX):
+                page.click(LOOK_OPTION)
+                if state == "question-words":
+                    page.fill(WORDS_BOX, LOOK_WORDS)
+                else:
+                    page.click(CARD_SEND)
+                card = tuple(page.evaluate(CARD_READING))
+            elif not page.query_selector(LOOK_OPTION):
+                card = (None, None, None, None)
         reading = None
         if state == "question-read":
             if paneled:
@@ -1003,7 +1059,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                activation=activation)
+                card=card, activation=activation)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1075,6 +1131,12 @@ def main(argv: list[str] | None = None) -> int:
     for shot in unlined:
         print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
               "Activate button")
+    expected = {"question-words": WORDS_CARD, "question-refused": REFUSED_CARD}
+    uncarded = [shot for shot in taken
+                if shot.state in expected and shot.card not in (None, expected[shot.state])]
+    for shot in uncarded:
+        print(f"console-screenshots: {shot.path.name} does not show the question card "
+              f"{'with its words typed' if shot.state == 'question-words' else 'refused without words'}")
     offrow = [shot for shot in taken if shot.acts]
     for shot in offrow:
         print(f"console-screenshots: {shot.path.name} puts Ask a question on another row than "
@@ -1088,7 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or offrow or scrolled or short) else 0
+                 or unlined or uncarded or offrow or scrolled or short) else 0
 
 
 if __name__ == "__main__":
