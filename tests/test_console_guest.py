@@ -471,6 +471,21 @@ class GuestWriteRuleTest(unittest.TestCase):
         self.assertEqual(view_in, before)
         self.assertEqual(json.dumps(result).count(c), json.dumps(view_in).count(c))
 
+    def test_mark_steer_offers_a_colleague_no_drop_on_an_unpicked_message(self):
+        nudge = "Tell the manager again, or drop the sprint."
+        turn = "It waits for the manager's next turn; drop the sprint if none comes."
+        sprint = lambda sid, by, action: {  # noqa: E731
+            "type": "sprint", "sprint_id": sid, "started_by": by,
+            "messages": [{"id": 1, "state": "not_picked_up", "action_text": action}]}
+        view_in = {"projects": [{"type": "project", "sprints": [
+            sprint("a", COLLEAGUE, nudge), sprint("b", None, nudge), sprint("c", COLLEAGUE, turn),
+            sprint("d", COLLEAGUE, None)]}], "inbox": {"open": [], "answered": []}}
+        before = copy.deepcopy(view_in)
+        result = guest.mark_steer(view_in, COLLEAGUE)
+        actions = [s["messages"][0]["action_text"] for s in result["projects"][0]["sprints"]]
+        self.assertEqual(actions, ["Tell the manager again.", "Tell the manager again.", turn, None])
+        self.assertEqual(view_in, before)
+
 
 if __name__ == "__main__":
     unittest.main()

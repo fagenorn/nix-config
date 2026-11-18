@@ -84,6 +84,8 @@ production holds) are never steerable. The service answers a write refused on th
 gains `steer` (started by that login) and every `inbox.open` and `inbox.answered` item gains `steer`
 (a brief or a question started by that login that is neither a look nor `owner_only`). The marks are the server's and
 are applied to a scrubbed guest view only; it adds the login nowhere and never mutates its argument.
+A message's `action_text` that is `NUDGE_ACTION_TEXT` reads `NUDGE_ACTION_TEXT_GUEST` ("Tell the
+manager again.") in the copy: a colleague cannot drop a sprint, so the line offers no drop.
 
 `parse_tailnet`, `parse_colleague` and `parse_removal` read the owner's write bodies as strict
 JSON (a duplicate key, a non-object or an extra or missing key is refused) and raise
@@ -102,6 +104,7 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
     LOGIN_MAX, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event, normal_login)
+from agent_tools.console.sprints import NUDGE_ACTION_TEXT
 from agent_tools.console.view import project_for
 
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
@@ -124,6 +127,7 @@ SHARING_OFF_TEXT = "Sharing is off on this console."
 HOST_TEXT = "This console is shared only at its tailnet name."
 NOT_SHARED_TEXT = "This console is not shared with you. Ask its owner to add your Tailscale login."
 OWNER_ONLY_TEXT = "Only the console's owner can do that."
+NUDGE_ACTION_TEXT_GUEST = "Tell the manager again."
 NOT_YOUR_PROJECT_TEXT = "That project is not shared with you."
 NOT_YOUR_SPRINT_TEXT = "You can steer only the sprints you started."
 OWNER_LOOK_TEXT = "Only the console's owner answers a look before merge."
@@ -370,6 +374,8 @@ def mark_steer(view: Mapping, login: str) -> dict:
     def copy(node: object) -> object:
         if isinstance(node, Mapping):
             result = {key: copy(member) for key, member in node.items()}
+            if result.get("action_text") == NUDGE_ACTION_TEXT:
+                result["action_text"] = NUDGE_ACTION_TEXT_GUEST
             if node.get("type") == "sprint":
                 result["steer"] = node.get("started_by") == login
             return result
