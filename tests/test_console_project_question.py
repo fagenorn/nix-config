@@ -373,11 +373,49 @@ class HookConfinementTest(unittest.TestCase):
             "git blame --contents=" + str(self.Q) + " flake.nix",
             "git diff -O../../state/console/page-token",
             "git diff -O@../../state/console/page-token",
+            "git blame -wS" + str(self.P / "page-token") + " flake.nix",
+            "git blame -wS" + str(self.Q) + " flake.nix",
+            "git log -wS../../state/console/events.sqlite3",
+            "git blame -wS@../../state/console/page-token flake.nix",
         ):
             with self.subTest(text):
                 self.assertEqual(
                     hook.decide(self.command(text), DECLARED, None, self.c), self.denied)
                 self.assertEqual(hook.decide(self.command(text), DECLARED), self.allowed)
+
+    def test_a_transcript_store_is_confined_like_the_console_state(self):
+        home = self.t / "home"
+        shared = home / ".claude" / "projects" / "-srv-p00"
+        shared.mkdir(parents=True)
+        transcript = shared / "session.jsonl"
+        transcript.write_text("{}")
+        profile = self.t / "accounts" / "profiles" / "p1"
+        profile.mkdir(parents=True)
+        (profile / "projects").symlink_to(home / ".claude" / "projects")
+        environ = {"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.t / "accounts"),
+                   "CLAUDE_CONFIG_DIR": str(profile)}
+        c = hook.parse_confinement(str(self.P), str(self.R), environ)
+        for name, tool_input in (
+            ("Read", {"file_path": str(transcript)}),
+            ("Read", {"file_path": str(profile / "projects" / "-srv-p00" / "session.jsonl")}),
+            ("Grep", {"pattern": "x", "path": str(home / ".claude" / "projects")}),
+            ("Grep", {"pattern": "x", "path": str(profile)}),
+            ("Grep", {"pattern": "x", "path": str(home)}),
+            ("Glob", {"pattern": str(home / ".claude" / "projects" / "**" / "*.jsonl")}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(hook.decide(self.doc(name, tool_input), DECLARED, None, c),
+                                 ("deny", hook.RECORDS_DENIED.format(records=c.records)))
+        for text in ("git diff --no-index " + str(transcript) + " flake.nix",
+                     "git blame -wS" + str(transcript) + " flake.nix"):
+            with self.subTest(text):
+                self.assertEqual(hook.decide(self.command(text), DECLARED, None, c),
+                                 ("deny", hook.RECORDS_DENIED.format(records=c.records)))
+        self.assertEqual(
+            hook.decide(self.doc("Read", {"file_path": str(self.root / "flake.nix")}),
+                        DECLARED, None, c), self.allowed)
+        self.assertEqual(hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, c),
+                         self.allowed)
 
     def test_a_symlink_into_the_console_state_is_resolved(self):
         (self.root / "link").symlink_to(self.P)
@@ -548,6 +586,27 @@ class HookProcessTest(unittest.TestCase):
                 ['[["just","build"]]', "owner/p01", "rel", str(R)],
                 json.dumps(tool("Read", {"file_path": str(R)})))
             self.assertEqual(json.loads(done.stdout), self.wire("deny", hook.MALFORMED))
+
+    def test_the_module_confines_the_transcript_stores_of_its_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            t = Path(directory).resolve()
+            P = t / "state" / "console"
+            (P / "project-question-settings").mkdir(parents=True)
+            R = P / "project-question-settings" / "a.records.json"
+            R.write_text("{}")
+            transcript = t / "home" / ".claude" / "projects" / "-srv-p00" / "s.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text("{}")
+            done = subprocess.run(
+                [sys.executable, "-m", "agent_tools.console.project_question_hook",
+                 '[["just","build"]]', "owner/p01", str(P), str(R)],
+                input=json.dumps(tool("Read", {"file_path": str(transcript)})),
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, "HOME": str(t / "home"), "CLAUDE_CONFIG_DIR": str(t / "cfg"),
+                     "CLAUDE_ACCOUNTS_DIR": str(t / "accounts")})
+            self.assertEqual(
+                json.loads(done.stdout),
+                self.wire("deny", hook.RECORDS_DENIED.format(records=str(R))))
 
     def test_a_bad_argument_denies_everything(self):
         read = json.dumps(tool("Read", {"file_path": "/x"}))
@@ -1909,6 +1968,30 @@ class QuestionRecordsServiceTest(QuestionCase):
             self.assertNotIn(other, ask.records)
         self.assertEqual([r[0] for r in self.question_rows()][rows_before:], [ASKED, ANSWERED_KIND])
         self.assertEqual(len(self.question_rows()), rows_before + 2)
+
+    def test_the_events_are_read_under_the_lock_that_guards_the_folded_state(self):
+        svc = self.arrange()
+        real = svc.log.events
+        got = []
+
+        def events():
+            taken = []
+
+            def take():
+                taken.append(svc._ingest.acquire(timeout=0.3))
+                if taken[0]:
+                    svc._ingest.release()
+
+            worker = threading.Thread(target=take)
+            worker.start()
+            worker.join()
+            got.extend(taken)
+            return real()
+
+        with mock.patch.object(svc.log, "events", events):
+            self.records_of(svc)
+        self.assertTrue(got)
+        self.assertFalse(any(got))
 
     def test_a_run_is_live_only_while_its_session_is_open_in_this_project(self):
         svc = self.arrange()

@@ -8,6 +8,7 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -295,6 +296,71 @@ class QuestionCheckTest(unittest.TestCase):
         self.assertEqual((code, line["status"]), (0, "met"))
         self.assertEqual(len(h.sleeps), 2)
         self.assertEqual(len(h.posts), 3)
+
+    def test_an_answer_that_says_it_could_not_open_its_records_is_ungrounded(self):
+        path = READ.format("q2")
+        for read in ("could not open " + path, path + ": could not open", "cannot read " + path + ".",
+                     "flake.nix\n" + path + " (permission denied)", "unable to open `" + path + "`"):
+            with self.subTest(read=read):
+                h = Harness(self)
+                h.seed([grounded("q1"), "Answer: x\nRead: " + read, grounded("q3")])
+                code, line = h.run()
+                self.assertEqual((code, line["verdicts"][1]), (1, "ungrounded"))
+        for read in ("flake.nix (could not open), " + path, path + ", docs/a.md"):
+            with self.subTest(read=read):
+                self.assertTrue(question_check.cites("Read: " + read, "q2.records.json"))
+
+    def test_a_malformed_state_file_is_a_setup_error_that_posts_nothing(self):
+        for text in ('{"projects": {"owner/p01": {"revision": "1', "", "[]", '{"projects": []}',
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": []}}}),
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: 7}}}})):
+            with self.subTest(text=text):
+                h = Harness(self)
+                h.state_file.parent.mkdir(parents=True)
+                h.state_file.write_text(text, encoding="utf-8")
+                code, line = h.run()
+                self.assertEqual((code, line), (2, {"status": "bad_state"}))
+                self.assertEqual((h.posts, h.new_keys), ([], 0))
+                self.assertEqual(h.state_file.read_text(encoding="utf-8"), text)
+                self.assertFalse(h.result_file.exists())
+
+    def test_a_run_of_another_question_keeps_the_keys_of_the_first(self):
+        h = Harness(self)
+        h.keys = iter(KEYS + ("d" * 32,))
+        h.after_post = lambda document: (h.add(h.asked(
+            f"q{len(h.posts)}", document["question"], document["request_key"])), (204, ""))[1]
+        for name in ("A", "B"):
+            h.run("--run", name, "--wait", "1")
+        self.assertEqual(len(h.posts), 4)
+        h.run("--run", "A", "--wait", "1")
+        self.assertEqual((len(h.posts), h.new_keys), (4, 4))
+        self.assertEqual(h.saved()["projects"][PROJECT]["keys"], {
+            T1: KEYS[0], T2: KEYS[1], question_check.NAMED_RUN.format(run="A"): KEYS[2],
+            question_check.NAMED_RUN.format(run="B"): "d" * 32})
+
+    def test_two_runs_at_once_share_the_keys_the_first_one_saved(self):
+        h = Harness(self)
+        argv = ["--project", PROJECT, "--token-file", str(h.token_file), "--state-file",
+                str(h.state_file), "--result-file", str(h.result_file), "--wait", "1"]
+        seams = dict(state=h.state, post=h.post, now=h.now, sleep=h.sleep, revision=h.revision)
+        workers = []
+
+        def slow_key():
+            if not workers:
+                other = list(argv)
+                other[other.index("--result-file") + 1] = str(h.result_file) + ".other"
+                workers.append(threading.Thread(
+                    target=lambda: question_check.main(other, new_key=h.new_key, **seams)))
+                workers[0].start()
+                workers[0].join(0.5)
+                h.case.assertTrue(workers[0].is_alive(), "the second run did not wait for the lock")
+            return h.new_key()
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            question_check.main(argv, new_key=slow_key, **seams)
+            workers[0].join(30)
+        self.assertEqual(h.new_keys, 3)
+        self.assertEqual({document["request_key"] for document in h.documents()}, set(KEYS))
 
     def test_no_revision_no_console_no_project_or_no_token_posts_nothing(self):
         cases = [("no_revision", 2), ("not_running", 75), ("not_registered", 75), ("no_token", 75)]

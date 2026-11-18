@@ -4092,9 +4092,13 @@ class ConsoleService:
             self._record_project_answer(question_id, project_id, outcome)
 
     def _question_records(self, project_id: str, root: str) -> str:
-        """The encoded document of the console's own records of one project (ADR-console-075)."""
-        events = self.log.events()
+        """The encoded document of the console's own records of one project (ADR-console-075).
+
+        The events and the folded state are read in one section under the ingest lock, so a delivery
+        that finishes while the records are gathered shows either before or after, never half of each.
+        """
         with self._ingest:
+            events = self.log.events()
             spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
             live_runs = {
                 key for key in self._deliveries

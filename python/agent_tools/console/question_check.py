@@ -17,7 +17,9 @@ accepted, else exit 2. `--token-file` defaults to `<state dir>/page-token`, `--s
 `<state dir>/checks/question-check-result.json`, where the state dir is `<state_root()>/console`.
 `--wait` defaults to `WAIT_SECONDS` (480, below verify_exec's 600-second limit).
 
-The state file is `{"projects": {ID: {"revision": SHA, "keys": {QUESTION TEXT: REQUEST KEY}}}}`. The
+The state file is `{"projects": {ID: {"revision": SHA, "keys": {QUESTION TEXT: REQUEST KEY}}}}`; its
+`keys` hold every question text this revision has been asked, not only the current run's three, so
+`--run A`, `--run B` and `--run A` again finds A's question the second time. The
 result file is `{"project", "revision", "checked_at", "status", "questions": [{"question",
 "request_key", "verdict", "post", "shown"}]}`: `post` is None when this run sent nothing for the
 question, `"posted"`, or `"refused: <status>: <text>"` (the console's refusal text included);
@@ -36,7 +38,12 @@ Order of one run:
    by `{"revision": rev, "keys": {}}`, so answers to an earlier revision's questions are never
    judged. Each question text takes its saved key, else a new `secrets.token_hex(16)` key, and the
    state file is written before any POST (a key kept across a retry of the same revision is the
-   only way a retry finds the question it already asked).
+   only way a retry finds the question it already asked). Reading the state, choosing the keys and
+   writing it are one section under an exclusive `flock` on `<state file>.lock`, so two runs at
+   once share one set of keys and cannot start six paid sessions. A state file that exists but is
+   not the shape above (truncated, not JSON, a wrong type) is status `bad_state`, exit 2, nothing
+   posted and the file left as it was: a fresh empty state would generate new keys and could ask
+   every paid question again. A missing file is an empty state.
 5. A question is found by its own key only (P6): the view question of ID whose `request_key` is the
    key saved for its text, judged by that question's `id`; a question of the same text under
    another key or none is never judged. A text whose key no view question carries is posted as
@@ -55,18 +62,26 @@ Order of one run:
    sorted keys, `{"status", "verdicts", "result_file"}`, holding no question text, no answer text
    and no text the console returned (P10); a refused post shows only as the verdict `refused`. The
    runs that stop before the project is found print `{"status"}` alone. Stderr gets only argparse's
-   usage error. The check writes nothing but its two files and never reads the tracker or the forge.
+   usage error. The check writes nothing but its two files and the lock file beside its state file, and never
+   reads the tracker or the forge.
 
 `cites(read_text, name)` is False for None. Otherwise it removes the `ASK_READ_TEXT` prefix and
-splits the rest on whitespace and `,;()[]<>` backquote and quote and `*`, strips each token's trailing
-`.` and `:` and then a line suffix (`:12`, `:1-40`, `:3,5`), and is True iff some token's text after
-its last `/` equals `name` exactly, so a backup, a longer name or another question's file never counts.
+splits the rest into clauses (at a newline, and at `.`, `;`, `,`, `!` or `?` followed by whitespace).
+A clause names `name` when, splitting it on whitespace and `,;()[]<>` backquote and quote and `*`,
+stripping each token's trailing `.` and `:` and then a line suffix (`:12`, `:1-40`, `:3,5`), some
+token's text after its last `/` equals `name` exactly, so a backup, a longer name or another
+question's file never counts. `cites` is True iff at least one clause names `name` and none that does
+matches `_FAILED_READ` (could not, cannot, unable, failed, denied, refused, not found, not readable,
+missing, error and the like): an answer that says it could not open its records file has not read it.
 
 The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
 """
 
 import argparse
+import contextlib
+import fcntl
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -89,6 +104,11 @@ NOT_YET = manager_check.NOT_YET
 REVISION_TIMEOUT = 10
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _TOKEN_SPLIT = re.compile(r"[\s,;()\[\]<>`'\"*]+")
+_CLAUSE_SPLIT = re.compile(r"\n|(?<=[.;,!?])\s+")
+_FAILED_READ = re.compile(
+    r"\b(?:could\s*n[o']t|can\s*n[o']t|can't|unable|fail(?:ed|s|ure)?|den(?:y|ied|ies)|refus(?:e|ed|al)"
+    r"|did\s*n[o']t|didn't|not\s+(?:found|readable|permitted|allowed|available|opened?|read)"
+    r"|no\s+such|unreadable|missing|errors?)\b", re.IGNORECASE)
 _LINE_SUFFIX = re.compile(r":[0-9][0-9,-]*$")
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
@@ -103,7 +123,13 @@ def cites(read_text: str | None, name: str) -> bool:
     """Whether the Read section names the file `name` as a complete name."""
     if read_text is None:
         return False
-    for token in _TOKEN_SPLIT.split(read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))):
+    clauses = [clause for clause in _CLAUSE_SPLIT.split(
+        read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))) if _names(clause, name)]
+    return bool(clauses) and not any(_FAILED_READ.search(clause) for clause in clauses)
+
+
+def _names(clause: str, name: str) -> bool:
+    for token in _TOKEN_SPLIT.split(clause):
         token = _LINE_SUFFIX.sub("", token.rstrip(".:"))
         if token.rsplit("/", 1)[-1] == name:
             return True
@@ -152,12 +178,39 @@ def _shown(entry: dict, key: str) -> dict | None:
     return None
 
 
-def _read_state(path: Path) -> dict:
+def _valid_state(document: object) -> bool:
+    if not isinstance(document, dict):
+        return False
+    projects = document.get("projects", {})
+    return isinstance(projects, dict) and all(
+        isinstance(kept, dict) and isinstance(kept.get("revision"), str)
+        and isinstance(kept.get("keys"), dict)
+        and all(isinstance(text, str) and isinstance(key, str) for text, key in kept["keys"].items())
+        for kept in projects.values())
+
+
+def _read_state(path: Path) -> dict | None:
+    """The saved state; `{}` when there is no file, None when the file is not a valid state."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return document if isinstance(document, dict) else {}
+    except (OSError, ValueError):
+        return None
+    return document if _valid_state(document) else None
+
+
+@contextlib.contextmanager
+def _locked(state_file: Path):
+    """An exclusive lock on `<state file>.lock` for the body, so two runs never both read an empty state."""
+    state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(state_file.with_name(state_file.name + ".lock"),
+                         os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def _verdict(shown: dict | None, refused: bool) -> str:
@@ -211,15 +264,17 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
         return finish("not_registered")
 
     texts = questions(args.run)
-    saved = _read_state(state_file)
-    projects = saved.get("projects") if isinstance(saved.get("projects"), dict) else {}
-    kept = projects.get(args.project)
-    if not isinstance(kept, dict) or kept.get("revision") != rev or not isinstance(kept.get("keys"), dict):
-        kept = {"revision": rev, "keys": {}}
-    keys = {text: kept["keys"].get(text) if isinstance(kept["keys"].get(text), str) else new_key()
-            for text in texts}
-    manager_check._write_json(state_file, {**saved, "projects": {
-        **projects, args.project: {"revision": rev, "keys": keys}}})
+    with _locked(state_file):
+        saved = _read_state(state_file)
+        if saved is None:
+            return finish("bad_state", 2)
+        projects = saved.get("projects", {})
+        kept = projects.get(args.project)
+        if kept is None or kept["revision"] != rev:
+            kept = {"revision": rev, "keys": {}}
+        keys = {text: kept["keys"][text] if text in kept["keys"] else new_key() for text in texts}
+        manager_check._write_json(state_file, {**saved, "projects": {
+            **projects, args.project: {"revision": rev, "keys": {**kept["keys"], **keys}}}})
 
     entry = _project_entry(current, args.project)
     posts: dict[str, str] = {}
