@@ -45,9 +45,9 @@ PARTS = {"title": "Importer resumes after a crash",
 
 TABLE = {
     "/api/looked": "owner", "/api/answer": "owner", "/api/check-answer": "owner",
-    "/api/goal": "owner", "/api/withdraw": "owner", "/api/approve": "owner",
-    "/api/reply": "owner", "/api/retry-manager": "owner", "/api/message": "owner",
-    "/api/stop": "owner", "/api/round-answer": "owner", "/api/continue": "owner",
+    "/api/goal": "guest-write", "/api/withdraw": "owner", "/api/approve": "guest-write",
+    "/api/reply": "guest-write", "/api/retry-manager": "owner", "/api/message": "guest-write",
+    "/api/stop": "owner", "/api/round-answer": "guest-write", "/api/continue": "owner",
     "/api/exclusion": "owner", "/api/pin": "owner", "/api/signin": "owner",
     "/api/signin-code": "owner", "/api/signin-cancel": "owner", "/api/signin-link": "owner",
     "/api/account-add": "owner", "/api/account-remove": "owner",
@@ -224,6 +224,8 @@ class RouteTableTest(GuestCase):
         self.assertEqual(set(TABLE), service.ROUTES)
         self.assertEqual({route for route, side in TABLE.items() if side == "owner"},
                          service.OWNER_ONLY)
+        self.assertEqual({route for route, side in TABLE.items() if side == "guest-write"},
+                         service.GUEST_WRITES)
         for name, value in vars(service).items():
             if (name.endswith(("_PATH", "_PREFIX")) and isinstance(value, str)
                     and value.startswith("/")):
@@ -620,11 +622,11 @@ class AccessWriteTest(GuestCase):
                "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
         text = " ".join(adr.split())
         for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
-                       "POST /api/share-remove", "#1237", "bad colleague"):
+                       "POST /api/share-remove", "#1237", "#1263", "bad colleague"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237"))
+        self.assertTrue(decided.endswith("#1193, #1237, #1263"))
 
 
 class ReadingServiceTest(GuestCase):
