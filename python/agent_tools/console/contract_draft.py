@@ -45,7 +45,7 @@ it reads `<label>: <value> (<source>)`. `more_line` counts those shown `more` en
 Every label is plain words, never a contract term.
 
 Proposed field. `PROPOSED` lists the fields `draft` adds after the 29 only when proposed: today the
-`commit-environment` field (`command commits run through`), drafted with the command of the first
+`commit-environment` field (`commits run in its development shell`), drafted with the command of the first
 `ENVIRONMENTS` file in `reading["environments"]` (source `files`) when `reading["hooks"]` is not empty,
 and never otherwise, so a draft without it is exactly the 29 records. It is a main field, a typed
 choice with the one option `none`, never open. `proposed_lines(fields)` gives the `shown` line of each
@@ -185,9 +185,9 @@ _TABLE = (
 )
 # Fields `draft` adds only when proposed; they are not among the 29 `FIELDS`.
 _PROPOSED_TABLE = (
-    (ENVIRONMENT_FIELD, "command commits run through",
+    (ENVIRONMENT_FIELD, "commits run in its development shell",
      ("/bindings/vcs/commit/environment", "/bindings/commands/commit-environment"),
-     _none("Commits run without a development environment"), True),
+     _none("Commits run outside a development shell"), True),
 )
 FIELDS: tuple[str, ...] = tuple(row[0] for row in _TABLE)
 ASKED = frozenset({"project-id", "default-branch", "tracker", "build-command", "test-command"})
@@ -272,7 +272,7 @@ PLACEHOLDERS = {
     "rejections-paths": "paths, separated by commas",
     "build-command": "the build command",
     "test-command": "the test command",
-    ENVIRONMENT_FIELD: "the command commits run through",
+    ENVIRONMENT_FIELD: "the development shell command",
     "review-plan-command": "the review command",
     "review-code-command": "the review command",
     "max-parallel": "a number",
@@ -507,9 +507,8 @@ def _ask(field: str, name: str, remotes: int) -> str:
         return (f"Which command {verb} {name}?\nThe console found none in its files: "
                 "type the command, or say it has none.")
     if field == ENVIRONMENT_FIELD:
-        return (f"Which command should the commits of {name} run through?\n"
-                "Its commit hooks need its development environment: type the command, or say they "
-                "need none.")
+        return (f"Which command opens the development shell the commits of {name} run in?\n"
+                "Its commit hooks need its development shell: type the command, or say they need none.")
     return f"What should the {LABELS[field]} of {name} be?"
 
 

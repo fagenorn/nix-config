@@ -1323,7 +1323,7 @@ class DocsTreeTest(unittest.TestCase):
         adr = found[0].read_text()
         for needle in ("#1268", "devenv.nix", "devenv shell --", "commit-environment",
                        "bindings.vcs.commit.environment", "core.hooksPath", ".sample",
-                       "command commits run through", "ADR-console-031",
+                       "commits run in its development shell", "ADR-console-031",
                        "ADR-project-contract-008", "ADR-console-033", "HEAD", "post-commit"):
             self.assertIn(needle, adr)
         for older, expected in (

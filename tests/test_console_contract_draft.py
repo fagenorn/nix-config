@@ -249,14 +249,18 @@ class ContractDraftTest(unittest.TestCase):
         self.assertEqual([f["field"] for f in fields], [*cd.FIELDS, "commit-environment"])
         self.assertEqual(pair(fields, "commit-environment"), ("devenv shell --", "files"))
         self.assertNotIn("commit-environment", [f["field"] for f in cd.open_fields(fields)])
-        line = "command commits run through: devenv shell -- (found in its files)"
+        line = "commits run in its development shell: devenv shell -- (found in its files)"
         entry = next(e for e in cd.shown(fields) if e["field"] == "commit-environment")
         self.assertEqual(entry["line"], line)
         self.assertIs(entry["more"], False)
         self.assertEqual(entry["options"], [
-            {"value": "none", "label": "Commits run without a development environment"}])
-        self.assertEqual(entry["placeholder"], "the command commits run through")
+            {"value": "none", "label": "Commits run outside a development shell"}])
+        self.assertEqual(entry["placeholder"], "the development shell command")
         self.assertEqual(cd.proposed_lines(fields), [line])
+        self.assertEqual(
+            by_field(fields)["commit-environment"]["ask"],
+            f"Which command opens the development shell the commits of {root.name} run in?\n"
+            "Its commit hooks need its development shell: type the command, or say they need none.")
         self.assertEqual(cd.more_line(fields), "and 22 more settings at their usual values")
         fields = self.settled(fields, str(root), build_command="none", test_command="none")
         drafted = cd.contract(fields)
@@ -415,7 +419,7 @@ class ContractDraftTest(unittest.TestCase):
         fields = self.settled(fields, str(root), build_command="none", test_command="none")
         dropped, error = cd.set_value(fields, "commit-environment", "none", entries=[], root=str(root))
         self.assertIsNone(error)
-        line = "command commits run through: none (set by you)"
+        line = "commits run in its development shell: none (set by you)"
         self.assertEqual([e["line"] for e in cd.shown(dropped) if e["field"] == "commit-environment"],
                          [line])
         self.assertEqual(cd.proposed_lines(dropped), [line])
@@ -435,7 +439,7 @@ class ContractDraftTest(unittest.TestCase):
                                       root=plain), (None, cd.UNKNOWN_FIELD))
 
     def test_a_refusal_of_the_commit_environment_reopens_its_field(self):
-        wanted = ("commit-environment", "The plan refused the command commits run through: m")
+        wanted = ("commit-environment", "The plan refused the commits run in its development shell: m")
         for pointer in ("/bindings/commands/commit-environment/argv/0",
                         "/bindings/vcs/commit/environment"):
             error = {"repair_id": "adopt.draft.invalid",

@@ -3386,7 +3386,7 @@ class ApplyItemViewTest(unittest.TestCase):
 class ProposedEnvironmentViewTest(unittest.TestCase):
     """The view the owner sees for a ready plan whose checkout proposes a commit environment."""
 
-    LINE = "command commits run through: devenv shell -- (found in its files)"
+    LINE = "commits run in its development shell: devenv shell -- (found in its files)"
     LATEST = {"root": "/srv/sample-app", "plan_id": PID, "state": "ready",
               "at": "2026-11-15T08:00:00+00:00", "project_id": None, "result": "planned",
               "outcome": "changes", "headline": "What adopting sample-app would change.",
@@ -3420,7 +3420,7 @@ class ProposedEnvironmentViewTest(unittest.TestCase):
         self.assertEqual(rows["commit-environment"]["line"], self.LINE)
         self.assertIs(rows["commit-environment"]["text"], True)
         self.assertEqual(rows["commit-environment"]["placeholder"],
-                         "the command commits run through")
+                         "the development shell command")
 
 
 class RegisterConfirmTest(unittest.TestCase):

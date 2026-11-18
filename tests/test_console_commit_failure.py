@@ -232,7 +232,7 @@ class DraftedEnvironmentTest(CommitFailureCase):
         self.arrange(devenv=True)
         (card,) = self.apply_cards()
         self.assertEqual(card["lines"][0],
-                         "command commits run through: devenv shell -- (found in its files)")
+                         "commits run in its development shell: devenv shell -- (found in its files)")
         plan = self.stored(self.shown["plan_id"])
         self.assertEqual(plan["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
         self.assertEqual(plan["bindings"]["commands"]["commit-environment"]["argv"],
@@ -256,14 +256,14 @@ class DraftedEnvironmentTest(CommitFailureCase):
         (entry,) = [d for d in self.view()["registration"]["draft"]
                     if d["field"] == "commit-environment"]
         self.assertEqual(entry["line"],
-                         "command commits run through: devenv shell -- (found in its files)")
+                         "commits run in its development shell: devenv shell -- (found in its files)")
         self.assertIs(entry["more"], False)
         given = {"id": contract_draft.QUESTION_ID, "subject": "commit-environment", "value": "none"}
         self.assertEqual(self.answer(answer_of(plan_id, given))[0], 204)
         self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] != plan_id
                       and r["state"] == "ready")
         (card,) = self.apply_cards()
-        self.assertEqual(card["lines"][0], "command commits run through: none (set by you)")
+        self.assertEqual(card["lines"][0], "commits run in its development shell: none (set by you)")
         plan = self.stored(self.view()["registration"]["plan_id"])
         self.assertNotIn("environment", plan["bindings"]["vcs"]["commit"])
         self.assertNotIn("commit-environment", plan["bindings"]["commands"])
@@ -271,7 +271,7 @@ class DraftedEnvironmentTest(CommitFailureCase):
     def test_the_same_checkout_without_devenv_plans_as_today_and_stops_at_its_hook(self):
         self.arrange(devenv=False)
         (card,) = self.apply_cards()
-        self.assertFalse([x for x in card["lines"] if x.startswith("command commits run through")])
+        self.assertFalse([x for x in card["lines"] if x.startswith("commits run in its development shell")])
         plan = self.stored(self.shown["plan_id"])
         self.assertNotIn("environment", plan["bindings"]["vcs"]["commit"])
         self.assertNotIn("commit-environment", plan["bindings"]["commands"])
