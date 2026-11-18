@@ -24,6 +24,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -1044,3 +1045,88 @@ class RecipeWiringTest(unittest.TestCase):
         self.assertEqual(members[-1], EVAL_TREE_SCRIPT)
         self.assertIn("tests/test_suite_runner.py", members)
         suite_runner.validate_members(members, REPO_ROOT)
+
+
+TMPDIR_MEMBER = (
+    "import os, tempfile, unittest\n"
+    "class T(unittest.TestCase):\n"
+    "    def test_it(self):\n"
+    "        open(os.environ['SUITE_RUNNER_TEST_SEEN'], 'w').write(tempfile.gettempdir())\n"
+    "        self.assertEqual(os.environ.get('SUITE_RUNNER_TEST_FAIL'), None)\n")
+
+
+class ScratchRootTest(unittest.TestCase):
+    def test_the_choice_follows_the_variable_then_the_memory_directory(self):
+        with tempfile.TemporaryDirectory() as memory:
+            missing = os.path.join(memory, "absent")
+            table = [
+                ({}, memory, memory),
+                ({"SUITE_RUNNER_SCRATCH": ""}, memory, memory),
+                ({}, missing, None),
+                ({"SUITE_RUNNER_SCRATCH": "disk"}, memory, None),
+                ({"SUITE_RUNNER_SCRATCH": "/named/dir"}, memory, "/named/dir"),
+                ({"SUITE_RUNNER_SCRATCH": "/named/dir"}, missing, "/named/dir"),
+                ({"SUITE_RUNNER_SCRATCH": "relative/dir"}, missing,
+                 os.path.abspath("relative/dir")),
+            ]
+            for environ, root, expected in table:
+                with self.subTest(environ=environ, root=root):
+                    self.assertEqual(suite_runner.scratch_root(environ, root), expected)
+
+    def test_a_memory_directory_is_usable_only_with_room_and_where_a_script_runs(self):
+        with tempfile.TemporaryDirectory() as memory:
+            self.assertIs(suite_runner.usable_memory_root(memory, 1), True)
+            self.assertIs(suite_runner.usable_memory_root(memory, 2 ** 62), False)
+            self.assertIs(suite_runner.usable_memory_root(os.path.join(memory, "absent"), 1), False)
+            with mock.patch.object(suite_runner, "_runs", return_value=False):
+                self.assertIs(suite_runner.usable_memory_root(memory, 1), False)
+            with mock.patch.object(suite_runner.os, "posix_spawn",
+                                   side_effect=PermissionError("noexec")):
+                self.assertIs(suite_runner.usable_memory_root(memory, 1), False)
+            self.assertEqual(os.listdir(memory), [])
+        with tempfile.NamedTemporaryFile() as handle:
+            self.assertIs(suite_runner.usable_memory_root(handle.name, 1), False)
+
+    def test_only_this_users_day_old_run_directories_are_swept(self):
+        with tempfile.TemporaryDirectory() as root:
+            now = time.time()
+            made = {}
+            for name, age in (("suite-runner-tmp-old", 90000), ("suite-runner-tmp-new", 60),
+                              ("other-old", 90000)):
+                made[name] = Path(root, name)
+                made[name].mkdir()
+                (made[name] / "file").write_text("x")
+                os.utime(made[name], (now - age, now - age))
+            Path(root, "suite-runner-tmp-file").write_text("x")
+            os.utime(Path(root, "suite-runner-tmp-file"), (now - 90000, now - 90000))
+            suite_runner.sweep_stale_scratch(root, now)
+            self.assertEqual(sorted(os.listdir(root)),
+                             ["other-old", "suite-runner-tmp-file", "suite-runner-tmp-new"])
+            suite_runner.sweep_stale_scratch(os.path.join(root, "absent"), now)
+
+
+class ScratchDirectoryTest(RunnerCase):
+    def seen_tmpdir(self, env: dict) -> tuple[subprocess.CompletedProcess, str]:
+        seen = self.barrier / "tmpdir"
+        member = self.member("test_tmp.py", TMPDIR_MEMBER)
+        result = self.run_suite("--jobs", "1", member,
+                                env={"SUITE_RUNNER_TEST_SEEN": str(seen), **env})
+        return result, seen.read_text()
+
+    def test_members_get_a_run_directory_under_the_named_root_and_it_is_removed(self):
+        for name, extra, code in (("passing", {}, 0), ("failing", {"SUITE_RUNNER_TEST_FAIL": "1"}, 1)):
+            with self.subTest(name):
+                root = self.barrier / f"scratch-{name}"
+                root.mkdir()
+                result, seen = self.seen_tmpdir({"SUITE_RUNNER_SCRATCH": str(root), **extra})
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertEqual(Path(seen).parent, root)
+                self.assertTrue(Path(seen).name.startswith("suite-runner-tmp-"))
+                self.assertEqual(list(root.iterdir()), [])
+
+    def test_disk_keeps_the_inherited_tmpdir(self):
+        inherited = self.barrier / "inherited"
+        inherited.mkdir()
+        result, seen = self.seen_tmpdir({"SUITE_RUNNER_SCRATCH": "disk", "TMPDIR": str(inherited)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(Path(seen), inherited)
