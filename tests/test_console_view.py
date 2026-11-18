@@ -1582,6 +1582,19 @@ class SprintReportViewTest(unittest.TestCase):
         self.assertEqual((shown["state"], shown["state_text"]), ("waiting", "waiting on you (2)"))
         self.assertEqual(shown["waiting"], 2)
 
+    def test_an_approval_the_console_holds_points_the_line_at_the_page_never_the_tracker(self):
+        for look_state, words in (("failed", "waiting for you to press Retry on your approval"),
+                                  ("posting", "recording your approval")):
+            with self.subTest(look_state=look_state):
+                base = reported(started(A), R, issues=((12, "building"),))
+                held = dataclasses.replace(
+                    Question(41, 0, T0, False, "Approve the card?", "the card", ("Approve", "Change"),
+                             "Approve"),
+                    answer="Approve", chosen="Approve", answered_at=T0, look_state=look_state)
+                shown = entry(line(dataclasses.replace(base, questions=(held,)), R + 4 * MIN))
+                self.assertEqual((shown["ball"], shown["waiting"]), ("owner", 1))
+                self.assertEqual(shown["now_text"], words)
+
     def test_a_held_check_that_blocks_no_open_issue_leaves_the_ball_with_the_manager(self):
         for blocking in ([], [99], [13], [30]):
             with self.subTest(blocking=blocking):
@@ -1762,7 +1775,7 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
                            "recommended": recommended,
                            "recommended_index": options.index(recommended),
                            "needs_words_index": []}],
-            "pictures": [],
+            "pictures": [], "look": None,
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
 
