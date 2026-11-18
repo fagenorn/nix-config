@@ -109,9 +109,13 @@ class DarwinAgent(unittest.TestCase):
       home = u.home.homeDirectory;
       profile = u.home.profileDirectory;
       user = u.home.username;
-      agentCommand = c.launchd.user.agents.agent-console.command;
+      atBoot = c.ownerServices.atBoot;
+      agentCommand = if c.launchd.user.agents ? agent-console then c.launchd.user.agents.agent-console.command else null;
+      daemonCommand = if c.launchd.daemons ? agent-console then c.launchd.daemons.agent-console.command else null;
+      inUserAgents = c.environment.userLaunchAgents ? "org.nixos.agent-console.plist";
+      inDaemons = c.environment.launchDaemons ? "org.nixos.agent-console.plist";
       homeAgent = u.launchd.agents ? agent-console;
-      plist = c.environment.userLaunchAgents."org.nixos.agent-console.plist".text;
+      plist = (c.environment.userLaunchAgents // c.environment.launchDaemons)."org.nixos.agent-console.plist".text;
     }"""
 
     @classmethod
@@ -129,10 +133,26 @@ class DarwinAgent(unittest.TestCase):
         for got, plist in self.hosts():
             command = got["command"]
             check_command(self, command)
-            self.assertEqual(got["agentCommand"], command)
+            self.assertEqual(got["daemonCommand" if got["atBoot"] else "agentCommand"], command)
             self.assertEqual(plist["ProgramArguments"],
                              ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
             self.assertNotIn("Program", plist)
+
+    def test_a_boot_host_runs_the_console_as_a_daemon_of_the_owner(self):
+        for got, plist in self.hosts():
+            if not got["atBoot"]:
+                continue
+            self.assertIs(got["inDaemons"], True)
+            self.assertIs(got["inUserAgents"], False)
+            self.assertEqual(plist["UserName"], got["user"])
+
+    def test_a_login_host_runs_the_console_as_a_user_agent(self):
+        for got, plist in self.hosts():
+            if got["atBoot"]:
+                continue
+            self.assertIs(got["inUserAgents"], True)
+            self.assertIs(got["inDaemons"], False)
+            self.assertNotIn("UserName", plist)
 
     def test_the_agent_starts_at_login_and_is_restarted_on_exit(self):
         for _, plist in self.hosts():
@@ -157,8 +177,9 @@ class DarwinAgent(unittest.TestCase):
             log = f"{got['home']}/Library/Logs/agent-console.log"
             self.assertEqual(plist["StandardOutPath"], log)
             self.assertEqual(plist["StandardErrorPath"], log)
-            self.assertEqual(set(plist), {"Label", "ProgramArguments", "RunAtLoad", "KeepAlive",
-                                          "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"})
+            keys = {"Label", "ProgramArguments", "RunAtLoad", "KeepAlive",
+                    "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"}
+            self.assertEqual(set(plist), keys | ({"UserName"} if got["atBoot"] else set()))
 
     def test_home_manager_declares_no_second_console_agent(self):
         for got, _ in self.hosts():
