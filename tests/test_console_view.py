@@ -1455,6 +1455,8 @@ class HeadingCountsOwnerBallTest(unittest.TestCase):
             ("no registry session", dataclasses.replace(base, manager_session="s1"), [],
              view.DEAF_SENTENCE),
             ("a question at the terminal", base, answer, view.TERMINAL_SENTENCE),
+            ("a permission at the terminal", base, [session("s1", "waiting_permission", name=NAME)],
+             view.DEAF_SENTENCE),
         ]
         for label, sprint_state, sessions, sentence in table:
             with self.subTest(label):
@@ -1474,6 +1476,18 @@ class HeadingCountsOwnerBallTest(unittest.TestCase):
                             now_ms=R + 2 * MIN, managers=True, movement=held)
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], view.DEAF_SENTENCE)
+
+    def test_a_deaf_manager_waiting_for_a_permission_is_not_sent_to_a_terminal_even_when_stopping(self):
+        held = moving(sessions=(SessionMovement("s1", A, None, None, None, R + MIN, True),))
+        base = reported(with_manager(started(A)), R)
+        stopping = dataclasses.replace(base, stop_at=iso(R + MIN))
+        for label, sprint_state in (("running", base), ("stopping", stopping)):
+            with self.subTest(label):
+                shown = derive_view([state("p00", 1)], None, sprints={A: sprint_state},
+                                    sessions=[session("s1", "waiting_permission", name=NAME)],
+                                    now_ms=R + 2 * MIN, managers=True, movement=held)
+                self.assertEqual(shown["statement"]["inbox_items"], 1)
+                self.assertEqual(shown["statement"]["sentence"], view.DEAF_SENTENCE)
 
     def test_a_stopping_manager_waiting_at_its_terminal_is_sent_there(self):
         stopping = dataclasses.replace(reported(with_manager(started(A)), R), stop_at=iso(R + MIN))

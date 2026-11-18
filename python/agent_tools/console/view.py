@@ -100,7 +100,7 @@ stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROG
 when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
 merge, else `QUESTION_SENTENCE` when any manager question is open, else, when only such sprints are
-counted, `TERMINAL_SENTENCE` for managers waiting at their terminals, `DEAF_SENTENCE` for managers
+counted, `TERMINAL_SENTENCE` for managers waiting at their terminals (an answer, or a permission unless the manager cannot hear the console), `DEAF_SENTENCE` for managers
 that cannot hear the console or are otherwise not waiting at a terminal (nothing to answer there),
 `TERMINAL_DEAF_SENTENCE` for both, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
@@ -2218,8 +2218,18 @@ def derive_view(
     # sessions rather than `now_text` (a stopping sprint's `now_text` is the stop sentence even while
     # its manager waits); any other counted sprint (one that cannot hear the console,
     # ADR-console-042 D5) has no terminal to go to and reads the recovery sentence.
-    at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints
-                        if any(s["state"] in _WAITING for s in sprint["sessions"])]
+    held_sessions = {m.session_id for read in (movement or {}).values() for m in read.sessions if m.held}
+
+    def asks_at_terminal(sprint: dict) -> bool:
+        # The order `sprint_now` reads: an answer, then a manager that cannot hear the console,
+        # then a permission, so a deaf manager's permission wait is not a terminal question.
+        if any(s["state"] == WAITING_ANSWER for s in sprint["sessions"]):
+            return True
+        deaf = any(m["manager"] and m["session_id"] in held_sessions
+                   for m in sprint["movement"]["sessions"])
+        return not deaf and any(s["state"] == WAITING_PERMISSION for s in sprint["sessions"])
+
+    at_terminal_asks = [sprint["sprint_id"] for sprint in at_terminal_sprints if asks_at_terminal(sprint)]
     open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items) + len(at_terminal))
