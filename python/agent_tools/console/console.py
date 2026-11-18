@@ -76,9 +76,10 @@ refuses.
 It is also given `pull_reader=movement.read_pulls` (#1110), so a running sprint's pull requests are read
 from the forge to name what it waits on (`agent_tools.console.movement`).
 
-Every minute it compares the console's own files with the integration branch on origin as the
-console's checkout last fetched it (`agent_tools.console.activation`), on every platform; the page
-says when a `just switch` would change what the console runs.
+Every minute it compares the console's own files, and the files the host's configuration is built from
+(from the host's configuration revision), with the integration branch on origin as the console's
+checkout last fetched it (`agent_tools.console.activation`), on every platform; the page says when a
+`just switch` would change what the host runs.
 
 The service keeps the console's profile choice for new sessions in `$CLAUDE_ACCOUNTS_DIR/chosen-profile`
 (else `~/.claude-accounts/chosen-profile`) and answers it on `GET /api/profile` (#1011).
@@ -146,7 +147,8 @@ def main(argv: list[str] | None = None) -> int:
             adopter=register.adopter_for(sys.platform),
             project_asker=project_question.asker_for(sys.platform),
             forge=approve.forge_for(sys.platform), trust_home=Path.home(), trust_at_start=True,
-            activation_reader=activation.reader_for(Path(agent_tools.__file__).resolve().parent.parent),
+            activation_reader=activation.reader_for(
+                Path(agent_tools.__file__).resolve().parent.parent, revision=activation_run.host_revision),
             activator=activation_run.Activator(service.default_store().parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots,
             serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale))

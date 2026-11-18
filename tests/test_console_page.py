@@ -854,6 +854,19 @@ class ActivationPageTest(unittest.TestCase):
         self.assertEqual(len(buttons), 1)
         self.assertIn("activate", buttons[0]["cls"].split())
 
+    def test_a_plain_words_line_carries_activate(self) -> None:
+        line = dict(ACTIVATION,
+                    text="A change to the agent tooling merged at 0123456789ab is not active on this host.")
+        frame = dict(view([project(0, [], quiet=True)]), activation=line)
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        shown_line = snap["projects"]["children"][1]
+        self.assertEqual(shown_line["tag"], "p")
+        self.assertIn("activation", shown_line["cls"].split())
+        self.assertEqual("".join(n["text"] for n in nodes(shown_line)), line["text"] + "Activate")
+        buttons = [n for n in nodes(shown_line) if n["tag"] == "button"]
+        self.assertEqual(len(buttons), 1)
+        self.assertIn("activate", buttons[0]["cls"].split())
+
     def test_activate_posts_the_shown_commit(self) -> None:
         frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
         (snap,) = render([{"frame": frame}, {"click": "activate"}, {"snapshot": True}])

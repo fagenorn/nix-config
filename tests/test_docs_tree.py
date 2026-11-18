@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from typing import Callable
 
-from agent_tools.console import register
+from agent_tools.console import activation, register, view
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -1955,6 +1955,45 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(context):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
+
+    def test_the_host_built_activation_decision_is_recorded_as_adr_073(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("073-*.md"))
+        self.assertEqual(len(found), 1, [p.name for p in found])
+        first = found[0].read_text().splitlines()[0]
+        self.assertTrue(first.startswith("# ADR-console-073 \u2014 "), first)
+        adr = self.doc("docs/areas/console/adr/" + found[0].name)
+        needles = ["#1258", "ADR-console-043", "ADR-system-004", "configuration revision",
+                   "git diff-tree", "-dirty", "is a failed read",
+                   "a failed run for the shown commit keeps Activate",
+                   "24 hours after the run finished", "ADR-system-004 D6, D8 and D9"]
+        needles += [f"`{p}`" for p in
+                    activation.NOT_BUILT_DIRS + activation.NOT_BUILT_FILES + view.AGENT_TOOLING]
+        needles += [t.replace("{commit}", "<commit>") for t in
+                    (view.ACTIVATION_TEXT, view.ACTIVATION_TOOLING_TEXT,
+                     view.ACTIVATION_CONFIGURATION_TEXT)]
+        for needle in needles:
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+
+        def status(path):
+            return next(row for row in (REPO_ROOT / path).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+
+        self.assertEqual(
+            status("docs/areas/console/adr/043-a-merged-console-change-not-active-on-this-host-"
+                   "is-one-line-in-the-work-column.md"),
+            "- **Status:** accepted; amended by ADR-system-004, ADR-console-073")
+        self.assertEqual(
+            status("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
+                   "activate.md"),
+            "- **Status:** accepted; amended by ADR-console-073")
+        self.assertIn("ADR-console-073 D5 amends it",
+                      self.doc("docs/areas/system/adr/004-host-activation-runs-only-through-the-"
+                               "consoles-activate.md"))
+        lines = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
+        entry = lines[lines.index("**Activation line**:") + 1]
+        self.assertIn("ADR-console-073", entry)
+        self.assertNotIn("carries a console change this host does not run", entry)
 
     def test_make_it_a_goal_is_recorded(self):
         adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")

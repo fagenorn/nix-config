@@ -908,7 +908,12 @@ projects, outside the ingest lock; the reading it returns (an `activation.Activa
 in memory only, never logged, and handed to `derive_view` as `activation`; a reading equal to the last
 one publishes nothing. A reader that raises (the production reader raises `activation.ReadFailed` for
 a failed read) keeps the previous reading, publishes nothing and is one stderr line
-`console: activation_failed <Type>: <message>`; only a returned value replaces the reading. An
+`console: activation_failed <Type>: <message>`; only a returned value replaces the reading. Each poll is dated by
+the count of polls begun, and a reading older than the one kept is dropped, so a slow poll never
+overwrites a newer one. When a run ends `ok`, the reading is withheld from the view and from Activate
+(`nothing to activate`) until a poll that began after the run's end has returned a value, so a switch
+that succeeded never offers Activate for its own commit again on a reading taken before it; a run that
+ended not `ok` withholds nothing. An
 exception escaping a poll is one stderr line `console: activation_poll_failed <Type>: <message>` and
 the loop goes on. Without a reader no thread starts and no line is shown.
 
@@ -916,8 +921,11 @@ The owner's Activate (#1193): `POST /api/activate`, a page write whose body is e
 object `{"commit": <40 lowercase hex>}` of at most `MAX_ACTIVATE_BYTES` (the `_json_body` 411, 415
 and 413 rules apply; any other body is 400 `bad activation`). It is answered 409 `text/plain`, one
 line, appending nothing, in this order: `nothing to activate` (no `activator`, no reading, or a
-reading with no changed file); `an activation is already running`; `that commit is no longer the
-tip of origin's integration branch` (the body's commit is not the shown reading's); then a fresh
+reading with nothing pending whose commit is not that of a run that failed less than a day ago,
+`view.offers_activate`);
+`an activation is already running`;
+`that commit is no longer the tip of origin's integration branch` (the body's commit is not the
+shown reading's); then a fresh
 `activator.tip(root)`, read outside the ingest lock, that cannot be read (`the tip of origin's
 integration branch could not be read`) or is not the commit (the same text as before). The claim on
 the activation is one flag taken under the ingest lock together with the first three checks, so two
@@ -933,7 +941,9 @@ failed write then kills the process group), a thread `ACTIVATE_THREAD` that runs
 `console: activation_run_failed <Type>: <message>` and the claim released. The claim lasts until
 `wait` returns an `Outcome`, which it does only once the run's whole process tree is gone, not when
 its first process exits: then one `activation.finished {root, commit, ok, reason, next_step}` row is
-appended, the claim released and the view published. `Stopped` (the service is closing) appends
+appended, the claim released and the view published; the activation reading is read again just
+before the row is appended (`poll_activation`), so the line never pairs a finished run with a reading taken
+before it. `Stopped` (the service is closing) appends
 nothing and keeps the claim; the run goes on. Any other exception from `wait` is one stderr line
 `console: activation_wait_failed <Type>: <message>`, no row, the claim kept. The newest started and
 finished rows are folded (`activation_run.fold`) into `_activation_run`, at construction and in
@@ -1475,8 +1485,8 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    is_waiting, project_for, project_states, read_states, registry_changes, sprint_absent_managers,
-    sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
+    is_waiting, offers_activate, project_for, project_states, read_states, registry_changes,
+    sprint_absent_managers, sprint_nudge_replies, sprint_sessions_of, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -3430,6 +3440,9 @@ class ConsoleService:
         self._activation_reader = activation_reader
         self._activation_seconds = activation_seconds
         self._activation: activation.Activation | None = None
+        self._activation_polls = 0  # readings begun; a reading is dated by the count when it began
+        self._activation_applied = 0  # the date of the reading kept
+        self._activation_after: int | None = None  # a successful run's end: only a later reading shows
         self._activation_thread: threading.Thread | None = None
         self._activator = activator
         self._activation_run: activation_run.LastRun | None = None
@@ -3694,7 +3707,7 @@ class ConsoleService:
             project_questions=self._project_questions,
             digest=digest.digest(self._moments, self._looked, self._now()),
             spend=self._spend_view,
-            capacity=cap, activation=self._activation,
+            capacity=cap, activation=self._shown_activation(),
             activation_run=self._activation_run,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
@@ -7095,15 +7108,27 @@ class ConsoleService:
             return
         with self._ingest:
             roots = sorted(state.root for state in self._states.values())
+            self._activation_polls += 1
+            began = self._activation_polls
         try:
             found = self._activation_reader(roots)
         except Exception as error:
             print(f"console: activation_failed {type(error).__name__}: {error}", file=sys.stderr)
             return
         with self._ingest:
-            if found != self._activation:
+            if began < self._activation_applied:
+                return
+            self._activation_applied = began
+            before = self._shown_activation()
+            if self._activation_after is not None and began > self._activation_after:
+                self._activation_after = None
+            if found != self._activation or self._shown_activation() != before:
                 self._activation = found
                 self._publish()
+
+    def _shown_activation(self) -> activation.Activation | None:
+        """The reading the page and Activate go by: none while a successful run awaits a reading begun after it."""
+        return None if self._activation_after is not None else self._activation
 
     def poll_serve(self) -> None:
         """One reading of Tailscale Serve's status; see the module docstring (guest door)."""
@@ -7121,8 +7146,9 @@ class ConsoleService:
     def activate(self, commit: str) -> None:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
         with self._ingest:
-            reading = self._activation
-            if self._activator is None or reading is None or not reading.changed:
+            reading = self._shown_activation()
+            if self._activator is None or not offers_activate(
+                    reading, self._activation_run, self.received_ms()):
                 raise sprints.Refused(ACTIVATE_NOTHING)
             if self._activating:
                 raise sprints.Refused(ACTIVATE_RUNNING)
@@ -7188,6 +7214,10 @@ class ConsoleService:
         except Exception as error:
             print(f"console: activation_wait_failed {type(error).__name__}: {error}", file=sys.stderr)
             return
+        if outcome.ok:
+            with self._ingest:
+                self._activation_after = self._activation_polls
+        self.poll_activation()
         try:
             self._finish_activation(run.root, outcome)
         except Exception as error:

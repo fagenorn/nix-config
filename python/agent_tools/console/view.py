@@ -75,14 +75,24 @@ never a login), null before the first one.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
-"root", "activate": <bool>}`. `pending` is a reading (the `activation.py` `Activation`) with a non-empty
-`changed`; `activation_run` is the newest run (`activation_run.LastRun`). The first match wins: a
-`running` run is `running` (ACTIVATING_TEXT, its commit, no Activate); a settled run is `activated`
-(ACTIVATED_TEXT) or `failed` (ACTIVATION_FAILED_TEXT with its reason and next step) when a change is
-pending for that very commit, or when nothing is pending and it finished less than OUTCOME_MS before
-`now_ms`, and only a `failed` one for the pending commit has `activate` true; a pending change is
-`pending` (ACTIVATION_TEXT, the reading's commit, `activate` true); otherwise null. Every text shows
-the commit as its first 12 characters. The member is on every view. It is a line beside the statement,
+"root", "activate": <bool>}`. `pending` is a reading (the `activation.py` `Activation`) whose
+`Activation.pending` is true; `activation_run` is the newest run (`activation_run.LastRun`). The first
+match wins: a `running` run is `running` (ACTIVATING_TEXT, its commit, no Activate); a settled run is
+`activated` (ACTIVATED_TEXT) or `failed` (ACTIVATION_FAILED_TEXT with its reason and next step) when
+`offers_activate` holds for that very commit (a `failed` run only: a reading that still names a pending
+change after an `activated` run is a fresh one, such as a rollback, and is `pending`; the service
+reads again before it records a run's end), or when nothing is pending and it finished less than
+OUTCOME_MS before `now_ms`, and only a `failed` one for the reading's commit has `activate` true (so
+nothing pending clears a failed run's line OUTCOME_MS after it finished, Activate included); a
+pending change is `pending` (the reading's commit, `activate` true); otherwise null. `offers_activate`
+is the one rule the service's admission of Activate shares: a reading with a pending change, or a
+`failed` run whose commit is the reading's and that finished less than OUTCOME_MS before `now_ms`, even
+with nothing pending, because the host's revision can reach the commit before the switch fails
+(ADR-system-004 D5); a day later, with the host at that commit, the line goes (ADR-console-073 D5). The pending text is ACTIVATION_TEXT when
+the reading names a changed console file; else ACTIVATION_TOOLING_TEXT when every other path starts
+with a member of AGENT_TOOLING (`python/`, `home/common/agent-`, `home/common/claude-code/`,
+`home/common/codex/`, `patches/agent-plugins/`, `lib/agent-`); else ACTIVATION_CONFIGURATION_TEXT.
+Every text shows the commit as its first 12 characters. The member is on every view. It is a line beside the statement,
 not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
 or `stale`.
 
@@ -923,6 +933,10 @@ UNREAD_DECISION = "A decision waits on the tracker, but its questions could not 
 INBOX_HEALTH = "inbox.health"
 ACTIVATE_COMMAND = "just switch"
 ACTIVATION_TEXT = "A console change merged at {commit} is not active on this host."
+ACTIVATION_TOOLING_TEXT = "A change to the agent tooling merged at {commit} and is not active on this host."
+ACTIVATION_CONFIGURATION_TEXT = "A change to the host configuration merged at {commit} and is not active on this host."
+AGENT_TOOLING = ("python/", "home/common/agent-", "home/common/claude-code/", "home/common/codex/",
+                 "patches/agent-plugins/", "lib/agent-")
 ACTIVATING_TEXT = "Activating this host at {commit}. The console may restart before it reports."
 ACTIVATED_TEXT = "Activated this host at {commit}."
 ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {next_step}"
@@ -2361,6 +2375,24 @@ def derive_view(
     }
 
 
+def offers_activate(activation: Activation | None, run: LastRun | None, now_ms: int | None) -> bool:
+    """Whether Activate is offered: a pending change, or a failed run for the reading's commit that finished
+    less than OUTCOME_MS before `now_ms`."""
+    if activation is None:
+        return False
+    return activation.pending or (
+        run is not None and run.state == "failed" and run.commit == activation.commit
+        and now_ms is not None and run.finished_ms is not None and now_ms - run.finished_ms < OUTCOME_MS)
+
+
+def _pending_text(activation: Activation) -> str:
+    if activation.changed:
+        return ACTIVATION_TEXT
+    if all(path.startswith(AGENT_TOOLING) for path in activation.other):
+        return ACTIVATION_TOOLING_TEXT
+    return ACTIVATION_CONFIGURATION_TEXT
+
+
 def _sharing_copy(sharing: Mapping) -> dict:
     last = sharing["last_request"]
     return {**sharing, "colleagues": list(sharing["colleagues"]),
@@ -2369,7 +2401,7 @@ def _sharing_copy(sharing: Mapping) -> dict:
 
 def _activation_line(activation: Activation | None, run: LastRun | None, now_ms: int | None) -> dict | None:
     """The activation line by the precedence in the module docstring; None when there is nothing to say."""
-    pending = activation is not None and bool(activation.changed)
+    pending = activation is not None and activation.pending
 
     def line(text: str, state: str, commit: str, root: str, activate: bool) -> dict:
         return {"text": text, "state": state, "commit": commit, "root": root, "activate": activate}
@@ -2377,7 +2409,8 @@ def _activation_line(activation: Activation | None, run: LastRun | None, now_ms:
     if run is not None and run.state == "running":
         return line(ACTIVATING_TEXT.format(commit=run.commit[:12]), "running", run.commit, run.root, False)
     if run is not None and run.state in ("activated", "failed"):
-        same = pending and activation.commit == run.commit
+        same = (activation is not None and activation.commit == run.commit
+                and (run.state == "failed" or not pending) and offers_activate(activation, run, now_ms))
         recent = (not pending and now_ms is not None and run.finished_ms is not None
                   and now_ms - run.finished_ms < OUTCOME_MS)
         if same or recent:
@@ -2387,7 +2420,7 @@ def _activation_line(activation: Activation | None, run: LastRun | None, now_ms:
                 commit=run.commit[:12], reason=run.reason or "", next_step=run.next_step or "")
             return line(text, "failed", run.commit, run.root, same)
     if pending:
-        return line(ACTIVATION_TEXT.format(commit=activation.commit[:12]), "pending",
+        return line(_pending_text(activation).format(commit=activation.commit[:12]), "pending",
                     activation.commit, activation.root, True)
     return None
 
