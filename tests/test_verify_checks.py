@@ -2933,3 +2933,327 @@ class RailwayProjectReadCommandTest(unittest.TestCase):
 
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/railway-project-read"), "100755")
+
+
+CONSOLE_LABEL = "org.nixos.agent-console"
+PROXY_LABEL = "org.nixos.claude-cache-proxy"
+SOPS_LABEL = "org.nixos.sops-nix"
+VERIFY_LABEL = "org.nixos.verify-pending"
+NO_SESSION = "ownerServices: the owner has no login session"
+SESSION = "ownerServices: the owner has a login session"
+DOMAIN = "Domain does not support specified action"
+
+
+def loopback_server(handler):
+    """A loopback `ThreadingHTTPServer` on port 0 serving `handler`, in a daemon thread."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class ConsoleHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == "/api/state" else 404)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    body = b'{"service":"cache-proxy"}'
+
+    def do_GET(self):
+        ok = self.path == "/_proxy/health"
+        body = self.body if ok else b""
+        self.send_response(200 if ok else 404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class OwnerServicesWorld(unittest.TestCase):
+    """A temp HOME with the forge key and the activation record, and the two loopback servers."""
+    commit = "b" * 40
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+        self.home = self.tmp / "home"
+        (self.home / ".ssh").mkdir(parents=True)
+        (self.home / "secret").write_text("key\n", encoding="utf-8")
+        self.key = self.home / ".ssh" / "id_ed25519"
+        self.key.symlink_to(self.home / "secret")
+        self.state = self.home / ".agents" / "state" / "console"
+        self.state.mkdir(parents=True)
+        self.result = self.state / "activation.result"
+        self.log = self.state / "activation.log"
+        self.write_activation({"commit": self.commit, "exit": 0},
+                              f"building\n{NO_SESSION}\ndone\n")
+        self.proxy_handler = type("Proxy", (ProxyHandler,), {})
+        self.console_server = loopback_server(ConsoleHandler)
+        self.proxy_server = loopback_server(self.proxy_handler)
+        self.addCleanup(self.stop, self.console_server)
+        self.addCleanup(self.stop, self.proxy_server)
+        self.console_port = self.console_server.server_address[1]
+        self.proxy_port = self.proxy_server.server_address[1]
+
+    @staticmethod
+    def stop(server):
+        server.shutdown()
+        server.server_close()
+
+    def write_activation(self, result, log):
+        if result is not None:
+            self.result.write_text(json.dumps(result), encoding="utf-8")
+        self.log.write_text(log, encoding="utf-8")
+        self.age_log(10)
+
+    def age_log(self, seconds):
+        """Set the log's mtime `seconds` before the result's (negative: after)."""
+        stamp = self.result.stat().st_mtime_ns if self.result.exists() else time.time_ns()
+        shifted = stamp - seconds * 1_000_000_000
+        os.utime(self.log, ns=(shifted, shifted))
+
+
+class OwnerServicesTest(OwnerServicesWorld):
+    """`owner-services` (issue 1290): the owner's services run at boot with nobody logged in."""
+
+    def setUp(self):
+        super().setUp()
+        merge_base = ("-C", ".", "merge-base", "--is-ancestor", "a" * 40, self.commit)
+        self.table = {
+            ("print", "gui/502"): (113, ""),
+            ("print", f"system/{CONSOLE_LABEL}"): (0, "\tstate = running\n\tpid = 4001\n"),
+            ("print", f"system/{PROXY_LABEL}"): (0, "\tstate = running\n\tpid = 4002\n"),
+            ("print", f"system/{SOPS_LABEL}"): (0, ""),
+            ("print", f"system/{VERIFY_LABEL}"): (0, ""),
+            ("-nP", "-a", f"-iTCP:{self.console_port}", "-sTCP:LISTEN", "-Fp"): (0, "p4001\nf3\n"),
+            ("-nP", "-a", f"-iTCP:{self.proxy_port}", "-sTCP:LISTEN", "-Fp"): (0, "p4002\nf5\n"),
+            merge_base: (0, ""),
+        }
+        self.merge_base = merge_base
+
+    def fake(self, argv, **kw):
+        answer = self.table[tuple(argv[1:])]
+        if callable(answer):
+            answer = answer()
+        if isinstance(answer, BaseException):
+            raise answer
+        code, stdout = answer
+        return subprocess.CompletedProcess(argv, code, stdout, "")
+
+    def check(self):
+        return verify_checks.owner_services(
+            console_port=self.console_port, proxy_port=self.proxy_port, merge="a" * 40,
+            home=self.home, uid=502, repo_root=Path("."), launchctl="/bin/launchctl",
+            lsof="/usr/sbin/lsof", run=self.fake)
+
+    def test_every_service_up_and_a_clean_page_activation_is_met(self):
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (0, "met"))
+        self.assertEqual(report["activation"], "clean")
+        self.assertTrue(report["met"])
+        self.assertTrue(all(report["daemons"].values()))
+        self.assertEqual(set(report["daemons"]), set(verify_checks.OWNER_SERVICE_LABELS))
+        self.assertEqual(report["console"], {"answers": True, "owned": True})
+        self.assertEqual(report["proxy"], {"answers": True, "owned": True})
+        self.assertTrue(report["ssh_key"])
+
+    def test_an_owner_gui_session_is_not_yet(self):
+        self.table[("print", "gui/502")] = (0, "")
+        self.assertEqual(self.check()[0], 75)
+        self.assertEqual(self.check()[1]["verdict"], "logged_in")
+
+    def test_a_gui_session_wins_over_a_failed_reading(self):
+        self.table[("print", "gui/502")] = (0, "")
+        self.table[("print", f"system/{SOPS_LABEL}")] = (113, "")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (75, "logged_in"))
+
+    def test_a_daemon_not_loaded_is_not_met(self):
+        self.table[("print", f"system/{SOPS_LABEL}")] = (113, "")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["daemons"][SOPS_LABEL], False)
+
+    def test_a_dangling_forge_key_is_not_met(self):
+        (self.home / "secret").unlink()
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["ssh_key"], False)
+
+    def test_a_proxy_that_is_not_the_cache_proxy_is_not_met(self):
+        self.proxy_handler.body = b'{"service":"other"}'
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["proxy"]["answers"], False)
+
+    def test_no_console_is_not_met(self):
+        self.console_server.shutdown()
+        self.console_server.server_close()
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["console"]["answers"], False)
+
+    def test_a_console_served_by_another_process_is_not_met(self):
+        lsof = ("-nP", "-a", f"-iTCP:{self.console_port}", "-sTCP:LISTEN", "-Fp")
+        self.table[("print", f"system/{CONSOLE_LABEL}")] = (0, "\tstate = spawn scheduled\n")
+        self.table[lsof] = (0, "p5000\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertEqual(report["console"], {"answers": True, "owned": False})
+        self.assertIs(report["daemons"][CONSOLE_LABEL], True)
+        with self.subTest("the job has a pid, another process listens"):
+            self.table[("print", f"system/{CONSOLE_LABEL}")] = (0, "\tpid = 4001\n")
+            self.assertIs(self.check()[1]["console"]["owned"], False)
+
+    def test_a_domain_line_in_the_page_activation_is_not_met(self):
+        self.write_activation({"commit": self.commit, "exit": 0},
+                              f"building\n{NO_SESSION}\nBoot-out failed: 125: {DOMAIN}\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (1, "not_met", "domain_lines"))
+
+    def test_an_activation_without_the_session_line_is_not_met(self):
+        self.write_activation({"commit": self.commit, "exit": 0}, "building\ndone\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (1, "not_met", "unmarked"))
+
+    def test_an_activation_in_an_owner_session_is_not_yet(self):
+        self.write_activation({"commit": self.commit, "exit": 0}, f"building\n{SESSION}\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "logged_in"))
+
+    def test_an_activation_of_an_older_commit_is_not_yet(self):
+        self.table[self.merge_base] = (1, "")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_an_unread_activation_is_not_yet(self):
+        self.result.unlink()
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_a_failed_activation_is_not_yet(self):
+        records = [({"commit": self.commit, "exit": 1}, "building\n"),
+                   ({"commit": self.commit, "exit": True}, "building\n"),
+                   ({"commit": self.commit, "exit": False}, "building\n"),
+                   ({"commit": self.commit, "error": "FileNotFoundError: x"}, "")]
+        for record, log in records:
+            with self.subTest(record=record):
+                self.write_activation(record, log)
+                code, report = self.check()
+                self.assertEqual((code, report["verdict"], report["activation"]),
+                                 (75, "not_yet", "unread"))
+
+    def test_a_log_newer_than_its_result_is_not_yet(self):
+        self.age_log(-10)
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_a_result_replaced_while_reading_is_not_yet(self):
+        def replaced():
+            self.result.unlink()
+            return 0, ""
+        self.table[self.merge_base] = replaced
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_an_unread_activation_is_not_yet_even_with_a_service_down(self):
+        self.result.unlink()
+        self.proxy_server.shutdown()
+        self.proxy_server.server_close()
+        self.assertEqual(self.check()[0], 75)
+
+    def test_a_missing_tool_is_a_failed_reading(self):
+        for key in list(self.table):
+            if key[0] == "-nP":
+                self.table[key] = FileNotFoundError("lsof")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["console"]["owned"], False)
+
+
+class OwnerServicesCommandTest(OwnerServicesWorld):
+    def setUp(self):
+        self.commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+        super().setUp()
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        pid = os.getpid()
+        self.launchctl = self.script("launchctl", f"""#!/bin/sh
+echo "noise {self.home}" >&2
+case "$*" in
+  "print gui/"*) exit 113 ;;
+  "print system/{CONSOLE_LABEL}"|"print system/{PROXY_LABEL}") echo "pid = {pid}"; exit 0 ;;
+  *) exit 0 ;;
+esac
+""")
+        self.lsof = self.script("lsof", f"""#!/bin/sh
+echo "noise {self.home}" >&2
+echo "p{pid}"
+exit 0
+""")
+        self.arguments = ["owner-services", "--console-port", str(self.console_port),
+                          "--proxy-port", str(self.proxy_port), "--merge", self.commit,
+                          "--launchctl", str(self.launchctl), "--lsof", str(self.lsof)]
+
+    def script(self, name, text):
+        path = self.bin / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def command(self, arguments=None):
+        return run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks",
+                              *(arguments or self.arguments)], env_extra={"HOME": str(self.home)})
+
+    def test_the_command_prints_one_json_line_and_exits_with_the_verdict(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "met")
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn(str(self.home), result.stdout + result.stderr)
+        self.assertNotIn("noise", result.stdout + result.stderr)
+
+    def test_the_committed_script_runs_the_owner_services_check(self):
+        (self.home / ".agents" / "bin").mkdir(parents=True)
+        (self.home / ".agents" / "bin" / "verify-pending").write_text(
+            "#!/bin/sh\nunset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+            f'exec {sys.executable} -I -m agent_tools.verification.verify_pending "$@"\n',
+            encoding="utf-8")
+        result = subprocess.run(["/bin/sh", str(ROOT / CHECKS / "owner-services"), *self.arguments[1:]],
+                                cwd=ROOT, env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "met")
+
+    def test_a_bad_merge_sha_is_a_usage_error(self):
+        arguments = list(self.arguments)
+        arguments[arguments.index("--merge") + 1] = "xyz"
+        result = self.command(arguments)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--merge", result.stderr)
+        self.assertNotIn("invalid choice", result.stderr)
+
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("owner-services --console-port N --proxy-port N --merge SHA",
+                       "verify_checks.owner_services", "issue 1290", DOMAIN, NO_SESSION):
+            self.assertIn(needle, verify_checks.__doc__)
+
+    def test_the_session_lines_match_the_activation_cleanup(self):
+        text = (ROOT / "hosts/common/darwin-owner-services.nix").read_text(encoding="utf-8")
+        self.assertIn(verify_checks.NO_SESSION_LINE, text)
+        self.assertIn(verify_checks.SESSION_LINE, text)
+
+    def test_the_check_script_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/owner-services"), "100755")

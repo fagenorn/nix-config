@@ -150,6 +150,31 @@ profile, handle or Railway project, environment or service, since the repository
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
 
+`owner-services --console-port N --proxy-port N --merge SHA [--launchctl PATH] [--lsof PATH]`
+(`verify_checks.owner_services`, issue 1290) is met when the owner's services run at boot on a Mac with nobody
+logged in at its screen. It only reads, every child's output is captured (the runner publishes the check's output
+in an issue comment), and a child that cannot start or times out reads as a failed reading. It reads the owner's
+login session (`launchctl print gui/UID` exits 0: a session now), each boot daemon `org.nixos.agent-console`,
+`org.nixos.claude-cache-proxy`, `org.nixos.sops-nix` and `org.nixos.verify-pending` (`launchctl print
+system/LABEL` exits 0: loaded), the console (its state endpoint answers, as `console-state`) and the cache proxy
+(`GET /_proxy/health` is 2xx with a JSON object whose `service` is `cache-proxy`), each owned (its daemon has a
+`pid` and that pid is the only listener `lsof` reports on the port, so a hand-run process beside a daemon that
+failed to bind does not count), the owner's `~/.ssh/id_ed25519` resolving to a file, and the activation record
+of `~/.agents/state/console` (`activation.result` and `activation.log`). The record is read only when it is a
+qualifying activation: the result is a JSON object with a 40 hex `commit`, an integer `exit` of 0 and no `error`;
+`merge` is an ancestor of that commit (`git merge-base --is-ancestor`); the log reads, is no newer than the
+result, and the result is unchanged when read again (a new activation unlinks it before it truncates the log).
+Otherwise it is `unread`. A read record is `logged_in` when a log line holds `ownerServices: the owner has a login
+session`, else `unmarked` when no line holds `ownerServices: the owner has no login session` (the lines the
+activation cleanup of `hosts/common/darwin-owner-services.nix` prints), else `domain_lines` when a line holds
+`Domain does not support specified action`, else `clean`. The verdict, in this order: a login session now is
+`logged_in` (75); an `unread` or `logged_in` record is `not_yet` (75), so no service reading is graded before a
+qualifying activation; then a daemon not loaded, a console or proxy that does not answer or is not owned, a
+`ssh_key` that does not resolve, or an `unmarked` or `domain_lines` record is `not_met` (1); else `met` (0).
+The report is `{"met", "verdict", "daemons", "console", "proxy", "ssh_key", "activation"}` of booleans and the
+strings above. It names no path, pid, project or account, since the repository is public. A bad port or a
+`--merge` that is not 40 lowercase hex characters is a usage error (2).
+
 `console-failed-start --port N` (`verify_checks.console_failed_start`, issue 1182) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object
 is `unreachable`, exit 75) and applies `failed_start_state` to it: with no open failed-start inbox card it is
@@ -216,6 +241,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import functools
 import http.client
 import io
 import json
@@ -1514,6 +1540,131 @@ def console_state(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
     return (0 if status == 200 else 1), {"port": port, "status": status}
 
 
+OWNER_SERVICE_LABELS = ("org.nixos.agent-console", "org.nixos.claude-cache-proxy",
+                        "org.nixos.sops-nix", "org.nixos.verify-pending")
+DOMAIN_LINE = "Domain does not support specified action"
+NO_SESSION_LINE = "ownerServices: the owner has no login session"
+SESSION_LINE = "ownerServices: the owner has a login session"
+_JOB_PID = re.compile(r"^\s*pid = (\d+)\s*$", re.MULTILINE)
+
+
+def _activation_state(home: Path, merge: str, repo_root: Path, run) -> str:
+    """Issue 1290: `unread` unless a qualifying activation is on record, else what its log says."""
+    state = home / ".agents" / "state" / "console"
+    result, log = state / "activation.result", state / "activation.log"
+    try:
+        first = result.read_bytes()
+        record = json.loads(first)
+        result_ns = result.stat().st_mtime_ns
+    except (OSError, ValueError):
+        return "unread"
+    if not isinstance(record, dict):
+        return "unread"
+    commit, code = record.get("commit"), record.get("exit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return "unread"
+    if isinstance(code, bool) or not isinstance(code, int) or code != 0 or "error" in record:
+        return "unread"
+    try:
+        ancestor = run(["git", "-C", str(repo_root), "merge-base", "--is-ancestor", merge, commit])
+    except (OSError, subprocess.TimeoutExpired):
+        return "unread"
+    if ancestor.returncode != 0:
+        return "unread"
+    try:
+        if not log.is_file():
+            return "unread"
+        text = log.read_text(encoding="utf-8", errors="replace")
+        if log.stat().st_mtime_ns > result_ns:
+            return "unread"
+        if result.read_bytes() != first:
+            return "unread"
+    except OSError:
+        return "unread"
+    lines = text.splitlines()
+    if any(SESSION_LINE in line for line in lines):
+        return "logged_in"
+    if not any(NO_SESSION_LINE in line for line in lines):
+        return "unmarked"
+    if any(DOMAIN_LINE in line for line in lines):
+        return "domain_lines"
+    return "clean"
+
+
+def _proxy_answers(port: int, timeout: float) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/_proxy/health")
+        response = connection.getresponse()
+        body = response.read()
+        if not 200 <= response.status < 300:
+            return False
+        payload = json.loads(body)
+    except (OSError, http.client.HTTPException, ValueError):
+        return False
+    finally:
+        connection.close()
+    return isinstance(payload, dict) and payload.get("service") == "cache-proxy"
+
+
+def owner_services(*, console_port: int, proxy_port: int, merge: str, home: Path, uid: int,
+                   repo_root: Path, launchctl: str = "/bin/launchctl", lsof: str = "/usr/sbin/lsof",
+                   run=None, timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1290: the owner's boot services run with nobody logged in at the screen."""
+    if run is None:
+        run = functools.partial(subprocess.run, capture_output=True, text=True,
+                                timeout=timeout, check=False)
+
+    def read(argv):
+        try:
+            return run(argv)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def loaded(label):
+        done = read([launchctl, "print", f"system/{label}"])
+        if done is None or done.returncode != 0:
+            return False, None
+        match = _JOB_PID.search(done.stdout or "")
+        return True, int(match.group(1)) if match else None
+
+    def listeners(port):
+        done = read([lsof, "-nP", "-a", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"])
+        if done is None or done.returncode != 0:
+            return set()
+        return {int(line[1:]) for line in (done.stdout or "").splitlines()
+                if re.fullmatch(r"p\d+", line)}
+
+    def owned(pid, port):
+        return pid is not None and listeners(port) == {pid}
+
+    gui = read([launchctl, "print", f"gui/{uid}"])
+    session = gui is not None and gui.returncode == 0
+    jobs = {label: loaded(label) for label in OWNER_SERVICE_LABELS}
+    console_pid = jobs["org.nixos.agent-console"][1]
+    proxy_pid = jobs["org.nixos.claude-cache-proxy"][1]
+    console = {"answers": console_state(console_port, timeout=timeout)[0] == 0,
+               "owned": owned(console_pid, console_port)}
+    proxy = {"answers": _proxy_answers(proxy_port, timeout), "owned": owned(proxy_pid, proxy_port)}
+    try:
+        ssh_key = (home / ".ssh/id_ed25519").resolve(strict=True).is_file()
+    except (OSError, RuntimeError):
+        ssh_key = False
+    activation = _activation_state(home, merge, repo_root, run)
+    daemons = {label: jobs[label][0] for label in OWNER_SERVICE_LABELS}
+    if session:
+        code, verdict = 75, "logged_in"
+    elif activation in ("unread", "logged_in"):
+        code, verdict = 75, "not_yet"
+    elif (not all(daemons.values()) or not all(console.values()) or not all(proxy.values())
+          or not ssh_key or activation in ("unmarked", "domain_lines")):
+        code, verdict = 1, "not_met"
+    else:
+        code, verdict = 0, "met"
+    return code, {"met": code == 0, "verdict": verdict, "daemons": daemons, "console": console,
+                  "proxy": proxy, "ssh_key": ssh_key, "activation": activation}
+
+
 LONG_GOAL_CHARS = 1000
 NEEDLE = slice(200, 300)
 
@@ -1999,6 +2150,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
     console.add_argument("--port", type=_port, required=True)
+    owner = checks.add_parser(
+        "owner-services",
+        help="issue 1290: the owner's services run at boot with nobody logged in")
+    owner.add_argument("--console-port", type=_port, required=True)
+    owner.add_argument("--proxy-port", type=_port, required=True)
+    owner.add_argument("--merge", type=_merge_sha, required=True)
+    owner.add_argument("--launchctl", default="/bin/launchctl")
+    owner.add_argument("--lsof", default="/usr/sbin/lsof")
     failed = checks.add_parser(
         "console-failed-start",
         help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
@@ -2025,6 +2184,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "owner-services":
+        code, report = owner_services(
+            console_port=args.console_port, proxy_port=args.proxy_port, merge=args.merge,
+            home=Path(os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir), uid=os.getuid(),
+            repo_root=Path("."), launchctl=args.launchctl, lsof=args.lsof)
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-failed-start":
