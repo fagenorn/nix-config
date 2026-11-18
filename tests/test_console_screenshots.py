@@ -113,9 +113,11 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_four_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 34)
-        self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
+    def test_the_set_is_thirty_six_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 36)
+        self.assertEqual(shots.STATES[-4:], ("sharing-panel", "guest-page", "guest-steer",
+                                             "owner-actors"))
+        self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
@@ -124,7 +126,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-16:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-18:-4], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
@@ -132,11 +134,41 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
+    def test_the_actor_seed_holds_a_colleague_sprint_an_answer_and_an_owner_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp).resolve(), "guest-steer", now_s)
+            svc = shots.start_service(fixture, now_s, guest=True)
+            try:
+                view = json.loads(svc.view_bytes)
+                guest = json.loads(svc.guest_view_bytes(shots.COLLEAGUE))
+            finally:
+                svc.close()
+        sprints = all_sprints(view)
+        theirs = [s for s in sprints if s["started_by"] == shots.COLLEAGUE]
+        self.assertEqual(len(theirs), 2)
+        answered = [s for s in theirs if s["messages"] and s["messages"][-1]["kind"] == "answer"]
+        self.assertEqual(len(answered), 1)
+        self.assertEqual(answered[0]["messages"][-1]["by"], shots.COLLEAGUE)
+        self.assertEqual([s for s in sprints if s["started_by"] is None][0]["messages"][-1]["by"],
+                         None)
+        self.assertEqual(len([s for s in sprints if s["started_by"] is None]), 1)
+        opened = view["inbox"]["open"]
+        confirms = [i for i in opened if i.get("reason") == "verify-approve"]
+        self.assertEqual([i["confirm"] for i in confirms], ["owner/web#12"])
+        briefs = [i for i in opened if i["reason"] == "brief"]
+        self.assertEqual(len(briefs), 1)
+        self.assertEqual(briefs[0]["started_by"], shots.COLLEAGUE)
+        steer = {i["reason"]: i["steer"] for i in guest["inbox"]["open"]}
+        self.assertTrue(steer["brief"])
+        self.assertFalse(steer["verify-approve"])
+
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
                  27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
-                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four"}
+                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
+                 35: "thirty-five", 36: "thirty-six"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -806,6 +838,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 else:
                     shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
                 self.assertIn("#top-who:not([hidden])", page.waits)
+
+    def test_the_actor_shots_wait_for_what_the_owner_judges_and_guest_steer_refuses_the_owner_page(self) -> None:
+        door = "#console-door"
+        with tempfile.TemporaryDirectory() as tmp:
+            browser, page = fake_browser({door, "#capacity"})
+            with self.assertRaisesRegex(RuntimeError, "the guest shot is not the guest page"):
+                shots._shoot(browser, "http://console.test/", "guest-steer", 480, Path(tmp))
+            browser, page = fake_browser({door})
+            shots._shoot(browser, "http://console.test/", "guest-steer", 480, Path(tmp))
+            self.assertIn("#top-who:not([hidden])", page.waits)
+            judged = [w for w in page.waits if w != "#top-who:not([hidden])"][1:]
+            self.assertEqual(judged, [".started-by", "text=Answered by", ".guest-wait",
+                                      "#inbox button.approve"])
+            browser, page = fake_browser({door})
+            shots._shoot(browser, "http://console.test/", "owner-actors", 480, Path(tmp))
+            self.assertEqual(page.waits[1:], [".started-by", "text=Answered by"])
 
     def test_the_guest_shot_on_the_base_page_waits_for_no_guest_part(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
