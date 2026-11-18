@@ -249,6 +249,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-messages { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
 .sprint-messages li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; color: var(--sub0); }
 .message-state, .message-reply { color: var(--ov2); }
+.started-by { color: var(--ov2); }
 .message-reply { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .manager-line .message-reply { flex: 1 1 auto; padding-left: 0; }
 .message-action { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); }
@@ -824,6 +825,12 @@ function messageLabel(message) {
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
   return typeof message.words === "string" ? message.text + ": " + message.words : message.text;
 }
+// Who wrote a line: the colleague's login when `by` names one, else the owner ("You" on the owner's door).
+function messageSays(message) {
+  const label = messageLabel(message);
+  if (typeof message.by !== "string") return ownerSays("You") + ": " + label;
+  return (message.kind === "answer" ? "Answered by " + message.by : message.by) + ": " + label;
+}
 function messageList(messages) {
   const list = el("ul", "sprint-messages");
   for (const message of messages) {
@@ -835,7 +842,7 @@ function messageList(messages) {
       continue;
     }
     const row = el("li", "message");
-    row.appendChild(el("span", "message-text", ownerSays("You") + ": " + messageLabel(message)));
+    row.appendChild(el("span", "message-text", messageSays(message)));
     row.appendChild(el("span", "message-state", message.state_text));
     if (message.new === true) row.appendChild(el("span", "message-new", "new"));
     if (typeof message.action_text === "string") {
@@ -956,8 +963,21 @@ function focusCard(card) {
 function openCheckCard(check) {
   focusCard(inboxCards.get(check.project_id + "#" + check.key));
 }
+// A sprint the colleague started that holds one of their own open cards: the two texts naming "you" are true for them.
+function steersHere(sprint) {
+  return guestDoor && sprint.steer === true && lastView !== null && lastView.inbox !== undefined
+    && lastView.inbox.open.some((open) => open.steer === true && open.sprint_id === sprint.sprint_id);
+}
+const YOURS_NOW = ["waiting for your approval of the brief", "waiting for your answer: "];
+function nowWords(text, acts) {
+  return acts && typeof text === "string" && YOURS_NOW.some((lead) => text.startsWith(lead)) ? text : ownerWords(text);
+}
+function ballWords(text, acts) {
+  return acts && text === "waiting on you" ? text : ownerWords(text);
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
+  const yours = steersHere(sprint);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
   item.dataset.sprintId = sprint.sprint_id;
   const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
@@ -992,11 +1012,11 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
     head.appendChild(prog);
   }
-  const now = el("p", "sp-now", ownerWords(sprint.now_text));
-  now.setAttribute("title", ownerWords(sprint.now_text));
+  const now = el("p", "sp-now", nowWords(sprint.now_text, yours));
+  now.setAttribute("title", nowWords(sprint.now_text, yours));
   head.appendChild(now);
   const words = el("p", "sp-status");
-  words.appendChild(el("span", "sprint-ball " + look.tone, ownerWords(sprint.ball_text)));
+  words.appendChild(el("span", "sprint-ball " + look.tone, ballWords(sprint.ball_text, yours)));
   if (typeof sprint.state_until === "string") {
     words.appendChild(timeEl("weekday", sprint.state_until, "until"));
   }
@@ -1007,6 +1027,7 @@ function drawSprint(item, entry, sprint) {
   age.appendChild(el("span", "", "goal set "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
   words.appendChild(age);
+  if (typeof sprint.started_by === "string") words.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   head.appendChild(words);
   item.appendChild(head);
   const spendBox = spendLine("sprint", sprint.sprint_id);
@@ -1030,7 +1051,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
   }
   const retrying = retries.get(sprint.sprint_id);
-  if (sprint.retry === true) {
+  if (sprint.retry === true && !guestDoor) {
     const again = actionButton("retry btn-quiet", "Retry", () => retry(item, entry, sprint));
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
     markBusy(again, retrying !== undefined && retrying.phase === "sending");
@@ -1053,9 +1074,14 @@ function drawSprint(item, entry, sprint) {
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
-  if (guestDoor) return;
+  if (guestDoor && sprint.steer !== true) return;
   const controls = el("div", "sprint-acts");
   controls.appendChild(tellBox(item, entry, sprint));
+  if (guestDoor) {
+    controls.dataset.steer = "1";
+    item.appendChild(controls);
+    return;
+  }
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
@@ -1202,6 +1228,7 @@ async function withdraw(item, entry, sprint) {
   }
 }
 async function retry(item, entry, sprint) {
+  if (guestDoor) return;
   const id = sprint.sprint_id;
   const current = retries.get(id);
   if (current !== undefined && current.phase === "sending") return;
@@ -1645,6 +1672,7 @@ function signinStillRunning(profile, attempt) {
     run !== null && run !== undefined && typeof run === "object" && run.state === "running" && run.attempt === attempt);
 }
 async function askSigninLink(profile, attempt) {
+  if (guestDoor) return;
   signinAsked.add(profile + "\n" + attempt);
   try {
     const response = await fetch("/api/signin-link", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }) });
@@ -4360,7 +4388,7 @@ function answerBox(item, state, lead) {
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
       markBusy(button, state.phase === "sending");
-      button.appendChild(el("kbd", "", String(oi + 1)));
+      if (!guestDoor) button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
       button.appendChild(pathWords(el("span", "ot"), option === q.chosen ? "chosen: " + option : option));
       if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
@@ -4526,9 +4554,10 @@ function seatHint(strip, host) {
 function renderInbox(view) {
   holdPictures(() => drawInbox(view));
 }
-function drawInbox(view) {
-  const fresh = view !== lastView;
-  lastView = view;
+// `guest` is null on the owner's door; on the guest's it is { fresh }, the guest's own cards only: renderGuest alone assigns lastView, to the whole frame.
+function drawInbox(view, guest = null) {
+  const fresh = guest === null ? view !== lastView : guest.fresh;
+  if (guest === null) lastView = view;
   const section = document.getElementById("inbox");
   const active = document.activeElement;
   const held = active && active.dataset && active.dataset.draft !== undefined
@@ -4539,13 +4568,13 @@ function drawInbox(view) {
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
-  const open = view.inbox.open;
+  const open = guest === null ? view.inbox.open : view.inbox.open.filter((item) => item.steer === true);
   const briefs = open.filter(isBrief);
   const stalls = open.filter(isStall);
   const starts = open.filter(isFailedStart);
   const progress = open.filter(isProgress);
   const signins = open.filter(isSignin);
-  const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
+  const signinRuns = guest === null && view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
   for (const [profile, run] of Object.entries(signinRuns)) {
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     if (profile === accountSignin || signins.some((item) => item.profile === profile)) continue;
@@ -4560,7 +4589,7 @@ function drawInbox(view) {
     if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
-  const profiles = view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
+  const profiles = guest === null && view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
     ? view.capacity.profiles : [];
   const listed = new Set(profiles.map((p) => p.profile));
   for (const [profile, held] of [...signinLinks]) {
@@ -4583,7 +4612,7 @@ function drawInbox(view) {
       signinLinks.delete(profile);
     }
   }
-  for (const item of signins) {
+  for (const item of guest === null ? signins : []) {
     const run = item.run;
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     const have = signinLinks.get(item.profile);
@@ -4660,7 +4689,10 @@ function drawInbox(view) {
     section.appendChild(rest);
   }
   inboxCards = cardOf;
-  const answered = view.inbox.answered;
+  if (guest !== null) {
+    for (const host of cardOf.values()) (host.card !== undefined ? host.card : host).dataset.steer = "1";
+  }
+  const answered = guest === null ? view.inbox.answered : [];
   if (answered.length > 0) {
     const done = el("ul", "done");
     for (const item of answered) done.appendChild(answeredLine(item));
@@ -4673,7 +4705,7 @@ function drawInbox(view) {
   if (keyHint !== null) keyHint.remove();
   keyHint = null;
   hintHost = null;
-  const strip = keyStrip(current, open);
+  const strip = guest === null ? keyStrip(current, open) : null;
   if (strip !== null) {
     const owner = current !== null ? current.item : open.find((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; });
     const host = owner === undefined ? undefined : cardOf.get(stateId(owner));
@@ -4795,6 +4827,7 @@ function finishedLine(sprint) {
   const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
   summary.appendChild(el("span", "outcome", counted ? closing.counts_text : ownerWords(sprint.state_text)));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
+  if (typeof sprint.started_by === "string") summary.appendChild(el("span", "started-by", "started by " + sprint.started_by));
   if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
   fold.appendChild(summary);
   const spendBox = spendLine("sprint", sprint.sprint_id);
@@ -5801,10 +5834,10 @@ function tick() {
 }
 setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
-const GUEST_TOP = "The owner's console, shared with you to read";
+const GUEST_TOP = "The owner's console, shared with you";
 const STALE_LEAD = "The tracker could not be read for ";
 const GUEST_KEEPS = new Set(["pic-thumb", "sprint-check"]);
-const OWNER_PARTS = ["spend-link", "goal", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
+const OWNER_PARTS = ["spend-link", "capacity", "accounts", "accounts-body", "account-add", "sharing-open",
   "sharing", "sharing-body", "promoted", "digest", "unmanaged", "register"];
 const guestDoor = document.getElementById("console-door").content !== "owner";
 if (guestDoor) {
@@ -5815,6 +5848,10 @@ if (guestDoor) {
   const who = document.getElementById("top-who");
   who.textContent = GUEST_TOP;
   who.hidden = false;
+  // The goal bar stays, with no shortcut: the guest door has no keys (P8).
+  document.getElementById("goal").hidden = false;
+  for (const key of document.querySelectorAll("#goal kbd")) key.remove();
+  goalText.removeAttribute("aria-keyshortcuts");
 } else {
   for (const id of ["spend-link", "goal", "capacity", "sharing-open"]) document.getElementById(id).hidden = false;
 }
@@ -5827,20 +5864,22 @@ function ownerWords(text, whole) {
   return [lead.replace(/\bYour\b/g, "The owner's").replace(/\byour\b/g, "the owner's").replace(/\byou\b/g, "the owner"), ...rest].join(": ");
 }
 function renderGuestStatement(view) {
-  const n = view.statement.inbox_items;
+  const steer = view.inbox.open.filter((item) => item.steer === true).length;
+  const n = view.statement.inbox_items - steer;
   const sentence = view.statement.sentence;
   const stale = typeof sentence === "string" && sentence.startsWith(STALE_LEAD);
   const none = "Nothing " + (stale || view.statement.stale === true ? "known " : "") + "waits on the owner";
   const nodes = [el("h1", "", n === 0 ? none : n === 1 ? "1 thing waits on the owner" : n + " things wait on the owner")];
   if (stale) nodes.push(el("p", "sub", ownerWords(sentence)));
+  if (steer > 0) nodes.push(el("p", "sub", steer === 1 ? "1 thing waits on you" : steer + " things wait on you"));
   document.getElementById("statement").replaceChildren(...nodes);
 }
+// The open items the colleague cannot act on, one "Waiting on the owner" row each, after the cards drawInbox drew.
 function renderGuestInbox(view) {
-  const cards = new Map();
-  const nodes = [];
-  if (view.inbox.open.length > 0) {
+  const rest = view.inbox.open.filter((item) => item.steer !== true);
+  if (rest.length > 0) {
     const list = el("ul", "guest-items");
-    for (const item of view.inbox.open) {
+    for (const item of rest) {
       const row = el("li", "guest-item");
       const [word, id] = kindOf(item);
       const kind = el("span", "guest-kind");
@@ -5853,19 +5892,23 @@ function renderGuestInbox(view) {
         ? phrase("span", "guest-wait", "Waiting on the owner for ", timeEl("since", item.waiting_since, ""))
         : el("span", "guest-wait", "Waiting on the owner"));
       if (item.stale) row.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
-      cards.set(stateId(item), row);
+      inboxCards.set(stateId(item), row);
       list.appendChild(row);
     }
-    nodes.push(list);
+    document.getElementById("inbox").appendChild(list);
   }
-  inboxCards = cards;
-  document.getElementById("inbox").replaceChildren(...nodes);
+}
+function steered(node) {
+  for (let n = node; n; n = n.parentNode) {
+    if (n.dataset !== undefined && n.dataset.steer === "1") return true;
+  }
+  return false;
 }
 function sweepGuest() {
   for (const id of ["statement", "inbox", "projects"]) {
     for (const tag of ["button", "input", "textarea", "select"]) {
       for (const node of document.querySelectorAll("#" + id + " " + tag)) {
-        if (!GUEST_KEEPS.has(node.className.split(" ")[0])) node.remove();
+        if (!GUEST_KEEPS.has(node.className.split(" ")[0]) && !steered(node)) node.remove();
       }
     }
     for (const link of document.querySelectorAll("#" + id + " a")) {
@@ -5877,8 +5920,12 @@ function renderGuest(view) {
   holdPictures(() => {
     const wasOpen = new Set();
     for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
+    const fresh = view !== lastView;
     lastView = view;
+    recentProjects = view.recent_projects || [];
     renderGuestStatement(view);
+    renderGoal();
+    drawInbox(view, { fresh });
     renderGuestInbox(view);
     renderProjects(view);
     for (const fold of document.querySelectorAll("details")) {

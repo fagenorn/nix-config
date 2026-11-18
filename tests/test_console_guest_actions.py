@@ -12,8 +12,10 @@ from agent_tools.console import guest, service, sprints
 
 from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
+from .test_console_guest_page import GUEST, named, page_of
 from .test_console_guest_service import (
     COLLEAGUE, GOAL, JSON, PARTS, STRANGER, TAILNET, GuestCase)
+from .test_console_page import PAGE, START, full, has_class, nodes
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SECOND = "second@example.invalid"
@@ -365,6 +367,53 @@ class GuestWriteTableTest(GuestWriteCase):
             self.assertNotIn("colleague@", text)
             self.assertNotIn("second@", text)
         self.assertIn("console: ", errors.getvalue())
+
+
+class BothPagesTest(GuestWriteCase):
+    def owner_post(self, svc, path, body):
+        headers = {"Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": self.owner_token(), **JSON}
+        status, _, answer = support.post_page(svc.address, path, headers, json.dumps(body).encode())
+        self.assertEqual(status, 204, answer)
+
+    def test_both_pages_show_who_started_who_answered_and_who_wrote(self):
+        self.seed()
+        svc = self.start()
+        mine = {"project_id": "owner/p01"}
+        status, _ = self.guest_post(svc, "/api/goal", {**mine, "goal": GOAL})
+        self.assertEqual(status, 204)
+        (stated,) = self.rows("goal.stated")
+        sid = stated["sprint_id"]
+        self.brief(svc, sid, 1)
+        mine["sprint_id"] = sid
+        self.assertEqual(self.guest_post(svc, "/api/approve", {**mine, "version": 1})[0], 204)
+        self.ask(svc, sid)
+        self.assertEqual(self.guest_post(svc, "/api/round-answer", {
+            **mine, "round": self.rounds[sid], "question": 0, "choice": 0})[0], 204)
+        self.assertEqual(self.guest_post(svc, "/api/message", {**mine, "text": "keep the reader"})[0],
+                         204)
+        other = "Tidy the settings page"
+        self.owner_post(svc, "/api/goal", {"project_id": "owner/p01", "goal": other})
+        owner_sid = [row["sprint_id"] for row in self.rows("goal.stated")
+                     if row["sprint_id"] != sid][0]
+        self.owner_post(svc, "/api/message", {
+            "project_id": "owner/p01", "sprint_id": owner_sid, "text": "owner note"})
+        owner_frame = json.loads(svc.view_bytes)
+        guest_frame = json.loads(svc.guest_view_bytes(COLLEAGUE))
+        for name, page, frame, noted in (("owner", PAGE.read_bytes(), owner_frame, "You: owner note"),
+                                         ("guest", GUEST, guest_frame, "The owner: owner note")):
+            with self.subTest(name):
+                snap = page_of(page, [START, {"frame": frame}, {"open": "earlier:" + sid}])
+                (first,) = [n for n in nodes(snap["projects"]) if n["tag"] == "li"
+                            and has_class(n, "sprint") and PARTS["title"] in full(n)]
+                (second,) = [n for n in nodes(snap["projects"]) if n["tag"] == "li"
+                             and has_class(n, "sprint") and other in full(n)]
+                self.assertIn("started by " + COLLEAGUE, full(first))
+                self.assertNotIn("started by", full(second))
+                lines = [full(n) for n in named(snap["projects"], "message-text")]
+                self.assertIn(f"Answered by {COLLEAGUE}: {QUESTION['options'][0]}", lines)
+                self.assertIn(f"{COLLEAGUE}: keep the reader", lines)
+                self.assertIn(noted, lines)
 
 
 if __name__ == "__main__":

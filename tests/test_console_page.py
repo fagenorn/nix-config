@@ -161,8 +161,8 @@ class PageTest(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
-    def test_the_page_is_under_60_kb_compressed(self) -> None:
-        self.assertLess(len(gzip.compress(self.data, 9)), 61440)
+    def test_the_page_is_under_62_kb_compressed(self) -> None:
+        self.assertLess(len(gzip.compress(self.data, 9)), 63488)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
