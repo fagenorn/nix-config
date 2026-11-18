@@ -796,7 +796,7 @@ class SprintCommandTest(Case):
         self.assertIsInstance(last.pop("id"), int)
         self.assertEqual(last, {
             "chosen": "sqlite", "kind": "answer", "question": "Which store keeps the checkpoints?",
-            "round": row[0], "text": "sqlite", "version": None})
+            "round": row[0], "text": "sqlite", "version": None, "words": None})
 
     def test_close_sends_the_closing_report_and_a_refusal_exits_1(self):
         svc = self.open()
@@ -1091,6 +1091,15 @@ class ManagerContractTest(unittest.TestCase):
         self.assertEqual(
             sprints.refused_reason("merge refused: required checks are not green"),
             "required checks are not green")
+
+    def test_the_contract_names_needs_words_and_the_owners_words(self):
+        text = " ".join(CONTRACT.read_text().split())
+        section = text.partition("## Questions")[2].partition(" ## ")[0]
+        look = text.partition("## A look before merge")[2].partition(" ## ")[0]
+        for needle in ("`needs_words`", "`words`"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertIn("needs_words", look)
 
     def test_the_report_help_names_its_optional_pictures(self):
         self.assertIn("pictures:", run_sprint("report", "--help").stdout)

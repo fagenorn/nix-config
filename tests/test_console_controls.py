@@ -35,7 +35,7 @@ OPTION_ONLY = frozenset({"btn-option"})
 LINE_ONLY = frozenset({"field-line"})
 AREA_ONLY = frozenset({"field-area"})
 CODE_ONLY = frozenset({"field-code"})
-ANS_PLAIN = ("ans-note", "ans-words", "ans-draft")
+ANS_PLAIN = ("ans-note", "ans-draft")
 ANS_ROLE = "ans-*"
 
 
@@ -55,12 +55,12 @@ DESK_CONTROLS: dict = {
         "signin-send", "signin-cancel", "give-goal", "notice-open", "notice-send",
         "notice-cancel", "notice-withdraw", "ask-open", "ask-send", "ask-cancel", "ask-goal", "follow-open", "follow-send",
         "follow-cancel", "thread-open", "reading-close", "ask-choice", "reply-send", "undo", *ANS_PLAIN, "goal-project",
-        "detail-open", "account-add-open", "account-add-send", "account-add-cancel",
+        "detail-open", "kept-words-dismiss", "account-add-open", "account-add-send", "account-add-cancel",
         "account-code-send", "account-signin-cancel", "account-link-get", "register-open",
         "register-send", "register-cancel", "register-withdraw", "draft-send", "draft-option",
         "draft-cancel", "draft-change", "goal-send", "goal-cancel", "viewer-prev", "viewer-next",
         "viewer-close", "cap", "pic-thumb", "sprint-check", "draft-pick", "activate"),
-    **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "ask-text",
+    **_roles(AREA_ONLY, "tell", "reply-text", "note-text", "words-text", "kept-words-text", "ask-text",
              "follow-text"),
     **_roles(LINE_ONLY, "draft-text", "confirm-text", "account-name", "acct-remove-name",
              "notice-text", "register-path", "goal-filter", "goal-text"),
@@ -193,6 +193,10 @@ def desk_scenarios() -> list:
          {"click": "stop"}, snapshot],
         [START, {"frame": with_sprints([{**SPRINT, "manager_state": "failed",
                                          "manager_text": "no manager", "retry": True}])}, snapshot],
+        # a refused answer whose question left keeps the owner's words on a card of their own
+        [START, {"frame": frame([Q0, Q1])}, words, {"hold": True}, {"click": "send"},
+         {"clock": 5000}, {"frame": frame([])},
+         {"release": {"status": 409, "text": "this question is already answered"}}, snapshot],
         [START, {"frame": with_check([])}, snapshot],
         # the activation line with its Activate button (#1193)
         [START, {"frame": {**view([project(0, [], quiet=True)]), "activation": ACTIVATION}},
@@ -574,7 +578,7 @@ BUSY_ROLES = frozenset({
     "register-withdraw", "send", "retry", "withdraw", "stop-confirm", "stop-cancel", "try-again",
     "stall-withdraw", "start-retry", "start-withdraw", "continue", "progress-withdraw",
     "signin-start", "signin-send", "look-retry",
-    "signin-cancel", "notice-withdraw", "ans-words", "ans-draft", "opt", "words-text", "draft-text"})
+    "signin-cancel", "notice-withdraw", "ans-draft", "opt", "words-text", "draft-text"})
 
 
 def refusal(text: str) -> dict:
@@ -704,8 +708,8 @@ BUSY_SCENARIOS = [
              {"signin-cancel"}),
     busy_row("notice-withdraw", NOTICE_STEPS, held("notice-withdraw"),
              refusal("this notice has ended")),
-    busy_row("ans-words", [START, {"frame": frame([Q0, Q1])}, TYPED_WORDS],
-             held("ans-words", {"clock": 5000}), NO_REPLY, {"ans-words", "words-text", "opt"}),
+    busy_row("question send", [START, {"frame": frame([Q0, Q1])}, TYPED_WORDS],
+             held("send", {"clock": 5000}), NO_REPLY, {"send", "words-text", "opt"}),
     busy_row("ans-draft", [START, {"frame": cards([T0])},
                            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}}],
              held("ans-draft", {"clock": 5000}), refusal("no"), {"ans-draft", "draft-text"}),

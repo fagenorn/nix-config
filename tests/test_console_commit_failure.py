@@ -9,6 +9,7 @@ Run: just agent-workflow-tests
 from __future__ import annotations
 
 import contextlib
+import http.client
 import io
 import json
 import os
@@ -23,9 +24,11 @@ from . import console_test_support as support
 from . import test_console_approve_service as approve_tests
 from .test_console_approve_service import ApproveCase
 from .test_console_register_service import ROOT, CancelChecks, git
-from .test_console_stream import next_view, open_stream
+from .test_console_stream import next_frame, next_view, open_stream
 
 SLUG = "fixture/console-commit-failure"
+GUEST_HOST = "desk.invented-tailnet.ts.net"
+COLLEAGUE = "colleague@example.invalid"
 ERROR_LINE = "console: plan_approve_error "
 CHATTY = ("#!/bin/sh\ni=1\nwhile [ $i -le 12 ]; do echo \"hook line $i\"; i=$((i+1)); done\n"
           "echo \"checking $PWD/README.md\"\necho \"config missing [$0]\" >&2\nexit 1\n")
@@ -147,6 +150,25 @@ class CancelUntilShownTest(CancelChecks, CommitFailureCase):
         self.failed()
         self.branch = approve.branch_of(self.shown["plan_id"])
 
+    def start(self, fake, **kwargs):
+        return super().start(fake, **{"guest_port": 0, **kwargs})
+
+    def open_guest_stream(self, login):
+        """A listed colleague's open guest stream; its response."""
+        support.write_registry(self.registry, support.entries(1))
+        self.svc.refresh()
+        self.svc.set_tailnet(GUEST_HOST)
+        self.svc.set_colleague(login, ("owner/p00",))
+        connection = http.client.HTTPConnection(*self.svc.guest_address, timeout=5)
+        self.addCleanup(connection.close)
+        connection.putrequest("GET", "/api/stream", skip_host=True)
+        connection.putheader("Host", GUEST_HOST)
+        connection.putheader("Tailscale-User-Login", login)
+        connection.endheaders()
+        response = connection.getresponse()
+        self.assertEqual(response.status, 200)
+        return response
+
     def branch_exists(self) -> bool:
         try:
             git(self.repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{self.branch}")
@@ -189,6 +211,13 @@ class CancelUntilShownTest(CancelChecks, CommitFailureCase):
 
     def test_reading_the_state_route_does_not_count_as_shown(self):
         support.get_page(self.svc.address, "/api/state", self.own())
+        self.refused_cancel({"root": str(self.repo)}, register.CANCEL_UNSEEN)
+        self.assertTrue(self.kept_worktree().is_dir())
+
+    def test_a_frame_written_to_a_colleague_does_not_count_as_shown(self):
+        response = self.open_guest_stream(COLLEAGUE)
+        self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
+        time.sleep(0.3)
         self.refused_cancel({"root": str(self.repo)}, register.CANCEL_UNSEEN)
         self.assertTrue(self.kept_worktree().is_dir())
 

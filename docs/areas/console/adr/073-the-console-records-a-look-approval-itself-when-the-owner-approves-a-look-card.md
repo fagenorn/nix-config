@@ -1,4 +1,4 @@
-# ADR-console-072 — The console records a look approval itself when the owner approves a look card
+# ADR-console-073 — The console records a look approval itself when the owner approves a look card
 
 - **Status:** accepted
 - **Decided in:** #1260

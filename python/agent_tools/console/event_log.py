@@ -129,6 +129,13 @@ window, the newest of its assignment rows older than the cutoff (the assignment 
 window opens), so retained hooks keep their profile; once no hook of the session is inside the window
 that row is removed like any other.
 
+Three kinds record the access list the owner keeps for the guest door (#1237): `SHARING_TAILNET`
+(`sharing.tailnet`, `{"tailnet"}`), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
+and `SHARING_REMOVED` (`sharing.removed`, `{"login"}`). None is in `KEPT_KINDS`, but the retention
+pass leaves, whatever its age, the newest tailnet row and, for each login, the newest colleague or
+removed row when it is a colleague row, the rows `guest.access_list` folds by, so the folded list is
+the same before and after a pass.
+
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
 the same call and leaves the connection usable. An empty sequence returns `[]`
@@ -209,6 +216,9 @@ SESSION_PROFILE = "session.profile"
 PICTURE_STORED = "picture.stored"
 ACTIVATION_STARTED = "activation.started"
 ACTIVATION_FINISHED = "activation.finished"
+SHARING_TAILNET = "sharing.tailnet"
+SHARING_COLLEAGUE = "sharing.colleague"
+SHARING_REMOVED = "sharing.removed"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the three question kinds, the look record, the two notice kinds,
@@ -395,7 +405,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -453,13 +463,17 @@ class EventLog:
                     "AND hook.at >= ? AND hook.seq > events.seq AND "
                     "json_extract(hook.payload, '$.session_id') "
                     "IS json_extract(events.payload, '$.session_id'))) "
-                    "AND NOT (kind IN (?, ?) AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
-                    "WHERE newer.kind = events.kind))",
+                    "AND NOT (kind IN (?, ?, ?) AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind = events.kind)) "
+                    "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind IN (?, ?) AND "
+                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login')))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
-                     SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED)).rowcount
+                     SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED, SHARING_TAILNET,
+                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED)).rowcount
 
             return self._transaction(remove)
 

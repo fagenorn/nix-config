@@ -1605,7 +1605,7 @@ class PictureDocsTest(unittest.TestCase):
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193"))
+        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237"))
         text = self.doc(adr008)
         for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
                        "ADR-console-036"):
@@ -1633,7 +1633,8 @@ class PictureDocsTest(unittest.TestCase):
         adr = "docs/areas/console/adr/"
         for path, amended in (
                 ("019-a-managers-questions-arrive-as-inbox-items.md",
-                 "- **Status:** accepted; amended by ADR-console-038, ADR-console-040"),
+                 "- **Status:** accepted; amended by ADR-console-038, ADR-console-040, "
+                 "ADR-console-072"),
                 ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-038 and ADR-console-045")):
             with self.subTest(path):

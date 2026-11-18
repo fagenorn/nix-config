@@ -70,6 +70,7 @@ round is
                     "context": "<optional, at most 400 characters>", "blocks": "<one line>",
                     "options": ["<one line, at most 80 characters>", ...],
                     "recommended": "<exact text of one option>",
+                    "needs_words": ["<exact text of an option>", ...],
                     "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
                                   "pair": "before" | "after"}, ...],
                     "look": {"issue": <n>, "pr": <n>, "head": "<40-hex>", "approve": "<exact text of one option>"},
@@ -78,6 +79,10 @@ round is
 
 `look` is optional and marks the question as the owner's look at a pull request before merge: the console
 checks it and records the owner's approval itself when that option is picked (see the manager contract).
+
+`needs_words` is optional and holds the exact text of each option that needs the owner's own words:
+the page refuses that option until the owner writes what to change, the console checks it
+(`NEEDS_WORDS_SHAPE`) and the command sends it as given.
 
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that
@@ -143,7 +148,8 @@ member of the closing report: the console decides, in one place.
 `{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the owner's messages the manager has
 not read, in id order, each once, and exit 0. An answer to one of the manager's questions (kind
 `answer`) also carries `"question"` (the question's text), `"round"` (the round id) and `"chosen"`
-(the option's text, or null for the owner's own words). An inbox with nothing unread is
+(the option's text, or null for the owner's own words) and `"words"` (the owner's words, or null for
+an option alone). An inbox with nothing unread is
 `{"messages": []}`. Before the inbox request the command sends `POST /api/notices` with the same body
 and, after the JSON line, prints `sprints.notice_block` of that answer: the open notices of the
 project's other sprints, the head line and then one line each, and nothing when there are none, so

@@ -554,7 +554,7 @@ function markBusy(node, busy) {
   if (busy) node.setAttribute("aria-busy", "true");
   else node.removeAttribute("aria-busy");
 }
-// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
+// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037): a word holding a slash is one span.seg per segment with a wbr between.
 function pathWords(node, text) {
   const value = String(text);
   if (!value.includes("/")) {
@@ -814,7 +814,7 @@ let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
-  return message.text;
+  return typeof message.words === "string" ? message.text + ": " + message.words : message.text;
 }
 function messageList(messages) {
   const list = el("ul", "sprint-messages");
@@ -2102,7 +2102,7 @@ function askRows(entry) {
 function askIds(entry) {
   return askRows(entry).map((question) => question.id);
 }
-// Every submission still outstanding: the accepted ones the view has not yet shown and the one in flight, oldest first. Each is matched to its own row among the fresh ones (not held when the first of them was sent, oldest first) whose question carries the same text (the console stores it stripped), the oldest submission taking the oldest such row, so one question's row never stands for another.
+// Every submission still outstanding, oldest first, each matched to its own fresh row with the same (stripped) question text, the oldest to the oldest, so one question's row never stands for another.
 function matchSent(sent, post, fresh) {
   const submissions = [...(sent === undefined ? [] : sent.list), ...(post !== undefined && post.phase === "sending" ? [post] : [])];
   const taken = new Map();
@@ -2127,7 +2127,7 @@ function askOutstanding(projectId, entry) {
   const { submissions, taken } = askMatches(projectId, entry);
   return submissions.filter((submission) => !taken.has(submission));
 }
-// Drops the accepted submissions the view now shows and counts their rows as held, so a later submission is matched only to a row of its own. A question the view carries while its send is still in flight is revealed at once, and only once (its fold the owner closed since stays closed when the send answers).
+// Drops the accepted submissions the view now shows and counts their rows as held; a question revealed while its send is in flight appears once, and a fold the owner closed since stays closed.
 function askReconcile(projectId, entry) {
   const sent = askSent.get(projectId);
   if (sent === undefined) return;
@@ -2353,7 +2353,7 @@ function pendingRow(post) {
   row.appendChild(el("p", "ask-state", post.phase === "sending" ? "Sending\u2026" : "Working on it"));
   return row;
 }
-// A project's Ask block: the open box and the submissions the view does not carry yet, newest first, never a row the view carries. A project whose line is drawn has its button there and draws no block while it has nothing to hold; one without a line keeps its named block holding the button.
+// A project's Ask block: the open box and the submissions the view does not carry yet, newest first; a project whose line is drawn has its button there and no block while it has nothing to hold.
 function askBlock(entry, afterLine, lined) {
   const id = entry.project_id;
   const pending = askOutstanding(id, entry).reverse();
@@ -2570,7 +2570,7 @@ function closeReading() {
   const opener = Array.from(document.querySelectorAll("button.thread-open")).find((button) => button.dataset.key === key);
   if (opener !== undefined) opener.focus();
 }
-// The reading panel in the main column: the open thread's heading, rows, outstanding follow-ups and follow-up box, or hidden and empty when no thread is open or the open one has left the view (#1226, D4). A thread a sent question asked to open is opened once, without moving focus.
+// The reading panel in the main column: the open thread's heading, rows and follow-up box, hidden and empty when no thread is open (#1226, D4). A thread a sent question asked to open is opened once, without moving focus.
 function renderReading(view) {
   const section = document.getElementById("reading");
   if (readingReveal !== null) {
@@ -3154,41 +3154,12 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
-// A look card's one line (#1260): why nothing was recorded, or what the console is doing about the approval; an open look has none.
 function lookLine(item) {
   if (!isQuestion(item) || item.look === null || typeof item.look !== "object" || typeof item.look.line !== "string") return null;
   return el("p", "look-line", item.look.line);
 }
-// An approval the owner gave that the console has not yet put on the tracker: its line, and Retry once the post failed.
 function isLookCard(item) {
   return isQuestion(item) && item.answered === true && item.look !== null && typeof item.look === "object";
-}
-const lookPosts = new Map();
-async function lookRetry(item) {
-  const id = itemId(item);
-  const current = lookPosts.get(id);
-  if (current !== undefined && current.phase === "sending") return;
-  const state = { phase: "sending", reason: "" };
-  lookPosts.set(id, state);
-  redraw();
-  let reason = null;
-  try {
-    const response = await fetch("/api/look-retry", {
-      method: "POST", headers: stallHeaders(),
-      body: JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index }),
-    });
-    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
-  } catch (error) {
-    console.error(error);
-    reason = "the console did not answer";
-  }
-  if (lookPosts.get(id) !== state) return;
-  if (reason === null) lookPosts.delete(id);
-  else {
-    state.phase = "failed";
-    state.reason = reason;
-  }
-  redraw();
 }
 function lookCard(item) {
   const card = el("article", "card look-card");
@@ -3197,14 +3168,17 @@ function lookCard(item) {
   const line = lookLine(item);
   if (line !== null) card.appendChild(line);
   if (item.look.state === "failed") {
-    const again = lookPosts.get(itemId(item));
+    const again = stallPosts.get("look-retry\n" + itemId(item));
     const sending = again !== undefined && again.phase === "sending";
-    const retry = actionButton("look-retry btn-primary", "Retry", () => lookRetry(item));
+    const retry = actionButton("look-retry btn-primary", "Retry", () => stallPost({ sprint_id: itemId(item) }, "look-retry", "Could not retry: ", () => fetch("/api/look-retry", {
+      method: "POST", headers: stallHeaders(),
+      body: JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index }),
+    })));
     if (sending) retry.setAttribute("disabled", "");
     markBusy(retry, sending);
     const act = el("div", "act");
     act.appendChild(retry);
-    if (again !== undefined && again.phase === "failed") act.appendChild(el("span", "fail", "Could not retry: " + again.reason));
+    if (again !== undefined && again.phase === "failed") act.appendChild(el("span", "fail", again.failure + again.reason));
     card.appendChild(act);
   }
   return card;
@@ -3469,7 +3443,7 @@ function isRetry(item) {
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-070): a question card whose first option grants its folder trust and registers it, or updates the checkout, and whose second sets it aside; both post to /api/register-confirm.
+// An already-adopted repository waiting to be registered (ADR-console-034) or a checkout behind its remote (ADR-console-070): a question card whose first option registers or updates it and whose second sets it aside.
 function isConfirm(item) {
   return item.reason === "register_confirm" || item.reason === "register_behind";
 }
@@ -3481,7 +3455,7 @@ function isTrust(item) {
 function isFailure(item) {
   return item.reason === "register_failed";
 }
-// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9), the Register card (ADR-console-034) or a failed registration's card (ADR-console-035): a card like a manager question.
+// An open question of an adoption plan (ADR-console-029 D10), a failed registration (ADR-console-028 D10, -035), the apply card (ADR-console-030 D9) or the Register card (ADR-console-034): a card like a manager question.
 function isRegister(item) {
   return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item) || isFailure(item) || isTrust(item);
 }
@@ -3527,7 +3501,7 @@ function answerState(item) {
     const first = picks.indexOf(null);
     state = {
       phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
-      project_id: item.project_id, key: item.key,
+      project_id: item.project_id, key: item.key, id,
     };
     answers.set(id, state);
   }
@@ -3590,6 +3564,7 @@ function choose(state, qi, oi) {
   state.q = qi;
   state.phase = "choosing";
   state.reason = "";
+  state.notice = "";
 }
 function begin(item, state, pending) {
   state.phase = "waiting";
@@ -3611,9 +3586,31 @@ function planBusy(item, state) {
   }
   return false;
 }
+function needsWords(question, index) {
+  return Array.isArray(question.needs_words_index) && question.needs_words_index.includes(index);
+}
+function startQuestion(item, state) {
+  const words = draftOf(wordsKey(item)).value;
+  const typed = words.trim() !== "";
+  const pick = state.picks[0];
+  const picked = typeof pick === "number";
+  if (!picked && !typed) return false;
+  if (picked && !typed && needsWords(item.questions[0], pick)) {
+    state.notice = WORDS_NEEDED_NOTICE;
+    return true;
+  }
+  state.headline = item.headline;
+  const answer = {};
+  if (picked) answer.choice = pick;
+  if (typed) answer.text = words;
+  return begin(item, state, { round: true, body: roundBody(item, answer) });
+}
+function questionSendOff(item, state) {
+  return !choosable(state) || (typeof state.picks[0] !== "number" && draftOf(wordsKey(item)).value.trim() === "");
+}
 function start(item, state) {
+  if (isQuestion(item)) return choosable(state) && startQuestion(item, state);
   if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
-  if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
   if (isRetry(item)) return begin(item, state, { retry: true, body: { plan_id: item.plan_id } });
   if (isApply(item)) {
     const body = { plan_id: item.plan_id };
@@ -3649,10 +3646,6 @@ function startDraft(item, state, text) {
   const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: text };
   return begin(item, state, { plan: true, body });
 }
-function startWords(item, state, text) {
-  if (!choosable(state) || !isQuestion(item)) return false;
-  return begin(item, state, { round: true, body: roundBody(item, { text }) });
-}
 function startCheck(item, state, answer, extra) {
   if (!choosable(state) || !check(item)) return false;
   return begin(item, state, { check: true, body: { project_id: state.project_id, key: state.key, answer, version: item.version, ...extra } });
@@ -3660,27 +3653,37 @@ function startCheck(item, state, answer, extra) {
 function dropDrafts(id, names) {
   for (const name of names) drafts.delete(id + "\n" + name);
 }
+function openItem(id) {
+  return lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+}
+function withdrawn(id, state) {
+  if (!roundWords(state.pending)) return answers.delete(id);
+  state.phase = "failed";
+  state.again = false;
+  state.kept = state.reason = "the question was withdrawn before the answer was sent";
+}
 function undo(state) {
   if (state.phase !== "waiting") return;
   clearTimeout(state.timer);
   state.timer = null;
   state.phase = "choosing";
+  if (roundWords(state.pending) && openItem(state.id) === undefined) withdrawn(state.id, state);
 }
 function fireAnswer(id) {
   const state = answers.get(id);
   if (state === undefined || state.phase !== "waiting") return;
   state.timer = null;
-  const item = lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+  const item = openItem(id);
   if (item === undefined) {
-    answers.delete(id);
-    return;
-  }
-  sendAnswer(id, state, item);
+    withdrawn(id, state);
+    redraw();
+  } else sendAnswer(id, state, item);
 }
 function postPlanAnswer(body) {
   return fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body: JSON.stringify(body) });
 }
 const NO_REASON = "the console did not say why.";
+const WORDS_NEEDED_NOTICE = "Say what to change.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
     && !state.pending.retry && !state.pending.plan;
@@ -3732,9 +3735,11 @@ async function sendAnswer(id, state, item) {
   } else if (reason === null) {
     dropDrafts(id, ["note", "confirm", "words", "draft"]);
     state.phase = "sent";
+    delete state.kept;
   } else {
     state.phase = "failed";
     state.reason = reason;
+    if (roundWords(state.pending)) state.kept = reason;
   }
   redraw();
 }
@@ -4012,8 +4017,7 @@ function statusLine(act, state, item) {
     act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") {
-      // A look card the console found moved already says so in its own line: the same words twice read as two problems.
-      const said = isQuestion(item) && item.look !== null && typeof item.look === "object" && item.look.state === "moved" && item.look.line === state.reason;
+          const said = isQuestion(item) && item.look !== null && typeof item.look === "object" && item.look.state === "moved" && item.look.line === state.reason;
       if (!said) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
         act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
@@ -4024,13 +4028,40 @@ function statusLine(act, state, item) {
   }
   return true;
 }
-function actionLine(item, state, lead) {
+function roundWords(pending) {
+  return pending !== null && pending !== undefined && pending.round === true && typeof pending.body.text === "string";
+}
+function keptWords(state) {
+  return state.kept !== undefined && roundWords(state.pending);
+}
+function keptWordsCard(id, state) {
+  const card = el("article", "card kept-words");
+  card.appendChild(el("p", "q", state.headline || "A question that is no longer open"));
+  card.appendChild(el("span", "reason", "This question is no longer open. Could not send: " + state.kept));
+  const area = typedArea("kept-words-text field-area", "Your words, not sent", "");
+  const edited = draftOf(id + "\nwords").value;
+  area.value = edited.trim() === "" ? state.pending.body.text : edited;
+  area.readOnly = true;
+  card.appendChild(area);
   const act = el("div", "act");
-  if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
+  act.appendChild(actionButton("kept-words-dismiss btn-quiet", "Dismiss", () => {
+    answers.delete(id);
+    dropDrafts(id, ["words"]);
+    redraw();
+  }));
+  card.appendChild(act);
+  return card;
+}
+function actionLine(item, state, lead, card) {
+  const act = el("div", "act");
+  const idle = !statusLine(act, state, item);
+  if ((idle || isQuestion(item)) && (item.questions.length > 0 || !textCard(item))) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send btn-primary" : "send btn-quiet", words, () => { if (start(item, state)) redraw(); });
-    if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
-    markBusy(send, planBusy(item, state));
+    const off = isQuestion(item) ? questionSendOff(item, state) : !picksComplete(item, state) || planBusy(item, state);
+    if (off) send.setAttribute("disabled", "");
+    if (isQuestion(item)) card.send = send;
+    markBusy(send, isQuestion(item) ? state.phase === "sending" : planBusy(item, state));
     send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
@@ -4078,21 +4109,13 @@ function noteBox(item, state, box) {
   send.disabled = area.value.trim() === "";
   return send;
 }
-function wordsBox(item, state, box) {
+function wordsBox(item, state, box, card) {
   const area = typedArea("words-text field-area", "Answer in your own words", "Answer in your own words");
-  const send = actionButton("ans-words btn-quiet", "Send my words", () => {
-    const text = area.value;
-    if (text.trim() === "") return;
-    if (startWords(item, state, text)) redraw();
-  });
-  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
-  const pending = !choosable(state);
-  box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
-  area.disabled = pending;
+  box.appendChild(draftField(area, wordsKey(item), () => {
+    if (card.send !== null) card.send.disabled = questionSendOff(item, state);
+  }));
+  area.disabled = !choosable(state);
   markBusy(area, state.phase === "sending");
-  send.disabled = pending || area.value.trim() === "";
-  markBusy(send, state.phase === "sending");
-  box.appendChild(send);
 }
 function draftInput(cls, placeholder) {
   const input = el("input", cls);
@@ -4106,7 +4129,6 @@ function draftInput(cls, placeholder) {
 function draftBox(item, state, box) {
   const input = draftInput("draft-text field-line", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
   const row = el("div", "draft-row");
-  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
   const pending = !choosable(state) || planBusy(item, state);
   const submit = () => {
     const text = input.value.trim();
@@ -4206,7 +4228,7 @@ function answerBox(item, state, lead) {
       if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
-        choose(state, qi, oi);
+        choose(state, qi, isQuestion(item) && state.picks[qi] === oi ? null : oi);
         redraw();
       });
       const row = el("li");
@@ -4219,9 +4241,10 @@ function answerBox(item, state, lead) {
     const held = heldLine(item);
     if (held !== null) box.appendChild(held);
   }
-  if (isQuestion(item)) wordsBox(item, state, box);
+  const card = { send: null };
+  if (isQuestion(item)) wordsBox(item, state, box, card);
   if (textCard(item)) draftBox(item, state, box);
-  box.appendChild(actionLine(item, state, lead));
+  box.appendChild(actionLine(item, state, lead, card));
   return box;
 }
 function boxState(item) {
@@ -4401,12 +4424,9 @@ function drawInbox(view) {
   const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
-    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
+    const shown = key.startsWith("look-retry\n") ? looks : key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
       : key.startsWith("start-retry\n") || key.startsWith("start-withdraw\n") ? starts : stalls;
-    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
-  }
-  for (const id of [...lookPosts.keys()]) {
-    if (lookPosts.get(id).phase !== "sending" && !looks.some((item) => itemId(item) === id)) lookPosts.delete(id);
+    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id || itemId(item) === id)) stallPosts.delete(key);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
   const profiles = view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
@@ -4466,7 +4486,7 @@ function drawInbox(view) {
         continue;
       }
     }
-    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
+    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending" && !keptWords(state);
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
   }
   for (const id of [...replaced.keys()]) {
@@ -4476,7 +4496,7 @@ function drawInbox(view) {
     if (key.startsWith("draft:")) continue;
     const id = key.split("\n")[0];
     const state = answers.get(id);
-    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending");
+    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending" || keptWords(state));
     if (!present.has(id) && !busy) drafts.delete(key);
   }
   const current = currentEntry(open);
@@ -4489,6 +4509,9 @@ function drawInbox(view) {
   for (const item of starts) section.appendChild(failedStartCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
+  for (const [id, state] of answers) {
+    if (!present.has(id) && keptWords(state)) section.appendChild(keptWordsCard(id, state));
+  }
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
   for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
@@ -4672,7 +4695,7 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
-// The activation line (#1114, #1193, ADR-console-043): the one sentence at the head of the Work column about activating this host, drawn with pathWords so a path breaks after a slash. While Activate is offered the line ends with its button; a refusal of the click shows beside it until a frame brings a different line.
+// The activation line (#1114, #1193, ADR-console-043): one sentence at the head of the Work column, ending with its Activate button while it is offered; a refusal shows beside it until a frame brings a different line.
 function activationLine(view) {
   const found = view.activation;
   if (found === null || typeof found !== "object") {

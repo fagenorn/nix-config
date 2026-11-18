@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for issue 1237: the last request on the console's guest port came through Tailscale
+# Serve with the tailnet name as its Host and one login header of Serve's own, and a client-sent
+# login did not arrive as sent. verify-pending runs it from the repository root at the commit the
+# block names. Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.console.serve_probe_check "$@"

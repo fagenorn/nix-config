@@ -1668,11 +1668,13 @@ def asked(seq, sprint_id, questions, **extra):
                   "questions": questions, **extra})
 
 
-def answer_row(seq, sprint_id, round_id, index, answer, chosen, question="q", recommended="files"):
+def answer_row(seq, sprint_id, round_id, index, answer, chosen, question="q", recommended="files",
+               words=None):
     return Event(seq, at(seq), event_log.QUESTION_ANSWERED, "owner/p00",
                  {"sprint_id": sprint_id, "goal": "one", "round": round_id, "index": index,
                   "question": question, "answer": answer, "chosen": chosen,
-                  "recommended": recommended, "differs": False})
+                  "recommended": recommended, "differs": False,
+                  **({} if words is None else {"words": words})})
 
 
 def approved_rows():
@@ -2106,7 +2108,9 @@ class RoundParseTest(unittest.TestCase):
         self.assertEqual(
             sprints.parse_round_answer(answer(question=1, choice=..., text="use the reader")),
             ("owner/p01", SID, 41, 1, None, "use the reader"))
-        for body in (answer(text="x"), answer(choice=...), answer(round=0), answer(round=True),
+        self.assertEqual(sprints.parse_round_answer(answer(text="make it shorter")),
+                         ("owner/p01", SID, 41, 0, 1, "make it shorter"))
+        for body in (answer(choice=...), answer(round=0), answer(round=True),
                      answer(question=-1), answer(choice=True), answer(choice=-1),
                      answer(choice=..., text=5), answer(extra=1), answer(sprint_id="ABC"),
                      answer(project_id=""), b"[1]", b"\xff", b"[" * 100000,
@@ -2120,6 +2124,18 @@ class RoundParseTest(unittest.TestCase):
 
 def question_state(events):
     return sprints.sprint_states([*approved_rows(), *events])[SID]
+
+
+class NeedsWordsTest(unittest.TestCase):
+    def test_a_question_may_mark_the_options_that_need_words(self):
+        checked = sprints.checked_round({"questions": [{**QUESTION, "needs_words": [" files "]}]})
+        self.assertEqual(checked["questions"][0]["needs_words"], ["files"])
+        self.assertNotIn("needs_words",
+                         sprints.checked_round({"questions": [QUESTION]})["questions"][0])
+        for value in ("files", [], [5], ["redis"], ["files", "files"]):
+            with self.subTest(value=value), self.assertRaises(sprints.Refused) as raised:
+                sprints.checked_round({"questions": [{**QUESTION, "needs_words": value}]})
+            self.assertEqual(str(raised.exception), sprints.NEEDS_WORDS_SHAPE.format(n=1))
 
 
 class QuestionFoldTest(unittest.TestCase):
@@ -2161,10 +2177,29 @@ class QuestionFoldTest(unittest.TestCase):
         self.assertEqual(
             sprints.inbox_entry(state.messages[-2]),
             {"id": 42, "kind": "answer", "version": None, "text": "sqlite", "at": at(42),
-             "question": "Which store keeps the checkpoints?", "round": 41, "chosen": "sqlite"})
+             "question": "Which store keeps the checkpoints?", "round": 41, "chosen": "sqlite",
+             "words": None})
+        self.assertEqual(sprints.inbox_entry(state.messages[-1])["words"], "use the reader")
         kept = question_state([asked(41, SID, [QUESTION]),
                                answer_row(42, SID, 41, 0, "files", "files")])
         self.assertIs(kept.questions[0].differs, False)
+
+    def test_an_answer_with_an_option_and_words_folds_both(self):
+        state = question_state([asked(41, SID, [{**QUESTION, "needs_words": ["sqlite"]}]),
+                                answer_row(42, SID, 41, 0, "sqlite", "sqlite",
+                                           words="make it shorter")])
+        (q,) = state.questions
+        self.assertEqual(q.needs_words, ("sqlite",))
+        self.assertEqual((q.answer, q.chosen, q.words), ("sqlite", "sqlite", "make it shorter"))
+        self.assertEqual(
+            sprints.inbox_entry(state.messages[-1]),
+            {"id": 42, "kind": "answer", "version": None, "text": "sqlite", "at": at(42),
+             "question": QUESTION["question"], "round": 41, "chosen": "sqlite",
+             "words": "make it shorter"})
+        recommended = question_state([asked(41, SID, [QUESTION]),
+                                      answer_row(42, SID, 41, 0, "files", "files",
+                                                 words="keep it short")])
+        self.assertIs(recommended.questions[0].differs, False)
 
     def test_a_round_before_approval_or_malformed_changes_nothing(self):
         early = [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS),
@@ -2180,6 +2215,8 @@ class QuestionFoldTest(unittest.TestCase):
                     answer_row(50, SID, True, 0, "x", None),
                     answer_row(50, SID, 41, True, "x", None),
                     answer_row(50, SID, 41, 0, 5, None),
+                    answer_row(50, SID, 41, 0, "x", None, words="w"),
+                    answer_row(50, SID, 41, 0, "sqlite", "sqlite", words=5),
                     asked(50, "fedcba9876543210", [QUESTION])):
             with self.subTest(row=row.payload):
                 self.assertEqual(question_state([*base, row]), before)
