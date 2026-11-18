@@ -75,7 +75,7 @@ def fake_browser(present):
                 return list(shots.FILLED_GOAL)
             if expression == shots.ACTIVATION_READING:
                 self.reads += 1
-                return list(shots.ACTIVATION_SHOWN)
+                return list(shots.ACTIVATION_SHOWN["activation-tooling"])
             if expression == shots.ACTS_ROW:
                 return []
             if expression == shots.SCROLL_Y:
@@ -102,25 +102,25 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twenty_nine_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 29)
+    def test_the_set_is_thirty_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 30)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES.index("waiting-its-turn"),
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-10:], ("goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-10:], ("goal-over", "inbox-card",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
-                                              "activation-line"))
+                                              "activation-tooling", "activation-host"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
     def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
         words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine"}
+                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -205,7 +205,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(page.reads, 1 if ask else 0)
                 self.assertEqual(field in page.waits, bool(clicks))
 
-    def test_an_activation_line_shot_without_the_line_and_its_button_fails_the_command(self) -> None:
+    def test_an_activation_shot_without_its_line_and_button_fails_the_command(self) -> None:
         def run(shot):
             out = StringIO()
             with tempfile.TemporaryDirectory() as tmp, \
@@ -214,37 +214,41 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 code = shots.main(["--out", tmp])
             return code, out.getvalue()
 
-        self.assertEqual(shots.ACTIVATION_SHOWN, (
-            "A change to the host configuration merged at 125812581258 and is not active on this "
-            "host.", 1))
+        self.assertEqual(shots.ACTIVATION_SHOWN, {
+            "activation-tooling": (
+                "A change to the agent tooling merged at 125812581258 and is not active on this "
+                "host.", 1),
+            "activation-host": (
+                "A change to the host configuration merged at 125812581258 and is not active on "
+                "this host.", 1)})
         phrase = "does not show the activation line with its Activate button"
-        for line in ((None, 1), (shots.ACTIVATION_SHOWN[0], 0), (shots.ACTIVATION_SHOWN[0], 2),
-                     ("A console change merged at 125812581258 is not active on this host.", 1)):
-            with self.subTest(line=line):
-                code, text = run(lambda path: shots.Shot("activation-line", 480, path, 480,
-                                                         activation=line))
-                self.assertEqual(code, 1)
-                self.assertIn(phrase, text)
-        code, text = run(lambda path: shots.Shot("activation-line", 480, path, 480,
-                                                 activation=shots.ACTIVATION_SHOWN))
-        self.assertEqual(code, 0)
-        self.assertNotIn(phrase, text)
-        self.assertEqual(shots.ACTIVATION_BASE, (None, 0))
-        code, text = run(lambda path: shots.Shot("activation-line", 480, path, 480,
-                                                 activation=shots.ACTIVATION_BASE))
-        self.assertEqual(code, 0)
+        for state, shown_ in shots.ACTIVATION_SHOWN.items():
+            other = next(v for k, v in shots.ACTIVATION_SHOWN.items() if k != state)
+            for line in ((None, 1), (shown_[0], 0), (shown_[0], 2), other,
+                         ("A console change merged at 125812581258 is not active on this host.", 1)):
+                with self.subTest(state=state, line=line):
+                    code, text = run(lambda path: shots.Shot(state, 480, path, 480, activation=line))
+                    self.assertEqual(code, 1)
+                    self.assertIn(phrase, text)
+            code, text = run(lambda path: shots.Shot(state, 480, path, 480, activation=shown_))
+            self.assertEqual(code, 0)
+            self.assertNotIn(phrase, text)
+            self.assertEqual(shots.ACTIVATION_BASE, (None, 0))
+            code, text = run(lambda path: shots.Shot(state, 480, path, 480,
+                                                     activation=shots.ACTIVATION_BASE))
+            self.assertEqual(code, 0)
         code, text = run(lambda path: shots.Shot("live-several", 480, path, 480,
                                                  activation=(None, 1)))
         self.assertEqual(code, 0)
 
-    def test_the_activation_line_shot_reads_the_line_only_in_its_own_state(self) -> None:
-        for state, reads in (("activation-line", 1), ("live-several", 0)):
+    def test_the_activation_shots_read_the_line_only_in_their_own_states(self) -> None:
+        for state, reads in (("activation-tooling", 1), ("activation-host", 1), ("live-several", 0)):
             with self.subTest(state), tempfile.TemporaryDirectory() as tmp:
                 browser, page = fake_browser(set())
                 shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
                 self.assertEqual(page.reads, reads)
-                self.assertEqual(shot.activation,
-                                 tuple(shots.ACTIVATION_SHOWN) if reads else None)
+                self.assertEqual(shot.activation, tuple(
+                    shots.ACTIVATION_SHOWN["activation-tooling"]) if reads else None)
 
     def test_an_ask_goal_shot_without_the_filled_box_fails_the_command(self) -> None:
         def run(shot):
@@ -757,11 +761,10 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         again.close()
                 elif state == "inbox-card":
                     self.assertEqual(len(view["inbox"]["open"][0]["questions"][0]["options"]), 2)
-                elif state == "activation-line":
+                elif state in ("activation-tooling", "activation-host"):
                     self.assertEqual(running, [])
                     self.assertEqual(view["activation"], {
-                        "text": "A change to the host configuration merged at 125812581258 and is "
-                                "not active on this host.",
+                        "text": shots.ACTIVATION_SHOWN[state][0],
                         "state": "pending", "commit": "1258" * 10,
                         "root": str(fixture.projects[1]), "activate": True})  # sorted: api
                     self.assertEqual(view["statement"]["inbox_items"], 0)
@@ -1045,7 +1048,8 @@ class ScreenshotReadingTest(unittest.TestCase):
             [False, None, False]])
 
     def test_the_activation_reading_reads_the_line_and_its_visible_buttons(self) -> None:
-        text_ = shots.ACTIVATION_SHOWN[0]
+        shown_ = shots.ACTIVATION_SHOWN["activation-host"]
+        text_ = shown_[0]
 
         def work(*, style="", buttons=1, line=True):
             body = ('<p class="activation"' + (f' style="{style}"' if style else "") + '><span><span>'
@@ -1057,7 +1061,7 @@ class ScreenshotReadingTest(unittest.TestCase):
             [work(), work(buttons=0), work(buttons=2), work(style="display:none"), work(line=False)],
             shots.ACTIVATION_READING)
         self.assertEqual(found, [
-            list(shots.ACTIVATION_SHOWN), [text_, 0], [text_, 2], [None, 0], [None, 0]])
+            list(shown_), [text_, 0], [text_, 2], [None, 0], [None, 0]])
 
     def test_the_goal_reading_reads_the_filled_box(self) -> None:
         filled = shots.FILLED_GOAL[1]

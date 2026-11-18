@@ -17,10 +17,10 @@ ADR-console-043 D1 and ADR-system-004 D8 tied the activation line to console fil
 
 **D4. A failed read keeps the line.** A revision that cannot be read, or one whose commit the checkout lacks, is a failed read as in ADR-console-043 D8: the last line stays and one stderr line is written; it is never "nothing to activate".
 
-**D5. A failed run stays retryable.** The host's configuration revision can reach the commit before switch-to-configuration fails (ADR-system-004 D5), which empties the comparison of D1. So a failed run for the shown commit keeps Activate while the tip is that commit, pending or not; the line's Activate and the page write's `nothing to activate` refusal are decided by the same rule. An activated run is unchanged.
+**D5. A failed run stays retryable for a day.** The host's configuration revision can reach the commit before switch-to-configuration fails (ADR-system-004 D5), which empties the comparison of D1. So a failed run for the shown commit keeps Activate while the tip is that commit and, with nothing pending, for 24 hours after the run finished (`OUTCOME_MS`); after that, with nothing pending, the line goes as ADR-system-004 D9 says, so a host the owner switched by hand does not read "failed" for as long as the tip stays put. The line's Activate and the page write's `nothing to activate` refusal are decided by the same rule. An activated run is unchanged.
 
 ## Consequences
 
-- This amends ADR-console-043 D1 (a change outside the console files now shows the line) and ADR-system-004 D6 and D8 (the line shows for any host-built change; an activation that does not change the console need not restart it, and the run's own scope and recorded exit settle it as before).
+- This amends ADR-console-043 D1 (a change outside the console files now shows the line) and ADR-system-004 D6, D8 and D9 (the line shows for any host-built change; an activation that does not change the console need not restart it, and the run's own scope and recorded exit settle it as before; a failed run's line and its Activate, which D9 keeps while the reading's commit equals the run's, now also end 24 hours after the run finished when nothing is pending, D5).
 - ADR-system-004 D3's guard sentence is unchanged: every wording ends "is not active on this host".
 - Related: ADR-console-001, ADR-console-043, ADR-system-004.

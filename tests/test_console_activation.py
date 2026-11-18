@@ -401,11 +401,19 @@ class ActivationViewTest(Trees):
 
     def test_a_failed_run_for_the_shown_commit_stays_retryable_with_nothing_pending(self):
         run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
-        for now in (NOW, NOW + view.OUTCOME_MS):
+        for now in (NOW, NOW + view.OUTCOME_MS - 1001):
             with self.subTest(now=now):
                 line = view.derive_view(
                     [], activation=Activation("/srv/cfg", (), C), activation_run=run, now_ms=now)["activation"]
                 self.assertEqual((line["state"], line["commit"], line["activate"]), ("failed", C, True))
+
+    def test_a_failed_run_for_the_shown_commit_clears_a_day_after_it_finished_with_nothing_pending(self):
+        run = LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
+        for now in (NOW + view.OUTCOME_MS - 1000, NOW + 10 * 24 * 3600 * 1000):
+            with self.subTest(now=now):
+                self.assertIsNone(view.derive_view(
+                    [], activation=Activation("/srv/cfg", (), C), activation_run=run,
+                    now_ms=now)["activation"])
 
     def test_an_activated_run_with_nothing_pending_offers_nothing(self):
         run = LastRun(C, "/srv/cfg", "activated", None, None, NOW - 1000)
@@ -416,7 +424,7 @@ class ActivationViewTest(Trees):
             [], activation=Activation("/srv/cfg", (), C), activation_run=run,
             now_ms=NOW + view.OUTCOME_MS)["activation"])
 
-    def test_offers_activate_is_a_pending_change_or_a_failed_run_for_the_shown_commit(self):
+    def test_offers_activate_is_a_pending_change_or_a_fresh_failed_run_for_the_shown_commit(self):
         none = Activation("/srv/cfg", (), C)
 
         def failed(commit):
@@ -426,11 +434,16 @@ class ActivationViewTest(Trees):
             (None, None, False), (None, failed(C), False), (none, None, False), (READ, None, True),
             (Activation("/srv/cfg", (), C, (SKILL,)), None, True), (none, failed(C), True),
             (none, failed("d" * 40), False),
+            (none, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - view.OUTCOME_MS + 1), True),
+            (none, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - view.OUTCOME_MS), False),
+            (none, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, None), False),
+            (READ, LastRun(C, "/srv/cfg", "failed", FAILURE, NEXT, NOW - view.OUTCOME_MS), True),
             (none, LastRun(C, "/srv/cfg", "activated", None, None, NOW), False),
             (none, LastRun(C, "/srv/cfg", "running", None, None, None), False))
         for index, (reading_, run, expected) in enumerate(table):
             with self.subTest(row=index):
-                self.assertIs(view.offers_activate(reading_, run), expected)
+                self.assertIs(view.offers_activate(reading_, run, NOW), expected)
+        self.assertIs(view.offers_activate(none, failed(C), None), False)
 
     def test_a_newer_pending_commit_replaces_an_old_outcome(self):
         run = LastRun("d" * 40, "/srv/cfg", "failed", FAILURE, NEXT, NOW - 1000)
@@ -762,6 +775,35 @@ class ActivatePageWriteTest(Trees):
                 time.sleep(0.05)
             self.assertEqual((status, body), (204, b""))
             self.await_finished(2)
+
+    def test_a_failed_run_is_no_longer_retryable_a_day_after_it_finished_once_the_host_runs_the_commit(self):
+        skew = [0.0]
+        pending = Activation(str(self.checkout), (), self.commit, (SKILL,))
+        host = [pending]
+        svc = self.open(reader=lambda roots: host[0],
+                        activator=self.activator("raise SystemExit(4)\n"),
+                        clock=lambda: time.time() + skew[0])
+        self.assertEqual((shown(svc)["state"], shown(svc)["activate"]), ("pending", True))
+        status, _, body = self.post(svc)
+        self.assertEqual((status, body.strip()), (204, b""))
+        self.await_finished()
+        host[0] = Activation(str(self.checkout), (), self.commit)
+        svc.poll_activation()
+        line = shown(svc)
+        self.assertEqual((line["state"], line["activate"]), ("failed", True))
+        skew[0] = 10 * 24 * 3600
+        svc.poll_activation()
+        svc._publish()
+        self.assertIsNone(shown(svc))
+        deadline = time.monotonic() + 20
+        while True:
+            status, _, body = self.post(svc)
+            if body.strip() != b"an activation is already running":
+                break
+            self.assertLess(time.monotonic(), deadline, "the first run's claim was never released")
+            time.sleep(0.05)
+        self.assertEqual((status, body.strip()), (409, b"nothing to activate"))
+        self.assertEqual(len(self.payloads("activation.started")), 1)
 
     def test_an_approved_activation_runs_the_stand_in_once_for_the_shown_commit(self):
         svc = self.open()

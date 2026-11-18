@@ -1949,7 +1949,8 @@ class DocsTreeTest(unittest.TestCase):
         adr = self.doc("docs/areas/console/adr/" + found[0].name)
         needles = ["#1258", "ADR-console-043", "ADR-system-004", "configuration revision",
                    "git diff-tree", "-dirty", "is a failed read",
-                   "a failed run for the shown commit keeps Activate"]
+                   "a failed run for the shown commit keeps Activate",
+                   "24 hours after the run finished", "ADR-system-004 D6, D8 and D9"]
         needles += [f"`{p}`" for p in
                     activation.NOT_BUILT_DIRS + activation.NOT_BUILT_FILES + view.AGENT_TOOLING]
         needles += [t.replace("{commit}", "<commit>") for t in
@@ -1971,6 +1972,9 @@ class DocsTreeTest(unittest.TestCase):
             status("docs/areas/system/adr/004-host-activation-runs-only-through-the-consoles-"
                    "activate.md"),
             "- **Status:** accepted; amended by ADR-console-072")
+        self.assertIn("ADR-console-072 D5 amends it",
+                      self.doc("docs/areas/system/adr/004-host-activation-runs-only-through-the-"
+                               "consoles-activate.md"))
         lines = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         entry = lines[lines.index("**Activation line**:") + 1]
         self.assertIn("ADR-console-072", entry)

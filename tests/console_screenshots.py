@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twenty-nine screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -48,20 +48,21 @@ Contract:
   question back with three choices; on a page with the reading panel (`READING_PANEL`) the
   Questions fold and the thread's line are clicked, so the answer reads in the main column, and
   on a page without it the fold and the thread's summary are clicked, which is the before
-  picture, its reading None). `activation-line` is the desk with no sprint and an activation reading
-  of two merged changes this host is built from, one under `python/` and one in the host
-  configuration, neither a console file, so its one line reads `ACTIVATION_SHOWN` (the
-  host-configuration wording, the longest of the plain-words wordings, and one Activate button;
-  the page draws one activation line, so one picture shows one wording); it is shot with a
-  stand-in reading, no run and no activator. On a page that cannot read `other` the reading holds
-  no change, the line is absent and its reading is `ACTIVATION_BASE`, which is the before
-  picture. On a page with the reading panel the other ask states click
+  picture, its reading None). `activation-tooling` and `activation-host` are the desk with no sprint and an
+  activation reading of merged changes this host is built from, none a console file: the first
+  changes only agent tooling (a `python/` file and a skill), so its one line reads the
+  agent-tooling wording; the second also changes the host configuration, so its line reads the
+  host-configuration wording (the page draws one activation line, so each picture shows one
+  wording, and `ACTIVATION_SHOWN` holds the line and the one Activate button each reads); each is
+  shot with a stand-in reading, no run and no activator. On a page that cannot read `other` the
+  reading holds no change, the line is absent and its reading is `ACTIVATION_BASE`, which is the
+  before picture. On a page with the reading panel the other ask states click
   through it: `ask-box` the fold and `owner/web`'s answered thread's line (its reading is then
   `HEAD_ASK`: the field shown, the working question's line, the panel's Read line), `ask-goal`
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 58 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 60 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -84,7 +85,7 @@ Contract:
   the sprint block's content, `OPEN_TELL`); or when an `ask-box` shot of a page that has the `ASK_OPEN`
   button does not show `owner/web`'s open field, its working question and its answered question's
   Read line (`OPEN_ASK`, or `HEAD_ASK` on a page with the reading panel); or when a
-  `activation-line` shot reads neither `ACTIVATION_SHOWN` nor `ACTIVATION_BASE`; or when a
+  `activation-tooling` or `activation-host` shot reads neither its `ACTIVATION_SHOWN` entry nor `ACTIVATION_BASE`; or when a
   `question-read` shot on a page with the panel does not read `READ_SHOWN` (`READ_READING`: the
   panel in the main column at the column's full width, the question once (counted from the question the shot was seeded with, an argument of
   the script), the answer holding bold,
@@ -139,7 +140,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "nothing-running", "waiting-its-turn", "manager-cannot-hear", "owner-check", "spend-page", "notices-fold",
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read", "activation-line")
+          "ask-goal", "question-read", "activation-tooling", "activation-host")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -180,9 +181,15 @@ DESK_OUTSIDE = "outside-1136"
 DEAF_MANAGER = "manager-1229"
 READING_PANEL = "section#reading"
 ACTIVATION_COMMIT = "1258" * 10
-ACTIVATION_PATHS = ("python/agent_tools/system/util.py", "hosts/common/common-packages.nix")
-ACTIVATION_SHOWN = ("A change to the host configuration merged at 125812581258 and is not active "
-                    "on this host.", 1)
+ACTIVATION_PATHS = {
+    "activation-tooling": ("python/agent_tools/system/util.py",
+                           "home/common/agent-skills/skills/deliver-standard/SKILL.md"),
+    "activation-host": ("python/agent_tools/system/util.py", "hosts/common/common-packages.nix")}
+ACTIVATION_SHOWN = {
+    "activation-tooling": ("A change to the agent tooling merged at 125812581258 and is not active "
+                           "on this host.", 1),
+    "activation-host": ("A change to the host configuration merged at 125812581258 and is not "
+                        "active on this host.", 1)}
 ACTIVATION_BASE = (None, 0)
 ACTIVATION_READING = """(() => {
   const line = document.querySelector('#projects p.activation');
@@ -291,7 +298,7 @@ class Fixture:
     projects: tuple[Path, ...]
     holding: tuple[int, ...] = ()
     deaf: bool = False
-    activating: bool = False
+    activating: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -549,7 +556,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "session_id": DESK_OUTSIDE, "cwd": web_root, "repo": web_root,
             "state": "working", "name": "importer run"})
         return running, ended
-    elif state not in ("nothing-running", "activation-line"):
+    elif state not in ("nothing-running", *ACTIVATION_PATHS):
         raise ValueError(f"unknown state {state!r}")
     return ()
 
@@ -661,7 +668,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
-        activating=state == "activation-line")
+        activating=ACTIVATION_PATHS.get(state, ()))
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -700,10 +707,12 @@ def _seed_lock_run(service: ConsoleService, fixture: Fixture, now_s: float) -> N
     service.poll_deliveries()
 
 
-def _activation_reader(roots):
+def _activation_reader(paths: tuple[str, ...]):
     """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
-    other = {"other": ACTIVATION_PATHS} if "other" in Activation.__dataclass_fields__ else {}
-    return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
+    def read(roots):
+        other = {"other": paths} if "other" in Activation.__dataclass_fields__ else {}
+        return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
+    return read
 
 
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None) -> ConsoleService:
@@ -718,7 +727,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         forge["pull_reader"] = lambda slug, pattern, *, cancelled: (
             PullRequest(7, frozenset(fixture.holding), False, None, True),)
     if fixture.activating:
-        forge["activation_reader"] = _activation_reader
+        forge["activation_reader"] = _activation_reader(fixture.activating)
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
@@ -979,7 +988,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                 for selector in (ASK_FOLD, READ_BASE_THREAD):
                     page.click(selector)
         activation = None
-        if state == "activation-line":
+        if state in ACTIVATION_PATHS:
             activation = tuple(page.evaluate(ACTIVATION_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
@@ -1061,8 +1070,8 @@ def main(argv: list[str] | None = None) -> int:
                    else shot.reading not in shown)]
     for shot in unread:
         print(f"console-screenshots: {shot.path.name} does not show the answer in the main column")
-    unlined = [shot for shot in taken if shot.state == "activation-line"
-               and shot.activation not in (ACTIVATION_SHOWN, ACTIVATION_BASE)]
+    unlined = [shot for shot in taken if shot.state in ACTIVATION_SHOWN
+               and shot.activation not in (ACTIVATION_SHOWN[shot.state], ACTIVATION_BASE)]
     for shot in unlined:
         print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
               "Activate button")

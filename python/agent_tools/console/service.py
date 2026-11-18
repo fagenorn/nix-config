@@ -859,7 +859,8 @@ The owner's Activate (#1193): `POST /api/activate`, a page write whose body is e
 object `{"commit": <40 lowercase hex>}` of at most `MAX_ACTIVATE_BYTES` (the `_json_body` 411, 415
 and 413 rules apply; any other body is 400 `bad activation`). It is answered 409 `text/plain`, one
 line, appending nothing, in this order: `nothing to activate` (no `activator`, no reading, or a
-reading with nothing pending whose commit is not that of a failed run, `view.offers_activate`);
+reading with nothing pending whose commit is not that of a run that failed less than a day ago,
+`view.offers_activate`);
 `an activation is already running`;
 `that commit is no longer the tip of origin's integration branch` (the body's commit is not the
 shown reading's); then a fresh
@@ -6731,7 +6732,8 @@ class ConsoleService:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
         with self._ingest:
             reading = self._activation
-            if self._activator is None or not offers_activate(reading, self._activation_run):
+            if self._activator is None or not offers_activate(
+                    reading, self._activation_run, self.received_ms()):
                 raise sprints.Refused(ACTIVATE_NOTHING)
             if self._activating:
                 raise sprints.Refused(ACTIVATE_RUNNING)
