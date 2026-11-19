@@ -1062,9 +1062,15 @@ class ManagerContractTest(unittest.TestCase):
 
     def test_the_contract_requires_owner_only_on_a_permission_escalation(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
-        self.assertIn("`owner_only`: required `true` on a question that escalates a permission "
-                      "or overlaps another sprint's claim", text)
+        self.assertIn("`owner_only`: required `true` on a question that escalates a permission, "
+                      "overlaps another sprint's claim or asks for a release, paid or production "
+                      "decision, otherwise optional", text)
         self.assertIn("a colleague who started the sprint cannot answer it", text)
+
+    def test_the_contract_does_not_say_the_owner_stated_every_goal(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertNotIn("one goal the owner stated", text)
+        self.assertIn("one goal stated on the console", text)
 
     def test_the_inbox_help_names_a_colleague_s_message(self):
         listing = " ".join(run_sprint("--help").stdout.split())

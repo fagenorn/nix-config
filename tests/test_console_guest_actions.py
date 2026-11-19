@@ -113,8 +113,10 @@ class GuestWriteCase(GuestCase):
         self.assertEqual(status, 200, answer)
         return json.loads(answer)["picture"]
 
-    def ask(self, svc, sid, pictures=(), owner_only=False):
+    def ask(self, svc, sid, pictures=(), owner_only=False, text=None):
         question = dict(QUESTION)
+        if text is not None:
+            question["question"] = text
         if owner_only:
             question["owner_only"] = True
         if pictures:
@@ -641,9 +643,34 @@ class BothPagesTest(GuestWriteCase):
                 self.assertIn("started by " + COLLEAGUE, full(first))
                 self.assertNotIn("started by", full(second))
                 lines = [full(n) for n in named(snap["projects"], "message-text")]
-                self.assertIn(f"Answered by {COLLEAGUE}: {QUESTION['options'][0]}", lines)
+                self.assertIn(f"Answered by {COLLEAGUE}: {QUESTION['question']} "
+                              f"Answer: {QUESTION['options'][0]}", lines)
                 self.assertIn(f"{COLLEAGUE}: keep the reader", lines)
                 self.assertIn(noted, lines)
+
+    def test_two_questions_with_the_same_answer_read_differently_in_the_history(self):
+        self.seed()
+        svc = self.start()
+        mine = {"project_id": "owner/p01"}
+        self.assertEqual(self.guest_post(svc, "/api/goal", {**mine, "goal": GOAL})[0], 204)
+        (stated,) = self.rows("goal.stated")
+        sid = stated["sprint_id"]
+        self.brief(svc, sid, 1)
+        mine["sprint_id"] = sid
+        self.assertEqual(self.guest_post(svc, "/api/approve", {**mine, "version": 1})[0], 204)
+        asks = ("May the reader change?", "May the writer change?")
+        for text in asks:
+            self.ask(svc, sid, text=text)
+            self.assertEqual(self.guest_post(svc, "/api/round-answer", {
+                **mine, "round": self.rounds[sid], "question": 0, "choice": 0})[0], 204)
+        owner_frame = json.loads(svc.view_bytes)
+        guest_frame = json.loads(svc.guest_view_bytes(COLLEAGUE))
+        for name, page, frame in (("owner", PAGE.read_bytes(), owner_frame), ("guest", GUEST, guest_frame)):
+            with self.subTest(name):
+                snap = page_of(page, [START, {"frame": frame}, {"open": "earlier:" + sid}])
+                lines = [full(n) for n in named(snap["projects"], "message-text")]
+                for text in asks:
+                    self.assertIn(f"Answered by {COLLEAGUE}: {text} Answer: {QUESTION['options'][0]}", lines)
 
 
 if __name__ == "__main__":
@@ -651,6 +678,13 @@ if __name__ == "__main__":
 
 
 class GuestWriteDocsTest(unittest.TestCase):
+    def test_adr_066_d3_records_the_brief_changes_right_and_the_owner_only_refusals(self):
+        (adr,) = (ROOT / "docs/areas/console/adr").glob("066-*.md")
+        (line,) = [l for l in adr.read_text().splitlines() if l.startswith("**D3.")]
+        for needle in ("request changes to it (`/api/reply`)", "`owner_only`", "permission escalation"):
+            with self.subTest(needle):
+                self.assertIn(needle, line)
+
     def test_the_contract_says_which_answers_are_the_owners(self):
         contract = (ROOT / "python/agent_tools/console/manager-contract.md").read_text()
         self.assertIn("Only an answer whose `sprint inbox` entry carries no `by` is the owner's.",

@@ -825,6 +825,10 @@ let reading = null;
 let readingReveal = null;
 let sprintRedraw = 0;
 function messageLabel(message) {
+  if (message.kind === "answer" && typeof message.question === "string") {
+    const answer = typeof message.words === "string" ? message.text + ": " + message.words : message.text;
+    return message.question + " Answer: " + answer;
+  }
   if (message.kind === "approved") return "Approved version " + message.version;
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
   return typeof message.words === "string" ? message.text + ": " + message.words : message.text;

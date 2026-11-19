@@ -104,6 +104,7 @@ from agent_tools.console.view import (
     project_states,
     read_states,
     registry_changes,
+    sprint_ball,
 )
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_issues
@@ -1133,6 +1134,16 @@ class BriefViewTest(unittest.TestCase):
         stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
         view = derive_view([state("p00", 1)], sprints={sid: stopping})
         self.assertEqual(view["inbox"]["open"], [])
+
+    def test_a_stopping_sprints_pending_brief_is_not_the_owners_ball_nor_a_task(self):
+        sid = "a" * 16
+        stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
+        view = derive_view([state("p00", 1)], sprints={sid: stopping}, now_ms=T0_MS)
+        self.assertNotEqual(view["entries"][0]["sprints"][0]["ball"], "owner")
+        self.assertNotEqual(sprint_ball(stopping, T0_MS, 0, ()), "owner")
+        self.assertEqual(sprint_ball(briefed(sprint(sid)), T0_MS, 0, ()), "owner")
+        self.assertEqual(view["statement"]["inbox_items"], 0)
+        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
 
     def test_a_brief_of_a_closed_or_stopped_sprint_is_no_item(self):
         a, b = "a" * 16, "b" * 16
@@ -2669,6 +2680,27 @@ class SprintEndViewTest(unittest.TestCase):
 class ActorViewTest(unittest.TestCase):
     GUEST = "colleague@example.invalid"
 
+    def test_an_answer_message_carries_the_question_it_answers_and_others_carry_none(self):
+        sid = "d" * 16
+        when = at_row(9)
+
+        def row(seq, kind, **payload):
+            return Event(seq, when, kind, "owner/p00",
+                         {"sprint_id": sid, "goal": "one", **payload})
+
+        ask = {"question": "Which store?", "blocks": "b", "options": ["sqlite", "files"],
+               "recommended": "files"}
+        rows = [row(20, event_log.GOAL_STATED), row(21, event_log.BRIEF_SENT, version=1, brief=PARTS_ROW),
+                row(22, event_log.BRIEF_APPROVED, version=1),
+                row(23, event_log.QUESTIONS_ASKED, blocker=False, questions=[ask]),
+                row(24, event_log.QUESTION_ANSWERED, round=23, index=0, question="Which store?",
+                    answer="sqlite", chosen="sqlite", recommended="files", differs=True)]
+        shown = derive_view([state("owner/p00", 1)], sprints=sprint_states(rows), now_ms=T0_MS)
+        messages = shown["entries"][0]["sprints"][0]["messages"]
+        (answer,) = [m for m in messages if m["kind"] == "answer"]
+        self.assertEqual(answer["question"], "Which store?")
+        self.assertTrue(all(m["question"] is None for m in messages if m["kind"] != "answer"))
+
     def test_the_sprint_its_cards_and_its_messages_carry_their_actor(self):
         from .test_console_sprints import guest_rows
         u, v = "d" * 16, "e" * 16
@@ -2940,7 +2972,7 @@ class SprintMessageViewTest(unittest.TestCase):
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
             "action_text": None, "read_at": None, "reply": None, "reply_at": None,
-            "words": None, "new": False, "by": None}])
+            "words": None, "new": False, "by": None, "question": None}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")

@@ -502,7 +502,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
                        "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>,
-                       "by": "<login>" | null}
+                       "by": "<login>" | null, "question": <str> | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -1570,6 +1570,14 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
     return ON_TRACK, ON_TRACK_TEXT
 
 
+def brief_pending(state: SprintState) -> bool:
+    """Whether the sprint's brief waits on a decision the console still takes: the one rule that
+    makes it an inbox item and the owner's ball (a sprint with a stop requested or one that takes
+    no question refuses the decision, so its brief is neither)."""
+    return (state.brief is not None and state.brief.decision == NONE and state.stop_at is None
+            and takes_questions(state))
+
+
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
                 listed: Collection[str], waits: WaitSignals = NO_WAITS,
                 failed_start: bool = False, deaf: bool = False) -> str | None:
@@ -1585,8 +1593,7 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
-    brief = state.brief
-    if (waiting or deaf or (brief is not None and brief.decision == NONE) or state.stalled is not None
+    if (waiting or deaf or brief_pending(state) or state.stalled is not None
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
@@ -1701,7 +1708,7 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
             "reply_at": message.reply_at, "words": message.words,
-            "new": _is_new(message, looked), "by": message.by}
+            "new": _is_new(message, looked), "by": message.by, "question": message.question}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
@@ -2219,8 +2226,7 @@ def derive_view(
             kept.setdefault(sprint.project_id, []).append(sprint)
 
     briefs = sorted((s for group in drafted.values() for s in group
-                     if s.brief is not None and s.brief.decision == NONE and s.stop_at is None
-                     and takes_questions(s)),
+                     if brief_pending(s)),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
                     for q in (*open_questions(s), *pending_looks(s))),
