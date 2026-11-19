@@ -42,7 +42,7 @@ Scan rule for a `.py` source:
    name also forgets the chains that start with `<name>.`), and only then are
    the class bindings installed, so unbinding `self` never drops
    `self.SENTENCES`. Statements are walked in order, compound bodies in order
-   in the same environment (no branch join): an assignment replaces each
+   in the same environment (no branch join, except for an `if`): an assignment replaces each
    target's kinds (a Tuple target is bound element-wise when the value is a
    Tuple or List of the same length, else each element gets the value's kinds);
    an augmented assignment adds; binding a name forgets the chains that start
@@ -50,7 +50,10 @@ Scan rule for a `.py` source:
    literal Tuple, List or Set iterable, else the iterable's kinds, before the
    body; a `with ... as v` binds `v` to the context expression's kinds; `if`,
    `while`, `try` (handlers, else, finally) and `match` bodies are walked in
-   order. A nested def or lambda is walked from a copy of the current
+   order, except an `if`: its body and its else branch are each walked from a
+   copy of the incoming environment, and the environment after the `if` holds,
+   per name, the union of the kinds the two branches else branch being the
+   incoming environment when there is none) end with. A nested def or lambda is walked from a copy of the current
    environment with its parameters unbound; its assertions belong to the
    enclosing unit.
 5. Assertions and findings. An assertion is an `assert` statement, or an
@@ -58,15 +61,21 @@ Scan rule for a `.py` source:
    `assert*`. Its operands are the first positional argument for ONE_OPERAND,
    the first two for TWO_OPERANDS, every positional argument of any other
    `assert*`, and every keyword value except DIAGNOSTIC_KEYWORDS; an `assert`
-   statement's operand is its test. It is a finding, recorded once at the
-   assertion's line, when (A) one operand is DOC and a different operand is
+   statement's operand is its test. A name in CALLABLE_FORM (`assertRaises`,
+   `assertRaisesRegex`, `assertWarns`, `assertWarnsRegex`) has as operands only
+   its leading exception and regex arguments (1 or 2); when positional arguments
+   follow them, they and every keyword value are the arguments of the called
+   callable, so a docstring passed there is input, not an operand. It is a
+   finding, recorded once at the assertion's line, when (A) one operand is DOC and a different operand is
    PHRASE, or (B) an operand's subtree holds a Compare whose left and
    comparators include a DOC part and a PHRASE part, or a Call named in
    MATCH_CALLS or PROBE_CALLS whose parts (the Attribute receiver plus the
    positional arguments) include a DOC part and a PHRASE part.
 6. A `.sh` source is scanned by line, and only for phrase tests: a line is a
    finding when its first non-blank character is not `#`, it matches
-   SHELL_DOC, and it matches SHELL_PHRASE_TEST. A docstring existence check is
+   SHELL_DOC, and it matches SHELL_PHRASE_TEST, or matches SHELL_COMPARE and,
+   once its empty double-quoted literals are removed, still holds a double-quoted
+   literal (a `!= ""` check compares with no phrase). A docstring existence check is
    no finding in any member kind.
 
 A suite member of any kind other than `.py` and `.sh` fails the scan, and a
@@ -105,8 +114,13 @@ TEXT_CALLS = frozenset({
 ARGUMENT_TEXT_CALLS = frozenset({"join", "dedent", "cleandoc"})
 SHELL_DOC = re.compile(r"__doc__|get_docstring|getdoc")
 SHELL_PHRASE_TEST = re.compile(
-    r"\bgrep\b|\bin\b|==|!=|startswith|endswith|\bcount\(|\bfind\(|\bindex\(|\bsearch\(|\bmatch\(|\bassert[A-Z]"
+    r"\bgrep\b|\bin\b|startswith|endswith|\bcount\(|\bfind\(|\bindex\(|\bsearch\(|\bmatch\(|\bassert[A-Z]"
 )
+SHELL_COMPARE = re.compile(r"==|!=")
+SHELL_EMPTY_LITERAL = re.compile(r'\\?"\\?"')
+SHELL_LITERAL = re.compile(r'"[^"]+"')
+# The count of leading operands (exception, regex) of each assertion that also takes a callable.
+CALLABLE_FORM = {"assertRaises": 1, "assertWarns": 1, "assertRaisesRegex": 2, "assertWarnsRegex": 2}
 
 # The docstring tests that name a credential word and were on main when the scan
 # landed (ADR-delivery-011). Adding an id here is a new decision with its own record.
@@ -263,6 +277,11 @@ class _Walk:
             operands = call.args[:1]
         elif name in TWO_OPERANDS:
             operands = call.args[:2]
+        elif name in CALLABLE_FORM:
+            operands = call.args[:CALLABLE_FORM[name]]
+            if len(call.args) > CALLABLE_FORM[name]:
+                self.check(call.lineno, operands, env)
+                return
         else:
             operands = list(call.args)
         operands = operands + [k.value for k in call.keywords if k.arg not in DIAGNOSTIC_KEYWORDS]
@@ -321,7 +340,15 @@ class _Walk:
                 if item.optional_vars is not None:
                     self.bind(item.optional_vars, None, self.kinds(item.context_expr, env), env)
             self.block(node.body, env)
-        elif isinstance(node, (ast.If, ast.While)):
+        elif isinstance(node, ast.If):
+            taken, other = dict(env), dict(env)
+            self.block(node.body, taken)
+            self.block(node.orelse, other)
+            env.clear()
+            for branch in (taken, other):
+                for chain, kinds in branch.items():
+                    env[chain] = env.get(chain, EMPTY) | kinds
+        elif isinstance(node, ast.While):
             self.block(node.body, env)
             self.block(node.orelse, env)
         elif TRIES and isinstance(node, TRIES):
@@ -356,12 +383,18 @@ class _Walk:
         return bindings
 
 
+def _shell_phrase_test(line: str) -> bool:
+    if SHELL_PHRASE_TEST.search(line):
+        return True
+    return bool(SHELL_COMPARE.search(line) and SHELL_LITERAL.search(SHELL_EMPTY_LITERAL.sub("", line)))
+
+
 def docstring_findings(path: str, source: str) -> list[tuple[str, int]]:
     if path.endswith(".sh"):
         return [
             (path, number)
             for number, line in enumerate(source.splitlines(), 1)
-            if not line.lstrip().startswith("#") and SHELL_DOC.search(line) and SHELL_PHRASE_TEST.search(line)
+            if not line.lstrip().startswith("#") and SHELL_DOC.search(line) and _shell_phrase_test(line)
         ]
     tree = ast.parse(source, filename=path)
     walk = _Walk()
@@ -529,6 +562,22 @@ COMPUTED_COMPARISON = HEAD + _body(r'''
         self.assertEqual(text.split(mod.__doc__), ["left", "right"])
 ''')
 
+CALLABLE_FIXTURE = HEAD + _body(r'''
+        self.assertRaisesRegex(ValueError, "invalid", parse, mod.__doc__)
+        self.assertRaises(ValueError, parse, mod.__doc__)
+        self.assertRaisesRegex(ValueError, "invalid", parse, text=mod.__doc__)
+''')
+
+BRANCHES = HEAD + _body(r'''
+        text = mod.__doc__
+        if flag:
+            text = run_cli(["--help"]).stdout
+            self.assertIn("usage:", text)
+        else:
+            self.assertIn("phrase", text)
+        self.assertIn("after", text)
+''')
+
 REBOUND = HEAD + _body(r'''
         doc = mod.__doc__
         doc = run_cli(["--help"]).stdout
@@ -579,6 +628,12 @@ class DocstringScanTest(unittest.TestCase):
     def test_a_docstring_existence_check_passes(self):
         self.assertEqual(self.found(DOCSTRING_EXISTS), [])
 
+    def test_a_docstring_passed_to_a_callable_form_assertion_passes(self):
+        self.assertEqual(self.found(CALLABLE_FIXTURE), [])
+
+    def test_each_branch_of_an_if_is_scanned_from_the_incoming_bindings(self):
+        self.assertEqual(self.found(BRANCHES), [(TEST_ID, 8), (TEST_ID, 9)])
+
     def test_a_help_usage_check_passes(self):
         self.assertEqual(self.found(HELP_USAGE), [])
 
@@ -616,6 +671,7 @@ class DocstringTreeTest(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "# grep m.__doc__ for words\n"
             "python3 -c 'import m; assert m.__doc__'\n"
+            "python3 -c 'import m; assert (m.__doc__ or \"\") != \"\"'\n"
         )
         found = self.findings({"justfile": JUSTFILE_HEAD + "    tests/x.sh\n", "tests/x.sh": script})
         self.assertEqual(found, [])
