@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import io
 import json
 import os
@@ -294,6 +295,11 @@ class HookTableTest(unittest.TestCase):
                     hook.parse_allowed(text)
 
 
+def normjoin(text, base):
+    """`hook._resolve` without symlink resolution: each alias spelling stays as written."""
+    return os.path.normpath(os.path.join(base, os.path.expanduser(text)))
+
+
 class HookConfinementTest(unittest.TestCase):
     """The hook confines reads of the console's state to the question's own records (#1271)."""
 
@@ -417,6 +423,93 @@ class HookConfinementTest(unittest.TestCase):
         self.assertEqual(hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, c),
                          self.allowed)
 
+    def test_a_second_spelling_of_the_console_state_is_confined_by_identity(self):
+        (self.t / "alias").symlink_to(self.t / "state")
+        A = self.t / "alias" / "console"
+        home = self.t / "home"
+        (home / ".claude" / "projects" / "-srv-p00").mkdir(parents=True)
+        (home / ".claude" / "projects" / "-srv-p00" / "session.jsonl").write_text("{}")
+        (self.t / "homealias").symlink_to(home)
+        c = hook.parse_confinement(str(self.P), str(self.R), {
+            "HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.t / "accounts"),
+            "CLAUDE_CONFIG_DIR": str(self.t / "absent")})
+        denied = ("deny", hook.RECORDS_DENIED.format(records=c.records))
+        records = A / "project-question-settings"
+        with mock.patch.object(hook, "_resolve", normjoin):
+            for name, tool_input, expected in (
+                ("Read", {"file_path": str(records / "a.records.json")}, self.allowed),
+                ("Read", {"file_path": str(self.root / "missing.nix")}, self.allowed),
+                ("Read", {"file_path": str(records / "b.records.json")}, denied),
+                ("Read", {"file_path": str(A / "page-token")}, denied),
+                ("Read", {"file_path": str(self.t / "homealias" / ".claude" / "projects"
+                                           / "-srv-p00" / "session.jsonl")}, denied),
+                ("Grep", {"pattern": "x", "path": str(self.t / "alias")}, denied),
+                ("Grep", {"pattern": "x", "path": str(self.t / "homealias")}, denied),
+                ("Grep", {"pattern": "x", "path": str(records)}, denied),
+                ("Glob", {"pattern": str(A) + "/**/*.json"}, denied),
+            ):
+                with self.subTest(name=name, tool_input=tool_input):
+                    self.assertEqual(
+                        hook.decide(self.doc(name, tool_input), DECLARED, None, c), expected)
+            with self.subTest("git blame"):
+                self.assertEqual(
+                    hook.decide(self.command("git blame -wS" + str(records / "b.records.json")
+                                             + " flake.nix"), DECLARED, None, c), denied)
+
+    def test_a_case_alias_of_the_console_state_is_confined_like_its_own_spelling(self):
+        def alias(p):
+            return Path(str(p).replace("/state/console", "/STATE/Console"))
+
+        if not (self.t / "STATE").exists():
+            self.skipTest("the temporary volume is case-sensitive")
+        for name, tool_input, expected in (
+            ("Read", {"file_path": str(alias(self.R))}, self.allowed),
+            ("Read", {"file_path": str(alias(self.Q))}, self.denied),
+            ("Read", {"file_path": str(alias(self.P / "page-token"))}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(alias(self.S))}, self.denied),
+            ("Grep", {"pattern": "x", "path": str(self.t / "STATE")}, self.denied),
+            ("Glob", {"pattern": str(alias(self.P)) + "/**/*.json"}, self.denied),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), expected)
+        with self.subTest("git blame"):
+            self.assertEqual(
+                hook.decide(self.command("git blame -wS" + str(alias(self.Q)) + " flake.nix"),
+                            DECLARED, None, self.c), self.denied)
+        with self.subTest("parser"):
+            with self.assertRaises(ValueError):
+                hook.parse_confinement(str(self.P), str(alias(self.P)))
+        (self.root / "elsewhere").symlink_to(alias(self.S))
+        self.assertEqual(
+            hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.denied)
+
+    def test_an_identity_that_cannot_be_read_is_a_denial(self):
+        (self.t / "alias").symlink_to(self.t / "state")
+        real_stat = os.stat
+
+        def broken(p, *args, **kwargs):
+            if os.fspath(p) == str(self.P):
+                raise OSError(errno.EIO, "Input/output error")
+            return real_stat(p, *args, **kwargs)
+
+        records = self.t / "alias" / "console" / "project-question-settings"
+        with mock.patch.object(hook, "_resolve", normjoin), \
+                mock.patch.object(hook.os, "stat", broken):
+            self.assertEqual(
+                hook.decide(self.doc("Read", {"file_path": str(records / "b.records.json")}),
+                            DECLARED, None, self.c), ("deny", hook.MALFORMED))
+        out = io.StringIO()
+        with mock.patch.object(hook.os.path, "realpath", os.path.normpath), \
+                mock.patch.object(hook.os, "stat", broken), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(
+                    self.doc("Read", {"file_path": str(self.root / "flake.nix")})))), \
+                contextlib.redirect_stdout(out):
+            status = hook.main([json.dumps([list(argv) for argv in DECLARED]), REPO,
+                                str(self.P), str(records / "a.records.json")])
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(out.getvalue()), hook.output("deny", hook.MALFORMED))
+
     def test_a_symlink_into_the_console_state_is_resolved(self):
         (self.root / "link").symlink_to(self.P)
         for name, tool_input in (
@@ -528,6 +621,11 @@ class HookConfinementTest(unittest.TestCase):
             with self.subTest(private=private, records=records):
                 with self.assertRaises(ValueError):
                     hook.parse_confinement(private, records)
+        (self.t / "alias").symlink_to(self.t / "state")
+        with self.subTest("the directory itself under a second spelling"):
+            with mock.patch.object(hook.os.path, "realpath", os.path.normpath):
+                with self.assertRaises(ValueError):
+                    hook.parse_confinement(str(self.P), str(self.t / "alias" / "console"))
 
 
 class HookProcessTest(unittest.TestCase):

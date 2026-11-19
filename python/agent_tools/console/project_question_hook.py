@@ -19,6 +19,8 @@ transcript stores (`transcript_dirs`: `projects` under `$CLAUDE_CONFIG_DIR`, und
 every profile of `$CLAUDE_ACCOUNTS_DIR`, default `~/.claude-accounts`), read from the hook's own
 environment: the profiles share one transcript store, and a transcript holds every tool result of a
 session, so another question's records would stay readable there after their file is removed.
+Containment is judged by filesystem identity as well as by spelling, so a case alias on a case-insensitive
+volume is the directory it opens, and an identity that cannot be read is a denial.
 
 Decision. `decide(document, allowed, repo)` returns `("allow", ALLOWED)` or `("deny", <sentence>)`, in
 this order:
@@ -208,8 +210,37 @@ class Confinement:
     transcripts: tuple[str, ...] = ()
 
 
+def _identity(path: str) -> tuple[int, int] | None:
+    """The `(st_dev, st_ino)` of `path`, or None when it is missing; any other `OSError` propagates."""
+    try:
+        status = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return status.st_dev, status.st_ino
+
+
 def _inside(path: str, directory: str) -> bool:
-    return os.path.commonpath([path, directory]) == directory
+    """Whether `path` is `directory` or lies below it, by spelling or by filesystem identity."""
+    if os.path.commonpath([path, directory]) == directory:
+        return True
+    held = _identity(directory)
+    if held is None:
+        return False
+    while True:
+        if _identity(path) == held:
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+
+def _same_file(path: str, other: str) -> bool:
+    """Whether `path` and `other` are one file, by spelling or by identity; a missing one is not."""
+    if path == other:
+        return True
+    first, second = _identity(path), _identity(other)
+    return first is not None and first == second
 
 
 def transcript_dirs(environ: Mapping[str, str]) -> tuple[str, ...]:
@@ -228,7 +259,7 @@ def parse_confinement(private: str, records: str, environ: Mapping[str, str] | N
     if not os.path.isabs(private) or not os.path.isabs(records):
         raise ValueError("the confinement paths are not absolute")
     real_private, real_records = os.path.realpath(private), os.path.realpath(records)
-    if real_records == real_private or not _inside(real_records, real_private):
+    if _same_file(real_records, real_private) or not _inside(real_records, real_private):
         raise ValueError("the records file is not inside the private directory")
     return Confinement(real_private, real_records,
                        transcript_dirs(os.environ if environ is None else environ))
@@ -388,7 +419,7 @@ def _reaches(text: str, base: str, c: Confinement) -> bool:
     if not text:
         return False
     path = _resolve(text, base)
-    if path == c.records:
+    if _same_file(path, c.records):
         return False
     return any(_inside(path, held) or _inside(held, path) for held in (c.private, *c.transcripts))
 
@@ -601,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         repo = parse_repo(arguments[1])
         confinement = parse_confinement(*arguments[2:]) if len(arguments) == 4 else None
         document = json.loads(sys.stdin.read())
-    except (IndexError, ValueError, RecursionError):
+    except (IndexError, ValueError, RecursionError, OSError):
         decision, reason = "deny", MALFORMED
     else:
         decision, reason = decide(document, allowed, repo, confinement)
