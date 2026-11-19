@@ -127,15 +127,16 @@ Tailscale client is not the one the request was admitted under (`HOST_TEXT`); th
 listed (`NOT_SHARED_TEXT`); the project is not on the login's list (`NOT_YOUR_PROJECT_TEXT`);
 otherwise None. `steer_refusal(login, started_by)` is None
 exactly when the sprint was started by that login (`NOT_YOUR_SPRINT_TEXT`; a sprint with no starter
-is the owner's). A question that carries a before-and-after pair is a look before merge and stays
-the owner's (`is_look`, `OWNER_LOOK_TEXT`), as does a question the manager marked `owner_only`
+is the owner's). A question that carries a before-and-after pair or a `look` is a look before merge
+and stays the owner's (`is_look` for the pair, `OWNER_LOOK_TEXT`; ADR-console-074), as does a question the manager marked `owner_only`
 (`OWNER_ONLY_TEXT`); tracker items (release confirmations, paid approvals,
 production holds) are never steerable. The service answers a write refused on these merits as
 `409`. No text names a project or a login.
 
 `mark_steer(view, login)` returns a copy of a scrubbed guest view in which every sprint mapping
 gains `steer` (started by that login) and every `inbox.open` and `inbox.answered` item gains `steer`
-(a brief or a question started by that login that is neither a look nor `owner_only`). The marks are the server's and
+(a brief or a question started by that login that is neither a look (a before-and-after pair or a
+`look`, ADR-console-074) nor `owner_only`). The marks are the server's and
 are applied to a scrubbed guest view only; it adds the login nowhere and never mutates its argument.
 A message's `action_text` that is `NUDGE_ACTION_TEXT` reads `NUDGE_ACTION_TEXT_GUEST` ("Tell the
 manager again.") in the copy: a colleague cannot drop a sprint, so the line offers no drop.
@@ -541,7 +542,7 @@ def mark_steer(view: Mapping, login: str) -> dict:
         reason = item.get("reason")
         return (reason in ("brief", "question") and item.get("started_by") == login
                 and not (reason == "question"
-                         and (item.get("owner_only") is True
+                         and (item.get("owner_only") is True or item.get("look") is not None
                               or is_look(picture.get("pair") for picture in item.get("pictures", [])))))
 
     def copy(node: object) -> object:

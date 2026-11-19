@@ -5,11 +5,13 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import os
+import socket
 import unittest
 
 from agent_tools.console import guest, service, sprints
 
-from agent_tools.console.event_log import MANAGER_STOPPED
+from agent_tools.console.event_log import MANAGER_STOPPED, QUESTIONS_ASKED
 
 from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
@@ -321,7 +323,16 @@ class GuestWriteTableTest(GuestWriteCase):
             ("two logins", {"logins": (COLLEAGUE, SECOND)}, 403, guest.NOT_SHARED_TEXT),
             ("forged login", {"logins": (STRANGER,)}, 403, guest.NOT_SHARED_TEXT),
             ("tailnet name as Host", {"host": TAILNET}, 403, guest.HOST_TEXT),
-            ("other forwarded host", {"forwarded_host": OTHER_HOST}, 403, guest.HOST_TEXT))
+            ("other forwarded host", {"forwarded_host": OTHER_HOST}, 403, guest.HOST_TEXT),
+            ("no Host", {"host": None}, 403, guest.HOST_TEXT),
+            ("Host with a port", {"host": "localhost:80"}, 403, guest.HOST_TEXT),
+            ("no forwarded host", {"forwarded_host": None}, 403, guest.HOST_TEXT),
+            ("forwarded host with port", {"forwarded_host": TAILNET + ":443"}, 403,
+             guest.HOST_TEXT),
+            ("two forwarded hosts", {"forwarded_host": [TAILNET, TAILNET]}, 403, guest.HOST_TEXT),
+            ("localhost origin", {"origin": "https://localhost"}, 403, "origin refused"),
+            ("origin with port", {"origin": "https://" + TAILNET + ":443"}, 403,
+             "origin refused"))
         for route in sorted(service.GUEST_WRITES):
             for name, kwargs, status, text in guards:
                 with self.subTest(route=route, case=name):
@@ -449,6 +460,109 @@ class GuestWriteTableTest(GuestWriteCase):
             self.assertNotIn("colleague@", text)
             self.assertNotIn("second@", text)
         self.assertIn("console: ", errors.getvalue())
+
+
+class GuestDoorWriteTest(GuestWriteCase):
+    def test_a_guest_never_answers_a_look_card_whichever_option(self):
+        head = "a" * 40
+        self.seed()
+        posted, reads = [], []
+        svc = self.start(look_reader=lambda slug, pr: reads.append((slug, pr)) or ("open", head),
+                         look_recorder=lambda *args: posted.append(args) or 1)
+        sid = self.waiting(svc, "owner/p01", ACTOR)
+        svc.approve_brief("owner/p01", sid, 1)
+        with svc._ingest:
+            appended = svc.log.append([(QUESTIONS_ASKED, "owner/p01", {
+                "sprint_id": sid, "goal": GOAL, "blocker": False, "look_repo": "owner/p01",
+                "questions": [{**QUESTION, "look": {"issue": 7, "pr": 8, "head": head,
+                                                    "approve": "files"}}]})])
+            svc._apply(appended)
+        round_id = appended[-1].seq
+        asked = next(q for q in svc._sprints[sid].questions if q.round_id == round_id)
+        self.assertEqual(asked.look, sprints.QuestionLook(7, 8, head, "files", repo="owner/p01"))
+        self.assertEqual(asked.pictures, ())
+        for choice in (0, 1):
+            with self.subTest(choice=choice):
+                got = self.still(svc, lambda: self.guest_post(svc, "/api/round-answer", {
+                    "project_id": "owner/p01", "sprint_id": sid, "round": round_id,
+                    "question": 0, "choice": choice}))
+                self.assertEqual(got, (409, guest.OWNER_LOOK_TEXT.encode() + b"\n"))
+        self.assertEqual(self.rows("question.answered"), [])
+        self.assertEqual(posted, [])
+        self.assertEqual(reads, [])
+
+    def test_a_change_between_admission_and_the_write_refuses_it(self):
+        def rename(svc):
+            self.status = {"Self": {**self.status["Self"], "DNSName": OTHER_HOST + "."}}
+            svc.poll_serve()
+
+        def unread(svc):
+            self.status = None
+            svc.poll_serve()
+
+        rows = (("rename", rename, guest.HOST_TEXT),
+                ("unread", unread, guest.NAME_UNREAD_TEXT),
+                ("off", lambda svc: svc.set_sharing(False), guest.SHARING_OFF_TEXT),
+                ("removed", lambda svc: svc.remove_colleague(COLLEAGUE), guest.NOT_SHARED_TEXT))
+        for name, change, text in rows:
+            with self.subTest(change=name):
+                self.setUp()
+                self.seed()
+                svc = self.start()
+                snapshot = []
+
+                def wrapped(svc=svc, change=change):
+                    change(svc)
+                    snapshot.append(support.log_rows(self.store))
+
+                self.in_flight(svc, wrapped)
+                got = self.guest_post(svc, "/api/goal",
+                                      {"project_id": "owner/p01", "goal": GOAL})
+                self.assertEqual(got, (409, text.encode() + b"\n"))
+                self.assertEqual(len(snapshot), 1)
+                self.assertEqual(support.log_rows(self.store), snapshot[0])
+
+    def test_name_unread_refuses_every_guest_write_at_the_door(self):
+        self.seed()
+        self.status = None
+        svc = self.start()
+        for route in sorted(service.GUEST_WRITES):
+            with self.subTest(route=route):
+                got = self.still(svc, lambda: self.guest_post(
+                    svc, route, b"", send_body=False))
+                self.assertEqual(got, (403, guest.NAME_UNREAD_TEXT.encode() + b"\n"))
+
+    def test_sharing_off_refuses_every_guest_write_at_the_door(self):
+        self.seed(shared=False)
+        svc = self.start()
+        for route in sorted(service.GUEST_WRITES):
+            with self.subTest(route=route):
+                got = self.still(svc, lambda: self.guest_post(
+                    svc, route, b"", send_body=False))
+                self.assertEqual(got, (403, guest.SHARING_OFF_TEXT.encode() + b"\n"))
+
+    def test_a_peer_neither_root_nor_the_owner_writes_nothing(self):
+        self.seed()
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc = self.start(guest_peer_reader=lambda sock: os.geteuid() + 1)
+            rows = support.log_rows(self.store)
+            body = json.dumps({"project_id": "owner/p01", "goal": GOAL}).encode()
+            head = ["POST /api/goal HTTP/1.1", "Host: localhost", f"X-Forwarded-Host: {TAILNET}",
+                    f"Tailscale-User-Login: {COLLEAGUE}", "Content-Type: application/json",
+                    f"X-Console-Token: {self.guest_token()}", f"Origin: https://{TAILNET}",
+                    f"Content-Length: {len(body)}"]
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(5)
+                sock.connect(svc.guest_socket)
+                try:
+                    sock.sendall("\r\n".join(head).encode() + b"\r\n\r\n" + body)
+                    got = sock.recv(1)
+                except ConnectionResetError:
+                    got = b""
+        self.assertEqual(got, b"")
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertEqual(captured.getvalue().splitlines(), ["console: guest_refused not_permitted"])
 
 
 class BothPagesTest(GuestWriteCase):

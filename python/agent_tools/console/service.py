@@ -164,7 +164,7 @@ the owner's body helper for the route with a `guest.GuestActor` (`411`, `415`, `
 <name>`); then, under the ingest lock and before anything is appended, the write-time re-check of the
 sharing switch, the read tailnet name the request was admitted under, the access list, the project, the starter (`409`
 `guest.NOT_YOUR_SPRINT_TEXT` unless the colleague started the sprint) and the look rule (`409`
-`guest.OWNER_LOOK_TEXT` for a question carrying a before-and-after pair, `guest.OWNER_ONLY_TEXT` for a
+`guest.OWNER_LOOK_TEXT` for a question carrying a `look` or a before-and-after pair, `guest.OWNER_ONLY_TEXT` for a
 question marked `owner_only`); success is an empty `204`.
 A guest's row carries `"by": <login>`, an owner's carries none; no refusal body or stderr line names a login.
 
@@ -7179,7 +7179,8 @@ class ConsoleService:
             self._guest_refusal(by, project_id)
             self._steered(by, project_id, sprint_id)
             sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
-            if by is not None and guest.is_look(p.pair for p in asked.pictures):
+            if by is not None and (asked.look is not None
+                                   or guest.is_look(p.pair for p in asked.pictures)):
                 raise sprints.Refused(guest.OWNER_LOOK_TEXT)
             if by is not None and asked.owner_only:
                 raise sprints.Refused(guest.OWNER_ONLY_TEXT)
