@@ -31,3 +31,4 @@ Serve was turned on for the guest door on eleven-m5 as ADR-console-077 D5 says, 
 - ADR-console-077's Status names this record; its D5 commands stand as written.
 - Sharing with a new colleague needs the admin's access rule for their devices as well as their entry on the list.
 - A host whose client gives no own addresses reads every guest-door request as unknown, and the held check waits.
+- A held check pinned to a commit before this change reads a reading with the `client` member as `bad_reading`, because that checker's schema lacks it. The outstanding guest-door hold on #1237 is such a check, so its pin moves to this change's merge commit once it is deployed; #1322 tracks that step.
