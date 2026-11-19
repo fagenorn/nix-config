@@ -17,7 +17,7 @@ Scan rule for a `.py` source:
    receiver or arguments. A call's name is `func.id` for a Name and
    `func.attr` for an Attribute.
 2. Units and environments. An environment maps a name to a set of kinds drawn
-   from ADR, AREAS, TEXT, PHRASE and MATCH. The module's top-level statements
+   from ADR, AREAS, DOCS, TEXT, PHRASE, MATCH and PATTERN. The module's top-level statements
    (defs and classes excepted) build the module environment, in order. Each
    unit, a top-level function or a method of a top-level class, is walked from
    a copy of it with its parameters bound to no kind.
@@ -38,19 +38,30 @@ Scan rule for a `.py` source:
    parts are the operands of `/`, the receiver (of joinpath) and the arguments
    of a joining call, and the receiver plus the first argument of a glob or
    rglob call. AREAS: a path expression whose text AREAS_ROOT matches, or a
-   Name with AREAS. TEXT: a call named in READ_CALLS or in the readers whose receiver or
+   Name with AREAS. DOCS: a path expression whose text DOCS_ROOT matches. A Name
+   (or attribute chain) with AREAS or DOCS stands, in a path expression's text,
+   for `docs/areas` or `docs`. TEXT: a call named in READ_CALLS or in the readers whose receiver or
    any argument has ADR, or a Name with TEXT. PHRASE: E is not TEXT and its
    subtree holds a string constant, an f-string or a Name with PHRASE. MATCH:
    E itself (through `not` and each operand of `and`/`or`) is a wording
-   comparison, or E is a Name with MATCH. A wording comparison is a Compare, or
-   a call named in MATCH_CALLS or PROBE_CALLS (a count or position), whose parts (the compared operands, or the
-   receiver plus positional arguments) hold a TEXT part and a PHRASE part.
+   comparison, or E is a Name with MATCH, or a Subscript, Compare or Call with a
+   MATCH part (so `len(hits)` of a saved result is MATCH). A wording comparison is
+   a Compare, or a Call (any name: `split`, `findall`, `count`), whose parts (the
+   compared operands, or the receiver plus positional arguments) hold a TEXT
+   part and a PHRASE part, except a call on a saved shape pattern. PATTERN: E is
+   a call of `compile` whose literal pattern holds a class, a class escape or a
+   quantifier once inline flags, group openers and escaped punctuation are
+   removed; a literal needle, a needle set or a pattern of plain words is no
+   PATTERN, for it asks for words.
    A comprehension is evaluated in its own copy of the environment, each
    generator binding its targets before its conditions and element; a lambda
    body binds its parameters to no kind.
 4. Fixture methods. The `self.` attributes that `setUpClass` and `setUp` (and their async
    forms; the owner is the first parameter, `cls` or `self`) leave start every method of
-   the class.
+   the class, those of its base classes defined in the module included. A
+   statement `self.helper()` that names a method of the class or its bases runs
+   that method's body, so the attributes it sets stay (a method already
+   running is not run again).
 
 5. Bindings follow statement order with flow. An assignment, a for target, a
    with variable and a walrus replace the target's kinds (an augmented
@@ -70,9 +81,9 @@ Scan rule for a `.py` source:
    another has PHRASE (rule A), when an operand or the assert test holds a
    Compare or a Call whose parts hold a TEXT part and a PHRASE part (rule B),
    or when an operand has MATCH (rule C). A call on a saved pattern,
-   `PATTERN.method(text)` with a Name or attribute chain as receiver, counts for
-   rule B only through MATCH_CALLS or PROBE_CALLS, because it asks for a shape,
-   not for words.
+   `PATTERN.method(text)` with a Name or attribute chain holding PATTERN as
+   receiver, counts for rule B only through MATCH_CALLS or PROBE_CALLS, because
+   it asks for a shape, not for words.
 
 A `.sh` member is a finding on every line that names a record, because a shell
 member never names one. A suite member of any other kind fails the scan, and a
@@ -91,6 +102,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ADR_PATH = re.compile(r"docs/areas/[^/\s'\"\x60]+/adr(?:/|$)")
 ADR_SEGMENT = re.compile(r"(?:^|/)adr(?:/|$)")
 AREAS_ROOT = re.compile(r"(?:^|/)docs/areas/?$")
+DOCS_ROOT = re.compile(r"(?:^|/)docs/?$")
+# What a pattern holds once inline flags, group openers and escaped punctuation (literal
+# characters) are taken away: a class, a class escape or a quantifier admits varying text.
+PATTERN_NOISE = re.compile(r"\(\?(?:P?<\w+>|[aiLmsux-]*[:)])|\\[^\w]")
+PATTERN_VARIABLE = re.compile(r"\[|\\[wWdDsS]|[.+*?{]")
 # `logins_in` is the check that a record names no login, a credential-shaped leak check.
 CREDENTIAL_WORDS = re.compile(r"token|credential|secret|password|keychain|\blogins_in\b", re.IGNORECASE)
 GUARD_FILES = frozenset({"tests/test_claude_permission_guard.py", "tests/test_guard_policy.py"})
@@ -148,6 +164,8 @@ KEPT_FROM_MAIN: frozenset[str] = frozenset()
 KEPT_CREDENTIAL_TESTS = KEPT_AT_START | KEPT_FROM_MAIN
 
 EMPTY: frozenset[str] = frozenset()
+# Kinds that mark a name's own value and never spread to an expression that holds the name.
+NOT_CARRIED = frozenset({"MATCH", "DOCS", "PATTERN"})
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 LOOPS = (ast.For, ast.AsyncFor, ast.While)
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -186,8 +204,8 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
-def _text(node: ast.AST) -> str:
-    static = _static_text(node)
+def _text(node: ast.AST, env: dict | None = None) -> str:
+    static = _static_text(node, env)
     return "_" if static is None else static
 
 
@@ -211,27 +229,33 @@ def _joining_parts(node: ast.AST) -> list[ast.AST] | None:
     return None
 
 
-def _static_text(node: ast.AST) -> str | None:
-    """The literal text of a path expression; `_` stands for the rest."""
+def _static_text(node: ast.AST, env: dict | None = None) -> str | None:
+    """The literal text of a path expression; `_` stands for the rest. A name the environment
+    knows holds the docs root or the areas root stands for that root's text."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if env and isinstance(node, (ast.Name, ast.Attribute)):
+        kinds = env.get(_key(node), EMPTY)
+        if "AREAS" in kinds:
+            return "docs/areas"
+        return "docs" if "DOCS" in kinds else None
     if isinstance(node, ast.JoinedStr):
         return "".join(
             v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else "_"
             for v in node.values
         )
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
-        left, right = _static_text(node.left), _static_text(node.right)
+        left, right = _static_text(node.left, env), _static_text(node.right, env)
         if isinstance(node.op, ast.Add):
-            return None if left is None and right is None else _text(node.left) + _text(node.right)
-        return f"{_text(node.left)}/{_text(node.right)}"
+            return None if left is None and right is None else _text(node.left, env) + _text(node.right, env)
+        return f"{_text(node.left, env)}/{_text(node.right, env)}"
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
-        return _static_text(node.left) if _is_string(node.left) else None
+        return _static_text(node.left, env) if _is_string(node.left) else None
     if isinstance(node, ast.Call) and _call_name(node) == "format" and isinstance(node.func, ast.Attribute):
-        return _static_text(node.func.value) if _is_string(node.func.value) else None
+        return _static_text(node.func.value, env) if _is_string(node.func.value) else None
     parts = _joining_parts(node)
     if parts is not None:
-        return "/".join(_text(part) for part in parts)
+        return "/".join(_text(part, env) for part in parts)
     return None
 
 
@@ -260,11 +284,15 @@ def _plus_operands(node: ast.AST) -> list[ast.AST]:
     return [node]
 
 
-def _glob_text(node: ast.AST) -> str | None:
+def _glob_text(node: ast.AST, env: dict | None = None) -> str | None:
     """The receiver's text and the pattern's text of a glob call, joined, else None."""
     if isinstance(node, ast.Call) and _call_name(node) in GLOB_CALLS and isinstance(node.func, ast.Attribute) and node.args:
-        return f"{_text(node.func.value)}/{_text(node.args[0])}"
+        return f"{_text(node.func.value, env)}/{_text(node.args[0], env)}"
     return None
+
+
+def _admits_variable_content(pattern: str) -> bool:
+    return bool(PATTERN_VARIABLE.search(PATTERN_NOISE.sub("", pattern)))
 
 
 def _parameters(node) -> list[str]:
@@ -345,6 +373,9 @@ class _Scan:
         self.readers = readers
         self.collect = False
         self.found: set[int] = set()
+        self.methods: dict[str, ast.AST] = {}  # the methods of the class being walked, by name
+        self.owner: str | None = None  # the walked method's first parameter, `self` or `cls`
+        self.stack: set[str] = set()
 
     # Expressions -----------------------------------------------------------
 
@@ -375,7 +406,7 @@ class _Scan:
         """The ADR, AREAS, TEXT and PHRASE kinds of the expression."""
         found: set[str] = set()
         for sub, scope in self.walk(node, env):
-            static = _static_text(sub)
+            static = _static_text(sub, scope)
             if static is not None:
                 if isinstance(sub, (ast.Constant, ast.JoinedStr)):
                     found.add("PHRASE")
@@ -384,21 +415,21 @@ class _Scan:
                 if AREAS_ROOT.search(static):
                     found.add("AREAS")
             if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
-                found |= scope.get(sub.id, EMPTY) - {"MATCH"}
+                found |= scope.get(sub.id, EMPTY) - NOT_CARRIED
             elif isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load):
-                found |= scope.get(_key(sub), EMPTY) - {"MATCH"}
+                found |= scope.get(_key(sub), EMPTY) - NOT_CARRIED
             elif isinstance(sub, ast.Call) and _call_name(sub) in READ_CALLS | self.readers:
                 operands = [sub.func.value] if isinstance(sub.func, ast.Attribute) else []
                 operands += sub.args + [k.value for k in sub.keywords]
                 if any("ADR" in self.facts(o, scope) for o in operands):
                     found.add("TEXT")
-            combined = _glob_text(sub)
+            combined = _glob_text(sub, scope)
             if combined is not None and ADR_PATH.search(combined):
                 found.add("ADR")
             assembled = _assembled_parts(sub)
             if (
                 assembled is not None
-                and ADR_SEGMENT.search(_text(sub))
+                and ADR_SEGMENT.search(_text(sub, scope))
                 and any("AREAS" in self.facts(part, scope) for part in assembled)
             ):
                 found.add("ADR")
@@ -408,7 +439,7 @@ class _Scan:
                 parts = [sub.func.value, *sub.args[:1]]
             else:
                 parts = _joining_parts(sub) or []
-            if len(parts) > 1 and any(ADR_SEGMENT.search(_text(part)) for part in parts) and any(
+            if len(parts) > 1 and any(ADR_SEGMENT.search(_text(part, scope)) for part in parts) and any(
                 "AREAS" in self.facts(part, scope) for part in parts
             ):
                 found.add("ADR")
@@ -418,7 +449,22 @@ class _Scan:
 
     def kinds(self, node: ast.AST, env: dict) -> frozenset[str]:
         found = self.facts(node, env)
-        return found | {"MATCH"} if self.is_match(node, env) else found
+        if self.is_match(node, env):
+            found |= {"MATCH"}
+        static = _static_text(node, env)
+        if static is not None and DOCS_ROOT.search(static):
+            found |= {"DOCS"}
+        if self.is_shape_pattern(node, env):
+            found |= {"PATTERN"}
+        return found
+
+    @staticmethod
+    def is_shape_pattern(node: ast.AST, env: dict) -> bool:
+        """A `compile` call whose pattern text admits varying text: it asks for a shape."""
+        if not (isinstance(node, ast.Call) and _call_name(node) == "compile" and node.args):
+            return False
+        pattern = _static_text(node.args[0], env)
+        return pattern is not None and _admits_variable_content(pattern)
 
     def parts_pin_wording(self, parts: list[ast.AST], env: dict) -> bool:
         part_kinds = [self.facts(part, env) for part in parts]
@@ -427,16 +473,15 @@ class _Scan:
     def is_wording_comparison(self, node: ast.AST, env: dict) -> bool:
         if isinstance(node, ast.Compare):
             return self.parts_pin_wording([node.left, *node.comparators], env)
-        if isinstance(node, ast.Call) and _call_name(node) in MATCH_CALLS | PROBE_CALLS:
-            return self.parts_pin_wording(self.call_parts(node), env)
+        if isinstance(node, ast.Call):
+            return self.call_pins_wording(node, env)
         return False
 
     def call_pins_wording(self, call: ast.Call, env: dict) -> bool:
         """A call with record text and a phrase among its parts, but not `pattern.method(text)`
-        on a saved pattern, which asks for a shape and not for words."""
+        on a saved shape pattern, which asks for a shape and not for words."""
         if _call_name(call) not in MATCH_CALLS | PROBE_CALLS and isinstance(call.func, ast.Attribute):
-            receiver = self.facts(call.func.value, env)
-            if _key(call.func.value) is not None and "PHRASE" in receiver and "TEXT" not in receiver:
+            if "PATTERN" in env.get(_key(call.func.value), EMPTY):
                 return False
         return self.parts_pin_wording(self.call_parts(call), env)
 
@@ -462,6 +507,12 @@ class _Scan:
             return self.is_match(node.operand, env)
         if isinstance(node, ast.BoolOp):
             return any(self.is_match(value, env) for value in node.values)
+        if isinstance(node, ast.Subscript):
+            return self.is_match(node.value, env)
+        if isinstance(node, ast.Compare) and any(self.is_match(p, env) for p in [node.left, *node.comparators]):
+            return True
+        if isinstance(node, ast.Call) and any(self.is_match(p, env) for p in self.call_parts(node)):
+            return True
         return self.is_wording_comparison(node, env)
 
     def bind_walrus(self, expression: ast.AST, env: dict) -> None:
@@ -585,31 +636,81 @@ class _Scan:
             self.scan([node.subject], env)
             outs = [env] + [self.block(case.body, dict(env), in_unit) for case in node.cases]
             return _join(*outs)
+        elif isinstance(node, ast.Expr):
+            self.scan([node.value], env)
+            self.inline(node.value, env)
         else:
             self.scan([c for c in ast.iter_child_nodes(node) if isinstance(c, ast.expr)], env)
         return env
+
+    def inline(self, call: ast.AST, env: dict) -> None:
+        """`self.helper()` as a statement runs the helper's body: the attributes it sets stay."""
+        func = call.func if isinstance(call, ast.Call) else None
+        if not (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id == self.owner
+            and func.attr in self.methods
+            and func.attr not in self.stack
+        ):
+            return
+        method = self.methods[func.attr]
+        params = _parameters(method)
+        if not params or any(_key(d) == "staticmethod" for d in method.decorator_list):
+            return
+        caller, callee = self.owner, params[0]
+        inner = {(callee + k[len(caller):] if k.startswith(caller + ".") else k): v for k, v in env.items()}
+        for name in params[1:]:
+            _store(inner, name, EMPTY)
+        outer = (self.collect, self.owner)
+        self.collect, self.owner = False, callee
+        self.stack.add(func.attr)
+        try:
+            end = self.block(method.body, inner)
+        finally:
+            self.stack.discard(func.attr)
+            self.collect, self.owner = outer
+        for key in [k for k in env if k.startswith(caller + ".")]:
+            del env[key]
+        env.update({caller + k[len(callee):]: v for k, v in end.items() if k.startswith(callee + ".")})
 
 
 FIXTURE_METHODS = ("setUpClass", "asyncSetUpClass", "setUp", "asyncSetUp")
 
 
-def _fixture_attributes(scan: _Scan, cls: ast.ClassDef, module_env: dict) -> dict:
-    """The `self.` attributes a class's fixture methods leave, as each test method starts with them."""
+def _class_chain(cls: ast.ClassDef, classes: dict, seen: frozenset = frozenset()) -> list[ast.ClassDef]:
+    """The classes of this module a class derives from, bases first, then the class."""
+    chain: list[ast.ClassDef] = []
+    for base in reversed(cls.bases):
+        if isinstance(base, ast.Name) and base.id in classes and base.id not in seen | {cls.name}:
+            chain += [c for c in _class_chain(classes[base.id], classes, seen | {cls.name}) if c not in chain]
+    return chain + [cls]
+
+
+def _class_methods(chain: list[ast.ClassDef]) -> dict:
+    return {m.name: m for c in chain for m in c.body if isinstance(m, FUNCTIONS)}
+
+
+def _fixture_attributes(scan: _Scan, chain: list[ast.ClassDef], module_env: dict) -> dict:
+    """The `self.` attributes the fixture methods of a class and its bases leave, as each test
+    method starts with them. A base's fixtures count even where the class overrides them."""
     carried: dict[str, frozenset[str]] = {}
-    outer = scan.collect
-    scan.collect = False
-    methods = {m.name: m for m in cls.body if isinstance(m, FUNCTIONS)}
-    for name in FIXTURE_METHODS:
-        method = methods.get(name)
-        if method is None or not _parameters(method):
-            continue
-        env = dict(module_env)
-        _unbind_parameters(method, env)
-        env.update(carried)
-        end = scan.block(method.body, env)
-        owner = _parameters(method)[0] + "."
-        carried.update({"self." + key[len(owner):]: kinds for key, kinds in end.items() if key.startswith(owner)})
-    scan.collect = outer
+    outer = (scan.collect, scan.owner, scan.methods)
+    scan.collect, scan.methods = False, _class_methods(chain)
+    for cls in chain:
+        methods = {m.name: m for m in cls.body if isinstance(m, FUNCTIONS)}
+        for name in FIXTURE_METHODS:
+            method = methods.get(name)
+            if method is None or not _parameters(method):
+                continue
+            env = dict(module_env)
+            _unbind_parameters(method, env)
+            env.update(carried)
+            scan.owner = _parameters(method)[0]
+            end = scan.block(method.body, env)
+            owner = scan.owner + "."
+            carried.update({"self." + key[len(owner):]: kinds for key, kinds in end.items() if key.startswith(owner)})
+    scan.collect, scan.owner, scan.methods = outer
     return carried
 
 
@@ -623,7 +724,7 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
     tree = ast.parse(source, filename=path)
     if not any(
         any(
-            text is not None and (ADR_PATH.search(text) or AREAS_ROOT.search(text))
+            text is not None and (ADR_PATH.search(text) or AREAS_ROOT.search(text) or DOCS_ROOT.search(text))
             for text in (_static_text(node), _glob_text(node))
         )
         for node in ast.walk(tree)
@@ -632,6 +733,7 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
     scan = _Scan(_readers(tree))
     module_env = scan.block(tree.body, {}, in_unit=False)
     findings: list[tuple[str, int]] = []
+    classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     for node in tree.body:
         if isinstance(node, FUNCTIONS):
             units = [(node.name, node)]
@@ -639,13 +741,17 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
             units = [(f"{node.name}.{m.name}", m) for m in node.body if isinstance(m, FUNCTIONS)]
         else:
             continue
-        carried = _fixture_attributes(scan, node, module_env) if isinstance(node, ast.ClassDef) else {}
+        chain = _class_chain(node, classes) if isinstance(node, ast.ClassDef) else []
+        carried = _fixture_attributes(scan, chain, module_env) if chain else {}
+        scan.methods = _class_methods(chain)
         for name, unit in units:
             env = dict(module_env)
             _unbind_parameters(unit, env)
             env.update(carried)
             scan.found = set()
             scan.collect = True
+            params = _parameters(unit)
+            scan.owner = params[0] if chain and params else None
             scan.block(unit.body, env)
             findings += [(f"{path}::{name}", line) for line in scan.found]
     return sorted(findings)
@@ -1026,6 +1132,176 @@ SAVED_COUNT = _fixture(r'''
             self.assertGreater(size, 0)
 ''')
 
+SAVED_LITERALS = _fixture(r'''
+    NEEDLES = {"one", "two"}
+    PAT = re.compile("Decided in")
+    FLAGGED_PAT = re.compile(r"(?m)^- \*\*Decided in:\*\*")
+    SHAPE_PAT = re.compile(r"(?m)^- \*\*Decided in:\*\* [\w ]+$")
+
+
+    class T(unittest.TestCase):
+        def test_needles(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertTrue(NEEDLES.issubset(text.split()))
+
+        def test_literal_pattern(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertEqual(len(PAT.findall(text)), 1)
+
+        def test_escaped_literal_pattern(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertEqual(len(FLAGGED_PAT.findall(text)), 1)
+
+        def test_shape_pattern(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertEqual(len(SHAPE_PAT.findall(text)), 1)
+''')
+
+SAVED_CALL_RESULTS = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_findall(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            hits = re.findall("words", text)
+            self.assertTrue(hits)
+
+        def test_split(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            parts = text.split("words")
+            self.assertEqual(len(parts), 2)
+
+        def test_replace(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            rest = text.replace("words", "")
+            self.assertTrue(rest)
+
+        def test_other_text(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            rows = text.splitlines()
+            self.assertEqual(len(rows), 3)
+''')
+
+DOCS_ROOT_NAMES = _fixture(r'''
+    DOCS = ROOT / "docs"
+    DOCS_S = "docs"
+
+
+    class T(unittest.TestCase):
+        def test_glob(self):
+            for p in DOCS.glob("areas/*/adr/*.md"):
+                self.assertIn("words", p.read_text())
+
+        def test_segments(self):
+            text = (DOCS / "areas" / "a" / "adr" / "x.md").read_text()
+            self.assertIn("words", text)
+
+        def test_string_name(self):
+            text = Path(DOCS_S + "/areas/a/adr/x.md").read_text()
+            self.assertIn("words", text)
+
+        def test_attribute(self):
+            self.docs = ROOT / "docs"
+            text = (self.docs / "areas" / "a" / "adr" / "x.md").read_text()
+            self.assertIn("words", text)
+
+        def test_context(self):
+            text = (DOCS / "areas" / "a" / "CONTEXT.md").read_text()
+            self.assertIn("words", text)
+
+        def test_archive_glob(self):
+            for p in DOCS.glob("archive/*.md"):
+                self.assertIn("words", p.read_text())
+
+        def test_rebound(self):
+            docs = DOCS
+            docs = ROOT / "other"
+            text = (docs / "areas" / "a" / "adr" / "x.md").read_text()
+            self.assertIn("words", text)
+''')
+
+INHERITED_FIXTURES = _fixture(r'''
+    class Base(unittest.TestCase):
+        def setUp(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+
+    class Middle(Base):
+        pass
+
+
+    class T(Middle):
+        def test_x(self):
+            self.assertIn("words", self.text)
+
+
+    class ContextBase(unittest.TestCase):
+        def setUp(self):
+            self.text = (ROOT / "docs/areas/a/CONTEXT.md").read_text()
+
+
+    class U(ContextBase):
+        def test_x(self):
+            self.assertIn("words", self.text)
+''')
+
+HELPER_FIXTURES = _fixture(r'''
+    class T(unittest.TestCase):
+        def load(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def setUp(self):
+            self.load()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+
+
+    class Cls(unittest.TestCase):
+        @classmethod
+        def read(cls):
+            cls.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        @classmethod
+        def setUpClass(cls):
+            cls.read()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+
+
+    class Called(unittest.TestCase):
+        def load(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def test_x(self):
+            self.load()
+            self.assertIn("words", self.text)
+
+
+    class Other(unittest.TestCase):
+        def load(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def setUp(self):
+            self.text = "other"
+            other.load()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+
+
+    class Loop(unittest.TestCase):
+        def load(self):
+            self.load()
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def setUp(self):
+            self.load()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+''')
+
+
 def _read_of(expression):
     return (
         "class T(unittest.TestCase):\n    def test_x(self):\n        a = 'a'\n"
@@ -1161,8 +1437,48 @@ class WordingScanTest(unittest.TestCase):
         with self.subTest("the attribute rebound in the test"):
             self.assertEqual(self.found(SETUP_ATTRIBUTE_REBOUND), [])
 
-    def test_a_saved_pattern_applied_to_record_text_is_no_phrase(self):
+    def test_a_saved_shape_pattern_applied_to_record_text_is_no_phrase(self):
         self.assertEqual(self.found(PATTERN_FINDALL), [])
+
+    def test_a_saved_literal_needle_or_pattern_asks_for_words(self):
+        self.assertEqual(
+            self.found(SAVED_LITERALS),
+            [
+                ("tests/test_f.py::T.test_escaped_literal_pattern", 18),
+                ("tests/test_f.py::T.test_literal_pattern", 14),
+                ("tests/test_f.py::T.test_needles", 10),
+            ],
+        )
+
+    def test_a_saved_result_of_a_call_on_record_text_and_a_phrase_is_found(self):
+        self.assertEqual(
+            self.found(SAVED_CALL_RESULTS),
+            [
+                ("tests/test_f.py::T.test_findall", 5),
+                ("tests/test_f.py::T.test_replace", 15),
+                ("tests/test_f.py::T.test_split", 10),
+            ],
+        )
+
+    def test_a_docs_root_held_in_a_name_names_records(self):
+        self.assertEqual(
+            self.found(DOCS_ROOT_NAMES),
+            [
+                ("tests/test_f.py::T.test_attribute", 21),
+                ("tests/test_f.py::T.test_glob", 8),
+                ("tests/test_f.py::T.test_segments", 12),
+                ("tests/test_f.py::T.test_string_name", 16),
+            ],
+        )
+
+    def test_record_text_set_by_an_inherited_or_called_fixture_is_found(self):
+        with self.subTest("a base class setUp"):
+            self.assertEqual(self.found(INHERITED_FIXTURES), [("tests/test_f.py::T.test_x", 12)])
+        with self.subTest("a helper called from a fixture or a test"):
+            self.assertEqual(
+                [(test.split("::")[1], line) for test, line in self.found(HELPER_FIXTURES)],
+                [("Called.test_x", 31), ("Cls.test_x", 22), ("Loop.test_x", 55), ("T.test_x", 9)],
+            )
 
     def test_a_saved_phrase_count_or_position_is_found(self):
         self.assertEqual(self.found(SAVED_COUNT), [(TEST_ID, 5), (TEST_ID, 7)])
