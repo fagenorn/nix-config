@@ -396,7 +396,11 @@ MOVED += (
     moved(_TOP_BAR, ".nav", "white-space", BOTH, "nav-nowrap"),
     *(moved(_TOP_BAR, selector, prop, NARROW, *_FIT,
             via="no top bar rule asks for more than the 480 column: its widths are read rendered")
-      for selector in (".top", ".conn", ".meter", ".cap", ".goal-bar", ".nav", ".brand")
+      for selector in (".top", ".conn", ".cap", ".goal-bar", ".nav", ".brand")
+      for prop in ("width", "min-width", "flex-basis")),
+    # The meter sits inside the clipped `.cap`, so no row above reads it: its own rows do.
+    *(moved(_TOP_BAR, ".meter", prop, NARROW, f"top-fit-meter-{prop}",
+            via="the meter sits inside the clipped `.cap`, so its own rendered value is read")
       for prop in ("width", "min-width", "flex-basis")),
     # The notices.
     moved(_NOTICE_BLOCKS, ".notice + .notice", "margin-top", BOTH, "notice-margin-top"),
