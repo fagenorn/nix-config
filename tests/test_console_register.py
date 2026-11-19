@@ -784,6 +784,18 @@ class UnregisteredFoldTest(unittest.TestCase):
                 self.assertEqual(folded.latest["root"], "/x/r")
                 self.assertEqual(folded.latest["at"], "t3")
 
+    def test_a_root_another_project_still_holds_keeps_its_registration(self):
+        events = self.a_events()[:3] + [self.reg(4, "c/r2", "/x/r"), self.ended(5, self.r_done),
+                                        self.gone(6, {"root": "/x/r"}),
+                                        self.gone(7, {"root": "/x/r"}, "c/r2")]
+        held = register.fold(events[:6])
+        self.assertEqual((held.latest["root"], held.latest["at"]), ("/x/r", "t5"))
+        self.assertEqual([e["root"] for e in held.before], ["/x/y"])
+        self.assertEqual(dict(held.roots), {"c/r2": "/x/r"})
+        left = register.fold(events)
+        self.assertEqual((left.latest["root"], left.latest["at"]), ("/x/y", "t1"))
+        self.assertEqual(dict(left.roots), {})
+
     def test_a_removed_root_never_returns_from_the_chain(self):
         a1 = register.dismissed(register.failed("/x/a", "failed"))
         b = register.failed("/x/b", "failed")

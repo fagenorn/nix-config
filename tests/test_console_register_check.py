@@ -588,6 +588,72 @@ class StubTest(Case):
         self.assertEqual(agent_platform.registry_path().read_bytes(), before)
         self.assertEqual(list(self.tmp_root.iterdir()), [])
 
+    def test_a_refusal_leaves_another_checkouts_entry_of_the_same_id_alone(self):
+        other = [{"project_id": "console-check/register-x", "root": "/other/checkout"}]
+        before = seeded(other)
+        self.token()
+        code, out = self.run_check(
+            ["--contract", CONTRACT], fetch=lambda url: view(None),
+            post=lambda url, headers, body: (409, (register.OPEN_SHOWN + "\n").encode()),
+            project_id="console-check/register-x")
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_a_changed_view_leaves_another_checkouts_entry_of_the_same_id_alone(self):
+        before = seeded([{"project_id": "console-check/register-x", "root": "/other/checkout"}])
+        self.token()
+        reads = []
+
+        def fetch(url):
+            reads.append(url)
+            return view(None) if len(reads) == 1 else sent(open_documents()["register card"])
+
+        code, out = self.run_check(["--contract", CONTRACT], fetch=fetch,
+                                   post=lambda *a: (204, b""),
+                                   project_id="console-check/register-x")
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_an_unrelated_registry_change_does_not_alter_a_refusal(self):
+        seeded([])
+        self.token()
+
+        def post(url, headers, body):
+            agent_platform.write_registry([{"project_id": "owner/new", "root": "/elsewhere"}])
+            return 409, (register.OPEN_SHOWN + "\n").encode()
+
+        code, out = self.run_check(["--contract", CONTRACT], fetch=lambda url: view(None),
+                                   post=post)
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_a_possible_dispatch_removes_the_entry_of_its_id_and_root_only(self):
+        pid = "console-check/register-x"
+        for name, root, kept in (("other root", "/other/checkout", True), ("own root", None, False)):
+            with self.subTest(name):
+                tmp = Path(tempfile.mkdtemp(dir=self.tmp_root))
+                fixture = tmp / "repo"
+                fixture.mkdir()
+                entry = {"project_id": pid, "root": root or str(fixture)}
+                seeded([entry])
+                left = register_check._restore(tmp, fixture, pid, [entry] if kept else [])
+                self.assertEqual(left, [])
+                held = register_check.service.read_fleet(agent_platform.registry_path())
+                self.assertEqual(held, [entry] if kept else [])
+
+    def test_a_quiet_group_without_its_projects_proves_nothing(self):
+        seeded([])
+        self.token()
+        document = {"registration": None, "entries": [{"type": "quiet_group"}]}
+        code, out = self.run_check(
+            ["--wait", "0.2", "--contract", CONTRACT], fetch=lambda url: sent(document),
+            post=lambda *a: (204, b""), poll=0.05, settle=2, shown=0.2)
+        self.assertEqual((code, out), (1, {
+            "status": "not_restored", "leftovers": ["registration"],
+            "verdict": {"status": "not_met", "reason": "no result"}}))
+
     def test_the_restore_wait_never_sleeps_past_its_bound(self):
         started = time.monotonic()
         result = register_check._restore_view(

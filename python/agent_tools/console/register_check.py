@@ -69,6 +69,13 @@ remove it, because a cleanup before then could be undone by a late registry or p
 that dies with no `close` while a child runs leaves that child unbounded; the view then does not
 answer 200 and the gate reports `unsettled`.
 
+A run that could not have started (a fixture failure, a changed view before the POST, a 4xx
+answer to the POST) restores only the fixture directory: the registry, the trust files and the plans
+are not read, and a change of theirs never alters the verdict. After a possible dispatch the registry
+entry is removed only when its project id and its root are both the fixture's, so another
+checkout's entry that shares the id is left. A quiet group of the view without its `projects` list
+proves no absence: the polls go on past it to their deadline.
+
 Restore runs after the gate: a Check again card the run left for the root (`inbox.open`, reason
 `trust_failed`) is answered through `POST /api/trust-check`, because the card lives in the console's log
 and only a granted retry clears it, and a card still open afterwards is a leftover named `trust card
@@ -291,14 +298,27 @@ def _is_running(document: Mapping, root: str) -> bool:
             and registration.get("status") == "running")
 
 
+def _members(entry: dict) -> list | tuple:
+    """The project entries an `entries` member holds; none for a quiet group whose projects are unreadable."""
+    if entry.get("type") != "quiet_group":
+        return (entry,)
+    projects = entry.get("projects")
+    return projects if isinstance(projects, list) else ()
+
+
 def _listed(document: Mapping, project_id: str) -> bool:
     for entry in document.get("entries") or ():
-        if not isinstance(entry, dict):
-            continue
-        members = entry["projects"] if entry.get("type") == "quiet_group" else (entry,)
-        if any(isinstance(m, dict) and m.get("project_id") == project_id for m in members):
+        if isinstance(entry, dict) and any(
+                isinstance(m, dict) and m.get("project_id") == project_id
+                for m in _members(entry)):
             return True
     return False
+
+
+def _unreadable(document: Mapping) -> bool:
+    """True when a quiet group of the view lacks its projects list: the view proves no absence."""
+    return any(isinstance(e, dict) and e.get("type") == "quiet_group"
+               and not isinstance(e.get("projects"), list) for e in document.get("entries") or ())
 
 
 def _asking(document: Mapping, root: str) -> bool:
@@ -311,7 +331,7 @@ def _asking(document: Mapping, root: str) -> bool:
 def _shown_back(document: Mapping, project_id: str, registration_before: object) -> bool:
     """True when the view shows the registration it showed before the run and no longer lists the project."""
     return ("registration" in document and isinstance(document.get("entries"), list)
-            and not _listed(document, project_id)
+            and not _unreadable(document) and not _listed(document, project_id)
             and document["registration"] == registration_before)
 
 
@@ -364,15 +384,28 @@ def _clear_trust_cards(fetch, post, base: str, token: str, root: Path) -> list[s
 
 
 def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
-             clear: Callable[[Path], list[str]] = lambda root: []) -> list[str]:
-    """Remove what the run left; the paths still left, the registry's included, else an empty list."""
+             clear: Callable[[Path], list[str]] = lambda root: [],
+             dispatched: bool = True) -> list[str]:
+    """Remove what the run left; the paths still left, the registry's included, else an empty list.
+
+    When no run could have started (`dispatched` false) only the fixture directory is removed: the
+    registry, the trust files and the plans are not the check's to touch, and no change of theirs is
+    a leftover. After a possible dispatch the registry entry is removed under the registry lock only
+    when both its project id and its root are the fixture's.
+    """
     leftovers: list[str] = []
+    if not dispatched:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return [str(tmp)] if os.path.lexists(tmp) else []
+    mine = {str(root), os.path.realpath(root)} if root is not None else set()
+
+    def ours(entry: dict) -> bool:
+        return entry["project_id"] == project_id and entry["root"] in mine
+
     try:
-        if any(entry["project_id"] == project_id
-               for entry in service.read_fleet(agent_platform.registry_path()) or []):
+        if any(ours(entry) for entry in service.read_fleet(agent_platform.registry_path()) or []):
             with agent_platform.registry_transaction() as entries:
-                agent_platform.write_registry(
-                    [entry for entry in entries if entry["project_id"] != project_id])
+                agent_platform.write_registry([entry for entry in entries if not ours(entry)])
     except Exception as error:  # noqa: BLE001 -- the comparison below decides
         print(f"register_check: {type(error).__name__}", file=sys.stderr)
     if root is not None:
@@ -571,7 +604,7 @@ def _decide(args, fetch, post, tmp_root, project_id, poll, settle, shown) -> tup
         if reached:
             settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[-1]),
                             lambda d: not _is_running(d, str(root)))
-        leftovers = _restore(tmp, root, pid, registry_before, clear) if settled else []
+        leftovers = _restore(tmp, root, pid, registry_before, clear, bool(reached)) if settled else []
         if settled and reached and root is not None:
             left, cancelled = _restore_view(fetch, post, base, token, root, pid,
                                             registration_before, poll, shown)

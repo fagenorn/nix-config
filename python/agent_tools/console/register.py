@@ -168,7 +168,8 @@ never shows, ADR-console-033 D2), else `state`: the view's `registration` member
 before the current one, oldest first, one per root (an ended row naming another root pushes the
 current one and drops the new root's older entry), `roots` each registered project's root; a
 `project.unregistered` row's root is its payload `root`, else the root its project was registered
-with, else it names nothing; it drops that root from `before` and, when it is the shown
+with, else it names nothing; while another registered project still holds that root it changes
+nothing, else it drops the root from `before` and, when it is the shown
 registration's, folds back to the last entry of `before`, so a registration whose project left the
 registry gives the page back what it replaced (ADR-console-084 D1); a matching cancel folds to none
 and clears `before`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
@@ -670,7 +671,7 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
         if event.kind == event_log.PROJECT_UNREGISTERED:
             root = _root_of(event.payload) or roots.get(event.project)
             roots.pop(event.project, None)
-            if root is None:
+            if root is None or root in roots.values():
                 continue
             before = tuple(e for e in before if e["root"] != root)
             if found is not None and found["root"] == root:
