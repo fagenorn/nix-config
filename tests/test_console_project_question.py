@@ -510,6 +510,23 @@ class HookConfinementTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(out.getvalue()), hook.output("deny", hook.MALFORMED))
 
+    def test_a_path_the_filesystem_cannot_resolve_is_not_a_denial(self):
+        root = self.root
+        (root / "loop").symlink_to("loop")
+        (root / "sub" / "a").symlink_to("b")
+        (root / "sub" / "b").symlink_to("a")
+        long_name = root / ("x" * 5000)
+        for name, tool_input in (
+            ("Grep", {"pattern": "x"}),
+            ("Glob", {"pattern": "**/*.nix"}),
+            ("Read", {"file_path": str(root / "loop")}),
+            ("Read", {"file_path": str(root / "sub" / "a")}),
+            ("Read", {"file_path": str(long_name)}),
+        ):
+            with self.subTest(name=name, tool_input=tool_input):
+                self.assertEqual(
+                    hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.allowed)
+
     def test_a_symlink_into_the_console_state_is_resolved(self):
         (self.root / "link").symlink_to(self.P)
         for name, tool_input in (

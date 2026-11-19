@@ -114,6 +114,7 @@ settings, not by this module.
 
 from __future__ import annotations
 
+import errno
 import glob
 import json
 import os
@@ -211,11 +212,19 @@ class Confinement:
 
 
 def _identity(path: str) -> tuple[int, int] | None:
-    """The `(st_dev, st_ino)` of `path`, or None when it is missing; any other `OSError` propagates."""
+    """The `(st_dev, st_ino)` of `path`, or None when it names nothing; any other `OSError` propagates.
+
+    A symlink loop (`ELOOP`) and a name too long to exist (`ENAMETOOLONG`) name nothing a client could
+    open, as a missing path does; an unreadable one (`EIO`, `EACCES`) is indeterminate and stays an error.
+    """
     try:
         status = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENAMETOOLONG):
+            return None
+        raise
     return status.st_dev, status.st_ino
 
 
