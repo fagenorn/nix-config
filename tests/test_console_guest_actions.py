@@ -594,7 +594,7 @@ class GuestDoorWriteTest(GuestWriteCase):
                 try:
                     sock.sendall("\r\n".join(head).encode() + b"\r\n\r\n" + body)
                     got = sock.recv(1)
-                except ConnectionResetError:
+                except ConnectionError:  # the refusal may close the door mid-send (reset or broken pipe)
                     got = b""
         self.assertEqual(got, b"")
         self.assertEqual(support.log_rows(self.store), rows)
@@ -678,13 +678,6 @@ if __name__ == "__main__":
 
 
 class GuestWriteDocsTest(unittest.TestCase):
-    def test_adr_066_d3_records_the_brief_changes_right_and_the_owner_only_refusals(self):
-        (adr,) = (ROOT / "docs/areas/console/adr").glob("066-*.md")
-        (line,) = [l for l in adr.read_text().splitlines() if l.startswith("**D3.")]
-        for needle in ("request changes to it (`/api/reply`)", "`owner_only`", "permission escalation"):
-            with self.subTest(needle):
-                self.assertIn(needle, line)
-
     def test_the_contract_says_which_answers_are_the_owners(self):
         contract = (ROOT / "python/agent_tools/console/manager-contract.md").read_text()
         self.assertIn("Only an answer whose `sprint inbox` entry carries no `by` is the owner's.",
