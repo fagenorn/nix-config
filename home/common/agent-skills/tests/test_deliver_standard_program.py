@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from program_harness import server_for  # noqa: E402
@@ -10784,10 +10785,16 @@ _SCENARIO_CALLS = {}
 
 
 def scenario_calls(name):
-    """The calls of one scenario, run once per process; callers never mutate the list."""
+    """The calls of one scenario, run once per process, a failure included; callers never mutate the list."""
     if name not in _SCENARIO_CALLS:
-        _SCENARIO_CALLS[name] = PROMPT_SCENARIOS[name]()
-    return _SCENARIO_CALLS[name]
+        try:
+            _SCENARIO_CALLS[name] = (PROMPT_SCENARIOS[name](), None)
+        except Exception as failure:
+            _SCENARIO_CALLS[name] = (None, failure)
+    calls, failure = _SCENARIO_CALLS[name]
+    if failure is not None:
+        raise failure
+    return calls
 
 
 def _rows(scenario, label, origin, *phrases):
@@ -10949,6 +10956,19 @@ class PromptPhraseTableTest(unittest.TestCase):
         self.assertEqual(row_failure("clerk", ("s", "y", "alpha", "o"), calls), "y is a reviewer call, not clerk")
         self.assertEqual(row_failure("clerk", ("s", "z", "alpha", "o"), calls), "no call labelled z")
         self.assertIs(scenario_calls("happy"), scenario_calls("happy"))
+
+    def test_a_failing_scenario_runs_once_and_every_later_row_reports_its_failure(self):
+        runs = []
+
+        def broken():
+            runs.append(1)
+            raise RuntimeError("harness timed out")
+
+        with mock.patch.dict(PROMPT_SCENARIOS, {"broken": broken}), mock.patch.dict(_SCENARIO_CALLS):
+            for _ in range(3):
+                with self.assertRaisesRegex(RuntimeError, "harness timed out"):
+                    scenario_calls("broken")
+        self.assertEqual(len(runs), 1)
 
     def test_removing_any_phrase_fails_exactly_its_row(self):
         for role, table in PROMPT_PHRASES.items():
