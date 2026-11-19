@@ -106,6 +106,7 @@
 | Release profile | Release |
 | Removal | Project contract |
 | Report | Console |
+| Retired host | Verification |
 | ResolvedProject | Project contract |
 | Row check | Guard |
 | Session | Console |

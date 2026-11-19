@@ -615,6 +615,143 @@ class IssueClosedTest(unittest.TestCase):
         self.assertEqual(run_from_root([str(ROOT / CHECKS / "issue-closed")]).returncode, 2)
 
 
+class HostMentionsTest(unittest.TestCase):
+    PATH = "repos/o/r/issues?state=open&per_page=100"
+
+    def read(self, pages, phrases=("anis-desktop", "Linux host"), gone="anis-desktop is gone", exempt=()):
+        def api_pages(path):
+            self.assertEqual(path, self.PATH)
+            return pages
+        with mock.patch.object(forge_api, "api_pages", side_effect=api_pages):
+            return verify_checks.host_mentions("o/r", list(phrases), gone, list(exempt))
+
+    def test_an_issue_that_names_the_host_without_the_gone_line_is_an_offender(self):
+        pages = [[{"number": 6, "title": "On the Linux host", "body": "anis-desktop is gone: moved to eleven-m5"},
+                  {"number": 7, "title": "y", "body": "nothing"}],
+                 [{"number": 5, "title": "x", "body": "run it on anis-desktop"},
+                  {"number": 8, "title": "pr", "body": "anis-desktop", "pull_request": {}}]]
+        self.assertEqual(self.read(pages), (1, {"mentioning": [5, 6], "offenders": [5]}))
+
+    def test_matching_ignores_case_and_honours_the_exemption(self):
+        pages = [[{"number": 9, "title": "t", "body": "the LINUX HOST"},
+                  {"number": 1291, "title": "t", "body": "anis-desktop"},
+                  {"number": 10, "title": "t", "body": "Anis-Desktop Is Gone. anis-desktop"},
+                  {"number": 11, "title": "anis-desktop", "body": None}]]
+        self.assertEqual(self.read(pages, exempt=[1291]),
+                         (1, {"mentioning": [9, 10, 11, 1291], "offenders": [9, 11]}))
+        self.assertEqual(self.read([[]]), (0, {"mentioning": [], "offenders": []}))
+
+    def test_an_open_criterion_that_still_names_the_host_is_not_answered_by_a_gone_paragraph(self):
+        gone = "anis-desktop is gone: nothing runs there now."
+        pages = [[{"number": 5, "title": "t", "body": f"- [ ] [evidence] run it on anis-desktop\n\n{gone}"},
+                  {"number": 6, "title": "t", "body": f"- [ ] [evidence] run it on eleven-m5\n- [x] was on the Linux host\n\n{gone}"},
+                  {"number": 7, "title": "t", "body": f"Run on the Linux host.\n\n{gone}"},
+                  {"number": 8, "title": "t", "body": f"1. [ ] run on the LINUX HOST\n\n{gone}"},
+                  {"number": 9, "title": "t", "body": f"- [ ] {gone}"}]]
+        self.assertEqual(self.read(pages), (1, {"mentioning": [5, 6, 7, 8, 9], "offenders": [5, 8]}))
+
+    def test_a_malformed_listing_is_a_forge_error(self):
+        for pages in (["x"], [["x"]], [[{"number": "5", "body": ""}]], [[{"number": True, "body": ""}]]):
+            with self.subTest(pages=pages):
+                with self.assertRaises(forge_api.ForgeError) as raised:
+                    self.read(pages)
+                self.assertEqual(raised.exception.code, "payload_invalid")
+        err = io.StringIO()
+        with mock.patch.object(forge_api, "api_pages",
+                               side_effect=forge_api.ForgeError("transport", "x")):
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = verify_checks.main(["host-mentions", "--repo", "o/r", "--phrase", "a", "--gone", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("verify-checks: forge_error: transport", err.getvalue())
+
+
+class HostPromptsTest(unittest.TestCase):
+    HOST = "anis-desktop"
+    STALE = {"reason": "verify-stale-check", "block": "1.0000000000000000", "check": "0",
+             "host": "anis-desktop", "cause": "silent", "last": "never"}
+
+    @staticmethod
+    def comment(cid, body, association="OWNER"):
+        return {"id": cid, "author_association": association, "body": body,
+                "updated_at": "2026-11-06T10:00:00Z"}
+
+    def prompt(self, cid, fields, association="OWNER"):
+        return self.comment(cid, forge_markers.render("owner-action", fields, "Asking."), association)
+
+    def end(self, cid, of, association="OWNER"):
+        return self.comment(cid, forge_markers.end_body(of, "decision"), association)
+
+    def run_check(self, listings, comments, repos=("o/r",)):
+        """`listings` maps a repo to its pages; `comments` maps (repo, issue) to REST comments."""
+        self.reads = []
+
+        def api_pages(path):
+            for repo, pages in listings.items():
+                if path == f"repos/{repo}/issues?state=open&per_page=100":
+                    return pages
+            raise AssertionError(path)
+
+        def list_comments(slug, issue):
+            self.reads.append((slug, issue))
+            return comments.get((slug, issue), [])
+        with mock.patch.object(forge_api, "api_pages", side_effect=api_pages), \
+                mock.patch.object(forge_markers, "list_comments", side_effect=list_comments):
+            return verify_checks.host_prompts(list(repos), self.HOST)
+
+    def test_a_live_prompt_naming_the_host_is_reported_whatever_the_labels(self):
+        listings = {"o/r": [[{"number": 3, "title": "t", "body": "", "labels": []},
+                             {"number": 4, "title": "t", "body": "", "labels": []}]]}
+        comments = {("o/r", 3): [self.prompt(30, self.STALE)],
+                    ("o/r", 4): [self.prompt(40, {**self.STALE, "host": "eleven-m5"})]}
+        self.assertEqual(self.run_check(listings, comments),
+                         (1, {"host": self.HOST, "live": [
+                             {"repo": "o/r", "issue": 3, "comment": 30, "reason": "verify-stale-check"}]}))
+
+    def test_trust_and_liveness_follow_the_marker_type(self):
+        listings = {"o/r": [[{"number": 5}, {"number": 4}, {"number": 3}]]}
+        approve = {**self.STALE, "reason": "verify-approve", "host": "mbp+anis-desktop"}
+        forge = {"issue": "5", "reason": "decision", "holder": "h", "host": self.HOST}
+        comments = {
+            ("o/r", 3): [self.prompt(30, self.STALE), self.end(31, 30)],
+            ("o/r", 4): [self.prompt(41, approve), self.end(42, 41, "COLLABORATOR"),
+                         self.prompt(43, self.STALE, "COLLABORATOR")],
+            ("o/r", 5): [self.prompt(50, forge, "COLLABORATOR"), self.prompt(51, forge, "NONE")]}
+        code, report = self.run_check(listings, comments)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["live"], [
+            {"repo": "o/r", "issue": 4, "comment": 41, "reason": "verify-approve"},
+            {"repo": "o/r", "issue": 5, "comment": 50, "reason": "decision"}])
+
+    def test_every_open_issue_is_read_once_and_none_is_met(self):
+        listings = {"o/r": [[{"number": 3}, {"number": 4}], [{"number": 5}]],
+                    "o/s": [[]]}
+        self.assertEqual(self.run_check(listings, {}, repos=("o/r", "o/s")),
+                         (0, {"host": self.HOST, "live": []}))
+        self.assertEqual(sorted(self.reads), [("o/r", 3), ("o/r", 4), ("o/r", 5)])
+
+    def test_a_live_prompt_on_an_open_pull_request_is_reported(self):
+        listings = {"o/r": [[{"number": 3, "title": "t", "body": "", "pull_request": {}},
+                             {"number": 4, "title": "t", "body": ""}]]}
+        comments = {("o/r", 3): [self.prompt(30, self.STALE)]}
+        self.assertEqual(self.run_check(listings, comments),
+                         (1, {"host": self.HOST, "live": [
+                             {"repo": "o/r", "issue": 3, "comment": 30, "reason": "verify-stale-check"}]}))
+        self.assertEqual(sorted(self.reads), [("o/r", 3), ("o/r", 4)])
+
+
+class HostCheckWrappersTest(unittest.TestCase):
+    def test_the_wrappers_are_committed_executable(self):
+        for name in ("host-mentions", "host-prompts"):
+            with self.subTest(name=name):
+                self.assertEqual(committed_mode(f"{CHECKS}/{name}"), "100755")
+                self.assertEqual(run_from_root([str(ROOT / CHECKS / name)]).returncode, 2)
+
+    def test_the_docstring_documents_the_checks(self):
+        for needle in ("host-mentions --repo R --phrase P", "verify_checks.host_mentions",
+                       "host-prompts --repo R", "verify_checks.host_prompts", "issue 1291"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+
 class PlatformStatusWrapperTest(unittest.TestCase):
     def test_runs_the_installed_platform_status_and_passes_it_through(self):
         with tempfile.TemporaryDirectory() as home:
@@ -2161,6 +2298,106 @@ class ConsoleFailedStartTest(unittest.TestCase):
 
     def test_the_docstring_documents_the_check(self):
         for needle in ("console-failed-start --port N", "verify_checks.console_failed_start"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+
+class ConsoleNoticeListsTest(unittest.TestCase):
+    """`console-notice-lists` (issue 1291): the owner's notices name every issue of a project."""
+
+    def serve(self, status, body):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = loopback_server(Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def serve_view(self, entries):
+        return self.serve(200, json.dumps({"entries": entries}).encode())
+
+    @staticmethod
+    def project(project_id, *notices):
+        return {"type": "project", "project_id": project_id, "notices": list(notices)}
+
+    @staticmethod
+    def notice(number, text, owner=True):
+        return {"id": number, "owner": owner, "kind": "heads-up", "text": text}
+
+    def test_one_owner_notice_naming_every_issue_covers_a_project(self):
+        port = self.serve_view([
+            self.project("jarbird", self.notice(4, "anis-desktop is gone: #611 #711 #712")),
+            {"type": "quiet_group", "label": "1 quiet projects", "count": 1,
+             "projects": [self.project("nodocom", self.notice(9, "anis-desktop is gone: #2600 #2990"))]}])
+        self.assertEqual(
+            verify_checks.console_notice_lists(port, {"jarbird": [611, 711, 712], "nodocom": [2600, 2990]}),
+            (0, {"verdict": "covered", "projects": {"jarbird": {"notice": 4}, "nodocom": {"notice": 9}}}))
+
+    def test_a_split_list_a_manager_notice_or_a_prefix_does_not_cover(self):
+        cases = {
+            "split": [self.notice(1, "gone: #611"), self.notice(2, "gone: #711 #712")],
+            "manager": [self.notice(3, "gone: #611 #711 #712", owner=False)],
+            "prefix": [self.notice(5, "gone: #6110 #711 #712")],
+        }
+        for name, notices in cases.items():
+            with self.subTest(name=name):
+                port = self.serve_view([self.project("jarbird", *notices)])
+                code, report = verify_checks.console_notice_lists(port, {"jarbird": [611, 711, 712]})
+                self.assertEqual(code, 75)
+                self.assertEqual(report["verdict"], "missing")
+                self.assertIsNone(report["projects"]["jarbird"]["notice"])
+
+    def test_an_entry_of_another_type_is_skipped_and_an_absent_project_is_missing(self):
+        port = self.serve_view([
+            {"type": "other", "project_id": "jarbird", "notices": [self.notice(1, "#611")]}])
+        self.assertEqual(verify_checks.console_notice_lists(port, {"jarbird": [611]}),
+                         (75, {"verdict": "missing", "projects": {"jarbird": {"notice": None}}}))
+
+    def test_an_unreachable_console_is_not_yet(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            closed = sock.getsockname()[1]
+        unreachable = (75, {"verdict": "unreachable"})
+        wanted = {"jarbird": [611]}
+        self.assertEqual(verify_checks.console_notice_lists(closed, wanted), unreachable)
+        self.assertEqual(verify_checks.console_notice_lists(self.serve(500, b"{}"), wanted), unreachable)
+        self.assertEqual(verify_checks.console_notice_lists(self.serve(200, b"[]"), wanted), unreachable)
+
+    def test_the_command_prints_one_json_line(self):
+        port = self.serve_view([self.project("jarbird", self.notice(4, "#611 #711"))])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-notice-lists", "--port", str(port),
+                                       "--notice", "jarbird=611,711"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), json.dumps(
+            {"projects": {"jarbird": {"notice": 4}}, "verdict": "covered"}, sort_keys=True) + "\n")
+
+    def test_a_bad_notice_argument_is_a_usage_error(self):
+        bad = (["jarbird"], ["jarbird=a"], ["jarbird=611,"], ["jarbird=0"],
+               ["jarbird=1", "jarbird=1"])
+        for values in bad:
+            with self.subTest(values=values):
+                argv = ["console-notice-lists", "--port", "1"]
+                for value in values:
+                    argv += ["--notice", value]
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_the_wrapper_is_committed_executable_and_documented(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-notice-lists"), "100755")
+        self.assertEqual(run_from_root([str(ROOT / CHECKS / "console-notice-lists")]).returncode, 2)
+        for needle in ("console-notice-lists --port N --notice", "verify_checks.console_notice_lists",
+                       "issue 1291"):
             self.assertIn(needle, verify_checks.__doc__)
 
 
