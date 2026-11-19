@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty-two screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-four screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -100,8 +100,20 @@ Contract:
   without those parts. On a page whose service does not read the actor (`reads_actors()` is False,
   `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
   file and the pictures are the before pictures of the actors.
+  `register-apply` and `register-draft` are the console's registration of `sample-app`, a
+  repository with no contract whose ready plan proposes the command its adoption commit runs
+  through (`PROPOSAL_LINE`, #1268), served with a stand-in adopter and forge so the plan can be
+  applied: `register-apply` is the ready Apply card, its first line the proposal and then the
+  plan's own lines (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
+  and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
+  `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
+  the proposal as a main line beside its Change control. `REGISTER_READING` reads the card's first
+  line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
+  holds what each state must read on a page that proposes it (`proposes_environment()`); on a
+  page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
+  picture, and any other reading fails.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 84 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 88 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -175,7 +187,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import capacity, event_log, manager, pictures, sessions, signin
+from agent_tools.console import capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -191,7 +203,8 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "notice-post-open", "desk-spend", "failed-start", "goal-open", "goal-near", "goal-over",
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
-          "ask-goal", "question-read", "activation-tooling", "activation-host", "sharing-panel",
+          "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
+          "register-draft", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -210,6 +223,28 @@ OTHER_DEVICE_ADDRESS = "100.64.0.20"
 SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
                   "guest-page", "guest-steer")
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
+REGISTER_STATES = ("register-apply", "register-draft")
+REGISTER_NAME = "sample-app"
+REGISTER_PLAN_ID = "sha256:" + "6" * 64
+REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
+PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
+REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
+                  "register-draft": (None, PROPOSAL_LINE, True)}
+REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),
+                 "register-draft": (None, None, False)}
+# The first line of the Apply card's list, the proposal's draft row and whether that row carries a
+# visible Change button; None for what the page does not show.
+REGISTER_READING = """(() => {
+  const shown = (node) => node && node.getClientRects().length > 0;
+  const first = document.querySelector('.apply-lines li');
+  const row = Array.from(document.querySelectorAll('ul.register-draft > li')).find((item) => {
+    const line = item.querySelector('.draft-line');
+    return shown(line) && line.textContent.trim().startsWith('commits run in its development shell');
+  });
+  const change = row ? row.querySelector('button.draft-change') : null;
+  return [shown(first) ? first.textContent.trim() : null,
+          row ? row.querySelector('.draft-line').textContent.trim() : null, Boolean(shown(change))];
+})()"""
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -385,6 +420,7 @@ class Fixture:
     holding: tuple[int, ...] = ()
     deaf: bool = False
     activating: tuple[str, ...] = ()
+    registering: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,6 +441,7 @@ class Shot:
     reading: tuple[bool, int, bool, bool, int] | None = None
     activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
+    register: tuple[str | None, str | None, bool] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -632,10 +669,34 @@ class _Seed:
                      {**base, "message": said.seq, "reply": REPLY_TEXT})
 
 
+def _seed_registration(seed: _Seed, state: str, root: str) -> None:
+    """A ready plan of `root`, a repository with no contract whose draft proposes a commit environment.
+
+    The reading names one GitHub remote, so the draft has no open question; its hook and
+    environment file are what a checkout with a devenv and installed commit hooks reads. The base
+    commit's draft ignores both and proposes nothing (the before picture).
+    """
+    reading = {**contract_draft.read(root),
+               "remotes": [("origin", f"https://github.com/owner/{REGISTER_NAME}.git")],
+               "default_branch": "main", "branches": ["main"],
+               "hooks": ["pre-commit"], "environments": ["devenv.nix"]}
+    fields = contract_draft.draft(root, reading)
+    seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
+        "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
+        "outcome": "changes", "headline": f"What adopting {REGISTER_NAME} would change.",
+        "lines": list(REGISTER_PLAN_LINES), "note": None, "plan_id": REGISTER_PLAN_ID,
+        "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
+    if state == "register-draft":
+        seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
+
+
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
                 read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> tuple[str, ...]:
     """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
     web, api = PROJECTS[0], PROJECTS[1]
+    if state in REGISTER_STATES:
+        _seed_registration(seed, state, str(Path(web_root).parent / REGISTER_NAME))
+        return ()
     if state == "live-several":
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
         seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
@@ -887,7 +948,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
-        activating=ACTIVATION_PATHS.get(state, ()))
+        activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES)
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -942,6 +1003,15 @@ def _activation_reader(paths: tuple[str, ...]):
         other = {"other": paths} if reads_other() else {}
         return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
     return read
+
+
+class _Inert:
+    """A stand-in adopter or forge: its presence lets a ready plan be applied, nothing calls it."""
+
+
+def proposes_environment() -> bool:
+    """Whether this page's drafted contract can propose the command the adoption commit runs through."""
+    return hasattr(contract_draft, "proposed_lines")
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -1008,6 +1078,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
             PullRequest(7, frozenset(fixture.holding), False, None, True),)
     if fixture.activating:
         forge["activation_reader"] = _activation_reader(fixture.activating)
+    if fixture.registering:
+        forge.update(adopter=_Inert(), forge=_Inert())
     bound: list = []
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
@@ -1392,6 +1464,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         activation = None
         if state in ACTIVATION_PATHS:
             activation = tuple(page.evaluate(ACTIVATION_READING))
+        register = None
+        if state in REGISTER_STATES:
+            register = tuple(page.evaluate(REGISTER_READING))
         page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
@@ -1405,7 +1480,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation)
+                card=card, activation=activation, register=register)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1479,6 +1554,11 @@ def main(argv: list[str] | None = None) -> int:
     for shot in unlined:
         print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
               "Activate button")
+    proposals = [shot for shot in taken if shot.state in REGISTER_SHOWN and shot.register != (
+        REGISTER_SHOWN[shot.state] if proposes_environment() else REGISTER_BASE[shot.state])]
+    for shot in proposals:
+        print(f"console-screenshots: {shot.path.name} does not show the proposed commit "
+              "environment on the Apply card or as a changeable draft line")
     expected = {"question-words": WORDS_CARD, "question-refused": REFUSED_CARD}
     uncarded = [shot for shot in taken
                 if shot.state in expected and shot.card not in (None, expected[shot.state])]
@@ -1498,7 +1578,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or uncarded or offrow or scrolled or short) else 0
+                 or unlined or proposals or uncarded or offrow or scrolled or short) else 0
 
 
 if __name__ == "__main__":

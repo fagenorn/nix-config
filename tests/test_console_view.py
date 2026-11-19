@@ -3345,8 +3345,8 @@ class RegisterItemViewTest(unittest.TestCase):
                 self.assertNotIn(term, text.lower())
         self.assertEqual(
             shown["registration"]["draft_more"],
-            f"and {len(contract_draft.FIELDS) - len(contract_draft.MAIN)} more settings at "
-            "their usual values")
+            f"and {len([f for f in contract_draft.FIELDS if f not in contract_draft.MAIN])} more "
+            "settings at their usual values")
         self.assertEqual(shown["registration"]["draft_more"],
                          "and 22 more settings at their usual values")
 
@@ -3482,6 +3482,46 @@ class ApplyItemViewTest(unittest.TestCase):
         self.assertEqual(shown["inbox"]["open"], [APPLY_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+
+
+class ProposedEnvironmentViewTest(unittest.TestCase):
+    """The view the owner sees for a ready plan whose checkout proposes a commit environment."""
+
+    LINE = "commits run in its development shell: devenv shell (found in its files)"
+    LATEST = {"root": "/srv/sample-app", "plan_id": PID, "state": "ready",
+              "at": "2026-11-15T08:00:00+00:00", "project_id": None, "result": "planned",
+              "outcome": "changes", "headline": "What adopting sample-app would change.",
+              "lines": ["moves 2 agent files under .agents/", "writes the project contract"],
+              "note": None, "questions": [], "remote": None}
+
+    def latest(self):
+        fields = contract_draft.draft("/srv/sample-app", {
+            **contract_draft.read("/nonexistent"), "hooks": ["pre-commit"],
+            "environments": ["devenv.nix"]})
+        return {**self.LATEST, "draft": fields}
+
+    def test_the_ready_apply_card_states_the_proposal_first_and_hides_the_draft(self):
+        latest = self.latest()
+        items = approve.apply_items(latest, None, None, "approve", deferred=set())
+        shown = derive_view([], registration=register.view_entry(None, latest),
+                            apply_items=items)
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "register_apply")
+        self.assertEqual(card["lines"], [self.LINE, *latest["lines"]])
+        self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
+        entry = shown["registration"]
+        self.assertEqual((entry["line"], entry["lines"], entry["draft"], entry["draft_more"]),
+                         ("Register sample-app: needs you", [], None, None))
+
+    def test_with_no_card_asking_the_draft_offers_the_proposal_as_a_changeable_line(self):
+        latest = self.latest()
+        shown = derive_view([], registration=register.view_entry(None, latest))
+        self.assertEqual(shown["inbox"]["open"], [])
+        rows = {row["field"]: row for row in shown["registration"]["draft"]}
+        self.assertEqual(rows["commit-environment"]["line"], self.LINE)
+        self.assertIs(rows["commit-environment"]["text"], True)
+        self.assertEqual(rows["commit-environment"]["placeholder"],
+                         "the development shell command")
 
 
 class RegisterConfirmTest(unittest.TestCase):
