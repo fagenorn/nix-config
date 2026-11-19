@@ -438,6 +438,48 @@ class ContractDraftTest(unittest.TestCase):
                 fields = cd.draft(str(root), cd.read(str(root)))
                 self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
 
+    def test_a_hooks_path_through_a_tracked_directory_link_resolves_in_head(self):
+        for letter, setting, links, wanted in (
+                ("directory-link", ".githooks", {".githooks": "tools/hooks"}, ["pre-commit"]),
+                ("nested-directory-link", "a/hooks", {"a": "tools"}, ["pre-commit"]),
+                ("escaping-hooks-path", "../hooks", {}, []),
+                ("link-into-directory-link", "local-hooks",
+                 {"local-hooks/pre-commit": "../alias/pre-commit", "alias": "tools/hooks"}, ["pre-commit"]),
+                ("dangling-directory-link", ".githooks", {".githooks": "tools/absent"}, [])):
+            with self.subTest(case=letter):
+                root = sample(self.parent / letter, remote=True)
+                git(root, "config", "core.hooksPath", setting)
+                (root / "tools" / "hooks").mkdir(parents=True)
+                (root / "tools" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+                (root / "tools" / "hooks" / "pre-commit").chmod(0o755)
+                for name, target in links.items():
+                    (root / name).parent.mkdir(parents=True, exist_ok=True)
+                    (root / name).symlink_to(target)
+                commit(root, {"devenv.nix": "{ }\n"})
+                reading = cd.read(str(root))
+                self.assertEqual(reading["hooks"], wanted)
+                fields = cd.draft(str(root), reading)
+                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
+
+    def test_only_the_local_hooks_path_counts_never_a_worktree_scoped_one(self):
+        for letter, common_hook, wanted in (("hides-nothing-real", False, []), ("hides-real", True, ["pre-commit"])):
+            with self.subTest(case=letter):
+                root = sample(self.parent / letter, remote=True)
+                commit(root, {"devenv.nix": "{ }\n"})
+                scoped = self.parent / f"{letter}-scoped"
+                scoped.mkdir()
+                if not common_hook:
+                    (scoped / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+                    (scoped / "pre-commit").chmod(0o755)
+                else:
+                    install_hook(root)
+                git(root, "config", "extensions.worktreeConfig", "true")
+                git(root, "config", "--worktree", "core.hooksPath", str(scoped))
+                reading = cd.read(str(root))
+                self.assertEqual(reading["hooks"], wanted)
+                fields = cd.draft(str(root), reading)
+                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
+
     def test_a_looping_tracked_hook_link_has_no_hooks(self):
         root = sample(self.parent, remote=True)
         git(root, "config", "core.hooksPath", "local-hooks")

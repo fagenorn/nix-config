@@ -353,32 +353,58 @@ def _entry(root: str, path: str, cancel: threading.Event | None = None) -> tuple
 
 
 def _repository_hooks_path(root: str, cancel: threading.Event | None = None) -> str | None:
-    """The `core.hooksPath` the repository itself sets (the last one wins), never a global, system or command-line one."""
+    """The `core.hooksPath` the repository's own config sets (the last one wins).
+
+    Only the `local` scope counts: the fresh linked worktree Apply creates inherits that file, not the
+    registration checkout's `config.worktree`, and never a global, system or command-line setting.
+    """
     value = None
     for line in _lines(_git(root, "config", "--type=path", "--show-scope", "--get-all", "core.hooksPath",
                             cancel=cancel)):
         scope, _, setting = line.partition("\t")
-        if scope in ("local", "worktree"):
+        if scope == "local":
             value = setting
     return value
 
 
-def _tracked_executable(root: str, path: str, cancel: threading.Event | None = None,
-                        depth: int = 0) -> bool:
-    """Whether `HEAD` tracks `path` as an executable file, following a tracked link inside the tree."""
-    entry = _entry(root, path, cancel)
-    if entry == ("100755", "blob"):
-        return True
-    if entry != ("120000", "blob") or depth >= MAX_LINKS:
-        return False
-    target = _git(root, "cat-file", "blob", f"HEAD:{path}", cancel=cancel)
-    text = target.decode("utf-8", "replace") if target else ""
-    if not text or posixpath.isabs(text):
-        return False
-    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), text))
-    if resolved == ".." or resolved.startswith("../"):
-        return False
-    return _tracked_executable(root, resolved, cancel, depth + 1)
+def _tracked_executable(root: str, path: str, cancel: threading.Event | None = None) -> bool:
+    """Whether `HEAD` tracks `path` as an executable file, following tracked links on every component.
+
+    Each component is looked up in the `HEAD` tree, as the checkout's filesystem would resolve it: a
+    link, whether it ends the path or sits on a directory component, is read and its target spliced in
+    (at most `MAX_LINKS` of them); a link that is absolute, empty or leaves the tree reads as absent.
+    """
+    pending = path.split("/")
+    current = ""
+    links = 0
+    entry: tuple[str, str] | None = None
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not current:
+                return False
+            current, entry = posixpath.dirname(current), ("040000", "tree")
+            continue
+        candidate = posixpath.join(current, part)
+        entry = _entry(root, candidate, cancel)
+        if entry is None:
+            return False
+        if entry == ("120000", "blob"):
+            links += 1
+            if links > MAX_LINKS:
+                return False
+            target = _git(root, "cat-file", "blob", f"HEAD:{candidate}", cancel=cancel)
+            text = target.decode("utf-8", "replace") if target else ""
+            if not text or posixpath.isabs(text):
+                return False
+            pending[:0] = text.split("/")
+        elif entry[1] == "tree":
+            current = candidate
+        elif pending:
+            return False
+    return entry == ("100755", "blob")
 
 
 def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
@@ -391,11 +417,8 @@ def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
     """
     setting = _repository_hooks_path(root, cancel)
     if setting is not None and not posixpath.isabs(setting):
-        relative = posixpath.normpath(setting)
-        if relative == ".." or relative.startswith("../"):
-            return []
         return [name for name in COMMIT_HOOKS
-                if _tracked_executable(root, posixpath.normpath(posixpath.join(relative, name)), cancel)]
+                if _tracked_executable(root, f"{setting}/{name}", cancel)]
     if setting is None:
         printed = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", cancel=cancel)
         if not printed:
