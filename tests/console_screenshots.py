@@ -120,7 +120,9 @@ Contract:
   `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
   closed, the wrong text or project, or the field clipping the filled text); or when any
   shot has a visible project line whose Ask a question button sits on another row than its Give it
-  a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
+  a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when a shot with the Accounts or Sharing
+  panel open shows any page text in the 24 px band under the panel's bottom edge (`PANEL_BENEATH`, a text box over
+  the panel's width that is the topmost thing at the middle of its part in the band: a backdrop over the page hides it); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
   tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
@@ -386,6 +388,7 @@ class Shot:
     reading: tuple[bool, int, bool, bool, int] | None = None
     activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
+    beneath: tuple[str, ...] = ()
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -1131,6 +1134,41 @@ ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((
   return Math.abs(centre(give) - centre(ask)) > 4;
 }).map((line) => line.dataset.project)"""
 
+# Page text left showing in the band just under an open Accounts or Sharing panel's bottom edge (#1316):
+# the text of every page text node outside the header whose box crosses that band, lies over the panel's
+# width and is the topmost thing at the middle of its part inside the band (so a backdrop over it hides it).
+PANEL_BAND = 24
+PANEL_BENEATH = f"""(() => {{
+  const panel = Array.from(document.querySelectorAll('.acct-panel')).find(
+    (item) => !item.hidden && item.getClientRects().length > 0);
+  if (!panel) return [];
+  const edge = panel.getBoundingClientRect();
+  const found = [];
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {{
+    const text = node.textContent.trim();
+    const host = node.parentElement;
+    if (!text || !host || host.closest('header') || host.closest('script, style')) continue;
+    if (getComputedStyle(host).visibility === 'hidden') continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    for (const box of Array.from(range.getClientRects())) {{
+      const top = Math.max(box.top, edge.bottom);
+      const bottom = Math.min(box.bottom, edge.bottom + {PANEL_BAND});
+      if (box.width <= 0 || bottom <= top) continue;
+      if (box.right <= edge.left || box.left >= edge.right) continue;
+      const x = (Math.max(box.left, edge.left) + Math.min(box.right, edge.right)) / 2;
+      const y = (top + bottom) / 2;
+      const hit = document.elementFromPoint(x, y);
+      if (hit && (hit === host || host.contains(hit))) {{
+        found.push(host.tagName.toLowerCase() + ': ' + text.slice(0, 40));
+        break;
+      }}
+    }}
+  }}
+  return found;
+}})()"""
+
 THREAD_READING = f"""(() => {{
   const fold = document.querySelector('details[data-key="questions:owner/web"]');
   const homes = Array.from(document.querySelectorAll(
@@ -1284,13 +1322,14 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         scroll_y = page.evaluate(SCROLL_Y)
         short = tuple(page.evaluate(SHORT_CONTROLS))
         acts = tuple(page.evaluate(ACTS_ROW))
+        beneath = tuple(page.evaluate(PANEL_BENEATH) or ())
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation)
+                card=card, activation=activation, beneath=beneath)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1374,6 +1413,10 @@ def main(argv: list[str] | None = None) -> int:
     for shot in offrow:
         print(f"console-screenshots: {shot.path.name} puts Ask a question on another row than "
               f"Give it a goal ({', '.join(shot.acts)})")
+    uncovered = [shot for shot in taken if shot.beneath]
+    for shot in uncovered:
+        print(f"console-screenshots: {shot.path.name} shows page text under the open panel "
+              f"({'; '.join(shot.beneath)})")
     scrolled = [shot for shot in taken if shot.scroll_y != 0]
     for shot in scrolled:
         print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
@@ -1383,7 +1426,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or uncarded or offrow or scrolled or short) else 0
+                 or unlined or uncarded or offrow or uncovered or scrolled or short) else 0
 
 
 if __name__ == "__main__":

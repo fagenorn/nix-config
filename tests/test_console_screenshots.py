@@ -1183,6 +1183,25 @@ class ScreenshotCaptureTest(unittest.TestCase):
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
 
+class PanelBackdropTest(unittest.TestCase):
+    def test_an_open_accounts_or_sharing_panel_leaves_no_page_text_under_its_bottom_edge(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"]).close()
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+        panels = ("accounts-panel", "sharing-panel", "sharing-off", "sharing-unreadable")
+        with tempfile.TemporaryDirectory() as tmp:
+            taken = shots.capture(Path(tmp) / "out", states=panels)
+        self.assertEqual([(s.state, s.width) for s in taken],
+                         [(state, width) for state in panels for width in shots.WIDTHS])
+        self.assertEqual([(s.path.name, s.beneath) for s in taken if s.beneath], [])
+
+
 class ScreenshotReadingTest(unittest.TestCase):
     def read_pages(self, htmls, expression):
         """Load each markup alone in one 1440x900 Chromium page and return what `expression` reads."""
