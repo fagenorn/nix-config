@@ -115,9 +115,10 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_seven_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 37)
-        self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
+    def test_the_set_is_thirty_nine_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 39)
+        self.assertEqual(shots.STATES[-4:], ("sharing-panel", "sharing-off", "sharing-unreadable",
+                                             "guest-page"))
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
@@ -126,7 +127,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-19:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-21:-4], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -140,7 +141,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                  24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
                  27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
                  31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
-                 35: "thirty-five", 36: "thirty-six", 37: "thirty-seven"}
+                 35: "thirty-five", 36: "thirty-six", 37: "thirty-seven",
+                 38: "thirty-eight", 39: "thirty-nine"}
         files = len(shots.STATES) * len(shots.WIDTHS)
         doc = " ".join(shots.__doc__.split())
         self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
@@ -751,6 +753,30 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     serve.close()
                 svc.close()
 
+    def test_the_sharing_shots_read_on_off_and_unreadable(self) -> None:
+        cases = (("sharing-panel", True, True, shots.TAILNET, "unchecked"),
+                 ("sharing-off", True, False, shots.TAILNET, "off"),
+                 ("sharing-unreadable", False, True, None, "unreadable"))
+        for state, readable, shared, tailnet, serve in cases:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp).resolve(), state, now_s)
+                svc = shots.start_service(
+                    fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent,
+                    tailnet_readable=readable)
+                try:
+                    connection = http.client.HTTPConnection(*svc.address, timeout=5)
+                    try:
+                        connection.request("GET", "/api/state")
+                        sharing = json.loads(connection.getresponse().read())["sharing"]
+                    finally:
+                        connection.close()
+                    self.assertEqual(sharing["shared"], shared)
+                    self.assertEqual(sharing["tailnet"], tailnet)
+                    self.assertEqual(sharing["state"], serve)
+                finally:
+                    svc.close()
+
     def test_the_harness_sends_each_door_its_own_headers(self) -> None:
         self.assertEqual(shots._guest_headers(("127.0.0.1", 9)), {"Host": shots.TAILNET})
         self.assertEqual(shots._guest_headers("/tmp/cg-x/g.sock"),
@@ -777,11 +803,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
             "/tmp/g.sock")
 
     def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
-        for present, opens in (({"#sharing-open"}, True), (set(), False)):
-            with self.subTest(opens=opens):
-                self.check_sharing_shot(present, opens)
+        for state in ("sharing-panel", "sharing-off", "sharing-unreadable"):
+            for present, opens in (({"#sharing-open"}, True), (set(), False)):
+                with self.subTest(state=state, opens=opens):
+                    self.check_sharing_shot(state, present, opens)
 
-    def check_sharing_shot(self, present: set, opens: bool) -> None:
+    def check_sharing_shot(self, state: str, present: set, opens: bool) -> None:
         calls: list[tuple[str, tuple]] = []
 
         class Page:
@@ -817,7 +844,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 return Page()
 
         with tempfile.TemporaryDirectory() as tmp:
-            shots._shoot(Browser(), "http://console.test/", "sharing-panel", 480, Path(tmp))
+            shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
         if not opens:
             self.assertNotIn(("click", ("#sharing-open",)), calls)
             self.assertNotIn(("wait_for_selector", ("#sharing:not([hidden])",)), calls)

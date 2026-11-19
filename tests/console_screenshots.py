@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty-seven screens the sprint block, the finished list, the message life, the
+- `STATES` names the thirty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -77,13 +77,15 @@ Contract:
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
   `sharing-panel` is the owner's Sharing panel opened over one invented colleague of `owner/web`
-  after one admitted guest request; `guest-page` is that colleague's read-only page through a
+  after one admitted guest request; `sharing-off` is that panel with sharing switched off and
+  the read name shown, and `sharing-unreadable` is it with sharing on and no readable name, so
+  it shows its line; neither makes a guest request; `guest-page` is that colleague's read-only page through a
   stand-in Serve that adds the tailnet Host and login header, refused when a page with a door
   meta (`#console-door`) is not the guest page. On the base commit's page, which has neither
   the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
   `guest-page` is the page the guest port served then, so a base run still writes every file.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 74 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 78 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -174,7 +176,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "sharing-panel",
-          "guest-page")
+          "sharing-off", "sharing-unreadable", "guest-page")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -187,7 +189,8 @@ LOOK_HEAD = "3f9c1d27a05be84c61d9f0273b8e5a14c7d0962e"
 LOOK_FOUND = "8e41b0a6d2c7f35918ae04b7c6d1259f3e0a7b84"
 TAILNET = "desk.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
-SHARING_STATES = ("sharing-panel", "guest-page")
+SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "guest-page")
+SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable")
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -585,6 +588,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
     elif state in SHARING_STATES:
         seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
+        if state == "sharing-off":
+            seed.put(MINUTE, SHARING_TAILNET, None, {"shared": False})
         seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
@@ -1023,7 +1028,8 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                     now_s = datetime.now(timezone.utc).timestamp()
                     service = start_service(
                         build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
-                        guest_dir=Path(door) if state in SHARING_STATES else None)
+                        guest_dir=Path(door) if state in SHARING_STATES else None,
+                        tailnet_readable=state != "sharing-unreadable")
                     serve = None
                     try:
                         host, port = service.address
@@ -1211,7 +1217,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")
-        if state == "sharing-panel" and page.query_selector("#sharing-open") is not None:
+        if state in SHARING_PANELS and page.query_selector("#sharing-open") is not None:
             page.click("#sharing-open")
             page.wait_for_selector("#sharing:not([hidden])")
         tell = None
