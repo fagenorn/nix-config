@@ -127,7 +127,8 @@ Contract:
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
   tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot misses a `STYLE_CHECKS`
   row, the line names each miss: the row's computed style is read after the capture, with probes
-  and steps as `StyleCheck` and `STYLE_STEPS` say. The style reading and its steps run only when
+  and steps as `StyleCheck` and `STYLE_STEPS` say (`look-card` is shot with its viewer closed,
+  then opens its first picture, so the viewer rows read it open). The style reading and its steps run only when
   `style_applies()` (the page served is the page beside this module), so a base run's pictures and
   result are as before. In real-answer mode, `fixture` rows are skipped. `capture(...,
   mutate=True)` records in `Shot.broke` each row whose `broken` rule made it miss. It returns 2
@@ -395,7 +396,13 @@ class StyleCheck:
     `fills` reads each match against its parent's content width, `right_edge` that its right edge
     stands at its parent's content edge, `hugs` that its content box is no wider than its text, and
     `largest_type` (`value` is `<px>|<selector list>`) that no element under `selector` has a
-    `font-size` of `<px>` or more unless it matches the list.
+    `font-size` of `<px>` or more unless it matches the list. `track_max` (`value` is
+    `<index>:<fraction>`) wants the px track at that 1-based index of the resolved
+    `grid-template-columns` to be at most that fraction of the content width, and `tracks` (`value`
+    is a count) that the grid has exactly that many top-level tracks. `alpha_max` wants the colour
+    to be clear or to have an alpha of at most `value`, `opaque` that it is one palette colour at
+    alpha 1, and `follows_shape` that a loaded `img` is as tall as its own shape makes it at its
+    width, within its `min-height` and `max-height`.
     """
     name: str
     states: tuple[str, ...]
@@ -416,11 +423,13 @@ class StyleCheck:
     fixture: bool = False
 
 
-# The selectors clicked, in order, after a state's picture and before its style reading.
-STYLE_STEPS: dict[str, tuple[str, ...]] = {}
+# The selectors clicked, in order, after a state's picture and before its style reading: the
+# look card opens its first picture in the viewer, so the viewer rows read what the owner sees.
+STYLE_STEPS: dict[str, tuple[str, ...]] = {"look-card": ("button.pic-thumb",)}
 WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt",
                    "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills",
-                   "largest_type", "right_edge", "hugs"})
+                   "largest_type", "right_edge", "hugs", "track_max", "tracks", "alpha_max",
+                   "opaque", "follows_shape"})
 PALETTE = {
     "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
     "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
@@ -440,6 +449,7 @@ _SPEND_PALETTE = {k: v for k, v in PALETTE.items() if k not in _NO_STATE_COLOURS
 # are the only colour literals of the desk page's style block besides its tokens.
 STYLE_LISTS = {
     "peach": PALETTE["--peach"],
+    "opaque": list(PALETTE.values()),
     "palette": {
         "desk": [*PALETTE.values(), "rgb(248, 187, 152)", "rgba(183, 189, 248, 0.1)", _HOVER, _HAIR,
                  "rgba(24, 25, 38, 0.22)", "rgba(24, 25, 38, 0.28)", "rgba(8, 9, 16, 0.45)",
@@ -842,6 +852,221 @@ STYLE_CHECKS += (
     *_sec_h("sec-h-promoted", "#promoted h2",
             probe='<h2 class="sec-h" data-style-probe>Capacity</h2>', host="#promoted"),
 )
+_LIVE = "live-several"
+_LOOK = "look-card"
+_OWNER = "owner-check"
+_MARK = '<span class="message-new">new reply</span>'
+_CHECK_LIST = ('<ul class="sprint-checks" data-style-probe><li><button class="sprint-check '
+               'btn-quiet btn-bare">x</button></li></ul>')
+_WAIT_LIST = '<ul class="sprint-checks" data-style-probe><li class="wait">x</li></ul>'
+_REST_ROW = '<ul class="rest" data-style-probe><li class="row">x</li></ul>'
+_CARD_HEAD = '<div class="card" data-style-probe><div class="head">x</div></div>'
+_REST_HEAD = ('<ul class="rest" data-style-probe><li class="row"><div class="head"><span>a</span>'
+              '<span class="wait">waiting</span></div></li></ul>')
+_LEAD_BRIEFS = ('<div data-style-probe><article class="card lead">x</article>'
+                '<details class="row brief-row">x</details><details class="row brief-row">y'
+                '</details></div>')
+_LEAD_REST = ('<div data-style-probe><article class="card lead">x</article>'
+              '<ul class="rest"><li class="row">x</li></ul></div>')
+_ANSWERED = ('<details class="done-item" data-style-probe><summary><b>Which database?</b>'
+             '<span>answered</span></summary></details>')
+_DRAFT = ('<ul class="register-draft" data-style-probe><li><span>a line</span>'
+          '<button class="draft-change btn-quiet">Change</button></li></ul>')
+_OPAQUE_LOOK = "rgba(24, 25, 38, .5)"
+_NO_IMAGE = "linear-gradient(red, red)"
+_HEAD = ".sp-head"
+# A line after a line has the hair above it unless it is `.after-line`, which the rule removes.
+_BLOCK = "#list > li.line + li.line:not(.after-line)"
+_ANSWER_CLIP = (("white-space", "equals", "nowrap", "normal"), ("overflow", "equals", "hidden", "visible"),
+                ("text-overflow", "equals", "ellipsis", "clip"), ("min-width", "equals", "0px", "50px"))
+_ANSWER_SPAN = ".done-item summary > span"
+
+
+def _wide(row_name, state, selector, prop, want, value, bad, **kw):
+    """The 1440 row of a property whose 480 value differs."""
+    return _row(f"{row_name}-1440", state, selector, prop, want, value, bad, widths=(1440,), **kw)
+
+
+def _narrow(row_name, state, selector, prop, want, value, bad, **kw):
+    """The 480 row of a property whose 1440 value differs."""
+    return _row(f"{row_name}-480", state, selector, prop, want, value, bad, widths=(480,), **kw)
+
+
+STYLE_CHECKS += (
+    # The new-reply mark in a summary, the check line and the wait line.
+    _row("new-mark-gap-finished", "finished-list", ".finished-list > summary .message-new",
+         "margin-left", "equals", "10px", "0px", widths=(1440,), host="#projects",
+         probe=f'<details class="finished-list" data-style-probe><summary>Finished {_MARK}'
+               '</summary></details>'),
+    _row("new-mark-gap-earlier", "finished-list", ".sprint-earlier summary .message-new",
+         "margin-left", "equals", "10px", "0px", widths=(1440,), host="#projects",
+         probe=f'<details class="sprint-earlier" data-style-probe><summary>Earlier {_MARK}'
+               '</summary></details>'),
+    _row("check-line-color", _OWNER, ".sprint-check", "color", "same_as", ".sprint-detail summary",
+         _RGB),
+    _row("check-line-cursor", _OWNER, ".sprint-check", "cursor", "same_as", ".sprint-detail summary",
+         "default"),
+    _row("check-line-font-size", _OWNER, ".sprint-check", "font-size", "same_as", ".sprint-detail",
+         "30px"),
+    _row("check-line-text-decoration-line", _OWNER, ".sprint-check", "text-decoration-line",
+         "equals", "none", "underline"),
+    _wide("check-line-min-height", _OWNER, ".sprint-check", "min-height", "same_as", ".btn-quiet",
+          "20px", compare_probe='<button class="btn-quiet" data-style-probe>x</button>'),
+    _narrow("check-line-min-height", _OWNER, ".sprint-check", "min-height", "equals", "44px", "20px"),
+    _narrow("check-line-display", _OWNER, ".sprint-check", "display", "equals", "flex", "block"),
+    _narrow("check-line-align-items", _OWNER, ".sprint-check", "align-items", "equals", "flex-start",
+            "center"),
+    _row("check-line-list-padding", _OWNER, ".sprint-checks", "padding", "equals", "0px 0px 0px 28px",
+         "9px"),
+    *_group("wait-line", _OWNER, ".sprint-checks .wait", (
+        ("margin", "equals", "0px", "9px"), ("padding", "same_as", ".sprint-check", "9px"),
+        ("font-size", "same_as", ".sprint-check", "30px")),
+        probe=_WAIT_LIST, host="#projects", compare_probe=_CHECK_LIST, compare_host="#projects"),
+    _narrow("wait-line-min-height", _OWNER, ".sprint-checks .wait", "min-height", "equals", "44px",
+            "20px", probe=_WAIT_LIST, host="#projects"),
+    _narrow("wait-line-min-height-same", _OWNER, ".sprint-checks .wait", "min-height", "same_as",
+            ".sprint-check", "20px", probe=_WAIT_LIST, host="#projects", compare_probe=_CHECK_LIST,
+            compare_host="#projects"),
+    # The now sentence, the pips and the project block.
+    _row("now-sentence-column-start", _LIVE, ".sp-now", "grid-column-start", "equals", "2", "1"),
+    _row("now-sentence-column-end", _LIVE, ".sp-now", "grid-column-end", "equals", "-1", "3"),
+    _row("now-sentence-display", _LIVE, ".sp-now", "display", "in", "-webkit-box|flow-root", "block"),
+    _row("now-sentence-box-orient", _LIVE, ".sp-now", "-webkit-box-orient", "equals", "vertical",
+         "horizontal"),
+    _row("now-sentence-line-clamp", _LIVE, ".sp-now", "-webkit-line-clamp", "equals", "2", "5"),
+    _row("now-sentence-overflow-y", _LIVE, ".sp-now", "overflow-y", "equals", "hidden", "visible"),
+    _row("pips-wrap-flex-wrap", _LIVE, ".pips", "flex-wrap", "equals", "wrap", "nowrap"),
+    _row("pips-wrap-pips-white-space", _LIVE, ".pips", "white-space", "not", "nowrap", "nowrap"),
+    _row("pips-wrap-prog-white-space", _LIVE, ".sp-prog", "white-space", "not", "nowrap", "nowrap"),
+    _row("pips-wrap-columns", _LIVE, _HEAD, "grid-template-columns", "starts", "16px ", "1fr"),
+    _row("pips-wrap-columns-max", _LIVE, _HEAD, "grid-template-columns", "track_max", "3:0.5",
+         "16px minmax(0, 1fr) 90%"),
+    _row("project-block-border-color", _LIVE, _BLOCK, "border-top-color", "equals", _HAIR, _RGB),
+    _row("project-block-border-width", _LIVE, _BLOCK, "border-top-width", "min", "1", "0px"),
+    _row("project-block-pname-weight", _LIVE, ".pname", "font-weight", "equals", "600", "400"),
+    # The brief rows and the registration rows.
+    _row("row-head-display", _NOTHING, ".row-head", "display", "equals", "flex", "block",
+          probe='<p class="row-head" data-style-probe>x</p>', host="#inbox", widths=(1440,)),
+    _row("row-head-summary-display", _NOTHING, ".brief-row > summary", "display", "equals", "flex",
+          "block", host="#inbox",
+          probe='<details class="row brief-row" data-style-probe><summary class="row-head">x'
+                '</summary></details>', widths=(1440,)),
+    _row("row-head-b-overflow-wrap", _NOTHING, ".row-head b", "overflow-wrap", "equals", "anywhere",
+          "normal", probe='<p class="row-head" data-style-probe><b>x</b></p>', host="#inbox", widths=(1440,)),
+    *(_row(f"rest-head-{name}", _NOTHING, ".rest .head", prop, want, value, bad, widths=(1440,),
+           probe=_REST_HEAD, host="#inbox", **extra)
+      for name, prop, want, value, bad, extra in (
+          ("display", "display", "equals", "flex", "block", {}),
+          ("column-gap", "column-gap", "same_as", ".card .head", "50px",
+           {"compare_probe": _CARD_HEAD, "compare_host": "#inbox"}),
+          ("align-items", "align-items", "same_as", ".card .head", "stretch",
+           {"compare_probe": _CARD_HEAD, "compare_host": "#inbox"}))),
+    StyleCheck("rest-head-wait-right", (_NOTHING,), (1440,), ".head .wait", "right", "right_edge", "",
+               ".head .wait { margin-left: 0 !important }", probe=_REST_HEAD, host="#inbox"),
+    _row("rest-head-wait-margin-left", _NOTHING, ".head .wait", "margin-left", "min", "0", "-5px",
+         widths=(1440,), probe=_REST_HEAD, host="#inbox"),
+    _row("row-gap-padding-top", _NOTHING, ".brief-row", "padding-top", "equals", "12px", "30px",
+         widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    _row("row-gap-padding-bottom", _NOTHING, ".brief-row", "padding-bottom", "equals", "12px",
+         "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    *(_row(f"row-gap-padding-{side}-same", _NOTHING, ".brief-row", f"padding-{side}", "same_as",
+           ".rest > li.row", "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox",
+           compare_probe=_REST_ROW, compare_host="#inbox")
+      for side in ("top", "bottom")),
+    _row("row-gap-lead-brief-margin-top", _NOTHING, ".card.lead + .brief-row", "margin-top",
+         "equals", "12px", "30px", widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    _row("row-gap-lead-rest-margin-top", _NOTHING, ".card.lead + .rest", "margin-top", "equals",
+         "12px", "30px", widths=(1440,), probe=_LEAD_REST, host="#inbox"),
+    _row("row-gap-brief-border-color", _NOTHING, ".brief-row + .brief-row", "border-top-color",
+         "equals", _HAIR, _RGB, widths=(1440,), probe=_LEAD_BRIEFS, host="#inbox"),
+    # The answered row clips its question to one line.
+    *(_row(f"answered-row-b-{prop}", _NOTHING, ".done-item summary > b", prop, want, value, bad,
+           probe=_ANSWERED, host="#inbox")
+      for prop, want, value, bad in _ANSWER_CLIP),
+    *(_row(f"answered-row-span-{prop}", _NOTHING, _ANSWER_SPAN, prop, want, value, bad,
+           probe=_ANSWERED, host="#inbox")
+      for prop, want, value, bad in _ANSWER_CLIP),
+    _row("answered-row-b-flex-grow", _NOTHING, ".done-item summary > b", "flex-grow", "equals", "0",
+         "1", probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-b-flex-shrink", _NOTHING, ".done-item summary > b", "flex-shrink", "gt",
+         _ANSWER_SPAN, "0", probe=_ANSWERED, host="#inbox", compare_probe=_ANSWERED,
+         compare_host="#inbox"),
+    _row("answered-row-span-flex-grow", _NOTHING, _ANSWER_SPAN, "flex-grow", "equals", "0", "1",
+         probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-span-flex-shrink", _NOTHING, _ANSWER_SPAN, "flex-shrink", "min", "0.001",
+         "0", probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-summary-flex-wrap", _NOTHING, ".done-item summary", "flex-wrap", "equals",
+         "nowrap", "wrap", probe=_ANSWERED, host="#inbox"),
+    _row("answered-row-item-min-width", _NOTHING, ".done-item", "min-width", "equals", "0px", "50px",
+         probe=_ANSWERED, host="#inbox"),
+    _row("draft-row-display", _NOTHING, ".register-draft li", "display", "equals", "grid", "block",
+          probe=_DRAFT, host="#inbox", widths=(1440,)),
+    _row("draft-row-columns", _NOTHING, ".register-draft li", "grid-template-columns", "tracks",
+          "2", "1fr", probe=_DRAFT, host="#inbox", widths=(1440,)),
+    _row("draft-row-change-white-space", _NOTHING, ".draft-change", "white-space", "equals",
+          "nowrap", "normal", probe=_DRAFT, host="#inbox", widths=(1440,)),
+    # The picture gallery, its thumbnails and the viewer (read open, after STYLE_STEPS).
+    _row("pics-flex-wrap", _LOOK, ".pics", "flex-wrap", "equals", "wrap", "nowrap"),
+    _row("pics-pic-min-width", _LOOK, ".pic", "min-width", "equals", "0px", "50px"),
+    _row("pics-pic-max-width", _LOOK, ".pic", "max-width", "equals", "100%", "none"),
+    _row("pics-pair-min-width", _LOOK, ".pic-pair", "min-width", "equals", "0px", "50px"),
+    _row("pics-pair-max-width", _LOOK, ".pic-pair", "max-width", "equals", "100%", "none"),
+    _row("pics-line-overflow-wrap", _LOOK, ".pic-line", "overflow-wrap", "equals", "anywhere",
+         "normal"),
+    _wide("pics-pair-display", _LOOK, ".pic-pair", "display", "equals", "flex", "block"),
+    _wide("pics-pair-direction", _LOOK, ".pic-pair", "flex-direction", "equals", "row", "column"),
+    _wide("pics-pair-align-items", _LOOK, ".pic-pair", "align-items", "equals", "flex-start",
+          "stretch"),
+    _narrow("pics-pair-direction", _LOOK, ".pic-pair", "flex-direction", "equals", "column", "row"),
+    _narrow("pics-pair-align-items", _LOOK, ".pic-pair", "align-items", "equals", "stretch",
+            "flex-start"),
+    _wide("pics-pair-pic-flex", _LOOK, ".pic-pair .pic", "flex", "equals", "1 1 0px", "0 0 auto"),
+    _row("thumb-object-fit", _LOOK, ".pic-thumb img", "object-fit", "equals", "contain", "fill"),
+    _wide("thumb-max-height", _LOOK, ".pic-thumb img", "max-height", "equals", "180px", "400px"),
+    _narrow("thumb-max-height", _LOOK, ".pic-thumb img", "max-height", "equals", "240px", "400px"),
+    _row("thumb-width", _LOOK, ".pic-thumb img", "width", "fills", "", "50%", every=True),
+    _row("thumb-height", _LOOK, ".pic-thumb img", "height", "follows_shape", "", "50px", every=True),
+    *(_row(f"{name}-{kind}", _LOOK, selector, prop, want, value, bad)
+      for name, selector in (("thumb", ".pic-thumb"), ("thumb-img", ".pic-thumb img"))
+      for kind, prop, want, value, bad in (
+          ("background-color", "background-color", "alpha_max", "0.35", "rgb(24, 25, 38)"),
+          ("background-image", "background-image", "equals", "none", _NO_IMAGE))),
+    _row("viewer-display", _LOOK, ".viewer", "display", "equals", "flex", "block"),
+    _row("viewer-direction", _LOOK, ".viewer", "flex-direction", "equals", "column", "row"),
+    _row("viewer-overflow-y", _LOOK, ".viewer", "overflow-y", "in", "visible|hidden|clip", "auto"),
+    _row("viewer-background-color", _LOOK, ".viewer", "background-color", "opaque", "",
+         _OPAQUE_LOOK),
+    _row("viewer-background-image", _LOOK, ".viewer", "background-image", "equals", "none",
+         _NO_IMAGE),
+    _row("viewer-bar-display", _LOOK, ".viewer-bar", "display", "equals", "flex", "block"),
+    _row("viewer-bar-direction", _LOOK, ".viewer-bar", "flex-direction", "equals", "row", "column"),
+    _row("viewer-bar-wrap", _LOOK, ".viewer-bar", "flex-wrap", "equals", "nowrap", "wrap"),
+    _row("viewer-bar-flex", _LOOK, ".viewer-bar", "flex", "equals", "0 0 auto", "1 1 auto"),
+    _row("viewer-bar-background-color", _LOOK, ".viewer-bar", "background-color", "opaque", "",
+         _OPAQUE_LOOK),
+    _row("viewer-bar-background-image", _LOOK, ".viewer-bar", "background-image", "equals", "none",
+         _NO_IMAGE),
+    _row("viewer-stage-overflow-y", _LOOK, ".viewer-stage", "overflow-y", "equals", "auto",
+         "hidden"),
+    _row("viewer-stage-align-items", _LOOK, ".viewer-stage", "align-items", "in",
+         "normal|flex-start|start", "center"),
+    _row("viewer-stage-child-margin-top", _LOOK, ".viewer-stage > *", "margin-top", "equals", "0px",
+         "20px"),
+    _row("viewer-img-max-width", _LOOK, ".viewer img", "max-width", "equals", "100%", "none"),
+    _row("viewer-img-object-fit", _LOOK, ".viewer img", "object-fit", "equals", "contain", "fill"),
+    _row("viewer-html-overflow-y", _LOOK, "html", "overflow-y", "equals", "hidden", "visible"),
+    _narrow("viewer-bar-button-min-height", _LOOK, ".viewer-bar button", "min-height", "min", "44",
+            "20px", every=True),
+    _row("viewer-focus-outline-style", _LOOK, ".viewer", "outline-style", "equals", "none", "solid",
+         forced=("focus-visible",)),
+    _row("viewer-focus-outline", _LOOK, ".viewer", "outline", "equals", "rgb(202, 211, 245) none 0px",
+         "2px solid " + _RGB, forced=("focus-visible",)),
+    _row("viewer-pair-display", _LOOK, ".viewer-pair", "display", "equals", "flex", "block"),
+    _wide("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "row",
+          "column"),
+    _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
+            "row"),
+)
 STYLE_PLACE = r"""((rows) => {
   let placed = 0;
   const put = (html, host, name) => {
@@ -868,7 +1093,14 @@ STYLE_MUTATE = r"""((css) => {
   style.textContent = css;
   document.head.appendChild(style);
 })"""
-STYLE_SETTLE = r"""(() => {
+STYLE_SETTLE = r"""(async () => {
+  // A picture is fetched after the page draws it, so wait for each one to have its source and load.
+  for (let tries = 0; tries < 100; tries++) {
+    const waiting = Array.from(document.querySelectorAll('img.pic-img')).some(
+      (img) => !img.hidden && (!img.getAttribute('src') || !img.complete));
+    if (!waiting) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
   for (const animation of document.getAnimations()) {
     try { animation.finish(); } catch (error) { /* an infinite animation has no end */ }
   }
@@ -1077,6 +1309,46 @@ STYLE_READING = r"""((rows) => {
         const right = node.getBoundingClientRect().right;
         got = Math.round(right * 100) / 100 + 'px';
         ok = right >= parent.getBoundingClientRect().right - parseFloat(cs.paddingRight) - 1;
+      } else if (row.want === 'track_max' || row.want === 'tracks') {
+        got = getComputedStyle(node).getPropertyValue('grid-template-columns');
+        const found = [];
+        let depth = 0, from = 0;
+        for (let i = 0; i <= got.length; i++) {
+          const char = got.charAt(i);
+          if (char === '(') depth++;
+          else if (char === ')') depth--;
+          else if ((char === ' ' || i === got.length) && depth === 0) {
+            if (i > from) found.push(got.slice(from, i));
+            from = i + 1;
+          }
+        }
+        if (row.want === 'tracks') {
+          ok = found.length === parseInt(row.value, 10);
+        } else {
+          const [index, fraction] = row.value.split(':');
+          const cs = getComputedStyle(node);
+          const width = node.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+          const track = found[parseInt(index, 10) - 1];
+          ok = track !== undefined && track.endsWith('px') && !track.includes('(')
+            && parseFloat(track) <= parseFloat(fraction) * width;
+        }
+      } else if (row.want === 'alpha_max') {
+        const colour = parse(got);
+        ok = colour !== null && parseFloat(colour.split(',')[3]) <= parseFloat(row.value);
+      } else if (row.want === 'opaque') {
+        ok = LISTS.opaque.map(parse).includes(parse(got));
+      } else if (row.want === 'follows_shape') {
+        const cs = getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        got = Math.round(rect.height * 100) / 100 + 'px';
+        if (!(node.naturalWidth > 0)) {
+          got += ' (not loaded)';
+        } else {
+          const low = parseFloat(cs.minHeight) || 0;
+          const high = cs.maxHeight === 'none' ? Infinity : parseFloat(cs.maxHeight);
+          const shape = Math.max(low, Math.min(high, rect.width * node.naturalHeight / node.naturalWidth));
+          ok = Math.abs(rect.height - shape) <= 1;
+        }
       } else if (row.want === 'hugs') {
         const cs = getComputedStyle(node);
         const width = node.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);

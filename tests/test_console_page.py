@@ -3072,20 +3072,6 @@ def picture_posts(snap: dict) -> list:
     return [p for p in snap["posts"] if p["url"].startswith("/api/picture/")]
 
 
-def page_css() -> tuple:
-    """The page's whole style block and its top level with every @media block removed."""
-    (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-    return style, re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-
-
-def css_declared(block: str, selector: str) -> dict:
-    merged: dict = {}
-    for name, decls in style_rules(block):
-        if name == selector:
-            merged.update(decls)
-    return merged
-
-
 class PagePictureTest(unittest.TestCase):
     def test_a_question_card_draws_one_thumbnail_per_picture_with_its_line(self) -> None:
         (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
@@ -3178,66 +3164,6 @@ class PagePictureTest(unittest.TestCase):
                           {"snapshot": True}])
         self.assertEqual(len(round_posts(snap)), 1)
         self.assertEqual(len(with_class(snap["inbox"], "fail")), 1)
-
-    def test_the_gallery_wraps_and_the_pair_stacks_at_480(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-
-        def declared(block: str, selector: str) -> dict:
-            merged: dict = {}
-            for name, decls in style_rules(block):
-                if name == selector:
-                    merged.update(decls)
-            return merged
-
-        self.assertEqual(declared(style, ".pics").get("flex-wrap"), "wrap")
-        for selector in (".pic", ".pic-pair"):
-            rule = declared(style, selector)
-            self.assertEqual((rule.get("min-width"), rule.get("max-width")), ("0", "100%"), selector)
-        self.assertEqual(declared(style, ".pic-line").get("overflow-wrap"), "anywhere")
-        narrow = media_block(style, "(max-width: 480px)")
-        self.assertEqual(declared(narrow, ".pic-pair").get("flex-direction"), "column")
-
-    def test_a_thumbnail_follows_its_pictures_shape_up_to_a_bound(self) -> None:
-        style, top = page_css()
-        image = css_declared(top, ".pic-thumb img")
-        self.assertEqual((image.get("width"), image.get("height")), ("100%", "auto"))
-        self.assertEqual(image.get("object-fit"), "contain")
-        self.assertEqual(image.get("max-height"), "180px")
-        narrow = media_block(style, "(max-width: 480px)")
-        self.assertEqual(css_declared(narrow, ".pic-thumb img").get("max-height"), "240px")
-        self.assertEqual(css_declared(top, ".pic-pair").get("align-items"), "flex-start")
-        self.assertEqual(css_declared(narrow, ".pic-pair").get("align-items"), "stretch")
-
-    def test_a_thumbnails_letterbox_is_a_light_tint_of_the_card(self) -> None:
-        _, top = page_css()
-        for selector in (".pic-thumb", ".pic-thumb img"):
-            fill = css_declared(top, selector).get("background", "")
-            if fill in ("", "none", "transparent"):
-                continue
-            tint = re.fullmatch(r"rgba\(\s*\d+,\s*\d+,\s*\d+,\s*(\.\d+|0\.\d+)\)", fill)
-            self.assertIsNotNone(tint, selector + " " + fill)
-            self.assertLessEqual(float(tint.group(1)), .35, selector)
-
-    def test_the_pair_sits_in_one_row_on_a_desktop(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-
-        def declared(block: str, selector: str) -> dict:
-            merged: dict = {}
-            for name, decls in style_rules(block):
-                if name == selector:
-                    merged.update(decls)
-            return merged
-
-        pair = declared(top, ".pic-pair")
-        self.assertEqual(pair.get("display"), "flex")
-        self.assertIn(pair.get("flex-direction"), (None, "row"))
-        self.assertEqual(declared(top, ".pic-pair .pic").get("flex"), "1 1 0")
-        for query in ("(max-width: 1180px)", "(max-width: 900px)"):
-            self.assertNotEqual(declared(media_block(style, query), ".pic-pair").get("flex-direction"),
-                                "column", query)
 
 
 class PageViewerTest(unittest.TestCase):
@@ -3342,26 +3268,6 @@ class PageViewerTest(unittest.TestCase):
         self.assertEqual(self.count(moved), "2 of 3")
         self.assertTrue(closed["viewer"]["hidden"])
 
-    def test_the_viewer_pair_is_a_row_and_stacks_at_480(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-
-        def declared(block: str, selector: str) -> dict:
-            merged: dict = {}
-            for name, decls in style_rules(block):
-                if name == selector:
-                    merged.update(decls)
-            return merged
-
-        pair = declared(top, ".viewer-pair")
-        self.assertEqual(pair.get("display"), "flex")
-        self.assertIn(pair.get("flex-direction"), (None, "row"))
-        narrow = media_block(style, "(max-width: 480px)")
-        self.assertEqual(declared(narrow, ".viewer-pair").get("flex-direction"), "column")
-        image = declared(top, ".viewer img")
-        self.assertEqual((image.get("max-width"), image.get("object-fit")), ("100%", "contain"))
-
     def test_the_gallery_and_viewer_are_one_shared_piece(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
         for needle in ("function pictureGallery(", "function openViewer(", 'id="viewer"'):
@@ -3402,8 +3308,6 @@ class PageViewerTest(unittest.TestCase):
         self.assertEqual(self.count(kept), "1 of 3")
         self.assertEqual(self.count(ended), "3 of 3")
         self.assertEqual(ended["active"], "viewer")
-        _, top = page_css()
-        self.assertEqual(css_declared(top, ".viewer:focus-visible").get("outline"), "none")
 
     def test_the_viewer_controls_share_one_bar_that_stays_in_view(self) -> None:
         (snap,) = render(self.opened + [{"click": "pic-thumb", "nth": 1}, {"snapshot": True}])
@@ -3413,27 +3317,6 @@ class PageViewerTest(unittest.TestCase):
                           "viewer-close btn-quiet"])
         self.assertEqual([full(c) for c in bar["children"]], ["Previous", "2 of 3", "Next", "Close"])
         self.assertEqual(len(with_class(snap["viewer"], "viewer-stage")), 1)
-        style, top = page_css()
-        row = css_declared(top, ".viewer-bar")
-        self.assertEqual(row.get("display"), "flex")
-        self.assertIn(row.get("flex-direction"), (None, "row"))
-        self.assertIn(row.get("flex-wrap"), (None, "nowrap"))
-        self.assertEqual(row.get("flex"), "none")
-        host = css_declared(top, ".viewer")
-        self.assertEqual((host.get("display"), host.get("flex-direction")), ("flex", "column"))
-        self.assertNotIn(host.get("overflow-y", host.get("overflow")), ("auto", "scroll"))
-        self.assertEqual(css_declared(top, ".viewer-stage").get("overflow"), "auto")
-        narrow = media_block(style, "(max-width: 480px)")
-        tall = css_declared(narrow, ".viewer-bar button").get("min-height", "0px")
-        self.assertGreaterEqual(int(tall.removesuffix("px")), 44)
-
-    def test_the_viewer_shows_its_pictures_at_the_top_of_the_stage(self) -> None:
-        _, top = page_css()
-        stage = css_declared(top, ".viewer-stage")
-        self.assertIn(stage.get("align-items"), (None, "flex-start", "start"))
-        placed = css_declared(top, ".viewer-stage > *").get("margin", "")
-        self.assertEqual(placed.split()[0], "0", placed)
-        self.assertNotIn(placed, ("auto", "auto auto"))
 
     def test_closing_the_viewer_restores_the_page_scroll(self) -> None:
         (snap,) = render(self.opened + [
@@ -3441,16 +3324,6 @@ class PageViewerTest(unittest.TestCase):
             {"key": "Escape", "follow": True}, {"snapshot": True}])
         self.assertTrue(snap["viewer"]["hidden"])
         self.assertEqual(snap["scroll_y"], 640)
-
-    def test_the_viewer_is_opaque_and_the_page_behind_it_does_not_scroll(self) -> None:
-        _, top = page_css()
-        tokens = css_declared(top, ":root")
-        for selector in (".viewer", ".viewer-bar"):
-            fill = css_declared(top, selector).get("background", "")
-            token = re.fullmatch(r"var\((--[a-z0-9]+)\)", fill)
-            self.assertIsNotNone(token, selector + " " + fill)
-            self.assertRegex(tokens.get(token.group(1), ""), r"^#[0-9a-f]{6}$", selector)
-        self.assertEqual(css_declared(top, "html:has(#viewer:not([hidden]))").get("overflow"), "hidden")
 
     def test_the_page_behind_the_viewer_is_inert(self) -> None:
         shown, closed = render(self.opened + [
@@ -4926,14 +4799,6 @@ class PageMessageLifeTest(unittest.TestCase):
         (fold,) = of_class(line, "details", "sprint-earlier")
         self.assertEqual(of_class(fold, "span", "message-new"), [])
 
-    def test_a_new_reply_mark_in_a_summary_is_set_off_from_the_words_before_it(self) -> None:
-        # The harness applies no CSS: the summaries are not flex boxes, so the span needs its own margin.
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        rules = style_rules(style)
-        for selector in (".finished-list > summary .message-new", ".sprint-earlier summary .message-new"):
-            merged = {k: v for s, d in rules if s == selector for k, v in d.items()}
-            self.assertEqual(merged.get("margin-left"), "10px", selector)
-
 
 MORE_KEY = "more:" + "a" * 16
 DETAIL_KEY = "sprint:" + "a" * 16
@@ -5818,24 +5683,6 @@ class PageSprintBlockTest(unittest.TestCase):
                 self.assertEqual(approvals(snap), [])
                 self.assertEqual(answers(snap), [])
 
-    def test_the_check_line_wears_the_sprint_openers_look_and_keeps_a_touch_target(self) -> None:
-        (style, top) = page_css()
-        opener = css_declared(top, ".sprint-detail summary")
-        line = css_declared(top, ".sprint-check")
-        self.assertEqual(line.get("color"), opener.get("color"))
-        self.assertEqual(line.get("cursor"), opener.get("cursor"))
-        self.assertEqual(line.get("font-size"), css_declared(top, ".sprint-detail").get("font-size"))
-        self.assertNotIn("text-decoration", line)
-        self.assertNotIn("min-height", line)
-        self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
-        (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
-        self.assertEqual(css_declared(narrow, ".sprint-check").get("min-height"), "44px")
-        # Top-aligned, so the text sits as far below the status line at 480 px as at 1440 px
-        # instead of centring in the 44 px target.
-        self.assertEqual(css_declared(narrow, ".sprint-check").get("display"), "flex")
-        self.assertEqual(css_declared(narrow, ".sprint-check").get("align-items"), "flex-start")
-        self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
-
     def test_a_check_line_with_no_card_does_nothing(self) -> None:
         (before, after) = render([
             START, {"frame": with_check([])}, {"snapshot": True},
@@ -5970,12 +5817,6 @@ class PageSprintBlockTest(unittest.TestCase):
                                   ["2 sprints across 2 projects"]])
 
     def test_the_now_sentence_is_clamped_to_two_lines(self) -> None:
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        merged = {k: v for s, d in style_rules(style) if s == ".sp-now" for k, v in d.items()}
-        for name, value in (("grid-column", "2 / -1"), ("display", "-webkit-box"),
-                            ("-webkit-box-orient", "vertical"), ("-webkit-line-clamp", "2"),
-                            ("line-clamp", "2"), ("overflow", "hidden")):
-            self.assertEqual(merged.get(name), value, name)
         (snap,) = render([START, {"frame": with_sprints([REPORTED])}, {"snapshot": True}])
         (now,) = of_class(snap["projects"], "p", "sp-now")
         self.assertEqual(now["title"], full(now))
@@ -6494,8 +6335,6 @@ class PageSprintGlanceTest(unittest.TestCase):
             "progress_text": f"0 of {MAX_REPORT_ISSUES} landed, {MAX_REPORT_ISSUES} queued",
             "issues": [{"issue": n, "stage": "queued", "stage_text": "queued"}
                        for n in range(1, MAX_REPORT_ISSUES + 1)]}
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        rules = style_rules(style)
         (snap,) = render([START, {"frame": with_sprints([full_report])}, {"snapshot": True}])
         (line,) = sprint_lines(snap)
         (pips,) = [n for n in top(line) if has_class(n, "pips")]
@@ -6503,23 +6342,6 @@ class PageSprintGlanceTest(unittest.TestCase):
                          MAX_REPORT_ISSUES)
         self.assertEqual([full(n) for n in top(line) if has_class(n, "pip-count")],
                          [f"0 of {MAX_REPORT_ISSUES}"])
-        self.assertTrue(any(s == ".pips" and d.get("flex-wrap") == "wrap" for s, d in rules))
-        for selector, decls in rules:
-            if selector in (".sp-prog", ".pips"):
-                self.assertNotEqual(decls.get("white-space"), "nowrap", selector)
-        grids = [d["grid-template-columns"] for s, d in rules
-                 if s == ".sp-head" and "grid-template-columns" in d]
-        self.assertGreaterEqual(len(grids), 1)
-        for value in grids:
-            found = re.match(r"^16px minmax\(0, 1fr\) fit-content\((\d+)%\)$", value)
-            self.assertIsNotNone(found, value)
-            self.assertLessEqual(int(found.group(1)), 50)
-
-    def test_the_now_sentence_spans_the_text_columns_of_the_head_grid(self) -> None:
-        # Grid auto-placement would put it in the 16px icon column; the harness applies no CSS.
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        merged = {k: v for s, d in style_rules(style) if s == ".sp-now" for k, v in d.items()}
-        self.assertEqual(merged.get("grid-column"), "2 / -1")
 
     def test_an_unknown_sprint_ball_fails_loud(self) -> None:
         for ball in ("bogus", "constructor", None):
@@ -6798,13 +6620,6 @@ class PageSideColumnTest(unittest.TestCase):
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
         name = summary["children"][0]
         self.assertEqual((name["tag"], name["cls"], name["text"]), ("h3", "pname", "owner/p00"))
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        rules = style_rules(style)
-        self.assertTrue([d for s, d in rules
-                         if s == "#list > li.line + li.line"
-                         and "var(--hair)" in d.get("border-top", "")])
-        self.assertTrue([d for s, d in rules
-                         if s == ".pname" and d.get("font-weight") == "600"])
 
 
 BRIEF = {
@@ -7119,17 +6934,6 @@ ROW_BODY = ("parts", "approve", "reply-text", "reply-send")
 
 
 class PageBriefRowTest(unittest.TestCase):
-    def test_the_brief_row_head_keeps_the_shared_flex_layout(self) -> None:
-        # The harness applies no CSS: a rule on the summary that is more specific
-        # than .row-head must not take its flex row (gap, wait at the right) away.
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        rules = style_rules(style)
-        self.assertEqual(
-            [d["display"] for s, d in rules if s == ".row-head" and "display" in d], ["flex"])
-        for selector, decls in rules:
-            if selector == ".brief-row > summary":
-                self.assertEqual(decls.get("display", "flex"), "flex", selector)
-
     def test_the_hint_follows_a_brief_row_as_it_folds_and_unfolds(self) -> None:
         # The hint sits on the summary while the row is closed and on the card while it is open;
         # folding or unfolding the row by hand moves it with no redraw in between (DR-003).
@@ -7144,31 +6948,6 @@ class PageBriefRowTest(unittest.TestCase):
             {"snapshot": True}, {"close": KEY_B}, {"snapshot": True},
             {"open": KEY_B}, {"snapshot": True}])
         self.assertEqual([holder(opened), holder(folded), holder(again)], ["article", "summary", "article"])
-
-    def test_a_register_row_head_keeps_the_flex_layout_of_a_card_head(self) -> None:
-        # The harness applies no CSS: a head inside li.row needs the card head's flex layout, gaps
-        # and right-aligned wait, or later registration rows run their spans together (DR-002).
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        merged: dict = {}
-        for selector in (".card .head", ".rest .head"):
-            found = {}
-            for name, decls in style_rules(style):
-                if name == selector:
-                    found.update(decls)
-            merged[selector] = found
-        self.assertEqual(merged[".rest .head"], merged[".card .head"])
-        self.assertEqual(merged[".rest .head"].get("display"), "flex")
-        self.assertTrue([d for s, d in style_rules(style) if s == ".head .wait" and d.get("margin-left") == "auto"])
-
-    def test_a_collapsed_row_title_wraps_a_long_unbroken_goal(self) -> None:
-        # A goal with a long unbroken token (a filename) sits in a flex item <b>; without
-        # overflow-wrap the row grows past a 480px viewport, as .brief .goal-line already avoids.
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        merged: dict = {}
-        for selector, decls in style_rules(style):
-            if selector == ".row-head b":
-                merged.update(decls)
-        self.assertEqual(merged.get("overflow-wrap"), "anywhere")
 
     def test_a_later_brief_is_one_row_until_opened(self) -> None:
         closed, opened, promoted = render([
@@ -7265,25 +7044,6 @@ class PageBriefRowTest(unittest.TestCase):
         self.assertEqual(field["placeholder"], "Or say what to change\u2026")
         self.assertEqual(field["label"], "Or say what to change")
 
-    def test_the_first_row_sits_one_row_gap_below_the_card(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
-        rules = style_rules(top)
-
-        def decls(selector: str) -> dict:
-            merged: dict = {}
-            for sel, found in rules:
-                if sel == selector:
-                    merged.update(found)
-            return merged
-
-        self.assertEqual(decls(".brief-row").get("padding"), decls(".rest > li.row")["padding"])
-        self.assertEqual(decls(".brief-row").get("padding"), "12px 0")
-        self.assertEqual(decls(".card.lead + .brief-row").get("margin-top"), "12px")
-        self.assertEqual(decls(".card.lead + .rest").get("margin-top"), "12px")
-        self.assertIn("var(--hair)", decls(".brief-row + .brief-row").get("border-top", ""))
-
     def test_a_closed_brief_row_stays_closed_after_its_reply_is_sent(self) -> None:
         both = {"frame": frame([BRIEF, BRIEF_B])}
         sent, closed = render([
@@ -7334,45 +7094,6 @@ def media_block(style: str, query: str) -> str:
 
 class PageAnsweredRowTest(unittest.TestCase):
     def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
-        rules = style_rules(top)
-        clip = {}
-        for selector, decls in rules:
-            if selector == ".done-item summary > b":
-                clip.update(decls)
-        self.assertEqual(
-            {k: clip.get(k) for k in ("white-space", "overflow", "text-overflow", "min-width")},
-            {"white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
-             "min-width": "0"})
-        summary = {}
-        for selector, decls in rules:
-            if selector == ".done-item summary":
-                summary.update(decls)
-        self.assertEqual(summary.get("flex-wrap"), "nowrap")
-        # The tail (the "more" words and the "when" phrase) must itself shrink and clip, so a
-        # narrow screen never pushes the row (and the page) wider than its column, but only
-        # after the question has given up its width: the question's shrink factor outweighs
-        # the tail's, so "answered ..., waiting for the agent" keeps its words (state is never
-        # colour alone) until the question is gone.
-        tail, row_rule = {}, {}
-        for selector, decls in rules:
-            if selector == ".done-item summary > span":
-                tail.update(decls)
-            if selector == ".done-item":
-                row_rule.update(decls)
-        self.assertEqual(
-            {k: tail.get(k) for k in ("white-space", "overflow", "text-overflow", "min-width")},
-            {"white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
-             "min-width": "0"})
-        tail_flex = tail.get("flex", "").split()
-        clip_flex = clip.get("flex", "").split()
-        self.assertEqual(tail_flex[:1], ["0"])
-        self.assertEqual(clip_flex[:1], ["0"])
-        self.assertGreater(float(clip_flex[1]), float(tail_flex[1]))
-        self.assertGreater(float(tail_flex[1]), 0)
-        self.assertEqual(row_rule.get("min-width"), "0")
         done = item("Z", answered=True, headline="Which database?",
                     answered_at="2026-11-11T10:00:00+00:00",
                     questions=[{"question": "Which database?", "options": ["sqlite", "postgres"],
@@ -10306,24 +10027,6 @@ class DraftedContractPageTest(unittest.TestCase):
         self.assertEqual(len(registered(snap, "draft-change")), 27)
         self.assertEqual(registered(snap, "draft-more"), [])
 
-    def test_change_controls_never_wrap_under_their_row(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
-        rules = style_rules(top)
-
-        def decls(selector: str) -> dict:
-            merged: dict = {}
-            for sel, found in rules:
-                if sel == selector:
-                    merged.update(found)
-            return merged
-
-        row = decls(".register-draft li")
-        self.assertEqual(row.get("display"), "grid")
-        self.assertEqual(row.get("grid-template-columns"), "minmax(0, 1fr) auto")
-        self.assertEqual(decls(".draft-change").get("white-space"), "nowrap")
-
     def test_at_480_and_1440_change_sits_beside_its_line(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -11537,20 +11240,6 @@ class WaitingLinePageTest(unittest.TestCase):
         children = block["children"]
         head = next(i for i, c in enumerate(children) if has_class(c, "sp-head"))
         self.assertIs(children[head + 1], checks)
-        (style, top) = page_css()
-        line = css_declared(top, ".sprint-checks .wait")
-        check = css_declared(top, ".sprint-check")
-        self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
-        self.assertEqual(line.get("margin"), "0")
-        self.assertEqual(line.get("padding"), check.get("padding"))
-        self.assertEqual(line.get("font-size"), check.get("font-size"))
-        (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
-        self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
-        # At 480 px the check line is a 44 px tap target with its text at the top; the waiting
-        # line takes the same box, so the gap below it is the check line's too.
-        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"),
-                         css_declared(narrow, ".sprint-check").get("min-height"))
-        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"), "44px")
 
     def test_a_project_with_only_waits_draws_its_name_and_its_line(self) -> None:
         frame = view([{**project(1, []), "waits": [UNDATED_WAIT]}])

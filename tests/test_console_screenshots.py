@@ -562,6 +562,167 @@ MOVED += (
     moved(_STRIP_DIM, ".meter i", "background", BOTH, "meter-fill-background-color",
           "meter-fill-background-image"),
 )
+_NEW_MARK = f"{PAGE}::PageMessageLifeTest::test_a_new_reply_mark_in_a_summary_is_set_off_from_the_words_before_it"
+_CHECK_LINE = (f"{PAGE}::PageSprintBlockTest::"
+               "test_the_check_line_wears_the_sprint_openers_look_and_keeps_a_touch_target")
+_NOW_SPAN = f"{PAGE}::PageSprintGlanceTest::test_the_now_sentence_spans_the_text_columns_of_the_head_grid"
+_NOW_CLAMP = f"{PAGE}::PageSprintBlockTest::test_the_now_sentence_is_clamped_to_two_lines"
+_PIPS = f"{PAGE}::PageSprintGlanceTest::test_a_full_report_keeps_every_pip_and_wraps_them"
+_WAIT = (f"{PAGE}::WaitingLinePageTest::"
+         "test_a_sprints_wait_sits_in_the_check_list_with_the_check_lines_indent_and_gap")
+_PROJECT = f"{PAGE}::PageSideColumnTest::test_a_project_is_a_block_headed_by_its_name"
+_ANSWERED = f"{PAGE}::PageAnsweredRowTest::test_an_answered_row_clips_its_question_to_one_line"
+_ROW_HEAD = f"{PAGE}::PageBriefRowTest::test_the_brief_row_head_keeps_the_shared_flex_layout"
+_REST_HEAD = f"{PAGE}::PageBriefRowTest::test_a_register_row_head_keeps_the_flex_layout_of_a_card_head"
+_ROW_TITLE = f"{PAGE}::PageBriefRowTest::test_a_collapsed_row_title_wraps_a_long_unbroken_goal"
+_ROW_GAP = f"{PAGE}::PageBriefRowTest::test_the_first_row_sits_one_row_gap_below_the_card"
+_DRAFT = f"{PAGE}::DraftedContractPageTest::test_change_controls_never_wrap_under_their_row"
+_GALLERY = f"{PAGE}::PagePictureTest::test_the_gallery_wraps_and_the_pair_stacks_at_480"
+_SHAPE = f"{PAGE}::PagePictureTest::test_a_thumbnail_follows_its_pictures_shape_up_to_a_bound"
+_TINT = f"{PAGE}::PagePictureTest::test_a_thumbnails_letterbox_is_a_light_tint_of_the_card"
+_PAIR_ROW = f"{PAGE}::PagePictureTest::test_the_pair_sits_in_one_row_on_a_desktop"
+_VIEWER_PAIR = f"{PAGE}::PageViewerTest::test_the_viewer_pair_is_a_row_and_stacks_at_480"
+_VIEWER_TOP = f"{PAGE}::PageViewerTest::test_the_viewer_shows_its_pictures_at_the_top_of_the_stage"
+_VIEWER_OPAQUE = (f"{PAGE}::PageViewerTest::"
+                  "test_the_viewer_is_opaque_and_the_page_behind_it_does_not_scroll")
+_VIEWER_ARROWS = f"{PAGE}::PageViewerTest::test_arrows_move_the_picture_and_leave_focus_where_it_is"
+_VIEWER_BAR = f"{PAGE}::PageViewerTest::test_the_viewer_controls_share_one_bar_that_stays_in_view"
+
+MOVED += (
+    # The new-reply mark, the check line and the wait line.
+    moved(_NEW_MARK, ".finished-list > summary .message-new", "margin-left", WIDE,
+          "new-mark-gap-finished"),
+    moved(_NEW_MARK, ".sprint-earlier summary .message-new", "margin-left", WIDE,
+          "new-mark-gap-earlier"),
+    moved(_CHECK_LINE, ".sprint-check", "color", BOTH, "check-line-color"),
+    moved(_CHECK_LINE, ".sprint-detail summary", "color", BOTH, "check-line-color",
+          via="the opener's colour is what the check line is read against"),
+    moved(_CHECK_LINE, ".sprint-check", "cursor", BOTH, "check-line-cursor"),
+    moved(_CHECK_LINE, ".sprint-detail summary", "cursor", BOTH, "check-line-cursor",
+          via="the opener's cursor is what the check line is read against"),
+    moved(_CHECK_LINE, ".sprint-check", "font-size", BOTH, "check-line-font-size"),
+    moved(_CHECK_LINE, ".sprint-detail", "font-size", BOTH, "check-line-font-size",
+          via="the sprint block's size is what the check line is read against"),
+    moved(_CHECK_LINE, ".sprint-check", "text-decoration", BOTH, "check-line-text-decoration-line"),
+    moved(_CHECK_LINE, ".sprint-check", "min-height", WIDE, "check-line-min-height-1440"),
+    moved(_CHECK_LINE, ".sprint-check", "min-height", NARROW, "check-line-min-height-480"),
+    moved(_CHECK_LINE, ".sprint-check", "display", NARROW, "check-line-display-480"),
+    moved(_CHECK_LINE, ".sprint-check", "align-items", NARROW, "check-line-align-items-480"),
+    moved(_CHECK_LINE, ".sprint-checks", "padding", BOTH, "check-line-list-padding"),
+    moved(_WAIT, ".sprint-checks", "padding", BOTH, "check-line-list-padding"),
+    moved(_WAIT, ".sprint-checks .wait", "margin", BOTH, "wait-line-margin"),
+    moved(_WAIT, ".sprint-checks .wait", "padding", BOTH, "wait-line-padding"),
+    moved(_WAIT, ".sprint-check", "padding", BOTH, "wait-line-padding",
+          via="the check line's padding is what the wait line is read against"),
+    moved(_WAIT, ".sprint-checks .wait", "font-size", BOTH, "wait-line-font-size"),
+    moved(_WAIT, ".sprint-check", "font-size", BOTH, "wait-line-font-size",
+          via="the check line's size is what the wait line is read against"),
+    moved(_WAIT, ".sprint-checks .wait", "min-height", NARROW, "wait-line-min-height-480",
+          "wait-line-min-height-same-480"),
+    moved(_WAIT, ".sprint-check", "min-height", NARROW, "wait-line-min-height-same-480",
+          via="the check line's height is what the wait line is read against"),
+    # The now sentence and the head grid.
+    moved(_NOW_SPAN, ".sp-now", "grid-column", BOTH, "now-sentence-column-start",
+          "now-sentence-column-end"),
+    moved(_NOW_CLAMP, ".sp-now", "grid-column", BOTH, "now-sentence-column-start",
+          "now-sentence-column-end"),
+    moved(_NOW_CLAMP, ".sp-now", "display", BOTH, "now-sentence-display"),
+    moved(_NOW_CLAMP, ".sp-now", "-webkit-box-orient", BOTH, "now-sentence-box-orient"),
+    moved(_NOW_CLAMP, ".sp-now", "-webkit-line-clamp", BOTH, "now-sentence-line-clamp"),
+    moved(_NOW_CLAMP, ".sp-now", "overflow", BOTH, "now-sentence-overflow-y"),
+    moved(_PIPS, ".pips", "flex-wrap", BOTH, "pips-wrap-flex-wrap"),
+    moved(_PIPS, ".pips", "white-space", BOTH, "pips-wrap-pips-white-space"),
+    moved(_PIPS, ".sp-prog", "white-space", BOTH, "pips-wrap-prog-white-space"),
+    moved(_PIPS, ".sp-head", "grid-template-columns", BOTH, "pips-wrap-columns",
+          "pips-wrap-columns-max"),
+    moved(_PROJECT, "#list > li.line + li.line", "border-top", BOTH, "project-block-border-color",
+          "project-block-border-width",
+          via="the blocks the rule draws are read, not the after-line ones it removes it from"),
+    moved(_PROJECT, ".pname", "font-weight", BOTH, "project-block-pname-weight"),
+    # The brief rows, the register head and the answered rows.
+    moved(_ROW_HEAD, ".row-head", "display", WIDE, "row-head-display"),
+    moved(_ROW_HEAD, ".brief-row > summary", "display", WIDE, "row-head-summary-display"),
+    moved(_REST_HEAD, ".rest .head", "display", WIDE, "rest-head-display"),
+    moved(_REST_HEAD, ".card .head", "display", WIDE, "rest-head-display",
+          via="the card head is what the register head is read against"),
+    moved(_REST_HEAD, ".rest .head", "column-gap", WIDE, "rest-head-column-gap"),
+    moved(_REST_HEAD, ".rest .head", "align-items", WIDE, "rest-head-align-items"),
+    moved(_REST_HEAD, ".head .wait", "margin-left", WIDE, "rest-head-wait-margin-left",
+          "rest-head-wait-right"),
+    moved(_ROW_TITLE, ".row-head b", "overflow-wrap", WIDE, "row-head-b-overflow-wrap"),
+    moved(_ROW_GAP, ".brief-row", "padding-top", WIDE, "row-gap-padding-top",
+          "row-gap-padding-top-same"),
+    moved(_ROW_GAP, ".brief-row", "padding-bottom", WIDE, "row-gap-padding-bottom",
+          "row-gap-padding-bottom-same"),
+    moved(_ROW_GAP, ".rest > li.row", "padding", WIDE, "row-gap-padding-top-same",
+          "row-gap-padding-bottom-same",
+          via="the registration row's padding is what the brief row is read against"),
+    moved(_ROW_GAP, ".card.lead + .brief-row", "margin-top", WIDE, "row-gap-lead-brief-margin-top"),
+    moved(_ROW_GAP, ".card.lead + .rest", "margin-top", WIDE, "row-gap-lead-rest-margin-top"),
+    moved(_ROW_GAP, ".brief-row + .brief-row", "border-top", WIDE, "row-gap-brief-border-color"),
+    *(moved(_ANSWERED, selector, prop, BOTH, f"answered-row-{name}-{key}")
+      for selector, name in ((".done-item summary > b", "b"), (".done-item summary > span", "span"))
+      for prop, key in (("white-space", "white-space"), ("overflow", "overflow"),
+                        ("text-overflow", "text-overflow"), ("min-width", "min-width"))),
+    moved(_ANSWERED, ".done-item summary > b", "flex", BOTH, "answered-row-b-flex-grow",
+          "answered-row-b-flex-shrink"),
+    moved(_ANSWERED, ".done-item summary > span", "flex", BOTH, "answered-row-span-flex-grow",
+          "answered-row-span-flex-shrink"),
+    moved(_ANSWERED, ".done-item summary", "flex-wrap", BOTH, "answered-row-summary-flex-wrap"),
+    moved(_ANSWERED, ".done-item", "min-width", BOTH, "answered-row-item-min-width"),
+    moved(_DRAFT, ".register-draft li", "display", WIDE, "draft-row-display"),
+    moved(_DRAFT, ".register-draft li", "grid-template-columns", WIDE, "draft-row-columns"),
+    moved(_DRAFT, ".draft-change", "white-space", WIDE, "draft-row-change-white-space"),
+    # The pictures and the viewer.
+    moved(_GALLERY, ".pics", "flex-wrap", BOTH, "pics-flex-wrap"),
+    moved(_GALLERY, ".pic", "min-width", BOTH, "pics-pic-min-width"),
+    moved(_GALLERY, ".pic", "max-width", BOTH, "pics-pic-max-width"),
+    moved(_GALLERY, ".pic-pair", "min-width", BOTH, "pics-pair-min-width"),
+    moved(_GALLERY, ".pic-pair", "max-width", BOTH, "pics-pair-max-width"),
+    moved(_GALLERY, ".pic-line", "overflow-wrap", BOTH, "pics-line-overflow-wrap"),
+    moved(_GALLERY, ".pic-pair", "flex-direction", NARROW, "pics-pair-direction-480"),
+    moved(_SHAPE, ".pic-thumb img", "width", BOTH, "thumb-width"),
+    moved(_SHAPE, ".pic-thumb img", "height", BOTH, "thumb-height"),
+    moved(_SHAPE, ".pic-thumb img", "object-fit", BOTH, "thumb-object-fit"),
+    moved(_SHAPE, ".pic-thumb img", "max-height", WIDE, "thumb-max-height-1440"),
+    moved(_SHAPE, ".pic-thumb img", "max-height", NARROW, "thumb-max-height-480"),
+    moved(_SHAPE, ".pic-pair", "align-items", WIDE, "pics-pair-align-items-1440"),
+    moved(_SHAPE, ".pic-pair", "align-items", NARROW, "pics-pair-align-items-480"),
+    *(moved(_TINT, selector, "background", BOTH, *names)
+      for selector, names in ((".pic-thumb", ("thumb-background-color", "thumb-background-image")),
+                              (".pic-thumb img", ("thumb-img-background-color",
+                                                  "thumb-img-background-image")))),
+    moved(_PAIR_ROW, ".pic-pair", "display", WIDE, "pics-pair-display-1440"),
+    moved(_PAIR_ROW, ".pic-pair", "flex-direction", WIDE, "pics-pair-direction-1440"),
+    moved(_PAIR_ROW, ".pic-pair .pic", "flex", WIDE, "pics-pair-pic-flex-1440"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "display", BOTH, "viewer-pair-display"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "flex-direction", WIDE, "viewer-pair-direction-1440"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "flex-direction", NARROW, "viewer-pair-direction-480"),
+    moved(_VIEWER_PAIR, ".viewer img", "max-width", BOTH, "viewer-img-max-width"),
+    moved(_VIEWER_PAIR, ".viewer img", "object-fit", BOTH, "viewer-img-object-fit"),
+    moved(_VIEWER_TOP, ".viewer-stage", "align-items", BOTH, "viewer-stage-align-items"),
+    moved(_VIEWER_TOP, ".viewer-stage > *", "margin", BOTH, "viewer-stage-child-margin-top"),
+    *(moved(_VIEWER_OPAQUE, selector, "background", BOTH, *names)
+      for selector, names in ((".viewer", ("viewer-background-color", "viewer-background-image")),
+                              (".viewer-bar", ("viewer-bar-background-color",
+                                               "viewer-bar-background-image")))),
+    moved(_VIEWER_OPAQUE, ":root", "--*", WIDE, "tokens-desk",
+          via="the viewer's fills are read as the page's palette colours"),
+    moved(_VIEWER_OPAQUE, "html:has(#viewer:not([hidden]))", "overflow", BOTH,
+          "viewer-html-overflow-y", via="the page behind the open viewer is read on html"),
+    moved(_VIEWER_ARROWS, ".viewer:focus-visible", "outline", BOTH, "viewer-focus-outline",
+          "viewer-focus-outline-style", via="keyboard focus is forced on the viewer and its outline read"),
+    moved(_VIEWER_BAR, ".viewer-bar", "display", BOTH, "viewer-bar-display"),
+    moved(_VIEWER_BAR, ".viewer-bar", "flex-direction", BOTH, "viewer-bar-direction"),
+    moved(_VIEWER_BAR, ".viewer-bar", "flex-wrap", BOTH, "viewer-bar-wrap"),
+    moved(_VIEWER_BAR, ".viewer-bar", "flex", BOTH, "viewer-bar-flex"),
+    moved(_VIEWER_BAR, ".viewer", "display", BOTH, "viewer-display"),
+    moved(_VIEWER_BAR, ".viewer", "flex-direction", BOTH, "viewer-direction"),
+    moved(_VIEWER_BAR, ".viewer", "overflow", BOTH, "viewer-overflow-y"),
+    moved(_VIEWER_BAR, ".viewer", "overflow-y", BOTH, "viewer-overflow-y"),
+    moved(_VIEWER_BAR, ".viewer-stage", "overflow", BOTH, "viewer-stage-overflow-y"),
+    moved(_VIEWER_BAR, ".viewer-bar button", "min-height", NARROW, "viewer-bar-button-min-height-480"),
+)
 STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
     f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
@@ -572,6 +733,7 @@ STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
     "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
     _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE, _STRIP_480, _STRIP_DIM,
+    _NOW_CLAMP, _PIPS, _WAIT, _PROJECT, _ANSWERED, _VIEWER_ARROWS, _VIEWER_BAR,
 })
 RENAMED: dict[str, str] = {
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled":
@@ -580,6 +742,13 @@ RENAMED: dict[str, str] = {
 LONGHANDS = {
     "font": ("font-style", "font-weight", "font-size", "line-height", "font-family"),
     "background": ("background-color", "background-image"),
+    "border-top": ("border-top-color",),
+    "flex": ("flex-grow", "flex-shrink"),
+    "grid-column": ("grid-column-start", "grid-column-end"),
+    "line-clamp": ("-webkit-line-clamp",),
+    "margin": ("margin-top",),
+    "overflow": ("overflow-y",),
+    "padding": ("padding-top", "padding-bottom"),
     "transition": ("transition-property", "transition-duration"),
     "text-decoration": ("text-decoration-line",),
     "list-style": ("list-style-type",),
@@ -1828,6 +1997,9 @@ class ScreenshotStyleTableTest(unittest.TestCase):
                 else:
                     self.assertIsNone(found)
 
+    def test_the_look_card_opens_the_viewer_before_its_style_reading(self) -> None:
+        self.assertEqual(shots.STYLE_STEPS["look-card"], ("button.pic-thumb",))
+
     def test_style_applies_only_to_the_page_beside_the_module(self) -> None:
         source = Path(shots.__file__).resolve().parents[1] / "python/agent_tools/console"
         with tempfile.TemporaryDirectory() as tmp:
@@ -2124,11 +2296,77 @@ class ScreenshotStyleTest(unittest.TestCase):
         self.assertEqual(self.styled(page % "margin-left: auto", [row]), ())
         self.assertEqual(self.styled(page % "", [row]), ("r: .last right is 128px",))
 
+    def test_the_reading_waits_for_a_picture_that_is_still_being_fetched(self) -> None:
+        import base64
+        wide = "data:image/png;base64," + base64.b64encode(shots._solid_png((9, 8, 7), 200, 100)).decode()
+        page = ('<div style="width: 300px"><img class="pic-img i" style="display: block; width: 100%; '
+                'height: auto"></div><script>setTimeout(() => '
+                f'document.querySelector(".i").src = "{wide}", 400)</script>')
+        row = style_row("r", selector=".i", prop="height", want="follows_shape")
+        self.assertEqual(self.styled(page, [row]), ())
+
     def test_hugs_names_a_label_wider_than_its_text(self) -> None:
         row = style_row("r", selector=".l", prop="width", want="hugs")
         page = '<span class="l" style="position: absolute; %s">a label</span>'
         self.assertEqual(self.styled(page % "", [row]), ())
         self.assertEqual(self.styled(page % "width: 300px", [row]), ("r: .l width is 300px",))
+
+    def test_track_max_names_a_track_past_its_fraction(self) -> None:
+        page = '<div class="g" style="display: grid; grid-template-columns: 16px 1fr 400px; width: 800px"><i></i></div>'
+        for fraction, found in (("0.4", ("r: .g grid-template-columns is 16px 384px 400px",)),
+                                ("0.5", ())):
+            row = style_row("r", selector=".g", prop="grid-template-columns", want="track_max",
+                            value=f"3:{fraction}")
+            self.assertEqual(self.styled(page, [row]), found, fraction)
+
+    def test_tracks_counts_the_top_level_tracks(self) -> None:
+        page = ('<div class="g" style="display: grid; grid-template-columns: minmax(0, 1fr) auto">'
+                '<i></i></div><div class="h" style="display: none; '
+                'grid-template-columns: minmax(0, 1fr) auto"></div>'
+                '<div class="one" style="display: grid; grid-template-columns: 1fr"><i></i></div>')
+        for selector, count, misses in ((".g", "2", False), (".h", "2", False), (".g", "3", True),
+                                        (".h", "3", True), (".one", "2", True)):
+            row = style_row("r", selector=selector, prop="grid-template-columns", want="tracks",
+                            value=count)
+            with self.subTest(selector=selector, count=count):
+                got = self.styled(page, [row])
+                self.assertEqual(len(got), int(misses))
+                if misses:
+                    self.assertRegex(got[0], rf"^r: {selector} grid-template-columns is ")
+
+    def test_alpha_max_takes_a_light_tint_and_names_a_dark_or_opaque_fill(self) -> None:
+        page = ('<p class="a" style="background: rgba(24, 25, 38, .22)">x</p>'
+                '<p class="b" style="background: rgba(0, 0, 0, .5)">x</p>'
+                '<p class="c" style="background: rgb(24, 25, 38)">x</p>'
+                '<p class="d" style="background: transparent">x</p>')
+        rows = [style_row(name, selector=f".{name}", prop="background-color", want="alpha_max",
+                          value="0.35") for name in "abcd"]
+        self.assertEqual(self.styled(page, rows), (
+            "b: .b background-color is rgba(0, 0, 0, 0.5)",
+            "c: .c background-color is rgb(24, 25, 38)"))
+
+    def test_opaque_takes_a_palette_colour_and_names_a_tint(self) -> None:
+        page = ('<p class="a" style="background: rgb(30, 32, 48)">x</p>'
+                '<p class="b" style="background: rgba(30, 32, 48, .9)">x</p>'
+                '<p class="c" style="background: rgb(1, 2, 3)">x</p>')
+        rows = [style_row(name, selector=f".{name}", prop="background-color", want="opaque",
+                          value="") for name in "abc"]
+        self.assertEqual(self.styled(page, rows), (
+            "b: .b background-color is rgba(30, 32, 48, 0.9)",
+            "c: .c background-color is rgb(1, 2, 3)"))
+
+    def test_follows_shape_names_an_image_off_its_shape(self) -> None:
+        import base64
+        wide = "data:image/png;base64," + base64.b64encode(shots._solid_png((9, 8, 7), 200, 100)).decode()
+        page = ('<div style="width: %spx"><img class="i" src="' + wide + '" style="display: block; '
+                'width: 100%%; %s"></div>')
+        row = style_row("r", selector=".i", prop="height", want="follows_shape")
+        self.assertEqual(self.styled(page % (300, "height: auto; max-height: 180px"), [row]), ())
+        self.assertEqual(self.styled(page % (400, "height: auto; max-height: 180px"), [row]), ())
+        self.assertEqual(self.styled(page % (300, "height: 50px; max-height: 180px"), [row]),
+                         ("r: .i height is 50px",))
+        broken = '<img class="i" src="data:image/png;base64,AAAA" style="width: 100px; height: 20px">'
+        self.assertEqual(self.styled(broken, [row]), ("r: .i height is 20px (not loaded)",))
 
     def sandboxed_capture(self, **kw):
         try:
