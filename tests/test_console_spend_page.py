@@ -19,7 +19,6 @@ from .test_console_page import media_block, style_rules
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
-DESK = REPO_ROOT / "python/agent_tools/console/page.html"
 PYPROJECT = REPO_ROOT / "python/pyproject.toml"
 
 
@@ -572,39 +571,6 @@ class SpendStaticTest(unittest.TestCase):
 
     def test_the_spend_page_is_small(self) -> None:
         self.assertLess(len(gzip.compress(self.data, 9)), 20480)
-
-
-    def test_the_spend_page_uses_no_peach_and_only_the_desk_palette(self) -> None:
-        self.assertNotIn("peach", self.text.lower())
-        self.assertNotIn("#f5a97f", self.text.lower())
-
-        def root_of(text: str) -> dict:
-            (block,) = re.findall(r"(?s):root\s*\{(.*?)\}", text)
-            pairs = (decl.partition(":") for decl in block.split(";"))
-            return {n.strip(): v.strip() for n, _, v in pairs if n.strip().startswith("--")}
-
-        mine, desk = root_of(self.text), root_of(DESK.read_text(encoding="utf-8"))
-        self.assertTrue(mine)
-        for name, value in mine.items():
-            self.assertEqual(desk.get(name), value, name)
-        for name in ("--peach", "--green", "--yellow", "--red"):
-            self.assertNotIn(name, mine)
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", self.text)
-        outside = re.sub(r"(?s):root\s*\{.*?\}", "", style)
-        for pattern in (r"#[0-9a-fA-F]{3,8}\b", r"rgba?\(", r"hsla?\("):
-            self.assertEqual(re.findall(pattern, outside), [], pattern)
-        for _, decls in style_rules(outside):
-            for prop, value in decls.items():
-                if not re.fullmatch(
-                        r"color|background|background-color|border.*|outline.*|fill|stroke", prop):
-                    continue
-                rest = re.sub(r"var\(--([a-z0-9-]+)\)",
-                              lambda m: "" if "--" + m.group(1) in mine else m.group(0), value)
-                rest = re.sub(r"-?\d*\.?\d+(?:px|rem|em|%)?", "", rest)
-                rest = re.sub(r"\b(?:none|transparent|currentColor|inherit|solid|dashed|dotted)\b", "", rest)
-                self.assertEqual(rest.strip(), "", f"{prop}: {value}")
-        script = self.text[self.text.index("<script>"):]
-        self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}", script), [])
 
     def test_the_spend_page_fits_480_wide(self) -> None:
         (style,) = re.findall(r"(?s)<style>(.*?)</style>", self.text)

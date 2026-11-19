@@ -182,9 +182,125 @@ class Moved:
     via: str = ""
 
 
-MOVED: tuple[Moved, ...] = ()
-STRIPPED: frozenset[str] = frozenset()
-RENAMED: dict[str, str] = {}
+PAGE = "tests/test_console_page.py"
+BOTH = (1440, 480)
+PEACH_VIA = "the rendered page is read for peach on every element"
+MOVED: tuple[Moved, ...] = (
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "color", BOTH,
+          ("nav-quiet",)),
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "white-space", BOTH,
+          ("nav-nowrap",)),
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "width", BOTH,
+          ("nav-width",)),
+    Moved(f"{PAGE}::PageTest::test_the_spend_link_is_quiet", ".nav", "min-width", BOTH,
+          ("nav-min-width",)),
+    Moved(f"{PAGE}::PageTest::test_peach_marks_only_needs_you", ".btn-primary", "color", BOTH,
+          ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageTest::test_peach_marks_only_needs_you", ".needs", "color", BOTH,
+          ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-working", "color",
+          (1440,), ("state-working",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-waiting_answer",
+          "color", (1440,), ("state-waiting-answer",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-waiting_permission",
+          "color", (1440,), ("state-waiting-permission",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ".s-limit", "color",
+          (1440,), ("state-limit",)),
+    Moved(f"{PAGE}::PageTest::test_session_states_use_the_state_colours", ":root", "--*", (1440,),
+          ("tokens-desk",), via="the :root token list is read from the rendered page"),
+    Moved(f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled", ".run", "color",
+          (1440,), ("runs-not-red",)),
+    Moved(f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled", ".run", "color",
+          BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
+          ".cap-out", "color", (1440,), ("cap-out-red",)),
+    Moved(f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
+          ".cap", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_notices_fold_uses_no_peach_and_no_new_colour",
+          ".notice", "color", BOTH, ("palette-notices",),
+          via="fold_colour_faults is the painted colours of the notices fold on the rendered page"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_notices_fold_uses_no_peach_and_no_new_colour",
+          ":root", "--*", (1440,), ("tokens-desk",),
+          via="the :root token list is read from the rendered page"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice", "color", BOTH, ("palette-notices",),
+          via="a colour written as rgb(), hex, a token, a name, a color-mix() or hsl() is one "
+              "painted colour that palette-notices refuses after normalisation"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice-long", "color", BOTH, ("palette-notices",),
+          via="a painted colour that palette-notices refuses after normalisation"),
+    Moved(f"{PAGE}::PageNoticeTest::test_the_colour_check_rejects_peach_written_any_way",
+          ".notice", "color", BOTH, ("palette-notices",),
+          via="a custom property is checked where it paints"),
+    Moved(f"{PAGE}::PageOptionTest::test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour",
+          ".btn-option", "width", BOTH, ("option-fills",)),
+    Moved(f"{PAGE}::PageOptionTest::test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour",
+          '.btn-option[aria-pressed="true"] kbd', "background-color", BOTH, ("option-pick-key",)),
+    Moved(f"{PAGE}::PageOptionTest::test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour",
+          ".btn-option", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageMessageLifeTest::test_the_new_marks_are_never_peach", ".new-replies",
+          "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageMessageLifeTest::test_the_new_marks_are_never_peach", ".message-new",
+          "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageMessageLifeTest::test_the_owners_words_read_you_in_lavender",
+          ".message-text", "color", BOTH, ("message-you-lav",)),
+    Moved(f"{PAGE}::PageManagerTest::test_the_quiet_withdraw_buttons_share_the_page_button_rules",
+          ".card .reason", "color", (1440,), ("reason-quiet",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_pip_marks_differ_beyond_colour", ".pip",
+          "border-top-style", (1440,), ("pips-differ",),
+          via="the four marks are compared on border, radius, shadow, image and width"),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_pip_marks_differ_beyond_colour", ".pip", "color",
+          BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you",
+          ".sprint-ball.needs", "color", (1440,), ("ball-needs",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you", ".st-go",
+          "color", (1440,), ("tone-go",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you", ".st-wait",
+          "color", (1440,), ("tone-wait",)),
+    Moved(f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you", ".st-dim",
+          "color", (1440,), ("tone-dim",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          ".acct-panel[hidden]", "display", (1440,), ("accounts-hidden",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          "#accounts", "color", BOTH, ("palette-accounts",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          "#accounts", "font-size", (1440,), ("sizes-accounts",)),
+    Moved(f"{PAGE}::AccountsPanelPageTest::test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden",
+          ":root", "--*", (1440,), ("tokens-desk",),
+          via="the :root token list is read from the rendered page"),
+    Moved(f"{PAGE}::PanelSigninPageTest::test_the_panel_never_draws_peach", ".acct-", "color", BOTH,
+          ("peach-only-needs",), via=PEACH_VIA),
+    Moved(f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+          ".spend", "color", BOTH, ("spend-quiet",)),
+    Moved(f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+          ".sp-spend", "color", BOTH, ("sp-spend-quiet",)),
+    Moved(f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+          ".spend", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved("tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+          ".btn-primary", "color", BOTH, ("peach-only-needs",), via=PEACH_VIA),
+    Moved("tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+          "body", "color", BOTH, ("palette-spend",)),
+    Moved("tests/test_console_spend_page.py::SpendStaticTest::"
+          "test_the_spend_page_uses_no_peach_and_only_the_desk_palette",
+          "body", "color", BOTH, ("palette-spend",)),
+    Moved("tests/test_console_spend_page.py::SpendStaticTest::"
+          "test_the_spend_page_uses_no_peach_and_only_the_desk_palette",
+          ":root", "--*", (1440,), ("tokens-spend",)),
+)
+STRIPPED: frozenset[str] = frozenset({
+    f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
+    f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
+    f"{PAGE}::PageNoticeTest::test_the_notices_fold_uses_no_peach_and_no_new_colour",
+    f"{PAGE}::PageMessageLifeTest::test_the_owners_words_read_you_in_lavender",
+    f"{PAGE}::PageSprintGlanceTest::test_only_an_owner_ball_reads_as_needs_you",
+    f"{PAGE}::PanelSigninPageTest::test_the_panel_never_draws_peach",
+    f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
+    "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+})
+RENAMED: dict[str, str] = {
+    f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled":
+        "test_the_page_never_says_stalled",
+}
 LONGHANDS = {
     "font": ("font-style", "font-weight", "font-size", "line-height", "font-family"),
     "background": ("background-color", "background-image"),
@@ -804,6 +920,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("not taken from the top", text)
 
+    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_a_shot_scrolls_back_to_the_top_before_its_capture(self) -> None:
         def fake(reset_to):
             class Page:
@@ -856,6 +973,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(shot.scroll_y, reset_to)
                 self.assertEqual(shot.scroll_y, page.captured[0][0])
 
+    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_the_goal_states_type_into_the_box_before_the_capture(self) -> None:
         calls: list[tuple[str, tuple]] = []
 
@@ -1015,6 +1133,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
             shots.guest_door(SimpleNamespace(guest_socket="/tmp/g.sock", guest_address=None)),
             "/tmp/g.sock")
 
+    @mock.patch.object(shots, "STYLE_CHECKS", ())
     def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
         for state in ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached"):
             for present, opens in (({"#sharing-open"}, True), (set(), False)):
@@ -1596,6 +1715,109 @@ class ScreenshotStyleTest(unittest.TestCase):
                          ("a: .a white-space is normal",))
         self.assertEqual(self.last_leftover, 0)
         self.assertEqual(self.styled(html, rows, mutation=mutation, only="b"), ())
+
+    def test_none_peach_names_a_peach_element_outside_the_allowed(self) -> None:
+        row = style_row("r", selector="body", prop="color", want="none_peach",
+                        value=".needs, .needs *")
+        peach = "rgb(245, 169, 127)"
+        mixed = f"color-mix(in srgb, {peach} 100%, white 0%)"
+
+        def page(inner):
+            return self.styled(f"<body>{inner}</body>", [row])
+
+        found = page(f'<p class="x" style="color: {peach}">x</p>')
+        self.assertIn(f"r: p.x color is {peach}", found)
+        self.assertTrue(all(miss.startswith("r: p.x ") for miss in found), found)
+        self.assertEqual(page(f'<div class="needs"><p class="x" style="color: {peach}">x</p></div>'), ())
+        self.assertEqual(page('<p class="x">x</p>'), ())
+        (mix, *_rest) = page(f'<p class="x" style="color: {mixed}">x</p>')
+        self.assertTrue(mix.startswith("r: p.x color is color(srgb "), mix)
+        self.assertEqual(page(f'<p class="x" style="box-shadow: 0 0 0 1px {peach}">x</p>'),
+                         (f"r: p.x box-shadow is {peach}",))
+        gone = style_row("g", selector=".missing", want="none_peach", value=".needs")
+        self.assertEqual(self.styled("<p>x</p>", [gone]), ("g: .missing is absent",))
+
+    def test_palette_takes_its_list_and_names_a_stray_colour(self) -> None:
+        def row(name, value):
+            return style_row(name, selector=".s", prop="color", want="palette", value=value)
+
+        rows = [row("notices", "notices"), row("desk", "desk"), row("spend", "spend")]
+
+        def page(colour):
+            return self.styled(f'<div class="s" style="color: {colour}"></div>', rows)
+
+        self.assertEqual(page("rgb(202, 211, 245)"), ())
+        self.assertEqual(page("rgba(202, 211, 245, .09)"), ())
+        lavender = "rgb(183, 189, 248)"
+        red = "rgb(237, 135, 150)"
+
+        def refused(colour, name):
+            return tuple(f"{name}: div.s {prop} is {colour}"
+                         for prop in ("color", "text-decoration-color", "caret-color"))
+
+        self.assertEqual(page(lavender), refused(lavender, "notices"))
+        self.assertEqual(page(red), refused(red, "notices") + refused(red, "spend"))
+        stray = "rgba(1, 2, 3, 0.5)"
+        self.assertEqual(page(stray), refused(stray, "notices") + refused(stray, "desk")
+                         + refused(stray, "spend"))
+        shape = style_row("p", selector=".s", prop="color", want="palette", value="desk")
+        svg = ('<div class="s" style="color: rgb(202, 211, 245)"><svg width="20" height="20">'
+               '<path d="M0 0h10v10z" style="fill: rgb(1, 2, 3)"/></svg></div>')
+        self.assertEqual(self.styled(svg, [shape]), ("p: path. fill is rgb(1, 2, 3)",))
+        shadow = style_row("s", selector=".s", prop="color", want="palette", value="desk")
+        lit = ('<div class="s" style="color: rgb(202, 211, 245); box-shadow: 0 0 0 1px rgb(1, 2, 3)">'
+               "x</div>")
+        self.assertEqual(self.styled(lit, [shadow]), ("s: div.s box-shadow is rgb(1, 2, 3)",))
+
+    def test_tokens_read_each_token_and_name_a_wrong_one(self) -> None:
+        lists = shots.STYLE_LISTS["tokens"]["desk"]
+        values = {**lists["colours"], "--ui": "sans-serif", "--display": "serif"}
+        declared = lambda **extra: "<style>:root{" + "".join(
+            f"{name}:{value};" for name, value in {**values, **extra}.items()) + "}</style>"
+        row = style_row("r", selector=":root", prop="--*", want="tokens", value="desk")
+        self.assertEqual(self.styled(declared(), [row]), ())
+        self.assertEqual(self.styled(declared(**{"--x": "1"}), [row]), ("r: :root declares --x",))
+        self.assertEqual(self.styled(declared(**{"--green": "rgb(0, 255, 0)"}), [row]),
+                         ("r: --green is rgb(0, 255, 0)",))
+        thin = declared().replace("--peach:rgb(245, 169, 127);", "")
+        self.assertEqual(self.styled(thin, [row]), ("r: :root lacks --peach",))
+        spend = style_row("s", selector=":root", prop="--*", want="tokens", value="spend")
+        self.assertEqual(self.styled(declared(), [spend]),
+                         tuple(f"s: :root declares {n}" for n in sorted(
+                             ("--green", "--peach", "--red", "--yellow"))))
+
+    def test_distinct_names_two_marks_that_differ_only_in_colour(self) -> None:
+        html = ("<style>i{display:block;width:9px;height:9px}"
+                ".a{border:1px solid rgb(1, 2, 3)} .b{border:1px solid rgb(4, 5, 6)}"
+                ".c{border:1px dashed rgb(1, 2, 3)}</style>"
+                '<i class="a"></i><i class="b"></i><i class="c"></i>')
+
+        def row(selector):
+            return style_row("r", selector=selector, prop="border-top-style", want="distinct")
+
+        self.assertEqual(self.styled(html, [row(".a | .c")]), ())
+        self.assertEqual(self.styled(html, [row(".a | .b")]), ("r: .a and .b differ only in colour",))
+        self.assertEqual(self.styled(html, [row(".a | .b | .c")]),
+                         ("r: .a and .b differ only in colour",))
+        self.assertEqual(self.styled(html, [row(".a | .z")]), ("r: .z is absent",))
+        probed = style_row("r", selector=".a | .b", prop="border-top-style", want="distinct",
+                           probe="<span data-style-probe><i class='a'></i><i class='b'></i></span>")
+        self.assertEqual(self.styled(html, [probed]), ("r: .a and .b differ only in colour",))
+
+    def test_sizes_shared_names_a_size_used_only_in_scope(self) -> None:
+        row = style_row("r", selector=".s", prop="font-size", want="sizes_shared")
+        page = ('<p>x</p><p style="font-size: 14px">y</p>'
+                '<div class="s"><b style="font-size: 14px">a</b>%s</div>')
+        self.assertEqual(self.styled(page % "", [row]), ())
+        self.assertEqual(self.styled(page % '<i style="font-size: 17px">b</i>', [row]),
+                         ("r: i. font-size is 17px",))
+
+    def test_fills_names_an_element_narrower_than_its_parent(self) -> None:
+        row = style_row("r", selector=".o", prop="width", want="fills", every=True)
+        page = ('<div style="width: 300px; padding: 0 10px; box-sizing: content-box">'
+                '<p class="o" style="margin: 0; %s">x</p></div>')
+        self.assertEqual(self.styled(page % "", [row]), ())
+        self.assertEqual(self.styled(page % "width: 200px", [row]), ("r: p.o width is 200px",))
 
     def sandboxed_capture(self, **kw):
         try:

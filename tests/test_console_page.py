@@ -227,15 +227,6 @@ class PageTest(unittest.TestCase):
             ["data:,", "/spend"],
         )
 
-    def test_the_spend_link_is_quiet(self) -> None:
-        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
-        base = style[:style.index("@media")]
-        (nav,) = [d for s, d in style_rules(base) if s == ".nav"]
-        self.assertEqual(nav.get("color"), "var(--sub0)")
-        self.assertEqual(nav.get("white-space"), "nowrap")
-        self.assertNotIn("width", nav)
-        self.assertNotIn("min-width", nav)
-
     def test_the_top_bar_fits_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
         base, at = "", 0
@@ -349,58 +340,7 @@ class PageTest(unittest.TestCase):
             )
         self.assertEqual(self.text.count("render(JSON.parse("), 1)
 
-    def test_peach_marks_only_needs_you(self) -> None:
-        found = 0
-        for body in re.findall(r"(?s)<style>(.*?)</style>", self.text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            for selector, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-                if "var(--peach)" in rule:
-                    found += 1
-                    self.assertTrue(".needs" in selector or ".btn-primary" in selector, selector)
-        self.assertGreater(found, 0)
-
-    def test_session_states_use_the_state_colours(self) -> None:
-        declared = dict(
-            re.findall(r"(--(?:green|yellow|red)):\s*(#[0-9a-f]{6})", self.text)
-        )
-        self.assertEqual(
-            declared, {"--green": "#a6da95", "--yellow": "#eed49f", "--red": "#ed8796"}
-        )
-        wanted = {
-            ".s-working": "var(--green)",
-            ".s-waiting_answer": "var(--yellow)",
-            ".s-waiting_permission": "var(--yellow)",
-            ".s-limit": "var(--red)",
-        }
-        rules = []
-        for body in re.findall(r"(?s)<style>(.*?)</style>", self.text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
-        for selector, colour in wanted.items():
-            with self.subTest(selector=selector):
-                self.assertTrue(
-                    any(
-                        selector in sel and f"color: {colour}" in rule
-                        for sel, rule in rules
-                    ),
-                    f"no rule colours {selector} with {colour}",
-                )
-
-    def test_runs_are_never_peach_or_red_and_never_stalled(self) -> None:
-        rules = []
-        for body in re.findall(r"(?s)<style>(.*?)</style>", self.text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
-        runs = [
-            (sel, rule)
-            for sel, rule in rules
-            if any(word in sel for word in (".run", ".runs", ".moved", ".quiet"))
-        ]
-        self.assertTrue(any(".run" in sel for sel, _ in runs))
-        for sel, rule in runs:
-            with self.subTest(selector=sel.strip()):
-                self.assertNotIn("var(--peach)", rule)
-                self.assertNotIn("var(--red)", rule)
+    def test_the_page_never_says_stalled(self) -> None:
         self.assertNotIn("stalled", self.text.lower())
 
     def test_the_page_never_parses_view_text_as_html(self) -> None:
@@ -1037,24 +977,6 @@ class CapacityPageTest(unittest.TestCase):
         self.assertIn("Resumes Fri 09:30", full(statement))
         for n in nodes(snap["capacity"]):
             self.assertNotIn("needs", n["cls"])
-        text = PAGE.read_text(encoding="utf-8")
-        style = text[text.index("<style>"):text.index("</style>")]
-        base, at = "", 0
-        for found in re.finditer(r"@media [^{]+\{", style):
-            if found.start() < at:
-                continue
-            base += style[at:found.start()]
-            depth, at = 1, found.end()
-            while depth:
-                depth += {"{": 1, "}": -1}.get(style[at], 0)
-                at += 1
-        base += style[at:]
-        rules = style_rules(base)
-        (out,) = [d for s, d in rules if s == ".cap-out"]
-        self.assertEqual(out.get("color"), "var(--red)")
-        for selector, decls in rules:
-            if ".cap" in selector:
-                self.assertNotIn("var(--peach)", " ".join(decls.values()), selector)
 
     def test_no_reading_at_all_shows_only_the_note(self) -> None:
         snap = capacity_snap(capacity(
@@ -1189,14 +1111,6 @@ HANDOFF_SPRINT_W = {
     "to_text": "for Fix the settings page", "at": utc(2 * 60000),
 }
 PAGE_TEXT = PAGE.read_text()
-ALLOWED = {"--text", "--sub1", "--sub0", "--ov2", "--hair", "--s0", "--s1", "--s2", "--base",
-           "--mantle", "--ui", "--display"}
-COLOUR_PROPERTY = re.compile(
-    r"^(color|background(-color)?|border(-(top|right|bottom|left))?(-color)?|outline(-color)?"
-    r"|box-shadow|text-shadow|text-decoration(-color)?|fill|stroke|caret-color|accent-color"
-    r"|column-rule(-color)?)$")
-QUIET_TOKEN = re.compile(r"^(-?[\d.]+(px|rem|em|%)?|none|solid|transparent|currentColor|inherit|inset)$")
-COLOUR_FUNCTION = re.compile(r"(?i)\b(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color|color-mix)\(")
 
 
 def with_notices(entry: dict, *notices: dict) -> dict:
@@ -1222,33 +1136,6 @@ def css_decls(selector: str) -> list:
         for sel, body in css_rules(PAGE_TEXT)
         if selector in [x.strip() for x in sel.split(",")]
     ]
-
-
-def fold_colour_faults(text: str, tokens: set) -> list:
-    faults = []
-    for selector, body in css_rules(text):
-        if not any(re.search(r"\." + re.escape(t) + r"(?![\w-])", selector) for t in tokens):
-            continue
-        for decl in body.split(";"):
-            if not decl.strip():
-                continue
-            prop, _, value = decl.partition(":")
-            prop, value = prop.strip(), value.strip()
-            names = re.findall(r"var\((--[\w-]+)\)", value)
-            rest = re.sub(r"var\((--[\w-]+)\)", " ", value)
-            for literal in ("rgba(202, 211, 245, .05)", "rgba(202, 211, 245, .09)"):
-                rest = rest.replace(literal, " ")
-            faulty = (
-                prop.startswith("--")
-                or any(name not in ALLOWED for name in names)
-                or re.search(r"#[0-9a-fA-F]{3,8}\b", rest) is not None
-                or COLOUR_FUNCTION.search(rest) is not None
-                or (COLOUR_PROPERTY.match(prop) is not None
-                    and any(not QUIET_TOKEN.match(t) for t in re.split(r"[\s,]+", rest) if t))
-            )
-            if faulty:
-                faults.append(f"{selector.strip()} {{ {decl.strip()} }}")
-    return faults
 
 
 class PageNoticeTest(unittest.TestCase):
@@ -1471,35 +1358,6 @@ class PageNoticeTest(unittest.TestCase):
              "notice-from", "notice-age", "notice-words", "notice-claim", "notice-paths",
              "notice-path", "notice-until", "notice-long"}, tokens)
         self.assertNotIn("needs", tokens)
-        self.assertEqual(fold_colour_faults(PAGE_TEXT, tokens), [])
-        rules = css_rules(PAGE_TEXT)
-        self.assertTrue([s for s, _ in rules if re.search(r"\.notice(?![\w-])", s)])
-        (root,) = [body for s, body in rules if s.strip() == ":root"]
-        self.assertEqual(sorted(re.findall(r"(--[\w-]+):", root)), [
-            "--base", "--crust", "--display", "--green", "--hair", "--hover", "--lav", "--mantle", "--ov2",
-            "--peach", "--red", "--s0", "--s1", "--s2", "--sub0", "--sub1", "--text", "--ui",
-            "--yellow"])
-
-    def test_the_colour_check_rejects_peach_written_any_way(self) -> None:
-        faulty = [
-            ".notice { color: rgb(245,169,127); }",
-            ".notice { color: #f5a97f; }",
-            ".notice { color: var(--peach); }",
-            ".notice { color: orange; }",
-            ".notice { background: color-mix(in srgb, var(--ov2) 60%, white); }",
-            ".notice { --tint: var(--ov2); }",
-            ".notice { border-top: 1px solid hsl(23 86% 73%); }",
-            ".notice { color: var(--lav); }",
-            ".notice-long { color: var(--peach); }",
-        ]
-        clean = ("<style>.notice { color: var(--ov2); } .line summary:hover { background: "
-                 "rgba(202, 211, 245, .05); } #list > li.line + li.line { border-top: 1px solid "
-                 "var(--hair); } .needs .k { color: var(--peach); }</style>")
-        for rule in faulty:
-            with self.subTest(rule=rule):
-                self.assertEqual(
-                    len(fold_colour_faults("<style>" + rule + "</style>", {"notice", "notice-long"})), 1)
-        self.assertEqual(fold_colour_faults(clean, {"notice", "line"}), [])
 
     def test_the_closed_notices_fold_shows_the_reports_disclosure_arrow(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
@@ -4510,22 +4368,6 @@ class PageOptionTest(unittest.TestCase):
         self.assertEqual([any(has_class(c, "rec") for c in o["children"]) for o in opts],
                          [False, True, False])
 
-    def test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        rules = []
-        for body in re.findall(r"(?s)<style>(.*?)</style>", text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            rules += [(" ".join(sel.split()), rule)
-                      for sel, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css)]
-        def declares(selector_test, declaration):
-            return any(selector_test(sel) and declaration in rule for sel, rule in rules)
-        self.assertTrue(declares(
-            lambda sel: any(t.endswith(".btn-option") for t in re.split(r"[\s,]+", sel)), "width: 100%"))
-        self.assertTrue(declares(lambda sel: '.btn-option[aria-pressed="true"] kbd' in sel, "background:"))
-        for sel, rule in rules:
-            if ".opt" in sel or ".btn-option" in sel:
-                self.assertNotIn("var(--peach)", rule, sel)
-
 
 class PageDigestTest(unittest.TestCase):
     def test_the_digest_lists_newest_first_with_earlier_folded(self) -> None:
@@ -5151,12 +4993,6 @@ class PageMessageLifeTest(unittest.TestCase):
         self.assertEqual(full(words), "You: note 3")
         (reply,) = of_class(line, "p", "message-reply")
         self.assertEqual(full(reply), "Manager: " + REPLY_TEXT)
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-        merged = {}
-        for selector, decls in style_rules(style):
-            if selector == ".message-text":
-                merged.update(decls)
-        self.assertEqual(merged.get("color"), "var(--lav)")
 
     def test_only_the_latest_exchange_shows_and_older_ones_sit_behind_a_closed_fold(self) -> None:
         messages = [
@@ -5376,17 +5212,6 @@ class PageMessageLifeTest(unittest.TestCase):
         for selector in (".finished-list > summary .message-new", ".sprint-earlier summary .message-new"):
             merged = {k: v for s, d in rules if s == selector for k, v in d.items()}
             self.assertEqual(merged.get("margin-left"), "10px", selector)
-
-    def test_the_new_marks_are_never_peach(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        found = 0
-        for body in re.findall(r"(?s)<style>(.*?)</style>", text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            for selector, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-                if ".new-replies" in selector or ".message-new" in selector:
-                    found += 1
-                    self.assertNotIn("var(--peach)", rule)
-        self.assertGreater(found, 0)
 
 
 MORE_KEY = "more:" + "a" * 16
@@ -5884,14 +5709,6 @@ class PageManagerTest(unittest.TestCase):
                 self.assertFalse(has_class(second, "btn-primary") or has_class(second, "needs"))
                 (act,) = [n for n in nodes(card) if has_class(n, "act")]
                 self.assertEqual([n for n in nodes(act) if n["tag"] == "button"], [first, second])
-
-    def test_the_quiet_withdraw_buttons_share_the_page_button_rules(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        style = text[text.index("<style>"):text.index("</style>")]
-        for kind in ("btn-primary", "btn-danger"):
-            with self.subTest(kind=kind):
-                self.assertRegex(style, r"(?m)^[^{]*\." + re.escape(kind) + r"[,\s{]")
-        self.assertRegex(style, r"\.card \.reason \{[^}]*color: var\(--ov2\)")
 
     def test_a_stall_card_withdraw_posts_the_withdrawal(self) -> None:
         (snap,) = render([
@@ -6898,23 +6715,6 @@ class PageSprintGlanceTest(unittest.TestCase):
                 self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
             self.assertEqual(len([n for n in nodes(line) if has_class(n, "sic")]), 1)
 
-    def test_pip_marks_differ_beyond_colour(self) -> None:
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        rules = style_rules(style)
-        normalised = []
-        for group in ("landed", "delivery", "held", "queued"):
-            found = [d for selector, d in rules if selector == ".pip.pip-" + group]
-            self.assertEqual(len(found), 1, group)
-            normalised.append({k: re.sub(r"var\(--[\w-]+\)|#[0-9a-fA-F]{3,8}", "C", v)
-                               for k, v in found[0].items()})
-        for i, left in enumerate(normalised):
-            for right in normalised[i + 1:]:
-                self.assertNotEqual(left, right)
-        for selector, decls in rules:
-            if ".pip" in selector:
-                for value in decls.values():
-                    self.assertNotIn("var(--peach)", value)
-
     def test_only_an_owner_ball_reads_as_needs_you(self) -> None:
         cases = [
             ("manager", "manager working", "sic-play", "st-go"),
@@ -6936,12 +6736,6 @@ class PageSprintGlanceTest(unittest.TestCase):
                 self.assertTrue(has_class(mark, icon_class))
                 self.assertTrue(has_class(mark, tone))
                 self.assertIs(has_class(mark, "needs"), ball == "owner")
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        rules = style_rules(style)
-        for marker, colour in ((".sprint-ball.needs", "var(--peach)"), (".st-go", "var(--green)"),
-                               (".st-wait", "var(--yellow)"), (".st-dim", "var(--ov2)")):
-            self.assertTrue(any(marker in selector and decls.get("color") == colour
-                                for selector, decls in rules), marker)
 
     def test_a_manager_session_reads_as_words_until_the_detail_opens(self) -> None:
         name = "owner/p00 sprint " + "a" * 16
@@ -8257,29 +8051,6 @@ class AccountsPanelPageTest(unittest.TestCase):
             (snap,) = render([START, {"frame": shown}, {"snapshot": True}])
             self.assertEqual(
                 [n for n in nodes(snap["capacity"])[1:] if n["tag"] in ("button", "input", "a")], [])
-
-    def test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden(self) -> None:
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-        rules = style_rules(style)
-
-        def ours(selector: str) -> bool:
-            return selector.startswith(".acct-") or selector.startswith("#accounts")
-
-        (hide,) = [d for s, d in rules if s == ".acct-panel[hidden]"]
-        self.assertEqual(hide.get("display"), "none")
-        declared = {k for s, d in rules if s == ":root" for k in d if k.startswith("--")}
-        ours_values = [v for s, d in rules if ours(s) for v in d.values()]
-        others = " ".join(v for s, d in rules if not ours(s) for v in d.values())
-        sizes = {d["font-size"] for s, d in rules if not ours(s) and "font-size" in d}
-        self.assertTrue(ours_values)
-        for value in ours_values:
-            for token in re.findall(r"var\((--[\w-]+)", value):
-                self.assertIn(token, declared)
-            for literal in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)", value):
-                self.assertIn(literal, others)
-        for selector, decls in rules:
-            if ours(selector) and "font-size" in decls:
-                self.assertIn(decls["font-size"], sizes, selector)
 
     def test_each_row_offers_one_exclusion_toggle_named_for_its_action(self) -> None:
         shown = {**view([]), "capacity": real_capacity(NOW_S, [
@@ -9834,11 +9605,6 @@ class PanelSigninPageTest(unittest.TestCase):
         self.assertEqual(len(in_row(a, "button", "signin-cancel")), 1)
         for n in nodes(panel(snap)):
             self.assertFalse({"btn-primary", "needs"} & set(n["cls"].split()), n["cls"])
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-        for selector, decls in style_rules(style):
-            if ".acct-" in selector or "#accounts" in selector:
-                for value in decls.values():
-                    self.assertNotIn("var(--peach)", value, selector)
 
     def test_add_account_sits_in_the_panel(self) -> None:
         html = PAGE.read_text(encoding="utf-8")
@@ -12125,14 +11891,6 @@ class PageSpendFigureTest(unittest.TestCase):
                     "#856", "building task 3 of 5", "#857", "plan review", "moved 3 min ago"])
 
     def test_the_figure_is_quiet_overlay_2_and_never_peach(self) -> None:
-        self.assertEqual(fold_colour_faults(PAGE_TEXT, {"spend", "sp-spend"}), [])
-        rules = css_rules(PAGE_TEXT)
-        spend = [b for s, b in rules if re.search(r"\.spend(?![\w-])", s)]
-        sp_spend = [b for s, b in rules if re.search(r"\.sp-spend(?![\w-])", s)]
-        self.assertTrue(any("color: var(--ov2)" in b for b in spend))
-        self.assertTrue(any("color: var(--ov2)" in b for b in sp_spend))
-        for body in spend + sp_spend:
-            self.assertNotIn("--peach", body)
         (snap,) = render([START, {"frame": SPEND_FRAME}, *SPEND_OPENS, {"snapshot": True}])
         for n in nodes(snap["projects"]):
             if has_class(n, "spend") or has_class(n, "sp-spend"):

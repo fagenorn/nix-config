@@ -389,7 +389,10 @@ class StyleCheck:
     `gt` compare with. `forced` pseudo-classes are forced on the matches over CDP, and
     `reduced_motion` reads under `prefers-reduced-motion: reduce`. `broken` is a rule that must
     make this row miss, which `capture(mutate=True)` proves. A `fixture` row reads the canonical
-    fixture answer, so a real-answer run skips it.
+    fixture answer, so a real-answer run skips it. The whole-page kinds (`none_peach`, `palette`,
+    `tokens`, `distinct`, `sizes_shared`) read the elements under `selector` (the probe's, for a
+    probe row) and the painted colours of each, normalised, or the CSSOM `:root` token list;
+    `fills` reads each match against its parent's content width.
     """
     name: str
     states: tuple[str, ...]
@@ -410,10 +413,10 @@ class StyleCheck:
     fixture: bool = False
 
 
-STYLE_CHECKS: tuple[StyleCheck, ...] = ()
 # The selectors clicked, in order, after a state's picture and before its style reading.
 STYLE_STEPS: dict[str, tuple[str, ...]] = {}
-WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt"})
+WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt",
+                   "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills"})
 PALETTE = {
     "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
     "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
@@ -421,6 +424,110 @@ PALETTE = {
     "--crust": "rgb(24, 25, 38)", "--peach": "rgb(245, 169, 127)", "--lav": "rgb(183, 189, 248)",
     "--green": "rgb(166, 218, 149)", "--yellow": "rgb(238, 212, 159)", "--red": "rgb(237, 135, 150)",
 }
+_HAIR = "rgba(202, 211, 245, 0.09)"
+_HOVER = "rgba(202, 211, 245, 0.05)"
+_CLEAR = "rgba(0, 0, 0, 0)"
+_NO_STATE_COLOURS = ("--peach", "--green", "--yellow", "--red")
+_DESK_TOKENS = ("--base", "--crust", "--display", "--green", "--hair", "--hover", "--lav", "--mantle",
+                "--ov2", "--peach", "--red", "--s0", "--s1", "--s2", "--sub0", "--sub1", "--text",
+                "--ui", "--yellow")
+_SPEND_PALETTE = {k: v for k, v in PALETTE.items() if k not in _NO_STATE_COLOURS}
+# The lists the whole-page want kinds compare with, named by a row's `value`. The desk literals
+# are the only colour literals of the desk page's style block besides its tokens.
+STYLE_LISTS = {
+    "peach": PALETTE["--peach"],
+    "palette": {
+        "desk": [*PALETTE.values(), "rgb(248, 187, 152)", "rgba(183, 189, 248, 0.1)", _HOVER, _HAIR,
+                 "rgba(24, 25, 38, 0.22)", "rgba(24, 25, 38, 0.28)", "rgba(8, 9, 16, 0.45)",
+                 "rgba(8, 9, 16, 0.9)", _CLEAR],
+        "spend": [*_SPEND_PALETTE.values(), _HOVER, _HAIR, _CLEAR],
+        "notices": [PALETTE[k] for k in ("--text", "--sub1", "--sub0", "--ov2", "--s0", "--s1",
+                                         "--s2", "--base", "--mantle")] + [_HAIR, _HOVER, _CLEAR],
+    },
+    "tokens": {
+        "desk": {"names": list(_DESK_TOKENS),
+                 "colours": {**PALETTE, "--hair": _HAIR, "--hover": _HOVER}},
+        "spend": {"names": [n for n in _DESK_TOKENS if n not in _NO_STATE_COLOURS],
+                  "colours": {**_SPEND_PALETTE, "--hair": _HAIR, "--hover": _HOVER}},
+    },
+}
+_EVERY_STATE = tuple(state for state in STATES if state != "guest-page")
+_BOTH = (1440, 480)
+_NEEDS = ".needs, .needs *, .btn-primary, .btn-primary *"
+_RED_ON = "{ color: rgb(1, 2, 3) !important }"
+
+
+def _colour(name, state, selector, token, probe="", host="body", widths=(1440,), **kw):
+    """A row that wants `selector`'s `color` to be `token`'s colour, broken by a rule setting it to
+    rgb(1, 2, 3)."""
+    return StyleCheck(name, (state,), widths, selector, kw.pop("prop", "color"), "equals",
+                      PALETTE[token], f"{selector} {_RED_ON}", probe=probe, host=host, **kw)
+
+
+STYLE_CHECKS: tuple[StyleCheck, ...] = (
+    StyleCheck("peach-only-needs", _EVERY_STATE, _BOTH, "body", "color", "none_peach", _NEEDS,
+               ".top-in { border-top: 2px solid rgb(245, 169, 127) !important }"),
+    StyleCheck("runs-not-red", ("live-several", "waiting-its-turn"), (1440,),
+               ".run, .runs, .moved, .quiet", "color", "not", PALETTE["--red"],
+               ".run, .runs, .moved, .quiet { color: rgb(237, 135, 150) !important }", every=True),
+    StyleCheck("palette-notices", ("notices-fold",), _BOTH, ".line.notices", "color", "palette",
+               "notices", ".notice-label { color: rgb(183, 189, 248) !important }"),
+    StyleCheck("palette-accounts", ("accounts-panel",), _BOTH, "#accounts", "color", "palette",
+               "desk", "#accounts { background-color: rgb(1, 2, 3) !important }"),
+    StyleCheck("sizes-accounts", ("accounts-panel",), (1440,), "#accounts", "font-size",
+               "sizes_shared", "", "#accounts * { font-size: 13.37px !important }"),
+    StyleCheck("accounts-hidden", ("accounts-panel",), (1440,), ".acct-panel[hidden]", "display",
+               "equals", "none", ".acct-panel[hidden] { display: block !important }",
+               probe='<div class="acct-panel" hidden data-style-probe></div>'),
+    StyleCheck("palette-spend", ("spend-page",), _BOTH, "body", "color", "palette", "spend",
+               ".brand { color: rgb(237, 135, 150) !important }"),
+    StyleCheck("tokens-desk", ("nothing-running",), (1440,), ":root", "--*", "tokens", "desk",
+               ":root { --green: #00ff00 !important }"),
+    StyleCheck("tokens-spend", ("spend-page",), (1440,), ":root", "--*", "tokens", "spend",
+               ":root { --peach: #f5a97f }"),
+    _colour("state-working", "nothing-running", ".s-working", "--green",
+            probe='<span class="s-working" data-style-probe>x</span>'),
+    _colour("state-waiting-answer", "nothing-running", ".s-waiting_answer", "--yellow",
+            probe='<span class="s-waiting_answer" data-style-probe>x</span>'),
+    _colour("state-waiting-permission", "nothing-running", ".s-waiting_permission", "--yellow",
+            probe='<span class="s-waiting_permission" data-style-probe>x</span>'),
+    _colour("state-limit", "nothing-running", ".s-limit", "--red",
+            probe='<span class="s-limit" data-style-probe>x</span>'),
+    _colour("cap-out-red", "nothing-running", ".cap-out", "--red", host="#capacity",
+            probe='<span class="cap-out" data-style-probe>x</span>'),
+    _colour("message-you-lav", "message-sent", ".message-text", "--lav", widths=_BOTH),
+    _colour("reason-quiet", "nothing-running", ".card .reason", "--ov2",
+            probe='<div class="card" data-style-probe><span class="reason">x</span></div>'),
+    _colour("ball-needs", "nothing-running", ".sprint-ball.needs", "--peach",
+            probe='<span class="sprint-ball needs" data-style-probe>x</span>'),
+    _colour("tone-go", "nothing-running", ".st-go", "--green",
+            probe='<span class="st-go" data-style-probe>x</span>'),
+    _colour("tone-wait", "nothing-running", ".st-wait", "--yellow",
+            probe='<span class="st-wait" data-style-probe>x</span>'),
+    _colour("tone-dim", "nothing-running", ".st-dim", "--ov2",
+            probe='<span class="st-dim" data-style-probe>x</span>'),
+    StyleCheck("pips-differ", ("nothing-running",), (1440,),
+               ".pip.pip-landed | .pip.pip-delivery | .pip.pip-held | .pip.pip-queued",
+               "border-top-style", "distinct", "",
+               ".pip.pip-queued { border: 0 !important; background: var(--sub0) !important }",
+               probe='<span data-style-probe><span class="pip pip-landed"></span>'
+                     '<span class="pip pip-delivery"></span><span class="pip pip-held"></span>'
+                     '<span class="pip pip-queued"></span></span>'),
+    _colour("spend-quiet", "desk-spend", ".spend", "--ov2", widths=_BOTH),
+    _colour("sp-spend-quiet", "desk-spend", ".sp-spend", "--ov2", widths=_BOTH),
+    StyleCheck("option-fills", ("inbox-card",), _BOTH, ".btn-option", "width", "fills", "",
+               ".btn-option { width: 50% !important }", every=True),
+    StyleCheck("option-pick-key", ("question-words",), _BOTH, '.btn-option[aria-pressed="true"] kbd',
+               "background-color", "equals", PALETTE["--lav"],
+               '.btn-option[aria-pressed="true"] kbd { background: none !important }'),
+    _colour("nav-quiet", "nothing-running", ".nav", "--sub0", widths=_BOTH),
+    StyleCheck("nav-nowrap", ("nothing-running",), _BOTH, ".nav", "white-space", "equals", "nowrap",
+               ".nav { white-space: normal !important }"),
+    StyleCheck("nav-width", ("nothing-running",), _BOTH, ".nav", "width", "max", "60",
+               ".nav { width: 200px !important }"),
+    StyleCheck("nav-min-width", ("nothing-running",), _BOTH, ".nav", "min-width", "equals", "auto",
+               ".nav { min-width: 0 !important }"),
+)
 STYLE_PLACE = r"""((rows) => {
   let placed = 0;
   const put = (html, host, name) => {
@@ -479,8 +586,142 @@ STYLE_READING = r"""((rows) => {
     (node) => !node.closest('[data-style-probe]'));
   const label = (node) => node.tagName.toLowerCase() + '.'
     + (node.getAttribute('class') || '').split(/\s+/)[0];
+  const LISTS = __LISTS__;
+  const SHAPES = new Set(['path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'text']);
+  const COLOURS = /(?:rgba?|color)\([^)]*\)/g;
+  const painted = (node) => {
+    const s = getComputedStyle(node);
+    const out = [['color', s.color], ['background-color', s.backgroundColor]];
+    for (const side of ['top', 'right', 'bottom', 'left']) {
+      if (parseFloat(s.getPropertyValue('border-' + side + '-width')) > 0) {
+        out.push(['border-' + side + '-color', s.getPropertyValue('border-' + side + '-color')]);
+      }
+    }
+    if (s.outlineStyle !== 'none') out.push(['outline-color', s.outlineColor]);
+    out.push(['text-decoration-color', s.textDecorationColor]);
+    if (s.getPropertyValue('column-rule-style') !== 'none') {
+      out.push(['column-rule-color', s.getPropertyValue('column-rule-color')]);
+    }
+    for (const prop of ['caret-color', 'accent-color']) {
+      const value = s.getPropertyValue(prop);
+      if (value !== 'auto') out.push([prop, value]);
+    }
+    for (const prop of ['box-shadow', 'text-shadow']) {
+      const value = s.getPropertyValue(prop);
+      if (value !== 'none') for (const colour of value.match(COLOURS) || []) out.push([prop, colour]);
+    }
+    if (SHAPES.has(node.tagName.toLowerCase())) {
+      for (const prop of ['fill', 'stroke']) {
+        const value = s.getPropertyValue(prop);
+        if (value !== 'none' && !value.startsWith('url(')) out.push([prop, value]);
+      }
+    }
+    return out;
+  };
+  const rendered = (node) => node.getClientRects().length > 0;
+  const scopeOf = (row) => {
+    const roots = row.probe ? probes(row.name) : onPage(row.selector);
+    const found = new Set();
+    for (const root of roots) for (const node of [root, ...root.querySelectorAll('*')]) found.add(node);
+    return {
+      roots,
+      nodes: Array.from(found).filter((node) => rendered(node)
+        && (row.probe || !node.closest('[data-style-probe]'))),
+    };
+  };
+  const wholePage = (row) => {
+    const found = [];
+    const { roots, nodes } = scopeOf(row);
+    if (!roots.length) return [`${row.name}: ${row.selector} is absent`];
+    if (row.want === 'none_peach') {
+      const peach = parse(LISTS.peach);
+      for (const node of nodes) {
+        if (node.matches(row.value)) continue;
+        for (const [prop, colour] of painted(node)) {
+          if (parse(colour) === peach) found.push(`${row.name}: ${label(node)} ${prop} is ${colour}`);
+        }
+      }
+    } else if (row.want === 'palette') {
+      const allowed = new Set(LISTS.palette[row.value].map(parse));
+      for (const node of nodes) {
+        for (const [prop, colour] of painted(node)) {
+          if (!allowed.has(parse(colour))) found.push(`${row.name}: ${label(node)} ${prop} is ${colour}`);
+        }
+      }
+    } else if (row.want === 'sizes_shared') {
+      const inside = new Set(nodes);
+      const sizes = new Set(Array.from(document.querySelectorAll('body *')).filter(
+        (node) => rendered(node) && !inside.has(node) && !node.closest('[data-style-probe]'))
+        .map((node) => getComputedStyle(node).fontSize));
+      for (const node of nodes) {
+        const size = getComputedStyle(node).fontSize;
+        if (!sizes.has(size)) found.push(`${row.name}: ${label(node)} font-size is ${size}`);
+      }
+    }
+    return found;
+  };
+  const tokens = (row) => {
+    const list = LISTS.tokens[row.value];
+    const declared = new Set();
+    const walk = (rules) => {
+      for (const rule of rules) {
+        if (rule.selectorText === ':root') {
+          for (const name of Array.from(rule.style)) if (name.startsWith('--')) declared.add(name);
+        } else if (rule.cssRules) {
+          walk(rule.cssRules);
+        }
+      }
+    };
+    for (const sheet of document.styleSheets) walk(sheet.cssRules);
+    const found = [];
+    for (const name of Array.from(declared).sort()) {
+      if (!list.names.includes(name)) found.push(`${row.name}: :root declares ${name}`);
+    }
+    for (const name of list.names) {
+      if (!declared.has(name)) found.push(`${row.name}: :root lacks ${name}`);
+    }
+    for (const [name, colour] of Object.entries(list.colours)) {
+      if (!declared.has(name)) continue;
+      const scratch = document.createElement('span');
+      scratch.style.color = `var(${name})`;
+      document.body.appendChild(scratch);
+      const got = getComputedStyle(scratch).color;
+      scratch.remove();
+      if (!same(got, colour)) found.push(`${row.name}: ${name} is ${got}`);
+    }
+    return found;
+  };
+  const distinct = (row) => {
+    const names = row.selector.split('|').map((part) => part.trim());
+    const roots = row.probe ? probes(row.name) : [];
+    const seen = [];
+    for (const name of names) {
+      const [node] = row.probe ? within(roots, name) : onPage(name);
+      if (!node) return [`${row.name}: ${name} is absent`];
+      const s = getComputedStyle(node);
+      const tuple = ['background-image', 'border-top-style', 'border-top-width',
+        'border-top-left-radius', 'box-shadow', 'width']
+        .map((prop) => s.getPropertyValue(prop).replace(COLOURS, 'C')).join('|');
+      seen.push([name, tuple]);
+    }
+    const found = [];
+    for (let i = 0; i < seen.length; i++) {
+      for (let j = i + 1; j < seen.length; j++) {
+        if (seen[i][1] === seen[j][1]) {
+          found.push(`${row.name}: ${seen[i][0]} and ${seen[j][0]} differ only in colour`);
+        }
+      }
+    }
+    return found;
+  };
   const misses = [];
   for (const row of rows) {
+    if (row.want === 'none_peach' || row.want === 'palette' || row.want === 'sizes_shared') {
+      misses.push(...wholePage(row));
+      continue;
+    }
+    if (row.want === 'tokens') { misses.push(...tokens(row)); continue; }
+    if (row.want === 'distinct') { misses.push(...distinct(row)); continue; }
     const matches = row.probe ? within(probes(row.name), row.selector) : onPage(row.selector);
     const subjects = row.every ? matches.filter((node) => node.getClientRects().length > 0)
                                : matches.slice(0, 1);
@@ -490,7 +731,7 @@ STYLE_READING = r"""((rows) => {
     }
     const pseudo = row.pseudo || null;
     for (const node of subjects) {
-      const got = getComputedStyle(node, pseudo).getPropertyValue(row.prop);
+      let got = getComputedStyle(node, pseudo).getPropertyValue(row.prop);
       let other = null;
       if (row.want === 'same_as' || row.want === 'gt') {
         const [rival] = [...within(probes(row.name + ':compare'), row.value), ...onPage(row.value)];
@@ -501,7 +742,13 @@ STYLE_READING = r"""((rows) => {
         other = getComputedStyle(rival, pseudo).getPropertyValue(row.prop);
       }
       let ok = false;
-      if (row.want === 'equals') ok = same(got, row.value);
+      if (row.want === 'fills') {
+        const parent = node.parentElement;
+        const cs = getComputedStyle(parent);
+        const width = node.getBoundingClientRect().width;
+        got = Math.round(width * 100) / 100 + 'px';
+        ok = width >= parent.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 1;
+      } else if (row.want === 'equals') ok = same(got, row.value);
       else if (row.want === 'in') ok = row.value.split('|').some((member) => same(got, member));
       else if (row.want === 'not') ok = !same(got, row.value);
       else if (row.want === 'starts') ok = got.startsWith(row.value);
@@ -516,7 +763,7 @@ STYLE_READING = r"""((rows) => {
     }
   }
   return misses;
-})"""
+})""".replace("__LISTS__", json.dumps(STYLE_LISTS))
 
 
 def style_applies(served: Path | None = None) -> bool:

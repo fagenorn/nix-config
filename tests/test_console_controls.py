@@ -897,15 +897,6 @@ class ControlStateTest(unittest.TestCase):
                                      ("var(--lav)", "600"), kind)
 
     def test_peach_is_only_on_the_primary_kind(self) -> None:
-        for name, style in (("desk", page_style()), ("spend", spend_style())):
-            for selector, decls in rules_of(style):
-                if not any("var(--peach)" in value for value in decls.values()):
-                    continue
-                classes = set(re.findall(r"\.([\w-]+)", last_compound(selector)))
-                primary = "btn-primary" in classes and not classes & (set(KINDS) - {"btn-primary"})
-                needs = ".needs" in selector and targets_control(selector) is None
-                with self.subTest(page=name, selector=selector):
-                    self.assertTrue(primary or needs)
         for snap in snapshots_of(desk_scenarios()):
             for node in controls_of(snap):
                 self.assertNotIn("needs", node["cls"].split(), node["cls"])
