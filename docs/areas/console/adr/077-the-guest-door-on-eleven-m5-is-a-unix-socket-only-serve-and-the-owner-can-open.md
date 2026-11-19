@@ -40,6 +40,6 @@ The page is then at `https://<host>.<tailnet>.ts.net/`. Never use Funnel: it is 
 
 ## Consequences
 
-- This amends ADR-console-066 (its D1, D4 and the first bullet of its D2) for eleven-m5; the rest of its D2 and its D3 stand. The `tailscale.exe` commands there are history of anis-desktop.
+- This amends ADR-console-066 (its D1, D4, the first bullet of its D2 and where its D2 reads the tailnet name) for eleven-m5; the rest of its D2 and its D3 stand. Admission and the probe's headers follow D4 here: `Host: localhost` and the tailnet name in one `X-Forwarded-Host`, never the tailnet name in `Host`. The `tailscale.exe` commands there are history of anis-desktop.
 - ADR-console-076 D7 is superseded for the guest door; the owner's port stays as ADR-console-076 decided.
 - A guest is still only as trusted as Serve's header, now with no other local account able to forge it.

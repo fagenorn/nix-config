@@ -27,7 +27,11 @@ The guest door is a Unix socket (ADR-console-077). `door_refusal(folder, sock, o
 folder is a directory and the socket a socket, both the owner's, the folder with no mode bit outside
 `FOLDER_MODE` (0700) and the socket none outside `SOCKET_MODE` (0600); a narrower mode is not wider,
 and an execute bit on the socket, setuid, setgid or sticky is. Anything else is `DOOR_WIDER`. It
-reads the two stat results only.
+reads the two stat results only. On macOS an ACL is kept beside the mode bits and can grant another
+account a folder whose mode is 0700, so `acl_grants(path)` (`acl_reader_for(sys.platform)`; None
+elsewhere, where the group bits already hold an ACL's mask) is True when the path itself, never what
+a symlink names, carries an allow entry; a deny-only ACL grants nothing. It raises `OSError` when the
+ACL cannot be read, which the service treats as a grant.
 
 The owner's port refuses a request that carries any header whose name, lowercased, starts with
 `tailscale-` or is `x-forwarded-for` (`owner_port_refusal`, `OWNER_PORT_TEXT`): a request through
@@ -86,6 +90,8 @@ JSON (a duplicate key, a non-object or an extra or missing key is refused) and r
 the service, which raises `Refused` for a write refused on its merits.
 """
 
+import ctypes
+import errno
 import json
 import os
 import re
@@ -379,6 +385,47 @@ def door_refusal(folder: os.stat_result | None, sock: os.stat_result | None,
             and stat.S_IMODE(sock.st_mode) & ~SOCKET_MODE == 0):
         return None
     return DOOR_WIDER
+
+
+ACL_TYPE_EXTENDED = 0x100
+ACL_FIRST_ENTRY, ACL_NEXT_ENTRY = 0, -1
+ACL_EXTENDED_ALLOW = 1
+
+
+def acl_grants(path: str) -> bool:
+    """Whether the macOS ACL of `path` (not what a symlink names) has an allow entry."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.acl_get_link_np.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    libc.acl_get_link_np.restype = ctypes.c_void_p
+    libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    libc.acl_get_entry.restype = ctypes.c_int
+    libc.acl_get_tag_type.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    libc.acl_get_tag_type.restype = ctypes.c_int
+    libc.acl_free.argtypes = [ctypes.c_void_p]
+    libc.acl_free.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = libc.acl_get_link_np(os.fsencode(path), ACL_TYPE_EXTENDED)
+    if not acl:
+        code = ctypes.get_errno()
+        if code in (0, errno.ENOENT):
+            return False
+        raise OSError(code, os.strerror(code), path)
+    try:
+        entry, which = ctypes.c_void_p(), ACL_FIRST_ENTRY
+        while libc.acl_get_entry(acl, which, ctypes.byref(entry)) == 0:
+            which = ACL_NEXT_ENTRY
+            tag = ctypes.c_int()
+            if libc.acl_get_tag_type(entry, ctypes.byref(tag)) != 0:
+                raise OSError(errno.EIO, "an ACL entry has no readable tag", path)
+            if tag.value == ACL_EXTENDED_ALLOW:
+                return True
+        return False
+    finally:
+        libc.acl_free(acl)
+
+
+def acl_reader_for(platform: str) -> Callable[[str], bool] | None:
+    return acl_grants if platform == "darwin" else None
 
 
 def serve_state(status: object, tailnet: str | None, guest_socket: str | None) -> str:

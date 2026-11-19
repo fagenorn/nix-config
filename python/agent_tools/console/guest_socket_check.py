@@ -22,7 +22,10 @@ The rules, read in this order, each printing one line:
 4. `USER` connected: `not_met`, `reachable_by_other_user`, exit 1;
 5. `USER`'s attempt gave no permission-denied proof (a timeout, a failed sudo, any other error):
    `not_yet`, `isolation_not_proven`, exit 75;
-6. otherwise (permission denied) `met`, exit 0.
+6. `USER` was denied but the owner's connect to the socket then failed: `not_yet`,
+   `door_not_answering`, exit 75 (the denial may come from a console that is gone, whose private
+   folder refuses `USER` all the same);
+7. otherwise (permission denied and the door still answers) `met`, exit 0.
 
 Output: exactly one stdout line, `json.dumps({"status": ..., "reason": ...}, sort_keys=True)`, with
 `reason` only when not met. It never carries the socket path, a uid or a login. A usage error
@@ -95,6 +98,9 @@ def main(argv: list[str] | None = None, *,
         return 1
     if answer != DENIED:
         _print("not_yet", "isolation_not_proven")
+        return NOT_YET
+    if not connect_owner(path):
+        _print("not_yet", "door_not_answering")
         return NOT_YET
     _print("met")
     return 0

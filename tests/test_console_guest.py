@@ -5,7 +5,10 @@ Run: just agent-workflow-tests
 
 import json
 import os
+import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -402,6 +405,30 @@ class DoorTest(unittest.TestCase):
                 self.assertEqual(guest.door_refusal(folder, sock, 501), expected)
         self.assertEqual((guest.FOLDER_MODE, guest.SOCKET_MODE), (0o700, 0o600))
         self.assertEqual(guest.DOOR_WIDER, "door_wider")
+
+
+class AclTest(unittest.TestCase):
+    """macOS keeps an ACL beside the mode bits, so a 0700 folder can still grant another account."""
+
+    def test_the_acl_reader_exists_only_where_an_acl_outranks_the_mode(self):
+        self.assertIs(guest.acl_reader_for("darwin"), guest.acl_grants)
+        self.assertIsNone(guest.acl_reader_for("linux"))
+        self.assertIsNone(guest.acl_reader_for("freebsd13"))
+
+    @unittest.skipUnless(sys.platform == "darwin", "ACLs outside the mode bits are macOS's")
+    def test_acl_grants_reads_an_allow_entry_not_a_deny_one(self):
+        root = Path(tempfile.mkdtemp(prefix="acl-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, root, True)
+        rows = [(None, False), ("everyone deny delete", False),
+                ("everyone allow list,search", True)]
+        for number, (entry, grants) in enumerate(rows):
+            with self.subTest(entry=entry):
+                target = root / f"d{number}"
+                target.mkdir(mode=0o700)
+                if entry is not None:
+                    subprocess.run(["/bin/chmod", "+a", entry, str(target)], check=True)
+                    self.addCleanup(subprocess.run, ["/bin/chmod", "-N", str(target)])
+                self.assertIs(guest.acl_grants(str(target)), grants)
 
 
 class SharingTest(unittest.TestCase):

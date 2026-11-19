@@ -82,11 +82,19 @@ socket is chmod 0600 at once after the bind, both the owner's; a folder that is 
 directory or not the owner's, or a non-socket file at PATH, is a `GuestSocketError` and the console
 does not start. A socket file at PATH is removed only when a connect to it is refused (a stale file); a
 connect that succeeds is `GuestSocketError` with `errno.EADDRINUSE` and leaves the running console's
-file alone; any other connect error is a `GuestSocketError` and leaves the file. `close` and a failed
-construction remove the socket file this console bound (the same device and inode) and nothing else.
+file alone; any other connect error is a `GuestSocketError` and leaves the file. A path that is not
+absolute is a `GuestSocketError` (`EINVAL`) before the console touches the file system or binds the
+owner's port. The stale-file probe, the bind and the listen run under an exclusive `flock` on
+`<socket>.lock` in the folder, so a second console never finds the first bound but not yet
+listening and unlinks its file. A folder that holds an ACL allow entry (`guest_acl_reader`, default
+`guest.acl_reader_for(sys.platform)`; macOS only) is a `GuestSocketError` (`EPERM`). `close` and a
+failed construction remove the socket file this console bound (the same device and inode) and nothing
+else.
 Every guest connection is judged in `verify_request` before a byte is read: `guest.door_refusal` on
 the `os.lstat` of the folder and the socket (any bit beyond 0700 or 0600, or not the owner's, refuses),
-then the peer's uid (`guest_peer_reader`, default `peer.unix_reader_for(sys.platform)`; `peer.unix_refusal`
+the socket path still naming the file this console bound (same device and inode, else the listener
+is not the one the path names and the connection is refused as `door_wider`), no ACL allow entry on
+the folder or the socket (a reader that raises counts as one), then the peer's uid (`guest_peer_reader`, default `peer.unix_reader_for(sys.platform)`; `peer.unix_refusal`
 admits only root and `owner_uid`; an absent or failing reader refuses as `unreadable`). A refusal closes
 the connection with no answer, appends nothing, records no reading and prints one stderr line `console:
 guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitted by
@@ -1530,6 +1538,7 @@ session. Nothing in this path reads the tracker or the forge.
 import contextlib
 import dataclasses
 import errno
+import fcntl
 import hmac
 import http.server
 import json
@@ -3394,7 +3403,28 @@ class GuestServer(socketserver.ThreadingUnixStreamServer):
         self.console = console
         self._path = Path(path)
         self._bound: tuple[int, int] | None = None
+        self._lock_fd: int | None = None
         super().__init__(str(path), GuestHandler)
+
+    @property
+    def bound(self) -> tuple[int, int] | None:
+        """The `(st_dev, st_ino)` of the socket file this server bound, None before the bind."""
+        return self._bound
+
+    def _lock(self) -> None:
+        fd = os.open(self._path.with_name(self._path.name + ".lock"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._lock_fd = fd
+
+    def _unlock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is not None:
+            os.close(fd)
 
     def server_bind(self) -> None:
         path = self._path
@@ -3409,6 +3439,10 @@ class GuestServer(socketserver.ThreadingUnixStreamServer):
             raise PermissionError(
                 errno.EPERM, "the guest socket folder is not the owner's own directory")
         os.chmod(folder, guest.FOLDER_MODE)
+        if self.console.acl_grants(folder):
+            raise PermissionError(
+                errno.EPERM, "the guest socket folder grants access through an ACL")
+        self._lock()
         try:
             held = os.lstat(path)
         except FileNotFoundError:
@@ -3432,6 +3466,12 @@ class GuestServer(socketserver.ThreadingUnixStreamServer):
         self._bound = (bound.st_dev, bound.st_ino)
         os.chmod(path, guest.SOCKET_MODE)
 
+    def server_activate(self) -> None:
+        try:
+            super().server_activate()
+        finally:
+            self._unlock()
+
     def verify_request(self, request, client_address) -> bool:
         code = self.console.guest_refusal(request)
         if code is not None:
@@ -3441,6 +3481,7 @@ class GuestServer(socketserver.ThreadingUnixStreamServer):
     def server_close(self) -> None:
         super().server_close()
         self.remove_socket()
+        self._unlock()
 
     def remove_socket(self) -> None:
         if self._bound is None:
@@ -3547,11 +3588,17 @@ class ConsoleService:
                  peer_reader: peer.PeerReader | None = peer.reader_for(sys.platform),
                  owner_uid: int | None = None,
                  peer_lookups: int = PEER_LOOKUPS,
-                 guest_peer_reader: peer.UnixPeerReader | None = peer.unix_reader_for(sys.platform)):
+                 guest_peer_reader: peer.UnixPeerReader | None = peer.unix_reader_for(sys.platform),
+                 guest_acl_reader: Callable[[str], bool] | None = guest.acl_reader_for(
+                     sys.platform)):
+        if guest_socket is not None and not Path(guest_socket).is_absolute():
+            raise GuestSocketError(str(guest_socket), OSError(
+                errno.EINVAL, "the guest socket path is not absolute"))
         self.peer_reader = peer_reader
         self.peer_slots = threading.BoundedSemaphore(peer_lookups)
         self.owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self.guest_peer_reader = guest_peer_reader
+        self.guest_acl_reader = guest_acl_reader
         self._guest_socket_path = None if guest_socket is None else Path(guest_socket)
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
@@ -3827,6 +3874,12 @@ class ConsoleService:
         refused = guest.door_refusal(stats[0], stats[1], self.owner_uid)
         if refused is not None:
             return refused
+        server = self._guest_server
+        if (server is None or server.bound is None
+                or (stats[1].st_dev, stats[1].st_ino) != server.bound):
+            return guest.DOOR_WIDER
+        if self.acl_grants(path.parent) or self.acl_grants(path):
+            return guest.DOOR_WIDER
         if self.guest_peer_reader is None:
             return "unreadable"
         try:
@@ -3834,6 +3887,15 @@ class ConsoleService:
         except Exception:
             uid = None
         return peer.unix_refusal(uid, self.owner_uid)
+
+    def acl_grants(self, target: Path) -> bool:
+        """Whether `target` grants through an ACL; a reader that fails counts as a grant."""
+        if self.guest_acl_reader is None:
+            return False
+        try:
+            return bool(self.guest_acl_reader(str(target)))
+        except Exception:
+            return True
 
     @property
     def guest_token(self) -> str | None:

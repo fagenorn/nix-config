@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections.abc import Mapping
@@ -614,6 +615,119 @@ class DoorTest(GuestCase):
         ino = os.lstat(self.guest_socket).st_ino
         svc.close()
         self.assertEqual(os.lstat(self.guest_socket).st_ino, ino)
+
+    def test_a_replaced_socket_path_refuses_the_listener_it_no_longer_names(self):
+        self.seed()
+        svc = self.start()
+        alias = self.guest_socket.with_name("alias.sock")
+        os.rename(self.guest_socket, alias)
+        decoy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(decoy.close)
+        decoy.bind(str(self.guest_socket))
+        os.chmod(self.guest_socket, 0o600)
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
+            with self.assertRaises((http.client.RemoteDisconnected, ConnectionError)):
+                self.request(str(alias), "GET", "/api/whoami", "localhost", (COLLEAGUE,), None,
+                             None, TAILNET)
+        self.assertEqual(captured.getvalue(), "console: guest_refused door_wider\n")
+        self.assertIsNone(self.last_request(svc))
+
+    def test_a_second_console_waits_for_the_first_to_listen_before_judging_the_file(self):
+        self.seed()
+        support.write_registry(self.registry, support.entries(2))
+        bound, release = threading.Event(), threading.Event()
+        real, calls = service.GuestServer.server_activate, []
+
+        def slow_activate(server):
+            calls.append(server)
+            if len(calls) == 1:
+                bound.set()
+                release.wait(10)
+            return real(server)
+
+        outcome = {}
+
+        def second():
+            try:
+                outcome["svc"] = service.ConsoleService(
+                    self.root / "second/console/events.sqlite3", self.registry, port=0,
+                    guest_socket=self.guest_socket, peer_reader=support.OWNER_PEER)
+            except OSError as error:
+                outcome["error"] = error
+
+        def first():
+            outcome["first"] = service.ConsoleService(
+                self.store, self.registry, port=0, guest_socket=self.guest_socket,
+                peer_reader=support.OWNER_PEER)
+
+        with mock.patch.object(service.GuestServer, "server_activate", slow_activate):
+            opener = threading.Thread(target=first)
+            opener.start()
+            self.assertTrue(bound.wait(10))
+            ino = os.lstat(self.guest_socket).st_ino
+            rival = threading.Thread(target=second)
+            rival.start()
+            rival.join(0.5)
+            release.set()
+            opener.join(10)
+            rival.join(10)
+        self.addCleanup(outcome["first"].close)
+        outcome["first"].start()
+        self.assertIsInstance(outcome.get("error"), service.GuestSocketError)
+        self.assertEqual(outcome["error"].errno, errno.EADDRINUSE)
+        self.assertEqual(os.lstat(self.guest_socket).st_ino, ino)
+        self.assertEqual(self.guest(outcome["first"], "GET", "/api/whoami")[0], 200)
+
+    def test_an_acl_grant_on_the_folder_or_the_socket_is_not_a_private_door(self):
+        self.seed()
+        granted, broken = set(), []
+
+        def reader(path):
+            if broken:
+                raise OSError(errno.EACCES, "unreadable")
+            return path in granted
+
+        svc = self.start(guest_acl_reader=reader)
+        self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            for target in (self.guest_socket.parent, self.guest_socket):
+                granted.add(str(target))
+                self.assertEqual(self.silent(svc), b"")
+                granted.clear()
+                self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+            broken.append(True)
+            self.assertEqual(self.silent(svc), b"")
+        self.assertEqual(captured.getvalue().splitlines(), ["console: guest_refused door_wider"] * 3)
+
+    def test_a_folder_that_grants_by_acl_is_a_start_error(self):
+        support.write_registry(self.registry, support.entries(2))
+        with self.assertRaises(service.GuestSocketError) as raised:
+            service.ConsoleService(
+                self.store, self.registry, port=0, guest_socket=self.guest_socket,
+                peer_reader=support.OWNER_PEER, guest_acl_reader=lambda path: True)
+        self.assertEqual(raised.exception.errno, errno.EPERM)
+        self.assertFalse(os.path.lexists(self.guest_socket))
+
+    def test_a_relative_socket_path_touches_nothing(self):
+        support.write_registry(self.registry, support.entries(2))
+        work = self.root / "cwd"
+        work.mkdir(mode=0o755)
+        os.chmod(work, 0o755)
+        before = os.getcwd()
+        os.chdir(work)
+        self.addCleanup(os.chdir, before)
+        for relative in (Path("guest.sock"), Path("sub/guest.sock")):
+            with self.subTest(path=str(relative)):
+                with self.assertRaises(service.GuestSocketError) as raised:
+                    service.ConsoleService(
+                        self.store, self.registry, port=0, guest_socket=relative,
+                        peer_reader=support.OWNER_PEER)
+                self.assertEqual(raised.exception.errno, errno.EINVAL)
+                self.assertEqual(raised.exception.path, str(relative))
+                self.assertEqual(stat.S_IMODE(os.lstat(work).st_mode), 0o755)
+                self.assertEqual(os.listdir(work), [])
+        self.assertFalse(self.store.parent.exists())
 
     def test_without_a_guest_socket_there_is_no_door(self):
         support.write_registry(self.registry, support.entries(2))

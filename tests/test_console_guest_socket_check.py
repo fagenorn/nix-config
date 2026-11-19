@@ -38,18 +38,20 @@ class RulesTest(unittest.TestCase):
             ({}, None, None, 75, "not_yet", "no_guest_door"),
             (state(None), None, None, 75, "not_yet", "no_guest_door"),
             (state("guest.sock"), None, None, 75, "not_yet", "no_guest_door"),
-            (state(SOCK), False, None, 75, "not_yet", "door_not_answering"),
-            (state(SOCK), True, "connected", 1, "not_met", "reachable_by_other_user"),
-            (state(SOCK), True, "unknown", 75, "not_yet", "isolation_not_proven"),
-            (state(SOCK), True, "denied", 0, "met", None),
+            (state(SOCK), [False], None, 75, "not_yet", "door_not_answering"),
+            (state(SOCK), [True], "connected", 1, "not_met", "reachable_by_other_user"),
+            (state(SOCK), [True], "unknown", 75, "not_yet", "isolation_not_proven"),
+            (state(SOCK), [True, False], "denied", 75, "not_yet", "door_not_answering"),
+            (state(SOCK), [True, True], "denied", 0, "met", None),
         ]
         for read, owner_ok, other, code, status, reason in rows:
             with self.subTest(state=read, owner=owner_ok, other=other):
                 owner_calls, other_calls = [], []
+                answers = iter(owner_ok or [])
 
-                def connect_owner(path, calls=owner_calls, ok=owner_ok):
+                def connect_owner(path, calls=owner_calls, answers=answers):
                     calls.append(path)
-                    return ok
+                    return next(answers)
 
                 def connect_other(user, path, calls=other_calls, answer=other):
                     calls.append((user, path))
@@ -64,8 +66,10 @@ class RulesTest(unittest.TestCase):
                 self.assertNotIn("@", printed)
                 known = isinstance(read, dict) and isinstance(
                     read.get("sharing", {}).get("socket"), str) and read["sharing"]["socket"].startswith("/")
-                self.assertEqual(owner_calls, [SOCK] if known else [])
-                self.assertEqual(other_calls, [("_runner", SOCK)] if owner_ok else [])
+                reached = other is not None
+                self.assertEqual(owner_calls, ([SOCK] * (2 if other == "denied" else 1)
+                                               if known else []))
+                self.assertEqual(other_calls, [("_runner", SOCK)] if reached else [])
 
     def test_a_bad_argument_is_2(self):
         for argv in ([], ["--as", "u", "--port", "x"]):
