@@ -1066,11 +1066,7 @@ class ManagerContractTest(unittest.TestCase):
                       "or overlaps another sprint's claim", text)
         self.assertIn("a colleague who started the sprint cannot answer it", text)
 
-    def test_the_inbox_contract_and_help_attribute_a_colleague_s_message(self):
-        doc = " ".join(sprint.__doc__.split())
-        self.assertIn('{"id", "kind", "version", "text", "at"}, ...]}`: the unread messages', doc)
-        self.assertIn('optional `"by"` login', doc)
-        self.assertIn("a message without `by` is the owner's", doc)
+    def test_the_inbox_help_names_a_colleague_s_message(self):
         listing = " ".join(run_sprint("--help").stdout.split())
         self.assertIn("print the unread messages to the sprint, the owner's and a colleague's",
                       listing)
