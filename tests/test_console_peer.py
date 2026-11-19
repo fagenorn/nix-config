@@ -6,6 +6,7 @@ Run: just agent-workflow-tests
 import errno
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -13,9 +14,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import peer
 from agent_tools.console.peer import (
     LOOKUP_TIMEOUT_SECONDS, NOT_OWNER_TEXT, UNREADABLE_TEXT, Holder, parse_lsof, read_lsof,
-    read_proc, reader_for, refusal)
+    read_proc, read_ucred, read_xucred, reader_for, refusal, unix_reader_for, unix_refusal)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 LSOF_FORWARD = """p52108
@@ -277,6 +279,72 @@ class PlatformTest(unittest.TestCase):
         while accepted.recv(4096):
             pass
         self.assert_attributed(listener, client)
+
+
+class FakeSocket:
+    """A socket whose `getsockopt` records its arguments and returns a value or raises."""
+
+    def __init__(self, result):
+        self.result = result
+        self.args = None
+
+    def getsockopt(self, *args):
+        self.args = args
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return self.result
+
+
+class UnixPeerTest(unittest.TestCase):
+    def test_unix_refusal_admits_only_root_and_the_owner(self):
+        rows = [
+            ((0, 501), None),
+            ((501, 501), None),
+            ((502, 501), "not_permitted"),
+            ((None, 501), "unreadable"),
+            ((True, 501), "unreadable"),
+            ((False, 0), "unreadable"),
+            (("0", 501), "unreadable"),
+        ]
+        for (uid, owner), expected in rows:
+            with self.subTest(uid=uid, owner=owner):
+                self.assertEqual(unix_refusal(uid, owner), expected)
+
+    def test_read_xucred_reads_the_effective_uid_and_fails_closed(self):
+        def xucred(version):
+            return struct.pack("=IIh2x16I", version, 501, 1, 20, *[0] * 15)
+
+        sock = FakeSocket(xucred(0))
+        self.assertEqual(read_xucred(sock), 501)
+        self.assertEqual(sock.args, (peer.SOL_LOCAL, peer.LOCAL_PEERCRED, peer.XUCRED_SIZE))
+        self.assertEqual(sock.args, (0, 1, 76))
+        self.assertIsNone(read_xucred(FakeSocket(xucred(1))))
+        self.assertIsNone(read_xucred(FakeSocket(xucred(0)[:10])))
+        self.assertIsNone(read_xucred(FakeSocket(OSError("no peer"))))
+
+    def test_read_ucred_reads_the_uid_and_fails_closed(self):
+        sock = FakeSocket(struct.pack("=iII", 4242, 501, 20))
+        self.assertEqual(read_ucred(sock), 501)
+        self.assertEqual(sock.args, (socket.SOL_SOCKET, peer.SO_PEERCRED, 12))
+        self.assertIsNone(read_ucred(FakeSocket(b"\0" * 8)))
+        self.assertIsNone(read_ucred(FakeSocket(OSError("no peer"))))
+
+    def test_unix_reader_for_names_the_platforms(self):
+        self.assertIs(unix_reader_for("darwin"), read_xucred)
+        self.assertIs(unix_reader_for("linux"), read_ucred)
+        self.assertIsNone(unix_reader_for("win32"))
+        if sys.platform == "darwin":
+            self.assertEqual(socket.LOCAL_PEERCRED, peer.LOCAL_PEERCRED)
+        if sys.platform.startswith("linux"):
+            self.assertEqual(socket.SO_PEERCRED, peer.SO_PEERCRED)
+
+    @unittest.skipUnless(sys.platform == "darwin" or sys.platform.startswith("linux"),
+                         "no Unix peer reader on this platform")
+    def test_the_platform_unix_reader_reads_this_process(self):
+        a, b = socket.socketpair(socket.AF_UNIX)
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        self.assertEqual(unix_reader_for(sys.platform)(a), os.geteuid())
 
 
 if __name__ == "__main__":

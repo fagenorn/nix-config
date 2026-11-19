@@ -32,9 +32,9 @@
 # console resumes waiting for its recorded exit. `systemd-run` and `systemctl` are reached
 # through `/run/current-system/sw/bin`, already on the path.
 #
-# The command also names the guest port Tailscale Serve proxies to (`--guest-port`, #1237)
-# and, when `agentConsole.tailscale` is set, the Windows Tailscale client the console reads
-# `serve status --json` from to show whether Serve proxies the tailnet name to that port.
+# The command also names the guest socket Tailscale Serve proxies to (`--guest-socket`, #1299,
+# ADR-console-077), in a mode-0700 folder the console makes, and, when `agentConsole.tailscale`
+# is set, this host's Tailscale client.
 {
   config,
   lib,
@@ -44,10 +44,10 @@
 }:
 let
   consolePort = 27184;
-  guestPort = 27185;
+  guestSocket = "${config.home.homeDirectory}/.agents/state/console/guest/guest.sock";
 
   command =
-    "${agentTools.launchers.console} --port ${toString consolePort} --guest-port ${toString guestPort}"
+    "${agentTools.launchers.console} --port ${toString consolePort} --guest-socket ${lib.escapeShellArg guestSocket}"
     + lib.optionalString (
       config.agentConsole.tailscale != null
     ) " --tailscale ${lib.escapeShellArg config.agentConsole.tailscale}"
@@ -76,7 +76,7 @@ in
     tailscale = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Path of the Windows Tailscale client the console reads `serve status --json` from (#1237); null reads nothing.";
+      description = "Path of this host's Tailscale client the console reads `serve status --json` from (#1237, #1299); null reads nothing.";
     };
     command = lib.mkOption {
       type = lib.types.str;

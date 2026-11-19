@@ -135,14 +135,17 @@ Contract:
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
   same fixtures; swapping in only the base `page.html` is not a before picture, since the head view's
-  `questions` object draws nothing on it. The after pictures run with `PYTHONPATH` at the branch.
+  `questions` object draws nothing on it. The after pictures run with `PYTHONPATH` at the branch. `guest_door_kwargs` and `guest_door` pick the
+base commit's guest port or the branch's guest socket, so a base run still serves the guest states.
 """
 from __future__ import annotations
 
 import argparse
 import http.client
+import inspect
 import json
 import os
+import socket
 import struct
 import sys
 import tempfile
@@ -852,8 +855,39 @@ def _activation_reader(paths: tuple[str, ...]):
     return read
 
 
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """An HTTP client of a guest door that is a Unix socket at `path`."""
+
+    def __init__(self, path: str, timeout: float = 5):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+
+def guest_door_kwargs(constructor, folder: Path) -> dict:
+    """The constructor arguments that open the guest door: the branch's socket, else the base's port."""
+    if "guest_socket" in inspect.signature(constructor).parameters:
+        return {"guest_socket": folder / "guest" / "guest.sock"}
+    return {"guest_port": 0}
+
+
+def guest_door(service) -> str | tuple[str, int]:
+    """Where `service` listens for guests: its socket path, else (the base commit) its address."""
+    return service.guest_socket if hasattr(service, "guest_socket") else service.guest_address
+
+
+def _door_connection(door: str | tuple[str, int], timeout: float) -> http.client.HTTPConnection:
+    if isinstance(door, str):
+        return _UnixHTTPConnection(door, timeout)
+    return http.client.HTTPConnection(*door, timeout=timeout)
+
+
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
-                  guest: bool = False) -> ConsoleService:
+                  guest_dir: Path | None = None) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
             launches.append(launch)
@@ -873,8 +907,9 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         activity=lambda root: None,
         slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
-        dispatch=lambda job: job(), guest_port=0 if guest else None,
-        repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
+        dispatch=lambda job: job(),
+        repo_of=lambda cwd: cwd, ping_log=lambda: None,
+        **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)), **forge)
     service.start()
     service.poll_spend()
     if fixture.activating:
@@ -887,15 +922,21 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
     return service
 
 
-def _guest_get(address: tuple[str, int], path: str = "/", *, host: str | None = TAILNET,
+def _guest_headers(door: str | tuple[str, int]) -> dict:
+    """The headers Serve sends to `door`: a port door (the base commit) reads the tailnet name as its
+    `Host`; a socket door reads `Host: localhost` and the name as its one `X-Forwarded-Host`."""
+    if isinstance(door, str):
+        return {"Host": "localhost", "X-Forwarded-Host": TAILNET}
+    return {"Host": TAILNET}
+
+
+def _guest_get(door: str | tuple[str, int], path: str = "/", *,
                login: str | None = COLLEAGUE) -> http.client.HTTPResponse:
-    """One GET to `address` carrying the tailnet Host and the colleague's login header."""
-    headers = {}
-    if host is not None:
-        headers["Host"] = host
+    """One GET to `door` carrying the door's host headers and the colleague's login header."""
+    headers = _guest_headers(door)
     if login is not None:
         headers["Tailscale-User-Login"] = login
-    connection = http.client.HTTPConnection(*address, timeout=10)
+    connection = _door_connection(door, 10)
     connection.request("GET", path, headers=headers)
     return connection.getresponse()
 
@@ -903,22 +944,24 @@ def _guest_get(address: tuple[str, int], path: str = "/", *, host: str | None = 
 class _Serve:
     """A loopback stand-in for Tailscale Serve in front of the guest port.
 
-    Each GET is forwarded to `guest_address` with `Host: TAILNET` and `Tailscale-User-Login:
-    COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For` and `Host` dropped; the status and
+    Each GET is forwarded to the guest door `door` with the door's host headers (`_guest_headers`:
+    `Host: TAILNET` for a port door, `Host: localhost` and `X-Forwarded-Host: TAILNET` for a socket
+    door) and `Tailscale-User-Login: COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For`,
+    `X-Forwarded-Host` and `Host` dropped; the status and
     headers are copied and the body is streamed until EOF, each chunk flushed (the view stream
     is event-stream). `.address` is where a browser reads it; `.close()` stops it.
     """
 
-    def __init__(self, guest_address: tuple[str, int]):
+    def __init__(self, door: str | tuple[str, int]):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 kept = {name: value for name, value in self.headers.items()
                         if not name.lower().startswith("tailscale-")
-                        and name.lower() not in ("x-forwarded-for", "host")}
-                connection = http.client.HTTPConnection(*guest_address, timeout=3600)
+                        and name.lower() not in ("x-forwarded-for", "x-forwarded-host", "host")}
+                connection = _door_connection(door, 3600)
                 try:
                     connection.request("GET", self.path, headers={
-                        **kept, "Host": TAILNET, "Tailscale-User-Login": COLLEAGUE})
+                        **kept, **_guest_headers(door), "Tailscale-User-Login": COLLEAGUE})
                     response = connection.getresponse()
                     self.send_response_only(response.status)
                     for name, value in response.getheaders():
@@ -964,18 +1007,19 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
             raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
         try:
             for state in states:
-                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp:
+                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
+                        tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
                     now_s = datetime.now(timezone.utc).timestamp()
                     service = start_service(
                         build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
-                        guest=state in SHARING_STATES)
+                        guest_dir=Path(door) if state in SHARING_STATES else None)
                     serve = None
                     try:
                         host, port = service.address
                         if state == "sharing-panel":
-                            _guest_get(service.guest_address).read()
+                            _guest_get(guest_door(service)).read()
                         elif state == "guest-page":
-                            serve = _Serve(service.guest_address)
+                            serve = _Serve(guest_door(service))
                             host, port = serve.address
                         for width in widths:
                             path = "spend" if state == "spend-page" else ""

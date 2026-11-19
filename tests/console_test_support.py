@@ -2,6 +2,8 @@
 import http.client
 import json
 import os
+import shutil
+import socket
 import sqlite3
 import tempfile
 import time
@@ -190,6 +192,26 @@ def sign_in(store, *names):
         log.append([signin.entry(name, signin.Status("signed_in", None)) for name in names])
     finally:
         log.close()
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """An HTTP client of the guest door: host `localhost`, connected to the Unix socket at `path`."""
+
+    def __init__(self, path: str, timeout: float = 5):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+
+def guest_socket_path(test) -> Path:
+    """A fresh guest socket path under /tmp (macOS limits a socket path to 104 bytes)."""
+    root = Path(tempfile.mkdtemp(prefix="cg-", dir="/tmp"))
+    test.addCleanup(shutil.rmtree, root, True)
+    return root / "guest" / "guest.sock"
 
 
 def OWNER_PEER(client, server):
