@@ -1,6 +1,6 @@
 # ADR-console-066 — A named colleague reaches the console only through Tailscale Serve on a guest port
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-077
 - **Decided in:** #1235, #1237
 
 ## Context

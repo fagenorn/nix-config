@@ -848,6 +848,28 @@ class DocsTreeTest(unittest.TestCase):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
 
+    def test_the_guest_socket_amendment_is_recorded_as_adr_077(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("077-*.md"))
+        self.assertEqual(len(found), 1, found)
+        raw = found[0].read_text()
+        text = re.sub(r"\s+", " ", raw)
+        self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-077 \u2014 "))
+        for needle in (
+            "- **Status:** accepted", "- **Decided in:** #1298", "ADR-console-066", "ADR-console-076",
+            "eleven-m5", "Unix socket", "mode-0700", "peer user", "second line", "administrator",
+            "sudo tailscale serve --bg --https=443 unix:<socket-path>", "tailscale serve status",
+            "sudo tailscale serve --https=443 off", "<host>.<tailnet>.ts.net", "<colleague-login>",
+            "tailscaled", "console-guest-door", "Funnel", "D2", "tailscale.exe",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
+                                      "through-tailscale-serve-on-a-guest-port.md"
+                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
+        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
+
     def test_the_relay_sender_decision_is_recorded_as_adr_068_and_cited_by_number(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         found = sorted(adr_dir.glob("068-*.md"))
