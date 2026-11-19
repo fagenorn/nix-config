@@ -63,7 +63,9 @@ SHARED_FRAME = {
         ACCESS, TAILNET, "serving",
         guest.reading(ACCESS, TAILNET, ["localhost"], [TAILNET], [STRANGER], [], [])),
 }
+UNSHARED_FRAME = {**SHARED_FRAME, "sharing": guest.sharing_entry(guest.Access(False, ACCESS.colleagues), TAILNET, "off")}
 OPEN = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
+UNSHARED_OPEN = [START, {"frame": UNSHARED_FRAME}, {"click": "share-open"}]
 SNAP = {"snapshot": True}
 
 
@@ -75,8 +77,9 @@ def writes(snap: dict) -> list:
     return [(p["url"], p["body"]) for p in snap["posts"] if p["url"] != "/api/looked"]
 
 
-def sharing_frame(state: str, tailnet: str | None, last_request: dict | None) -> dict:
-    return {**SHARED_FRAME, "sharing": guest.sharing_entry(ACCESS, tailnet, state, last_request)}
+def sharing_frame(state: str, tailnet: str | None, last_request: dict | None, shared: bool = True) -> dict:
+    return {**SHARED_FRAME, "sharing": guest.sharing_entry(
+        guest.Access(shared, ACCESS.colleagues), tailnet, state, last_request)}
 
 
 class SharingPanelTest(unittest.TestCase):
@@ -108,8 +111,13 @@ class SharingPanelTest(unittest.TestCase):
     def test_the_panel_shows_the_access_list_and_its_lines(self) -> None:
         (snap,) = harness([*OPEN, SNAP])
         body = snap["sharing_body"]
-        (tailnet,) = named(body, "share-tailnet")
-        self.assertEqual(tailnet["value"], TAILNET)
+        self.assertEqual(named(body, "share-tailnet"), [])
+        self.assertEqual(named(body, "share-tailnet-save"), [])
+        self.assertEqual(
+            full(named(body, "share-name")[0]),
+            "This host's tailnet name, read from Tailscale: desk.invented-tailnet.ts.net.")
+        self.assertEqual(len(named(body, "share-off")), 1)
+        self.assertEqual(named(body, "share-on"), [])
         people = [(full(named(p, "share-who")[0]), full(named(p, "share-projects")[0]))
                   for p in named(body, "share-person")]
         self.assertEqual(people, [(COLLEAGUE, "owner/p01"), (SECOND, "owner/p00, owner/p01")])
@@ -125,28 +133,48 @@ class SharingPanelTest(unittest.TestCase):
         self.assertEqual([full(n) for n in named(body, "share-project")],
                          ["owner/p00", "owner/p01"])
         (login,) = named(body, "share-login")
-        self.assertEqual([tailnet["label"], login["label"]],
-                         ["Tailnet name", "Colleague's Tailscale login"])
+        self.assertEqual([n["label"] for n in nodes(body) if n.get("label")],
+                         ["Colleague's Tailscale login"])
+        self.assertEqual(login["label"], "Colleague's Tailscale login")
         self.assertEqual([n["cls"] for n in nodes(body)
                           if has_class(n, "needs") or has_class(n, "btn-primary")], [])
 
     def test_the_sharing_and_last_request_lines(self) -> None:
+        named_line = f"This host's tailnet name, read from Tailscale: {TAILNET}."
+        unread = "can't read this host's tailnet name"
         lines = [
-            ("off", None, "Sharing is off: no tailnet name is set."),
-            ("unchecked", TAILNET,
+            ("off", False, TAILNET, "Sharing is off.", named_line),
+            ("off", False, None,
+             "Sharing is off, and the console can't read this host's tailnet name from Tailscale.", None),
+            ("unreadable", True, None,
+             "Sharing is on, but the console can't read this host's tailnet name from Tailscale, "
+             "so guests can't get in.", None),
+            ("unchecked", True, TAILNET,
              f"Sharing is on at {TAILNET}, but the console cannot tell whether Tailscale Serve "
-             "is set up for the guest door."),
-            ("not_proxying", TAILNET,
-             f"Sharing is on at {TAILNET}, but Tailscale Serve is not set up for the guest door."),
-            ("serving", TAILNET,
-             f"Sharing is on: Tailscale Serve sends {TAILNET} to the guest door."),
+             "is set up for the guest door.", named_line),
+            ("not_proxying", True, TAILNET,
+             f"Sharing is on at {TAILNET}, but Tailscale Serve is not set up for the guest door.",
+             named_line),
+            ("serving", True, TAILNET,
+             f"Sharing is on: Tailscale Serve sends {TAILNET} to the guest door.", named_line),
         ]
         steps = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
-        for state, tailnet, _ in lines:
-            steps += [{"frame": sharing_frame(state, tailnet, None)}, SNAP]
-        for snap, (state, _, text) in zip(harness(steps), lines):
-            with self.subTest(state=state):
-                self.assertEqual(full(named(snap["sharing_body"], "share-line")[0]), text)
+        for state, shared, tailnet, _, _ in lines:
+            steps += [{"frame": sharing_frame(state, tailnet, None, shared)}, SNAP]
+        for snap, (state, shared, tailnet, text, name_line) in zip(harness(steps), lines):
+            with self.subTest(state=state, shared=shared, tailnet=tailnet):
+                body = snap["sharing_body"]
+                self.assertEqual(full(named(body, "share-line")[0]), text)
+                self.assertEqual([full(n) for n in named(body, "share-name")],
+                                 [] if name_line is None else [name_line])
+                if tailnet is None:
+                    self.assertEqual(
+                        sum(unread in full(n) for cls in ("share-name", "share-line", "share-last")
+                            for n in named(body, cls)), 1)
+                drawn, absent = ("share-off", "share-on") if shared else ("share-on", "share-off")
+                self.assertEqual(len(named(body, drawn)), 1)
+                self.assertEqual(named(body, absent), [])
+                self.assertIsNot(named(body, drawn)[0]["disabled"], True)
         last = "Last request on the guest door: "
         why_host = "refused because the Host is not localhost or the forwarded Host is not the tailnet name."
         why_login = "refused because it had not exactly one login header."
@@ -173,6 +201,9 @@ class SharingPanelTest(unittest.TestCase):
             (guest.reading(guest.NO_ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [], []),
              last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
                     "refused because sharing is off."),
+            (guest.reading(ACCESS, None, local, [TAILNET], [COLLEAGUE], [], []),
+             last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
+                    "refused because the console could not read this host's tailnet name."),
             (None, "No request has come to the guest door yet."),
         ]
         steps = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
@@ -186,15 +217,15 @@ class SharingPanelTest(unittest.TestCase):
 
     def test_the_controls_call_the_owner_only_writes(self) -> None:
         (snap,) = harness([
-            *OPEN, {"type": {"class": "share-tailnet", "text": OTHER_TAILNET}},
-            {"click": "share-tailnet-save"}, {"click": "share-off"},
+            *OPEN, {"click": "share-off"},
+            {"frame": UNSHARED_FRAME}, {"click": "share-on"},
             {"type": {"class": "share-login", "text": THIRD}},
             {"click": "share-project", "nth": 0}, {"click": "share-add"},
             {"click": "share-edit", "nth": 1}, {"click": "share-project", "nth": 0},
             {"click": "share-add"}, {"click": "share-remove", "nth": 1}, SNAP])
         self.assertEqual(writes(snap), [
-            (service.SHARE_TAILNET_PATH, '{"tailnet":"other.invented-tailnet.ts.net"}'),
-            (service.SHARE_TAILNET_PATH, '{"tailnet":null}'),
+            (service.SHARE_TAILNET_PATH, '{"shared":false}'),
+            (service.SHARE_TAILNET_PATH, '{"shared":true}'),
             (service.SHARE_COLLEAGUE_PATH,
              '{"login":"third@example.invalid","projects":["owner/p00"]}'),
             (service.SHARE_COLLEAGUE_PATH,
@@ -271,22 +302,14 @@ class SharingPanelTest(unittest.TestCase):
         self.assertTrue(has_class(focused, "share-project"))
         self.assertEqual(full(focused), "owner/p01")
 
-    def test_writes_on_one_tailnet_or_login_wait_their_turn(self) -> None:
-        typed = "typed.invented-tailnet.ts.net"
+    def test_writes_on_the_switch_or_one_login_wait_their_turn(self) -> None:
         held, released, sending, done = harness([
-            *OPEN, {"type": {"class": "share-tailnet", "text": OTHER_TAILNET}}, {"hold": True},
-            {"click": "share-tailnet-save"},
-            {"type": {"class": "share-tailnet", "text": typed}}, SNAP,
-            {"click": "share-off"}, {"release": NO_REPLY}, SNAP,
+            *OPEN, {"hold": True}, {"click": "share-off"}, {"click": "share-off"}, SNAP,
+            {"release": NO_REPLY}, SNAP,
             {"click": "share-edit", "nth": 1}, {"hold": True}, {"click": "share-add"}, SNAP,
             {"click": "share-remove", "nth": 1}, {"release": NO_REPLY}, SNAP])
-        body = held["sharing_body"]
-        self.assertEqual(
-            [named(body, c)[0]["aria_disabled"] for c in ("share-off", "share-tailnet-save")],
-            ["true", "true"])
-        self.assertEqual(writes(released), [
-            (service.SHARE_TAILNET_PATH, '{"tailnet":"other.invented-tailnet.ts.net"}')])
-        self.assertEqual(named(released["sharing_body"], "share-tailnet")[0]["value"], typed)
+        self.assertEqual(named(held["sharing_body"], "share-off")[0]["aria_disabled"], "true")
+        self.assertEqual(writes(released), [(service.SHARE_TAILNET_PATH, '{"shared":false}')])
         removes = named(sending["sharing_body"], "share-remove")
         self.assertEqual([n["aria_disabled"] for n in removes], [None, "true"])
         paths = [url for url, _ in writes(done)]
