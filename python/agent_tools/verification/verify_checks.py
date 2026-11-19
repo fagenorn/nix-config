@@ -228,12 +228,14 @@ or `--issue` (a positive integer) is a usage error (2).
 (`verify_checks.host_mentions`, issue 1291) reads every page of `repos/R/issues?state=open&per_page=100`
 (pull requests skipped) and reports `{"mentioning", "offenders"}`, both ascending issue numbers. An issue
 mentions when any P occurs, ignoring case, in its title or body; it is an offender when it mentions, is
-not named by `--exempt` and its body does not contain G, ignoring case. Exit 0 when there is no offender,
+not named by `--exempt` and either its body does not contain G, ignoring case, or an open criterion of
+its body (an unchecked task-list item, `- [ ]`, that does not itself contain G) contains a P: a criterion
+still naming the host is not answered by a separate paragraph saying it is gone. Exit 0 when there is no offender,
 1 otherwise. A page that is not a list, an element that is not an object or a `number` that is not an
 integer is a `payload_invalid` forge error (exit 2), as is any other forge error.
 
 `host-prompts --repo R [--repo R ...] --host H` (`verify_checks.host_prompts`, issue 1291) lists the open
-issues of each R as `host-mentions` does, reads one comment listing per open issue (whatever its labels),
+issues of each R as `host-mentions` does, pull requests included (the console inbox shows a marker on one), reads one comment listing per open issue (whatever its labels),
 and reports `{"host", "live": [{"repo", "issue", "comment", "reason"}]}` sorted by repo, issue and comment.
 A live `owner-action` marker counts when its `host` field, or one `+`-separated member of it, is H: a
 runner prompt (`verify_answer.is_runner_prompt`) only from an OWNER or MEMBER comment and live over the
@@ -460,8 +462,8 @@ def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
     return (0 if report["verified"] else 1), report
 
 
-def _open_issues(repo: str) -> list[dict]:
-    """Every open issue of `repo` in listing order, pull requests skipped, the shape checked."""
+def _open_issues(repo: str, pulls: bool = False) -> list[dict]:
+    """Every open issue of `repo` in listing order, pull requests skipped unless `pulls`, the shape checked."""
     found = []
     for page in forge_api.api_pages(f"repos/{repo}/issues?state=open&per_page=100"):
         if not isinstance(page, list):
@@ -469,7 +471,7 @@ def _open_issues(repo: str) -> list[dict]:
         for issue in page:
             if not isinstance(issue, dict):
                 raise _invalid("issue is not an object")
-            if "pull_request" in issue:
+            if "pull_request" in issue and not pulls:
                 continue
             number = issue.get("number")
             if isinstance(number, bool) or not isinstance(number, int):
@@ -478,8 +480,12 @@ def _open_issues(repo: str) -> list[dict]:
     return found
 
 
+OPEN_CRITERION = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[ \]")
+
+
 def host_mentions(repo: str, phrases: Sequence[str], gone: str, exempt: Sequence[int]) -> tuple[int, dict]:
-    """Met when every open issue naming a phrase is exempt or carries the `gone` line in its body."""
+    """Met when every open issue naming a phrase is exempt or carries the `gone` line in its body and has
+    no open criterion (an unchecked task-list item other than the `gone` line) naming a phrase."""
     needles = [p.lower() for p in phrases]
     mentioning, offenders = [], []
     for issue in _open_issues(repo):
@@ -488,7 +494,10 @@ def host_mentions(repo: str, phrases: Sequence[str], gone: str, exempt: Sequence
         if not any(needle in text for needle in needles):
             continue
         mentioning.append(issue["number"])
-        if issue["number"] not in exempt and gone.lower() not in body.lower():
+        criteria = [line.lower() for line in body.splitlines()
+                    if OPEN_CRITERION.match(line) and gone.lower() not in line.lower()]
+        if issue["number"] not in exempt and (
+                gone.lower() not in body.lower() or any(n in line for line in criteria for n in needles)):
             offenders.append(issue["number"])
     return (0 if not offenders else 1), {"mentioning": sorted(mentioning), "offenders": sorted(offenders)}
 
@@ -502,7 +511,7 @@ def host_prompts(repos: Sequence[str], host: str) -> tuple[int, dict]:
     """Met when no open issue holds a live owner-action prompt that names `host`."""
     live = []
     for repo in repos:
-        for issue in _open_issues(repo):
+        for issue in _open_issues(repo, pulls=True):
             comments = forge_markers.list_comments(repo, issue["number"])
 
             def read(trusted):

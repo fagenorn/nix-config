@@ -149,7 +149,9 @@ def _wait(index: int, check: dict, held: verify_issues.Held, ctx: verify_facts.C
 
 
 def owner_waits(held: verify_issues.Held, ctx: verify_facts.Context) -> list[Wait]:
-    """The wait of every owner check of `held` that has one, ordered by check index."""
+    """The wait of every owner check of `held` that has one, ordered by check index.
+
+    A check bound only to retired hosts has none: the runner reports it `host_retired` and never asks it."""
     waits = []
     for index, check in enumerate(held.block["checks"]):
         try:
@@ -157,6 +159,8 @@ def owner_waits(held: verify_issues.Held, ctx: verify_facts.Context) -> list[Wai
                 continue
             if verify_issues.latest_result(held.markers, held.key, index) is not None:
                 continue
+            if verify_run.effective_host(check["host"], lambda: False) is None:
+                continue  # an owner check is never taken from a retired host, so no host asks it
             found = _wait(index, check, held, ctx)
         except (KeyError, TypeError, ValueError):
             continue

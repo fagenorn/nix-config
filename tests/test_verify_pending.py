@@ -582,6 +582,15 @@ class OwnerWaitTest(unittest.TestCase):
         self.assertIsNone(waits[0].until)
         self.assertEqual(world.argvs("gh"), [])
 
+    def test_an_ask_bound_only_to_the_retired_host_has_no_wait_but_a_listed_host_keeps_it(self):
+        world = world_with(self)
+        when = {"not_before": "2026-11-18T10:00:00+00:00"}
+        for host, expected in (("anis-desktop", []), (["anis-desktop"], []),
+                               (["anis-desktop", "mbp"], ["not_before"]), ("mbp", ["not_before"])):
+            with self.subTest(host=host):
+                waits = self.waits(world, self.asking(when, host=host))
+                self.assertEqual([w.reason for w in waits], expected)
+
     def test_a_due_prompted_check_does_not_wait(self):
         world = world_with(self)
         ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
@@ -1129,6 +1138,14 @@ class PassBase(unittest.TestCase):
         patch = mock.patch.object(vx, "workspace", self.fake_workspace)
         patch.start()
         self.addCleanup(patch.stop)
+        reader = mock.patch.object(vx, "script_text", self.fake_script_text)
+        reader.start()
+        self.addCleanup(reader.stop)
+
+    def fake_script_text(self, root, commit, path):
+        """The script as the fake workspace holds it, whatever the commit."""
+        target = self.world.checkout / path
+        return target.read_text(encoding="utf-8") if target.is_file() else None
 
     @contextlib.contextmanager
     def fake_workspace(self, root, commit):
@@ -1554,6 +1571,29 @@ class RetiredHostTest(PassBase):
                 self.hold(check(host="old-box", run=run, when=HOLD_LATER))
                 self.assertEqual(self.run_pass("new-box", retired=RETIRED),
                                  [line(0, "AC1", "pending", "not_before")])
+
+    def test_a_linux_only_script_is_one_host_retired_line_and_never_runs(self):
+        ran = self.world.checkout / "ran"
+        for name, text in (("systemd.sh", "systemctl is-active foo"), ("proc.sh", "cat /proc/cpuinfo"),
+                           ("missing.sh", None)):
+            if text is not None:
+                script = self.world.checkout / "scripts" / name
+                script.write_text(f"#!{sys.executable}\nopen({str(ran)!r}, 'w').close()  # {text}\n",
+                                  encoding="utf-8")
+                script.chmod(0o755)
+            for host in ("new-box", "mbp"):
+                with self.subTest(script=name, host=host):
+                    self.hold(check(host="old-box", run={"script": f"scripts/{name}"}))
+                    self.assertEqual(self.run_pass(host, retired=RETIRED),
+                                     [line(0, "AC1", "pending", "host_retired")])
+                    self.assertEqual(self.markers("verify-result"), [])
+                    self.assertFalse(ran.exists())
+
+    def test_a_portable_script_bound_to_a_retired_host_runs_on_the_successor(self):
+        self.hold(check(host="old-box", run={"script": "scripts/check.sh"}))
+        lines = self.run_pass("new-box", retired=RETIRED)
+        self.assertEqual(lines[0]["state"], "pass")
+        self.assertEqual(self.markers("verify-result")[0].fields["host"], "new-box")
 
     def test_another_host_leaves_a_taken_check_to_the_successor(self):
         for held in (ok_check(host="old-box"),

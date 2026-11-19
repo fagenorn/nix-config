@@ -10,9 +10,12 @@ only `Context.now()`, the forge's clock (P6, P7).
 
 A check is this host's when its effective host equals the host, is `any` or lists it. The effective
 host maps each host of `RETIRED_HOSTS` to its successor for a check the unattended gate would run
-and to nobody otherwise; a check nobody can take is one `pending` line with reason `host_retired`
-on every host and is never answered. A writing pass ends a retired host's live prompts and due
-markers with reason `host_retired`; seen and stale follow the effective host, and a taken check
+(a script only when its text at the commit it runs at is readable and names nothing in `LINUX_ONLY`,
+for the successor is darwin) and to nobody otherwise; a check nobody can take is one `pending` line
+with reason `host_retired` on every host, is never answered and is never executed. A writing pass
+ends a retired host's live prompts and due markers with reason `host_retired`, except an ask or act
+prompt a retired host posted for a check others can answer: that is renamed in place to the successor,
+its boxes kept; seen and stale follow the effective host, and a taken check
 goes stale only after its successor has reported on the block. A run of a check
 holds a lease (P8), a `verify-run` marker it wins and deletes when it is done, so no two runs of
 one check overlap whatever their host (a run that died leaves a claim `LEASE`, 30 minutes, ends:
@@ -69,7 +72,7 @@ live approve prompts of a repository, outside any pass.
 import json
 import re
 import types
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -86,6 +89,12 @@ from agent_tools.system.forge_api import ForgeError
 NEEDS = "needs-verification"
 # A retired host to the successor that takes its checks (issue 1291, ADR-verification-010).
 RETIRED_HOSTS: Mapping[str, str] = types.MappingProxyType({"anis-desktop": "eleven-m5"})
+# What a Linux-only script names: a retired host is Linux and its successor is darwin, so a script that
+# reads any of these is not portable and nobody takes it (ADR-verification-010).
+LINUX_ONLY = re.compile(
+    r"\b(?:systemctl|journalctl|loginctl|nixos-rebuild|nixos-option|nvidia-smi)\b"
+    r"|/proc/|/sys/|/etc/(?:os-release|nixos|systemd)\b|/run/(?:current-system|systemd|user|wrappers)\b"
+    r"|/usr/lib/systemd")
 # Delivery labels a verified close drops with NEEDS; removing an absent one is a no-op (404).
 DELIVERY = ("in-progress", "agent:ready")
 FAILED = ("verification-failed", "B60205")
@@ -257,6 +266,20 @@ def runner_trusted(slug: str) -> bool:
     return isinstance(membership, dict) and membership.get("state") == "active"
 
 
+def effective_host(host: str | list[str], takeable: Callable[[], bool],
+                   retired: Mapping[str, str] = RETIRED_HOSTS) -> str | list[str] | None:
+    """`host` with each retired host replaced by its successor when `takeable()` and dropped otherwise
+    (duplicates removed in order); None when no host is left."""
+    def one(name: str) -> str | None:
+        if name not in retired:
+            return name
+        return retired[name] if takeable() else None
+    if isinstance(host, str):
+        return one(host)
+    mapped = list(dict.fromkeys(name for name in map(one, host) if name is not None))
+    return mapped or None
+
+
 def pass_repo(project: Project, host: str, refs: verify_block.References, *,
               issue: int | None = None, report: bool = False,
               retired: Mapping[str, str] = RETIRED_HOSTS) -> list[dict]:
@@ -312,6 +335,7 @@ class _Pass:
                  report: bool, retired: Mapping[str, str] = RETIRED_HOSTS) -> None:
         self.project, self.host, self.refs, self.report = project, host, refs, report
         self.retired = retired
+        self.scripts: dict[tuple[str, str], bool] = {}
         self.slug = project.slug
         self.number = node["number"]
         self.node = node
@@ -427,21 +451,23 @@ class _Pass:
         self.run_leased(index, check, ac, key, previous, prev, due)
 
     def takeable(self, check: Mapping) -> bool:
-        """Whether the unattended gate would run `check`: what a successor may take from a retired host."""
-        return verify_exec.gate(check, self.project.bindings["workflow"]["verification"]).runnable
+        """Whether a successor may take `check` from a retired host: the unattended gate would run it and,
+        for a script, the script at the commit it runs at is readable and names nothing Linux-only."""
+        gate = verify_exec.gate(check, self.project.bindings["workflow"]["verification"])
+        run = check.get("run") or {}
+        return gate.runnable and ("script" not in run or self.portable(run))
+
+    def portable(self, run: Mapping) -> bool:
+        """Whether the script of `run` is readable and names nothing only Linux has (read once per pass)."""
+        path, commit = run["script"], run.get("at") or self.block["merge"]
+        if (commit, path) not in self.scripts:
+            text = verify_exec.script_text(self.project.root, commit, path)
+            self.scripts[commit, path] = text is not None and LINUX_ONLY.search(text) is None
+        return self.scripts[commit, path]
 
     def bound(self, check: Mapping) -> str | list[str] | None:
-        """The check's effective host: `host` with each retired host replaced by its successor when
-        the check is takeable and dropped otherwise; None when no host can take it."""
-        def one(name: str) -> str | None:
-            if name not in self.retired:
-                return name
-            return self.retired[name] if self.takeable(check) else None
-        host = check["host"]
-        if isinstance(host, str):
-            return one(host)
-        mapped = list(dict.fromkeys(name for name in map(one, host) if name is not None))
-        return mapped or None
+        """The check's effective host (`effective_host` over the check's `host`), None when no host can take it."""
+        return effective_host(check["host"], lambda: self.takeable(check), self.retired)
 
     def obsolete(self, marker: Marker) -> bool:
         """Whether `marker` is a runner prompt of this block that waits on a retired host or a check no host can take.
@@ -460,17 +486,40 @@ class _Pass:
         return self.bound(check) is None
 
     def retire(self) -> None:
-        """End the live prompts and due markers of this block that wait on a retired host."""
+        """End the live prompts and due markers of this block that wait on a retired host, and hand an
+        ask or act prompt it posted for a check others can answer to the successor, answer state kept."""
         gone = False
         for m in self.markers:
             waits = m.kind == verify_issues.DUE and m.fields.get("block") == self.block_key \
                 and m.fields.get("host") in self.retired
-            if (waits or self.obsolete(m)) and forge_markers.is_live(m, self.markers):
+            if not forge_markers.is_live(m, self.markers):
+                continue
+            if waits or self.obsolete(m):
                 forge_markers.end(self.slug, self.number, m.comment_id, "host_retired")
+                gone = True
+            elif self.posted_by_retired(m):
+                self.transfer(m)
                 gone = True
         if gone:
             self.markers = verify_issues.visible(
                 forge_markers.list_markers(self.slug, self.number, TRUSTED), self.block_id)
+
+    def posted_by_retired(self, marker: Marker) -> bool:
+        """Whether `marker` is an ask or act prompt of this block that a retired host posted."""
+        return verify_answer.is_runner_prompt(marker) and marker.fields.get("block") == self.block_key \
+            and marker.fields.get("reason") in (verify_owner.ASK, verify_owner.ACT) \
+            and marker.fields.get("host") in self.retired
+
+    def transfer(self, marker: Marker) -> None:
+        """Rename the retired host in `marker` (its `host` field and its sentence) to the successor, in place:
+        the comment keeps its id and its boxes, so an answer already ticked is still read."""
+        old = marker.fields["host"]
+        new = self.retired[old]
+        body = forge_markers.with_fields(marker, host=new)
+        first, _, rest = body.partition("\n")
+        sentence, newline, extra = rest.partition("\n")
+        forge_markers.edit(self.slug, marker.comment_id,
+                           f"{first}\n{sentence.replace(old, new)}{newline}{extra}")
 
     def run_leased(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
                    prev: str | None, due: verify_facts.Due) -> None:

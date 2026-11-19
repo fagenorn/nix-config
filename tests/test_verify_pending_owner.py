@@ -836,7 +836,7 @@ class RetiredPromptTest(OwnerBase):
         self.assertEqual(len(self.ended(ask.comment_id)), 1)
         self.assertEqual(self.world.issue()["state"], "open")
 
-    def test_an_ask_a_retired_host_posted_for_a_check_others_can_answer_stays_live(self):
+    def test_an_ask_a_retired_host_posted_for_a_check_others_can_answer_moves_to_the_successor(self):
         for host in ("any", ["old-box", "mbp"]):
             with self.subTest(host=host):
                 self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(ask_check(host=host))))],
@@ -847,7 +847,31 @@ class RetiredPromptTest(OwnerBase):
                 for _ in range(2):
                     self.assertEqual(self.run_pass("mbp", retired=RETIRED), [line(0, "AC1", "pending", "owner_waiting")])
                 self.assertEqual(self.ended(ask.comment_id), [])
-                self.assertEqual([p.comment_id for p in self.live_prompts()], [ask.comment_id])
+                live, = self.live_prompts()
+                self.assertEqual((live.comment_id, live.fields["host"]), (ask.comment_id, "new-box"))
+                self.assertEqual(live.body.split("\n", 1)[1], ask.body.split("\n", 1)[1])
+
+    def test_a_transferred_ask_keeps_its_ticked_answer(self):
+        self.hold(ask_check(host="any"))
+        self.run_pass("old-box", retired={})
+        ask, = self.prompts("verify-ask")
+        self.tick(ask.comment_id, vo.ACCEPT)
+        lines = self.run_pass("mbp", retired=RETIRED)
+        self.assertEqual(lines[0]["state"], "pass")
+        self.assertEqual(self.results(), ["pass"])
+
+    def test_a_transferred_act_names_the_successor_in_its_sentence(self):
+        act = check(host="any", kind="human", reason="hands",
+                    run={"act": "Plug it in", "then": {"command": "nix-activate"}})
+        self.hold(act)
+        self.run_pass("old-box", retired={})
+        posted, = self.prompts("verify-act")
+        self.assertIn("old-box", posted.body)
+        self.run_pass("mbp", retired=RETIRED)
+        moved, = [p for p in self.live_prompts() if p.comment_id == posted.comment_id]
+        self.assertEqual(moved.fields["host"], "new-box")
+        self.assertNotIn("old-box", moved.body)
+        self.assertIn("new-box", moved.body.split("\n")[1])
 
     def test_a_retired_check_that_failed_gets_no_decision_prompt(self):
         c = ok_check(host="old-box", effects="live", on_fail="ask")

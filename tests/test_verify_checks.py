@@ -641,6 +641,15 @@ class HostMentionsTest(unittest.TestCase):
                          (1, {"mentioning": [9, 10, 11, 1291], "offenders": [9, 11]}))
         self.assertEqual(self.read([[]]), (0, {"mentioning": [], "offenders": []}))
 
+    def test_an_open_criterion_that_still_names_the_host_is_not_answered_by_a_gone_paragraph(self):
+        gone = "anis-desktop is gone: nothing runs there now."
+        pages = [[{"number": 5, "title": "t", "body": f"- [ ] [evidence] run it on anis-desktop\n\n{gone}"},
+                  {"number": 6, "title": "t", "body": f"- [ ] [evidence] run it on eleven-m5\n- [x] was on the Linux host\n\n{gone}"},
+                  {"number": 7, "title": "t", "body": f"Run on the Linux host.\n\n{gone}"},
+                  {"number": 8, "title": "t", "body": f"1. [ ] run on the LINUX HOST\n\n{gone}"},
+                  {"number": 9, "title": "t", "body": f"- [ ] {gone}"}]]
+        self.assertEqual(self.read(pages), (1, {"mentioning": [5, 6, 7, 8, 9], "offenders": [5, 8]}))
+
     def test_a_malformed_listing_is_a_forge_error(self):
         for pages in (["x"], [["x"]], [[{"number": "5", "body": ""}]], [[{"number": True, "body": ""}]]):
             with self.subTest(pages=pages):
@@ -714,11 +723,20 @@ class HostPromptsTest(unittest.TestCase):
             {"repo": "o/r", "issue": 5, "comment": 50, "reason": "decision"}])
 
     def test_every_open_issue_is_read_once_and_none_is_met(self):
-        listings = {"o/r": [[{"number": 3}, {"number": 4}], [{"number": 5}, {"number": 6, "pull_request": {}}]],
+        listings = {"o/r": [[{"number": 3}, {"number": 4}], [{"number": 5}]],
                     "o/s": [[]]}
         self.assertEqual(self.run_check(listings, {}, repos=("o/r", "o/s")),
                          (0, {"host": self.HOST, "live": []}))
         self.assertEqual(sorted(self.reads), [("o/r", 3), ("o/r", 4), ("o/r", 5)])
+
+    def test_a_live_prompt_on_an_open_pull_request_is_reported(self):
+        listings = {"o/r": [[{"number": 3, "title": "t", "body": "", "pull_request": {}},
+                             {"number": 4, "title": "t", "body": ""}]]}
+        comments = {("o/r", 3): [self.prompt(30, self.STALE)]}
+        self.assertEqual(self.run_check(listings, comments),
+                         (1, {"host": self.HOST, "live": [
+                             {"repo": "o/r", "issue": 3, "comment": 30, "reason": "verify-stale-check"}]}))
+        self.assertEqual(sorted(self.reads), [("o/r", 3), ("o/r", 4)])
 
 
 class HostCheckWrappersTest(unittest.TestCase):
