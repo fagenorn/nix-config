@@ -1,6 +1,6 @@
 # ADR-console-077 — The guest door on eleven-m5 is a Unix socket only Serve and the owner can open
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-078
 - **Decided in:** #1298, #1299
 
 ## Context

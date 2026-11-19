@@ -993,11 +993,14 @@ class AccessWriteTest(GuestCase):
                "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
         text = " ".join(adr.split())
         for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
-                       "POST /api/share-remove", "#1237", "bad colleague"):
+                       "POST /api/share-remove", "#1237", "bad colleague", "bad sharing",
+                       "turn sharing on or off", "ADR-console-078"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237, #1294"))
+        self.assertTrue(decided.endswith("#1193, #1237, #1294, #1305"))
+        status = next(row for row in adr.splitlines() if row.startswith("- **Status:**"))
+        self.assertTrue(status.endswith("ADR-console-076, ADR-console-078"))
 
 
 class ReadingServiceTest(GuestCase):
