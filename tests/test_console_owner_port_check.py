@@ -131,10 +131,12 @@ class RequestAsTest(unittest.TestCase):
 
 
 class ConnectAsTest(unittest.TestCase):
-    def stub(self, code, record=None):
+    def stub(self, code, record=None, kwargs_record=None):
         def run(argv, **kwargs):
             if record is not None:
                 record.append(argv)
+            if kwargs_record is not None:
+                kwargs_record.append(kwargs)
             return subprocess.CompletedProcess(argv, code, b"", b"")
         return run
 
@@ -149,6 +151,16 @@ class ConnectAsTest(unittest.TestCase):
         for code in (1, 14, 127):
             with self.subTest(code=code):
                 self.assertEqual(connect_as("_runner", "s", run=self.stub(code)), "unknown")
+
+    def test_the_probe_runs_isolated_from_a_folder_every_user_can_read(self):
+        argvs, kwargs = [], []
+        connect_as("_runner", "/tmp/x/console.sock", run=self.stub(13, argvs, kwargs))
+        argv, = argvs
+        self.assertEqual(argv[:6], ["/usr/bin/sudo", "-n", "-u", "_runner", "/usr/bin/python3",
+                                    "-I"])
+        self.assertEqual(argv[6], "-c")
+        kw, = kwargs
+        self.assertEqual(kw["cwd"], "/")
 
     def test_a_probe_that_did_not_run_is_unknown(self):
         def raising(exc):
