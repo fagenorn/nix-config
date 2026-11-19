@@ -1,6 +1,6 @@
 # ADR-console-025 — The owner adds an account from the page
 
-- **Status:** accepted; amended by ADR-console-075
+- **Status:** accepted; amended by ADR-console-075, ADR-console-080
 - **Decided in:** #842, #1027, #1035, #1039
 
 ## Context

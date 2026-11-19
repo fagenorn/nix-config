@@ -19,7 +19,7 @@ from pathlib import Path
 from agent_tools.console import account_add, signin, signin_run
 
 from . import console_test_support as support
-from .test_console_signin_run import CODE, FAKE, LINK, until
+from .test_console_signin_run import CODE, FAKE, LINK, LOOPBACK_LINK, MANUAL_LINK, until
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ADD = "/api/account-add"
@@ -79,7 +79,8 @@ class Case(unittest.TestCase):
     def begin(self, adder="default", runs=True, reader=True):
         def factory(on_end):
             return signin_run.SignIns(on_end=on_end, environ=self.environ,
-                                      clock=lambda: self.mono[0], link_wait=5)
+                                      clock=lambda: self.mono[0], link_wait=5,
+                                      manual_grace=0.2, host="console-host")
         self.svc = support.service(
             self, self.store, self.registry, profile_dirs=Listing(self.profiles),
             clock=lambda: self.now[0],
@@ -246,12 +247,23 @@ class AccountSigninTest(Case):
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Cache-Control"], "no-store")
         attempt = self.start_attempt("fresh")
-        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK, "profile": "fresh"})
+        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK, "route": "unknown",
+                                            "port": None, "forward": None, "profile": "fresh"})
         self.assertIn("fresh", self.reads)
         view = self.view()
         self.assertIn("signin/fresh", [item["key"] for item in view["inbox"]["open"]])
         self.assertEqual(view["signin_runs"]["fresh"],
                          {"state": "running", "at": None, "attempt": attempt})
+
+    def test_an_added_accounts_answer_carries_the_manual_route(self):
+        self.environ.update(FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK)
+        self.begin()
+        status, _, body = self.post({"name": "fresh"})
+        self.assertEqual(status, 200)
+        attempt = self.start_attempt("fresh")
+        self.assertEqual(json.loads(body), {"attempt": attempt, "link": MANUAL_LINK,
+                                            "route": "manual", "port": None, "forward": None,
+                                            "profile": "fresh"})
 
     def test_the_view_lists_an_added_account_after_a_restart(self):
         self.begin()
@@ -282,7 +294,8 @@ class AccountSigninTest(Case):
             status, _, body = self.post({"name": "fresh"})
         self.assertEqual(status, 200)
         attempt = self.start_attempt("fresh")
-        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK, "profile": "fresh"})
+        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK, "route": "unknown",
+                                            "port": None, "forward": None, "profile": "fresh"})
         self.assertIn("console: signin_add_read_failed fresh timeout\n", err.getvalue())
         self.assertEqual([p for _, p in self.rows("signin.reading") if p["profile"] == "fresh"], [])
         view = self.view()
