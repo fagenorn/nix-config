@@ -2124,7 +2124,8 @@ class QuestionRecordsServiceTest(QuestionCase):
         other = {"session_id": "s-0", "run_id": "wf_b", "moved_ms": 1700000000000,
                  "issues": [{"issue": 9, "stage": "queued", "task": None, "tasks": None,
                              "locking": False}]}
-        entries = [(deliveries.DELIVERY_SEEN, "owner/p01", run),
+        entries = [("project.registered", "owner/p01", {"root": "/srv/p01"}),
+                   (deliveries.DELIVERY_SEEN, "owner/p01", run),
                    (deliveries.DELIVERY_SEEN, "owner/p00", other)]
         for root, commit in (("/srv/p01", "c" * 40), ("/srv/p00", "d" * 40)):
             entries.append((event_log.ACTIVATION_STARTED, None,

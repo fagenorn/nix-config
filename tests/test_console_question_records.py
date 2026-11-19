@@ -209,12 +209,23 @@ class ProjectRecordsTest(unittest.TestCase):
                 self.assertEqual(
                     [x["sprint_id"] for x in r["spend"]["sprints"]], [P_SPRINT])
 
+    def test_a_pruned_predecessor_registry_still_keeps_its_activations_out(self):
+        # Retention removed the predecessor's registered and unregistered rows but kept the newest
+        # activation rows (EVENTS seq 4 to 7); only this project's later registration is retained.
+        events = EVENTS + [
+            Event(200, f"{DAY2}T12:00:00+00:00", "project.registered", P, {"root": P_ROOT}),
+            activation(201, event_log.ACTIVATION_FINISHED,
+                       {"root": P_ROOT, "commit": "e" * 40, "ok": True, "reason": None,
+                        "next_step": None})]
+        r = records(events=events)
+        self.assertEqual([a["commit"] for a in r["activations"]], ["e" * 40])
+
     def test_the_projects_own_registrations_and_unrelated_ones_drop_nothing(self):
         def registry(seq, kind, project, payload):
             return Event(seq, f"{DAY2}T12:00:00+00:00", kind, project, payload)
 
         events = sorted([
-            registry(100, "project.registered", P, {"root": P_ROOT}),
+            registry(0, "project.registered", P, {"root": P_ROOT}),
             registry(101, "project.registered", O, {"root": O_ROOT}),
             *EVENTS,
             registry(102, event_log.PROJECT_UNREGISTERED, P, {}),

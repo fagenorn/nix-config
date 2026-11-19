@@ -36,7 +36,11 @@ says who owned the path when it was observed. The rows' registrations are folded
 project other than `project_id` stopped owning `root` is its predecessor's end. Activation rows at or
 before that `seq` are not counted, and neither are spend days up to and including that row's UTC date
 (a day shared with a predecessor is not counted, so a figure is never the predecessor's); `days` still
-lists those days, with zero figures. With no such row nothing is dropped.
+lists those days, with zero figures. Retention removes a registration row after 90 days but keeps the
+newest activation rows, so a predecessor's rows can outlive the evidence that it owned the path: an
+activation row at or before the seq of `project_id`'s own earliest retained registration at `root` is
+not counted either, since the project cannot have owned the path before it was registered there. With
+neither bound nothing is dropped.
 
 Scope (ADR-console-082 D3, D4). Every section holds only rows, keys and ids of `project_id`. A `delivery.seen` row counts
 only when its project column is `project_id`. The activation rows have no project column, so one
@@ -109,6 +113,15 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
                 left = event
             roots.pop(other, None)
     return left
+
+
+def _owned_since(rows: Iterable[Event], project_id: str, root: str) -> int:
+    """The `seq` of `project_id`'s earliest retained registration at `root`, else 0."""
+    for event in rows:
+        if (event.kind == REGISTERED and event.project == project_id
+                and isinstance(event.payload, dict) and event.payload.get("root") == root):
+            return event.seq
+    return 0
 
 
 def figure(tokens: spend_module.Tokens) -> dict:
@@ -310,5 +323,6 @@ def project_records(
             sprint_states, None if left is None else left.at[:10]),
         "sprints": [_sprint_entry(state) for state in own_sprints],
         "deliveries": _deliveries(seen_rows, live_runs),
-        "activations": _activations(rows, root, 0 if left is None else left.seq),
+        "activations": _activations(
+            rows, root, max(_owned_since(rows, project_id, root), 0 if left is None else left.seq)),
         "held_checks": held}
