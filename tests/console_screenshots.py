@@ -120,9 +120,11 @@ Contract:
   `REFUSED_CARD`; or when an `ask-goal` shot's reading is not `FILLED_GOAL` (the box
   closed, the wrong text or project, or the field clipping the filled text); or when any
   shot has a visible project line whose Ask a question button sits on another row than its Give it
-  a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when a shot with the Accounts or Sharing
-  panel open shows any page text in the 24 px band under the panel's bottom edge (`PANEL_BENEATH`, a text box over
-  the panel's width that is the topmost thing at the middle of its part in the band: a backdrop over the page hides it); or when any shot is not taken from the top of the
+  a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when an `accounts-panel` or Sharing
+  shot does not show its own panel open (`OPEN_PANEL` is not `PANEL_OF`'s id for the state); or when a shot with the
+  Accounts or Sharing panel open shows any text outside that panel (the header's goal picker included) in the 24 px
+  band under the panel's bottom edge (`PANEL_BENEATH`, a text box over the panel's width with no opaque background
+  above it at the middle of its part in the band: a transparent backdrop hides nothing); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
   tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
@@ -389,6 +391,7 @@ class Shot:
     activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
     beneath: tuple[str, ...] = ()
+    panel: str | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -1135,20 +1138,35 @@ ACTS_ROW = """Array.from(document.querySelectorAll('li[data-project]')).filter((
 }).map((line) => line.dataset.project)"""
 
 # Page text left showing in the band just under an open Accounts or Sharing panel's bottom edge (#1316):
-# the text of every page text node outside the header whose box crosses that band, lies over the panel's
-# width and is the topmost thing at the middle of its part inside the band (so a backdrop over it hides it).
+# the text of every text node outside the open panel (the header's goal picker included) whose box
+# crosses that band and lies over the panel's width, unless something above it paints an opaque
+# background there. A backdrop that is transparent hides nothing, though it takes the pointer.
 PANEL_BAND = 24
+OPEN_PANEL = """(() => {
+  const panel = Array.from(document.querySelectorAll('.acct-panel')).find(
+    (item) => !item.hidden && item.getClientRects().length > 0);
+  return panel ? panel.id : null;
+})()"""
 PANEL_BENEATH = f"""(() => {{
   const panel = Array.from(document.querySelectorAll('.acct-panel')).find(
     (item) => !item.hidden && item.getClientRects().length > 0);
   if (!panel) return [];
   const edge = panel.getBoundingClientRect();
+  const alpha = (colour) => {{
+    if (colour === 'transparent') return 0;
+    const parts = colour.replace(/^[a-z-]+\\(|\\)$/g, '').split(/\\s*[,/]\\s*|\\s+/);
+    return parts.length >= 4 ? parseFloat(parts[3]) : 1;
+  }};
+  const covers = (item) => {{
+    const style = getComputedStyle(item);
+    return alpha(style.backgroundColor) >= 0.95 && parseFloat(style.opacity) >= 0.95;
+  }};
   const found = [];
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {{
     const text = node.textContent.trim();
     const host = node.parentElement;
-    if (!text || !host || host.closest('header') || host.closest('script, style')) continue;
+    if (!text || !host || panel.contains(host) || host.closest('script, style')) continue;
     if (getComputedStyle(host).visibility === 'hidden') continue;
     const range = document.createRange();
     range.selectNodeContents(node);
@@ -1159,15 +1177,21 @@ PANEL_BENEATH = f"""(() => {{
       if (box.right <= edge.left || box.left >= edge.right) continue;
       const x = (Math.max(box.left, edge.left) + Math.min(box.right, edge.right)) / 2;
       const y = (top + bottom) / 2;
-      const hit = document.elementFromPoint(x, y);
-      if (hit && (hit === host || host.contains(hit))) {{
-        found.push(host.tagName.toLowerCase() + ': ' + text.slice(0, 40));
-        break;
-      }}
+      const stack = document.elementsFromPoint(x, y);
+      const at = stack.findIndex((item) => item === host || host.contains(item));
+      if (at < 0) continue;
+      if (stack.slice(0, at).some((item) => !item.contains(host) && covers(item))) continue;
+      found.push(host.tagName.toLowerCase() + ': ' + text.slice(0, 40));
+      break;
     }}
   }}
   return found;
 }})()"""
+
+# The panel each panel state must show open, by its id (#1316): a state whose button is missing
+# leaves no panel, and nothing beneath a missing panel is a clear band to read.
+PANEL_OF = {"accounts-panel": "accounts", "sharing-panel": "sharing", "sharing-off": "sharing",
+            "sharing-unreadable": "sharing"}
 
 THREAD_READING = f"""(() => {{
   const fold = document.querySelector('details[data-key="questions:owner/web"]');
@@ -1323,13 +1347,14 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         short = tuple(page.evaluate(SHORT_CONTROLS))
         acts = tuple(page.evaluate(ACTS_ROW))
         beneath = tuple(page.evaluate(PANEL_BENEATH) or ())
+        panel = page.evaluate(OPEN_PANEL)
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation, beneath=beneath)
+                card=card, activation=activation, beneath=beneath, panel=panel)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1413,6 +1438,9 @@ def main(argv: list[str] | None = None) -> int:
     for shot in offrow:
         print(f"console-screenshots: {shot.path.name} puts Ask a question on another row than "
               f"Give it a goal ({', '.join(shot.acts)})")
+    unpaneled = [shot for shot in taken if shot.state in PANEL_OF and shot.panel != PANEL_OF[shot.state]]
+    for shot in unpaneled:
+        print(f"console-screenshots: {shot.path.name} shows panel {shot.panel!r}, not {PANEL_OF[shot.state]!r}")
     uncovered = [shot for shot in taken if shot.beneath]
     for shot in uncovered:
         print(f"console-screenshots: {shot.path.name} shows page text under the open panel "
@@ -1426,7 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or uncarded or offrow or uncovered or scrolled or short) else 0
+                 or unlined or uncarded or offrow or unpaneled or uncovered or scrolled or short) else 0
 
 
 if __name__ == "__main__":
