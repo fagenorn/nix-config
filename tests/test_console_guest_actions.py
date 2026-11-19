@@ -17,7 +17,7 @@ from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
 from .test_console_guest_page import GUEST, named, page_of
 from .test_console_guest_service import (
-    COLLEAGUE, GOAL, JSON, OTHER_HOST, PARTS, STRANGER, TAILNET, GuestCase)
+    COLLEAGUE, GOAL, JSON, OTHER_HOST, PARTS, ROOT, STRANGER, TAILNET, GuestCase)
 from .test_console_page import PAGE, START, full, has_class, nodes
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -614,3 +614,24 @@ class BothPagesTest(GuestWriteCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuestWriteDocsTest(unittest.TestCase):
+    def test_the_records_say_guest_writes_ride_the_guest_door(self):
+        adrs = ROOT / "docs/areas/console/adr"
+        guard = (adrs / "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
+        for phrase in ("GuestHandler._guest_write", "ADR-console-078 D2",
+                       "the guest door (ADR-console-077)"):
+            self.assertIn(phrase, guard)
+        (decision,) = [line for line in (adrs / (
+            "066-a-named-colleague-reaches-the-console-only-through-tailscale-serve-on-a-guest-port.md"
+        )).read_text().splitlines() if line.startswith("**D3.")]
+        for phrase in ("admitted on the guest door as its reads are (ADR-console-077 D4)",
+                       "a question that carries a look or a before-and-after pair is a look before "
+                       "merge and stays the owner's"):
+            self.assertIn(phrase, decision)
+        contract = (ROOT / "python/agent_tools/console/manager-contract.md").read_text()
+        self.assertIn("Only an answer whose `sprint inbox` entry carries no `by` is the owner's.",
+                      contract)
+        self.assertIn("An entry with `by` is a listed colleague's answer, which never answers a look",
+                      contract)

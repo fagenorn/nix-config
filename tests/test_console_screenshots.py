@@ -10,6 +10,7 @@ import pwd
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -167,6 +168,52 @@ class ScreenshotFixtureTest(unittest.TestCase):
         steer = {i["reason"]: i["steer"] for i in guest["inbox"]["open"]}
         self.assertTrue(steer["brief"])
         self.assertFalse(steer["verify-approve"])
+
+    def test_capture_shoots_the_guest_steer_state_through_the_guest_door(self) -> None:
+        class Browser:
+            def close(self):
+                pass
+
+        class Playwright:
+            chromium = types.SimpleNamespace(launch=lambda args=None: Browser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        api = types.ModuleType("playwright.sync_api")
+        api.Error = type("Error", (Exception,), {})
+        api.sync_playwright = Playwright
+        seen = []
+
+        def fake(browser, url, state, width, out, **kwargs):
+            host, port = url.split("//")[1].split("/")[0].split(":")
+            connection = http.client.HTTPConnection(host, int(port))
+            try:
+                connection.request("GET", "/api/state")
+                response = connection.getresponse()
+                seen.append((state, url, response.status, json.loads(response.read())))
+            finally:
+                connection.close()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
+                                              "playwright.sync_api": api}), \
+                mock.patch.object(shots, "_shoot", side_effect=fake):
+            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],))
+        self.assertEqual(len(seen), 1)
+        state, url, status, view = seen[0]
+        self.assertEqual((state, status), ("guest-steer", 200))
+        theirs = [s for s in all_sprints(view) if s["started_by"] == shots.COLLEAGUE]
+        self.assertEqual(len(theirs), 2)
+        self.assertEqual([s["steer"] for s in theirs], [True, True])
+        owners = [s for s in all_sprints(view) if s["started_by"] is None]
+        self.assertEqual([s["steer"] for s in owners], [False])
+        confirms = [i for i in view["inbox"]["open"] if i.get("reason") == "verify-approve"]
+        self.assertTrue(confirms)
+        self.assertEqual([i["steer"] for i in confirms], [False] * len(confirms))
 
     def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
         justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
