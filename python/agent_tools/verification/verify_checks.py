@@ -282,7 +282,8 @@ positive integer is a usage error (2).
 agent-workflow-tests` at the repository root and is met (0) only when the suite exits 0 in strictly under
 SECONDS of wall time; a suite that exits non-zero is not met (1, verdict `failed`) and so is one that takes
 SECONDS or longer (verdict `slow`). At SECONDS the suite is killed with its whole process group and every
-descendant found by parentage, in whatever session (a test fixture's daemon included), and a killed run
+process found by parentage or by an environment mark the run's id puts in
+every process it starts, in whatever session and whoever now parents it (a test fixture's daemon, orphaned to init, included), and a killed run
 reads as not met (1, verdict `deadline`). `wall_seconds` is the unrounded value the verdict was judged on. SECONDS may not exceed the runner's `verify_exec.TIMEOUT` less
 `SUITE_REPORT_MARGIN`, so the check always reports before the runner kills it; a missing, non-numeric,
 non-positive or larger SECONDS is a usage error (2) before any suite starts. The suite runs with
@@ -312,6 +313,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from typing import IO
 from datetime import datetime, timezone
@@ -2373,33 +2375,44 @@ def _last_summary(log: IO[bytes], chunk: int = LOG_CHUNK) -> str | None:
     return None if summary is None else summary.decode("utf-8", "replace")
 
 
-def _process_children() -> dict[int, list[int]]:
-    """Every live process's children, from one `ps` listing (empty when `ps` cannot be read)."""
+SUITE_MARK = "AGENT_SUITE_WALL_TIME_RUN"  # env var carrying the run's id into every process it starts
+
+
+def _process_table() -> list[tuple[int, int, str]]:
+    """Every live process as (pid, ppid, command and environment), from one `ps` listing (empty when
+    `ps` cannot be read): the environment is what finds a daemon that was orphaned to init."""
+    flags = ["-E"] if sys.platform == "darwin" else ["e"]
     try:
-        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True,
-                                 timeout=10).stdout
+        listing = subprocess.run(["ps", "-A", *flags, "-ww", "-o", "pid=,ppid=,command="],
+                                 capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
-        return {}
-    children: dict[int, list[int]] = {}
+        return []
+    table: list[tuple[int, int, str]] = []
     for row in listing.splitlines():
-        fields = row.split()
-        if len(fields) == 2 and all(field.isdigit() for field in fields):
-            children.setdefault(int(fields[1]), []).append(int(fields[0]))
-    return children
+        fields = row.split(None, 2)
+        if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
+            table.append((int(fields[0]), int(fields[1]), fields[2] if len(fields) > 2 else ""))
+    return table
 
 
-def _freeze_descendants(root_pid: int) -> set[int]:
-    """Stop `root_pid`'s descendants, however many sessions they span, and return them: a stopped
-    process forks nothing, so repeating until a listing shows nothing new reaches the whole tree."""
+def _freeze_suite_processes(root_pid: int, mark: str) -> set[int]:
+    """Stop every process of the suite run and return them: the descendants of `root_pid` by parentage
+    and every process whose environment carries `mark`, in whatever session and whoever now parents
+    it. A stopped process forks nothing, so repeating until a listing shows nothing new reaches all."""
     seen: set[int] = set()
     for _ in range(10):
-        children = _process_children()
-        queue, found = [root_pid], set()
+        table = _process_table()
+        children: dict[int, list[int]] = {}
+        for pid, ppid, _ in table:
+            children.setdefault(ppid, []).append(pid)
+        found = {pid for pid, _, rest in table if mark in rest and pid != os.getpid()}
+        queue = [root_pid, *found]
         while queue:
             for child in children.get(queue.pop(), ()):
-                if child not in seen and child not in found:
+                if child not in found:
                     found.add(child)
                     queue.append(child)
+        found -= seen
         if not found:
             break
         for pid in found:
@@ -2414,15 +2427,17 @@ def suite_wall_time(limit: float, *, root: Path = Path("."),
     """Run `argv` at `root`, kill everything it started at `limit` seconds and judge the wall time."""
     with tempfile.TemporaryFile("w+b") as output:  # a file, never a pipe: the output is never read live
         started = time.monotonic()
+        mark = f"{SUITE_MARK}={uuid.uuid4().hex}"
         proc = subprocess.Popen(list(argv), cwd=root, stdin=subprocess.DEVNULL, stdout=output,
                                 stderr=subprocess.STDOUT, start_new_session=True,
-                                env=verify_exec.child_env())
+                                env=verify_exec.child_env(**dict([mark.split("=")])))
         try:
             suite_exit: int | None = proc.wait(timeout=limit)
         except subprocess.TimeoutExpired:
-            # A fixture's daemon in its own session is outside the process group and its test is
-            # killed before it can reap it, so the descendants are found by parentage and killed too.
-            descendants = _freeze_descendants(proc.pid)
+            # A fixture's daemon in its own session is outside the process group, its launcher is
+            # long gone (it is parented to init) and its test is killed before it can reap it, so
+            # the run's processes are found by parentage and by the run's environment mark.
+            descendants = _freeze_suite_processes(proc.pid, mark)
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
             for pid in descendants:

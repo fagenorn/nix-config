@@ -583,12 +583,18 @@ class SuiteWallTimeTest(unittest.TestCase):
         self.assertEqual((code, report["verdict"]), (1, "slow"))
         self.assertGreaterEqual(report["wall_seconds"], report["limit"])
 
-    def test_a_daemon_in_its_own_session_is_killed_at_the_deadline(self):
-        suite = (
-            "import subprocess, sys, time\n"
+    def test_an_orphaned_daemon_in_its_own_session_is_killed_at_the_deadline(self):
+        # The fixture's shape: the client that starts the daemon exits at once, so the daemon is
+        # re-parented to init (ppid 1) and sits in its own session, out of reach of both the
+        # process group and a walk down from the suite.
+        launcher = (
+            "import subprocess, sys\n"
             "daemon = subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'],\n"
             "                          start_new_session=True)\n"
-            "open(sys.argv[1], 'w').write(str(daemon.pid))\n"
+            "open(sys.argv[1], 'w').write(str(daemon.pid))\n")
+        suite = (
+            "import subprocess, sys, time\n"
+            f"subprocess.run([sys.executable, '-c', {launcher!r}, sys.argv[1]], check=True)\n"
             "time.sleep(60)\n")
         with tempfile.TemporaryDirectory() as tmp:
             pidfile = Path(tmp) / "pid"
