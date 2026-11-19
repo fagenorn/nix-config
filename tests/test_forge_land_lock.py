@@ -1,4 +1,7 @@
-"""forge-claim land (issue 629): the cross-host land lock against the fake gh and its ref store."""
+"""forge-claim land (issue 629): the cross-host land lock against the fake gh and its ref store.
+
+Logic tests answer the fake gh in this process (`ForgeWorld.answer_in_process`); the concurrent runs,
+the CLI children and the token check keep real child processes."""
 import contextlib
 import io
 import json
@@ -14,6 +17,7 @@ from email.utils import format_datetime
 from agent_tools.claims import forge_claim
 from agent_tools.claims import forge_land_lock as land_lock
 from agent_tools.claims import forge_markers as fm
+from agent_tools.system import forge_api
 from .forge_world import NETWORK_DOWN, ForgeWorld, host_clock
 
 SLUG, BRANCH = "octo/widgets", "main"
@@ -83,6 +87,8 @@ def finish(proc):
 
 
 class Base(unittest.TestCase):
+    in_process = True  # logic tests answer gh in this process; a real-child test sets False
+
     def setUp(self):
         self.slept = []
         patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
@@ -93,6 +99,8 @@ class Base(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
+        if self.in_process:
+            self.world.answer_in_process(forge_api)
 
     def lock(self, sha=None, **kwargs):
         self.world.ref_store(SLUG, {REF: sha} if sha else {}, **kwargs)
@@ -603,6 +611,8 @@ class TransientRetryTest(Base):
 class ConcurrencyTest(Base):
     """Children of `python -m agent_tools.claims.forge_claim land` racing on one ref store."""
 
+    in_process = False
+
     def test_racing_acquires_leave_one_holder(self):
         self.lock()
         self.pulls(A, pull(11, sha=A))
@@ -633,6 +643,36 @@ class ConcurrencyTest(Base):
         code, out = finish(start_cli(*land("release", A)))
         self.assertEqual((code, out["verdict"]), (3, "not_held"))
         self.assertEqual(self.world.refs(), {REF: B})
+
+
+class InProcessTest(Base):
+    def test_a_land_lock_logic_test_starts_no_child_process(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        with mock.patch.object(subprocess, "Popen", side_effect=RuntimeError("a child process started")):
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertTrue(self.world.argvs("gh"))
+        self.assertTrue(all(not call["token_visible"] for call in self.world.calls()))
+
+
+class TokenTest(Base):
+    in_process = False
+
+    def test_a_github_token_never_reaches_gh_in_a_child_process(self):
+        self.assertIs(forge_api.subprocess, subprocess)
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "harness-gh-token"}):
+            with mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as spy:
+                code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"]), (0, "acquired"))
+        self.assertEqual(self.world.refs(), {REF: A})
+        calls = self.world.calls()
+        self.assertTrue(calls)
+        self.assertTrue(all(call["tool"] == "gh" and not call["token_visible"] for call in calls))
+        self.assertEqual([list(c.args[0]) for c in spy.call_args_list], [["gh", *row["argv"]] for row in calls])
 
 
 class ClockTest(Base):
@@ -2330,7 +2370,10 @@ class InProcessForgeTest(unittest.TestCase):
 
 
 class IdleRaceTest(Base):
+    in_process = False
+
     def test_concurrent_idle_stealers_one_wins(self):
+        self.assertIs(forge_api.subprocess, subprocess)
         self.lock(C, schedule=["get", "get", "cas", "cas"])
         self.pulls(A, pull(11, sha=A))
         self.pulls(B, pull(13, sha=B))
