@@ -161,8 +161,14 @@ class PageTest(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
-    def test_the_page_is_under_60_kb_compressed(self) -> None:
-        self.assertLess(len(gzip.compress(self.data, 9)), 61440)
+    def test_the_page_is_under_63_kb_compressed(self) -> None:
+        # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could
+        # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
+        # Raised from 61 KB by #1323: the route sentence, its three wordings and the forward-command check
+        # (about 700 bytes compressed) did not fit the 439 bytes the cap had left.
+        # Raised from 62 KB by #1263: its guest controls and actor marks on both pages, merged with #1323's
+        # route sentence, came to 64126 bytes against the 63488 the two caps held.
+        self.assertLess(len(gzip.compress(self.data, 9)), 64512)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
@@ -318,7 +324,7 @@ class PageTest(unittest.TestCase):
              "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
-             "/api/activate", "/api/share-tailnet", "/api/share-colleague",
+             "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
              "/api/share-remove"},
         )
         self.assertEqual(
@@ -328,7 +334,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 45)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 46)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -5654,6 +5660,16 @@ class PageFailedStartTest(unittest.TestCase):
             [n for n in nodes(snap["inbox"])
              if n["tag"] == "li" and FAILED_START["headline"] in full(n)], [])
 
+    def test_a_retry_failure_is_forgotten_once_its_card_leaves_the_inbox(self) -> None:
+        failed = look_answered("failed", FAILED_LINE)
+        (gone, back) = render([START, {"frame": frame([failed])},
+                               {"respond": {"status": 502, "text": FAILED_LINE + "\n"}},
+                               {"click": "look-retry"}, {"frame": frame([])}, {"snapshot": True},
+                               {"frame": frame([failed])}, {"snapshot": True}])
+        self.assertEqual(look_cards(gone), [])
+        (card,) = look_cards(back)
+        self.assertEqual([n for n in nodes(card) if has_class(n, "fail")], [])
+
     def test_a_sending_retry_is_disabled(self) -> None:
         (snap,) = render([
             START, {"frame": frame([FAILED_START])}, {"hold": True},
@@ -5664,6 +5680,150 @@ class PageFailedStartTest(unittest.TestCase):
         (drop,) = [n for n in nodes(card) if has_class(n, "start-withdraw")]
         self.assertIs(retry["disabled"], True)
         self.assertIs(drop["disabled"], False)
+
+
+MOVED_LINE = ("Nothing was recorded: the pull request is now at bbbbbbb, not at aaaaaaa, "
+              "the head these pictures show. The manager will send the new pictures.")
+FAILED_LINE = "GitHub had a problem and did not take the answer. Try again in a moment."
+
+
+def look_of(state: str, line: str | None) -> dict:
+    return {"issue": 12, "pr": 34, "head": "a" * 40, "state": state, "line": line, "approve_index": 0}
+
+
+def look_answered(state: str, line: str | None) -> dict:
+    return question(0, "May this merge?", ["approve", "approve with one fix", "ask for changes"],
+                    "approve", round=3, look=look_of(state, line), answered=True,
+                    questions=[{"question": "May this merge?", "chosen": "approve",
+                                "options": ["approve", "approve with one fix", "ask for changes"],
+                                "recommended": "approve", "recommended_index": 0}])
+
+
+def look_cards(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if has_class(n, "look-card")]
+
+
+def retry_posts(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/look-retry"]
+
+
+class PageLookTest(unittest.TestCase):
+    def test_a_moved_look_question_shows_why_nothing_was_recorded(self) -> None:
+        asked = question(0, "May this merge?", ["approve", "ask for changes"], "approve",
+                         context="Two pictures show the change.", look=look_of("moved", MOVED_LINE))
+        (snap,) = render([START, {"frame": frame([asked])}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        (line,) = [n for n in nodes(lead) if has_class(n, "look-line")]
+        self.assertEqual(line["tag"], "p")
+        self.assertEqual(full(line), MOVED_LINE)
+        self.assertEqual(len([n for n in nodes(lead) if n["tag"] == "button" and has_class(n, "opt")]), 2)
+        kids = lead["children"]
+        context = next(c for c in kids if has_class(c, "context"))
+        self.assertLess(kids.index(context), kids.index(line))
+
+    def test_a_moved_look_line_shows_in_the_list_line_too(self) -> None:
+        asked = question(1, "May this merge?", ["approve", "ask for changes"], "approve",
+                         look=look_of("moved", MOVED_LINE))
+        (snap,) = render([START, {"frame": frame([Q0, asked])}, {"snapshot": True}])
+        (row,) = rows_of(snap)
+        (line,) = [n for n in nodes(row) if has_class(n, "look-line")]
+        self.assertEqual(full(line), MOVED_LINE)
+        self.assertEqual(len([n for n in nodes(row) if n["tag"] == "button" and has_class(n, "opt")]), 2)
+
+    def test_a_failed_look_shows_its_reason_and_retry_posts_the_question(self) -> None:
+        failed = look_answered("failed", FAILED_LINE)
+        (before, snap) = render([START, {"frame": frame([failed])}, {"snapshot": True},
+                                 {"click": "look-retry"}, {"snapshot": True}])
+        self.assertEqual(retry_posts(before), [])
+        (card,) = look_cards(snap)
+        self.assertEqual(card["tag"], "article")
+        self.assertIn("May this merge?", full(card))
+        (line,) = [n for n in nodes(card) if has_class(n, "look-line")]
+        self.assertEqual(full(line), FAILED_LINE)
+        self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"], ["Retry"])
+        self.assertEqual([n for n in nodes(card) if has_class(n, "opt") or has_class(n, "words-text")], [])
+        (post,) = retry_posts(snap)
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": SID, "round": 3, "question": 0})
+
+    def test_a_look_answer_the_console_found_moved_says_why_once(self) -> None:
+        options = ["approve", "ask for changes"]
+        open_card = question(0, "May this merge?", options, "approve", look=look_of("open", "Choosing approve records it."))
+        moved_card = question(0, "May this merge?", options, "approve", look=look_of("moved", MOVED_LINE))
+        (snap,) = render([START, {"frame": frame([open_card])},
+                          {"respond": {"status": 409, "text": MOVED_LINE + "\n"}},
+                          {"key": "1"}, {"key": "Enter"}, {"clock": 5000}, {"frame": frame([moved_card])},
+                          {"snapshot": True}])
+        self.assertEqual(full(snap["inbox"]).count(MOVED_LINE), 1)
+        self.assertNotIn("Could not send", full(snap["inbox"]))
+
+    def test_a_look_card_never_starts_its_approving_option_picked(self) -> None:
+        open_card = question(0, "May this merge?", ["approve", "ask for changes"], "approve",
+                             look=look_of("open", "Choosing approve records it."))
+        (nothing, typed, picked) = render([
+            START, {"frame": frame([open_card])}, {"key": "Enter"}, {"clock": 5000},
+            {"snapshot": True},
+            {"type": {"class": "words-text", "text": "please change the heading"}},
+            {"click": "send"}, {"clock": 10000}, {"snapshot": True},
+            {"frame": frame([open_card])},
+            {"click": "opt", "nth": 0}, {"click": "send"}, {"clock": 15000}, {"snapshot": True},
+        ])
+        self.assertEqual(round_posts(nothing), [])
+        (post,) = round_posts(typed)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0,
+            "text": "please change the heading"})
+        self.assertEqual([posted(p) for p in round_posts(picked)][-1]["choice"], 0)
+
+    def test_a_failed_retry_says_why(self) -> None:
+        failed = look_answered("failed", FAILED_LINE)
+        (snap,) = render([START, {"frame": frame([failed])},
+                          {"respond": {"status": 502, "text": FAILED_LINE + "\n"}},
+                          {"click": "look-retry"}, {"snapshot": True}])
+        (card,) = look_cards(snap)
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "fail")],
+                         ["Could not retry: " + FAILED_LINE])
+
+    def test_a_sending_retry_is_disabled(self) -> None:
+        failed = look_answered("failed", FAILED_LINE)
+        (snap,) = render([START, {"frame": frame([failed])}, {"hold": True},
+                          {"click": "look-retry"}, {"snapshot": True}])
+        (card,) = look_cards(snap)
+        (retry,) = [n for n in nodes(card) if has_class(n, "look-retry")]
+        self.assertIs(retry["disabled"], True)
+        self.assertEqual(len(retry_posts(snap)), 1)
+
+    def test_a_posting_look_shows_its_line_and_no_retry(self) -> None:
+        line = "Recording your approval of aaaaaaa on issue 12."
+        (snap,) = render([START, {"frame": frame([look_answered("posting", line)])},
+                          {"snapshot": True}])
+        (card,) = look_cards(snap)
+        (shown,) = [n for n in nodes(card) if has_class(n, "look-line")]
+        self.assertEqual(full(shown), line)
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "button"], [])
+
+    def test_a_round_answer_that_failed_on_the_server_offers_try_again(self) -> None:
+        reason = "GitHub had a problem and did not take the answer."
+        (snap, again) = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"respond": {"status": 502, "text": reason}},
+            {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+            {"click": "try-again"}, {"snapshot": True},
+        ])
+        self.assertIn("Could not send: " + reason, full(snap["inbox"]))
+        self.assertEqual(len([n for n in nodes(snap["inbox"]) if has_class(n, "try-again")]), 1)
+        first, second = round_posts(again)
+        self.assertEqual(first["body"], second["body"])
+
+    def test_a_refused_round_answer_offers_no_try_again(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"respond": {"status": 409, "text": "this question is already answered"}},
+            {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "try-again")], [])
 
 
 class PageManagerTest(unittest.TestCase):
@@ -7847,6 +8007,15 @@ SIGNIN = {
     "answered": False, "waiting_since": "2026-11-12T08:00:00+00:00",
 }
 ANSWER = "{\"attempt\":7,\"link\":\"https://claude.example/a?s=1\"}"
+LINK_A = "https://claude.example/a?s=1"
+FWD = "ssh -N -L 54321:localhost:54321 console-host"
+PORT_LINE = ("This sign-in returns to port 54321 on the console's machine. "
+             "If your browser is on another machine, forward that port to it first")
+MANUAL_SENTENCE = ("Sign in on that page; it then shows a code. "
+                   "Paste the code here and press Send code.")
+UNKNOWN_SENTENCE = ("The console could not tell where this sign-in returns, "
+                    "so a browser on another machine may not finish it.")
+LOOPBACK_ANSWER = {"attempt": 7, "forward": FWD, "link": LINK_A, "port": 54321, "route": "loopback"}
 
 
 def with_run(entry: dict, state: str, attempt: int) -> dict:
@@ -8857,6 +9026,67 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")],
                          ["A sign-in is running."])
 
+    def route_card(self, answer: dict | None = None, text: str | None = None) -> dict:
+        body = text if text is not None else json.dumps(answer, sort_keys=True, separators=(",", ":"))
+        steps = [START, {"frame": frame([SIGNIN])}, {"respond": {"status": 200, "text": body}},
+                 {"click": "signin-start"}, {"frame": frame([with_run(SIGNIN, "running", 7)])},
+                 {"snapshot": True}]
+        (snap,) = render(steps)
+        return sign_in_card(snap)
+
+    def route_texts(self, card: dict) -> list:
+        return [full(n) for n in of_class(card, "p", "signin-route")]
+
+    def test_a_manual_route_answer_shows_the_paste_the_code_sentence(self) -> None:
+        card = self.route_card({"attempt": 7, "forward": None, "link": LINK_A, "port": None,
+                                "route": "manual"})
+        (link,) = of_class(card, "a", "signin-link")
+        self.assertEqual(link["href"], LINK_A)
+        self.assertEqual(self.route_texts(card), [MANUAL_SENTENCE])
+        self.assertEqual(of_class(card, "code", "signin-forward"), [])
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+
+    def test_a_loopback_route_answer_names_the_port_and_the_forward_command(self) -> None:
+        card = self.route_card(LOOPBACK_ANSWER)
+        self.assertEqual(self.route_texts(card), [PORT_LINE + ": " + FWD])
+        (forward,) = of_class(card, "code", "signin-forward")
+        self.assertEqual(full(forward), FWD)
+
+    def test_a_loopback_route_answer_without_a_forward_still_names_the_port(self) -> None:
+        card = self.route_card({**LOOPBACK_ANSWER, "forward": None})
+        self.assertEqual(self.route_texts(card), [PORT_LINE + "."])
+        self.assertEqual(of_class(card, "code", "signin-forward"), [])
+
+    def test_an_unknown_route_answer_says_the_return_could_not_be_told(self) -> None:
+        for answer in (
+            {"attempt": 7, "forward": None, "link": LINK_A, "port": None, "route": "unknown"},
+            {"attempt": 7, "forward": None, "link": LINK_A, "port": 0, "route": "loopback"},
+            {"attempt": 7, "forward": FWD, "link": LINK_A, "port": "54321", "route": "loopback"},
+        ):
+            with self.subTest(answer=answer):
+                card = self.route_card(answer)
+                self.assertEqual(self.route_texts(card), [UNKNOWN_SENTENCE])
+                self.assertEqual(of_class(card, "code", "signin-forward"), [])
+
+    def test_an_answer_without_a_route_shows_no_route_sentence(self) -> None:
+        for text in (ANSWER, json.dumps({**json.loads(ANSWER), "route": "elsewhere"})):
+            with self.subTest(text=text):
+                card = self.route_card(text=text)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-route")], [])
+                (link,) = of_class(card, "a", "signin-link")
+                self.assertEqual(link["href"], LINK_A)
+                self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+
+    def test_a_forward_command_of_another_shape_is_not_shown(self) -> None:
+        control = self.route_card(LOOPBACK_ANSWER)
+        self.assertEqual(len(of_class(control, "code", "signin-forward")), 1)
+        for forward in ("rm -rf /", "ssh -N -L 1:localhost:1 console-host",
+                        "ssh -N -L 54321:localhost:54321 a;b"):
+            with self.subTest(forward=forward):
+                card = self.route_card({**LOOPBACK_ANSWER, "forward": forward})
+                self.assertEqual(of_class(card, "code", "signin-forward"), [])
+                self.assertEqual(self.route_texts(card), [PORT_LINE + "."])
+
     def test_a_code_is_sent_to_the_code_route_and_the_field_empties(self) -> None:
         (snap,) = render(SIGNED_IN_STEPS + [
             {"type": {"class": "signin-code", "text": "ab#C-1"}},
@@ -9211,6 +9441,19 @@ class AddAccountPageTest(unittest.TestCase):
         self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")], [ELSE])
         for cls in ("signin-link", "signin-code", "signin-start", "signin-cancel"):
             self.assertEqual([n for n in nodes(card) if has_class(n, cls)], [], cls)
+
+    def test_the_add_account_continuation_shows_the_route_sentence(self) -> None:
+        answer = json.dumps({"attempt": 9, "forward": None, "link": "https://claude.example/b",
+                             "port": None, "profile": "fresh", "route": "manual"},
+                            sort_keys=True, separators=(",", ":"))
+        steps = [step if step.get("respond", {}).get("text") != ADDED
+                 else {"respond": {"status": 200, "text": answer}} for step in ADD_STEPS]
+        (snap,) = render(steps + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in added(snap, "signin-route")], [MANUAL_SENTENCE])
+        order = [n for n in nodes(snap["account_add"])
+                 if has_class(n, "account-add-link") or has_class(n, "signin-route")]
+        self.assertEqual([n["tag"] for n in order], ["a", "p"])
 
     def test_the_add_box_shows_the_outcome_when_the_sign_in_ends(self) -> None:
         for state, text in (

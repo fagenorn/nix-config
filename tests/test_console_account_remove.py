@@ -144,11 +144,13 @@ class RemoverTest(unittest.TestCase):
 
 
 class PlatformTest(unittest.TestCase):
-    def test_only_linux_gets_a_signer_out_and_a_remover(self):
+    def test_only_linux_and_macos_get_a_signer_out_and_a_remover(self):
         self.assertIs(signer_out_for("linux"), sign_out)
         self.assertIsInstance(remover_for("linux"), Remover)
-        self.assertIsNone(signer_out_for("darwin"))
-        self.assertIsNone(remover_for("darwin"))
+        self.assertIs(signer_out_for("darwin"), sign_out)
+        self.assertIsInstance(remover_for("darwin"), Remover)
+        self.assertIsNone(signer_out_for("win32"))
+        self.assertIsNone(remover_for("win32"))
 
 
 if __name__ == "__main__":

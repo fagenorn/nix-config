@@ -1,21 +1,20 @@
 """Who may run sudo without a password on each darwin host, as its configuration evaluates (issue 698).
 
-Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
+Reads the host evaluations from `tests/host_readings.py`, which evaluates the flake from this
+checkout's git tree, so new files must be `git add`-ed first.
 Run: just agent-workflow-tests
 """
 import unittest
 
-from .test_verify_pending_units import evaluate, username
-
-APPLY = "c: u: c.security.sudo.extraConfig"
+from . import host_readings
 
 
 class HostSudo(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # pure: the required CI job runs on Linux, so no darwin build may be needed.
-        cls.got = {host: evaluate(f"darwinConfigurations.{host}", APPLY, pure=True) for host in ("eleven-m5", "mbp")}
-        cls.user = username()
+        # Read from a pure evaluation: the required CI job runs on Linux, so no darwin build may be needed.
+        cls.got = {host: host_readings.read(host, "sudo") for host in ("eleven-m5", "mbp")}
+        cls.user = host_readings.username()
 
     def rules(self, host):
         return [line.strip() for line in self.got[host].splitlines() if "NOPASSWD" in line]

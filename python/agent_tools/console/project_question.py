@@ -3,7 +3,7 @@
 Why. The console answers an owner's question about a registered project with one Claude Code
 client run in that project's folder, under the account the console chose. The session only reads.
 This module builds that session (routes, prompt, settings, argv) and runs it to one `Outcome`; the
-service (Task 3 of the plan) owns admission, the event log and the thread. Linux only: the
+service (Task 3 of the plan) owns admission, the event log and the thread. Linux and macOS: the
 session is a child of the console, started by `manager.run_in_own_group` under
 `manager.client_environment`, both reused and never copied. The manager's own model is not
 compared or changed (D1): the session names `--model sonnet` and nothing else changes.
@@ -41,7 +41,7 @@ cannot be read), then the reads paragraph (the git reads with their examples, an
 reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
 thread text, then `QUESTION_MARK` and the question (ADR-console-065).
 
-Records (ADR-console-075). An `Ask` may carry `records`, the encoded document of the console's own
+Records (ADR-console-082). An `Ask` may carry `records`, the encoded document of the console's own
 records for the project (None: none). The session's file is `records_path(ask)`: `SETTINGS_DIR`'s
 directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
 settings file with exactly `ask.records`, and removed with the settings file on every path once the
@@ -50,7 +50,7 @@ thread text, only with records. No permission rule is added: Read is already adm
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
-(`parse_keyed_request` also reads an optional `request_key`, ADR-console-075 D9).
+(`parse_keyed_request` also reads an optional `request_key`, ADR-console-082 D9).
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
@@ -61,13 +61,13 @@ which wins over any allow; `--tools` removes every other built-in tool, and Bash
 (the git reads need it even with no route). On top of those, a PreToolUse command hook
 (`project_question_hook`, run through `siblings.sibling_argv`, given the allowed argv and the
 repository, and with records also `private_dir(ask)`, the console's state directory, and
-`records_path(ask)`, which confine its reads to that one file: ADR-console-075) admits only reads, the bare declared commands and the plain git and gh reads;
+`records_path(ask)`, which confine its reads to that one file: ADR-console-082) admits only reads, the bare declared commands and the plain git and gh reads;
 `"onFailure": "block"` makes the pinned client treat a hook that errors, fails
 to start or times out as a block, because without it such a hook is non-blocking and the call would
 fall to the permission rules. The file lives in `SETTINGS_DIR` under the console's state (a 0700
 directory, the file 0600, written atomically) and is removed when the run ends.
 
-Argv. `launch_command` is None off Linux, else `claude-account run -p --model sonnet
+Argv. `launch_command` is None on a host `manager.supported` refuses, else `claude-account run -p --model sonnet
 --session-id <id> --permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools <tools>
 --output-format json --settings <file> <prompt>`. `--tools` is variadic: it is always followed by
 another option, so the prompt, which is last, is never swallowed into the tool list. The session id
@@ -82,7 +82,8 @@ stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-ac
 `cancel` (`STOPPED_TEXT`); a non-zero exit (the last non-empty stderr line); then the JSON on
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
 else `ANSWERED` with `answer_text`, which adds `NO_PRODUCTION_LINE` when no route is declared (D5).
-`asker_for(platform)` is `run_question` where the manager is supported, else None.
+`asker_for(platform)` is `run_question` on Linux and macOS (what `manager.supported` admits), else None
+(ADR-console-081: a project question runs wherever a manager does).
 
 Fold and answer shape (#1177). `asked_questions(events, known)` folds the two row kinds into each
 project's questions, a tuple of `AskedQuestion` in ascending `seq`. An asked row counts only with
@@ -128,7 +129,7 @@ lowercase hex digits; any other is a `ValueError`), and returns
 `(project_id, question, thread_id or None, request_key or None)`; `parse_request` returns its
 first three. The key names one request: an asked row carries `request_key` only when one was
 given, the fold keeps it only when it is a string fullmatching `REQUEST_KEY`, and the service asks
-a key once per project (ADR-console-075 D9).
+a key once per project (ADR-console-082 D9).
 """
 
 from __future__ import annotations

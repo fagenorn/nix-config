@@ -1,4 +1,4 @@
-# ADR-console-075 — A question session reads the console's own records of its project
+# ADR-console-082 — A question session reads the console's own records of its project
 
 - **Status:** accepted
 - **Decided in:** #1271

@@ -64,14 +64,18 @@ Wire format, one object:
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
      "activation": <activation line> | null,
      "spend": <spend view> | null,
-     "sharing": {"tailnet": <name> | null, "colleagues": [{"login", "projects"}, ...],
-                 "state": "off" | "unchecked" | "not_proxying" | "serving",
-                 "last_request": <guest-port reading> | null}}
+     "sharing": {"shared": <bool>, "tailnet": <this host's read name> | null,
+                 "colleagues": [{"login", "projects"}, ...],
+                 "state": "off" | "unreadable" | "unchecked" | "not_proxying" | "serving",
+                 "last_request": <guest-door reading> | null, "socket": <guest socket path> | null,
+                 "other_device_seen": <bool>}}
 
 `sharing` is the owner's access list for the guest door and its Serve state (#1237,
 `guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
-(`guest.scrub`). `last_request` is the last guest-port request's `guest.reading` (counts and flags,
-never a login), null before the first one.
+(`guest.scrub`). `last_request` is the last guest-door request's `guest.reading` (counts and flags,
+never a login; its `client` is a comparison with this host's own addresses, never an address), null
+before the first one. `other_device_seen` is true once any reading since the service began had `client`
+`other_device` (ADR-console-079), false after a restart.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
@@ -169,7 +173,9 @@ counts in `inbox_items` and the headline. Its entry is
     {"type": "inbox_item", "reason": "brief", "key": "brief/<sprint id>", "project_id",
      "sprint_id", "title", "version": <int>, "brief": {"title", "done", "excluded", "slices",
      "risks", "asks"}, "pictures": [{"id", "line", "pair"}], "answered": false,
-     "waiting_since": "<time the brief was sent>"}
+     "waiting_since": "<time the brief was sent>", "started_by": "<login>" | null}
+
+`started_by` is the login of the guest who stated the sprint's goal, null for the owner (#1263).
 
 `pictures` is `_picture_entries(brief.pictures)`, `[]` for a brief with none, each line cut to
 `MAX_PICTURE_LINE_CHARS` and never refused; `brief` holds the six parts only.
@@ -298,7 +304,8 @@ then that entry's `out_until` (null when unknown), else null. Digest and bring-b
 state without the quota. `view` reads no clock.
 
 `BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
-what the page offers. An approved or changes-asked brief is no inbox item; only registered
+what the page offers. An approved or changes-asked brief, or one of a sprint with a stop requested (the console
+refuses its decision), is no inbox item; only registered
 projects' briefs appear, as for sprints.
 
 Each open question of a shown sprint (`sprints.open_questions`; a registered project, as briefs) is
@@ -313,7 +320,24 @@ is none. Its entry is
                     "recommended": "<option>", "recommended_index": <int>,
                     "needs_words_index": [<int>, ...]}],
      "pictures": [{"id": "<picture id>", "line": "<text>", "pair": "before" | "after" | null}],
-     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
+     "look": null | {"issue", "pr", "head", "state": "open" | "moved" | "posting" | "failed",
+                     "line": <str>, "approve_index": <int> | null},
+     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>",
+     "started_by": "<login>" | null, "owner_only"?: true}
+
+`owner_only` is present, and true, only on a question the manager marked for the owner alone
+(#1263); a colleague never answers it.
+
+`look` (#1260) is null for a question that carries no look. For one that does, `approve_index` is the index
+among the logged options of the option that approves the head (the page never starts that option picked, so
+an approval is always the owner's own choice), and `state` is `open`
+(`line` is `answer.LOOK_APPROVES`: the console's own words naming the option that approves, the head and
+pull request it approves, so a manager's option text cannot hide that choosing it approves), `moved` (the pull request moved or ended before the owner approved; `line` is
+`answer.LOOK_MOVED`, or `answer.LOOK_CLOSED` when the found state is not open), `posting` (`line` is
+`answer.LOOK_RECORDING`) or `failed` (`line` is the recorded reason). Each question of
+`sprints.pending_looks` (an approval answered but not yet on the tracker) is an entry too, with
+`answered` true, `chosen` the option chosen and the `look` above; they are ordered with the open
+questions by `(at, sprint_id, round, index)` and counted in `inbox_items` and the headline.
 
 The texts are shown cut, never refused, though a round logged before the limits can exceed them
 (ADR-console-027): the ask and the headline to `MAX_ASK_CHARS` (140), `context` to
@@ -440,7 +464,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state_text": "<text>",
                       "ball": "manager" | "owner" | "nobody" | null,
                       "ball_text": "<text>" | null, "now_text": "<sentence>" | null,
-                      "stated_at", "age_text", "manager_text": <text> | null,
+                      "stated_at", "started_by": "<login>" | null, "age_text",
+                      "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
                                        | "stalled" | "unavailable",
                       "manager_until": "<time>" | null, "retry": <bool>,
@@ -476,7 +501,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>}
+                       "reply_at": "<time>" | null, "words": <str> | null, "new": <bool>,
+                       "by": "<login>" | null, "question": <str> | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -546,7 +572,8 @@ where a run's `done` reads `closed out` and any other run stage is that stage wi
 never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
-report's issues or its `inbox` numbers, plus the sprint's open questions. An open owner check (a
+report's issues or its `inbox` numbers, plus the sprint's open questions and its answered look cards whose approval is
+not yet on the tracker (`pending_looks`, #1260). An open owner check (a
 verification prompt or a held-issue review card, ADR-console-051, ADR-console-054) whose `blocking`
 list meets none of the sprint's open issues (report issues not landed, held, dropped or closed
 out) is not counted and is listed in `checks`
@@ -579,7 +606,7 @@ decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
-the report's phase is `done` and no question is open, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
+the report's phase is `done` and no question is open and no look approval is still to be recorded, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
 the movement reading is quiet, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
@@ -596,7 +623,7 @@ being one the client held and did not deliver), `NOW_DEAF_TEXT`; a listed sessio
 permission, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
 `drafting`); no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
-`NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
+`NOW_QUESTION_TEXT` with the first one's text; a waiting item (`waiting` above 0) while an answered look card's approval failed to post (#1260), `NOW_LOOK_RETRY_TEXT`, or is being recorded, `NOW_LOOK_RECORDING_TEXT`; any other waiting item,
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
 wait, `NOW_QUOTA_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
 (`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT`, `NOW_RELEASE_TEXT` and `NOW_LOCK_TEXT`
@@ -638,7 +665,7 @@ a session waiting for an answer or a permission reads "waiting for an answer" or
 permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`)
 and every older one whose reply is `new`, oldest first (so a reply to an old message is never
-cut); an approval the manager picked up without a reply is left out and takes no slot, while one
+cut); a look approval the console still holds (`Message.held`, #1260), the manager's `look-moved` notice (#1260) and an approval the manager picked up without a reply are left out and take no slot, while one
 it replied to stays, its reply `new` until a later look and listed in `new_replies`. `approval` is the sprint's earliest approval message as one `messages` entry (same members), whether or not `messages` shows it, else null: the read receipt the verify check reads, which the presentation filter must not hide. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered, else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
 sent, else `sent`; a nudge never changes it. The pick-up is the minute form (`PICKUP_MINUTE_TEXT`)
 exactly when `derive_view(..., nudges=True)` (default; the service passes whether it has a nudger)
@@ -712,7 +739,7 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from types import MappingProxyType
 
-from agent_tools.console import contract_draft, inbox, project_question
+from agent_tools.console import answer as owner_answer, contract_draft, inbox, project_question
 from agent_tools.console.activation import Activation
 from agent_tools.console.activation_run import LastRun
 from agent_tools.console.capacity import EMPTY
@@ -759,11 +786,13 @@ from agent_tools.console.sprints import (
     FINISHED_AFTER_MS,
     HELD,
     LANDED,
+    LOOK_FAILED,
     MAX_ASK_CHARS,
     MAX_CONTEXT_CHARS,
     MAX_OPTION_CHARS,
     MAX_PICTURE_LINE_CHARS,
     MESSAGE_APPROVED,
+    MESSAGE_LOOK_MOVED,
     NO_PROGRESS_TEXT,
     NUDGE_ACTION_TEXT,
     NONE,
@@ -777,6 +806,8 @@ from agent_tools.console.sprints import (
     NOW_DEAF_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
+    NOW_LOOK_RECORDING_TEXT,
+    NOW_LOOK_RETRY_TEXT,
     NOW_FAILED_START_TEXT,
     NOW_LOCK_TEXT,
     NOW_NO_PROGRESS_TEXT,
@@ -838,11 +869,13 @@ from agent_tools.console.sprints import (
     merge_refused,
     message_state,
     open_questions,
+    pending_looks,
     open_notices,
     open_owner_notices,
     progress_text,
     sprint_title,
     takes_notices,
+    takes_questions,
     unreachable,
 )
 from agent_tools.verification import verify_owner
@@ -943,7 +976,8 @@ ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {ne
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
 SHARING_OFF = MappingProxyType({
-    "tailnet": None, "colleagues": [], "state": "off", "last_request": None})
+    "shared": False, "tailnet": None, "colleagues": [], "state": "off", "last_request": None,
+    "socket": None, "other_device_seen": False})
 
 
 @dataclass(frozen=True)
@@ -1242,10 +1276,11 @@ def sprint_checks(state: SprintState, records: Iterable[InboxRecord]) -> list[In
 
 def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
     """How many open items wait on the sprint: `records` naming an issue its report names, minus
-    its check lines (`sprint_checks`), plus its open questions."""
+    its check lines (`sprint_checks`), plus its open questions and its answered look cards whose approval
+    is not yet on the tracker (`pending_looks`, #1260: a failed post waits on the owner's Retry)."""
     named = _sprint_named(state, records)
     checks = sprint_checks(state, named)
-    return len(named) - len(checks) + len(open_questions(state))
+    return len(named) - len(checks) + len(open_questions(state)) + len(pending_looks(state))
 
 
 @dataclass(frozen=True)
@@ -1518,7 +1553,8 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
         return DONE, DONE_TEXT
     if brief is None or brief.decision != APPROVED:
         return DRAFTING, DRAFTING_TEXT
-    if report is not None and report.phase == DONE and not open_questions(state):
+    if (report is not None and report.phase == DONE and not open_questions(state)
+            and not pending_looks(state)):
         return DONE, DONE_TEXT
     if waiting:
         return WAITING, WAITING_TEXT.format(n=waiting)
@@ -1532,6 +1568,14 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
     if report is None:
         return STARTING, STARTING_TEXT
     return ON_TRACK, ON_TRACK_TEXT
+
+
+def brief_pending(state: SprintState) -> bool:
+    """Whether the sprint's brief waits on a decision the console still takes: the one rule that
+    makes it an inbox item and the owner's ball (a sprint with a stop requested or one that takes
+    no question refuses the decision, so its brief is neither)."""
+    return (state.brief is not None and state.brief.decision == NONE and state.stop_at is None
+            and takes_questions(state))
 
 
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
@@ -1549,8 +1593,7 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     shows a held, undelivered peer message, #1229) waits on the owner too."""
     if ended_at(state) is not None:
         return None
-    brief = state.brief
-    if (waiting or deaf or (brief is not None and brief.decision == NONE) or state.stalled is not None
+    if (waiting or deaf or brief_pending(state) or state.stalled is not None
             or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
@@ -1610,6 +1653,12 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
     if questions := open_questions(state):
         return NOW_QUESTION_TEXT.format(question=questions[0].question)
     if waiting > 0:
+        # An approval the console holds is the owner's Retry on the page (#1260), never an answer on the tracker.
+        looks = pending_looks(state)
+        if any(question.look_state == LOOK_FAILED for question in looks):
+            return NOW_LOOK_RETRY_TEXT
+        if looks:
+            return NOW_LOOK_RECORDING_TEXT
         return NOW_DECISION_TEXT
     if state.stalled is not None:
         return NOW_STALLED_TEXT
@@ -1636,9 +1685,11 @@ def _is_new(message: Message, looked: str | None) -> bool:
 
 def _shown_messages(messages: Sequence[Message], looked: str | None) -> list[Message]:
     """The `SHOWN_MESSAGES` newest messages, plus any older one whose reply is new (#1086), once
-    every approval the manager picked up without a reply is left out: it takes no slot."""
-    kept = [m for m in messages
-            if not (m.kind == MESSAGE_APPROVED and m.read_at is not None and m.reply is None)]
+    every approval the manager picked up without a reply is left out: it takes no slot. A held look
+    approval (#1260) is left out too: it was never offered to the manager, so it is neither sent nor
+    unpicked-up until it is released."""
+    kept = [m for m in messages if not m.held and m.kind != MESSAGE_LOOK_MOVED
+            and not (m.kind == MESSAGE_APPROVED and m.read_at is not None and m.reply is None)]
     first = len(kept) - SHOWN_MESSAGES
     return [m for i, m in enumerate(kept) if i >= first or _is_new(m, looked)]
 
@@ -1657,7 +1708,7 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
             "reply_at": message.reply_at, "words": message.words,
-            "new": _is_new(message, looked)}
+            "new": _is_new(message, looked), "by": message.by, "question": message.question}
 
 
 def _approval_entry(state: SprintState, now_ms: int | None, minute: bool, retry: bool,
@@ -1739,6 +1790,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                                sprint_wait(state, now_ms, listed, waits), failed_start=failed,
                                deaf=deaf),
         "stated_at": state.stated_at,
+        "started_by": state.started_by,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
         "manager_state": manager_state,
@@ -1970,13 +2022,35 @@ def _brief_entry(sprint: SprintState) -> dict:
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint), "version": brief.version, "brief": brief.parts,
             "pictures": _picture_entries(brief.pictures),
-            "answered": False, "waiting_since": brief.sent_at}
+            "answered": False, "waiting_since": brief.sent_at,
+            "started_by": sprint.started_by}
+
+
+def _look_entry(question: Question) -> dict | None:
+    look = question.look
+    if look is None:
+        return None
+    state, line = "open", owner_answer.LOOK_APPROVES.format(
+        option=cut(look.approve, MAX_OPTION_CHARS), head=look.head[:7], pr=look.pr, issue=look.issue)
+    if question.look_state == "moved":
+        state = "moved"
+        line = (owner_answer.LOOK_MOVED.format(found=(question.look_found or "")[:7], head=look.head[:7])
+                if question.look_found_state == "open" and question.look_found is not None
+                else owner_answer.LOOK_CLOSED.format(state=question.look_found_state))
+    elif question.look_state == "posting":
+        state, line = "posting", owner_answer.LOOK_RECORDING.format(head=look.head[:7], issue=look.issue)
+    elif question.look_state == "failed":
+        state, line = "failed", question.look_reason
+    approve = question.options.index(look.approve) if look.approve in question.options else None
+    return {"issue": look.issue, "pr": look.pr, "head": look.head, "state": state, "line": line,
+            "approve_index": approve}
 
 
 def _question_entry(sprint: SprintState, question: Question) -> dict:
     ask = cut(question.question, MAX_ASK_CHARS)
     context = question.context
-    return {"type": "inbox_item", "reason": "question",
+    answered = question.answer is not None
+    entry = {"type": "inbox_item", "reason": "question",
             "key": f"question/{sprint.sprint_id}/{question.round_id}/{question.index}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
             "title": sprint_title(sprint),
@@ -1986,13 +2060,19 @@ def _question_entry(sprint: SprintState, question: Question) -> dict:
             "more_questions": 0,
             "questions": [{"question": ask,
                            "options": [cut(o, MAX_OPTION_CHARS) for o in question.options],
-                           "chosen": None, "recommended": cut(question.recommended,
+                           "chosen": (cut(question.chosen, MAX_OPTION_CHARS)
+                                      if question.chosen is not None else None),
+                           "recommended": cut(question.recommended,
                                                               MAX_OPTION_CHARS),
                            "recommended_index": question.options.index(question.recommended),
                            "needs_words_index": [i for i, option in enumerate(question.options)
                                                  if option in question.needs_words]}],
-            "pictures": _picture_entries(question.pictures),
-            "items": [], "answers": [], "answered": False, "waiting_since": question.at}
+            "pictures": _picture_entries(question.pictures), "look": _look_entry(question),
+            "items": [], "answers": [], "answered": answered, "waiting_since": question.at,
+            "started_by": sprint.started_by}
+    if question.owner_only:
+        entry["owner_only"] = True
+    return entry
 
 
 def _stall_entry(sprint: SprintState) -> dict:
@@ -2147,10 +2227,10 @@ def derive_view(
             kept.setdefault(sprint.project_id, []).append(sprint)
 
     briefs = sorted((s for group in drafted.values() for s in group
-                     if s.brief is not None and s.brief.decision == NONE),
+                     if brief_pending(s)),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
-                    for q in open_questions(s)),
+                    for q in (*open_questions(s), *pending_looks(s))),
                    key=lambda pair: (pair[1].at, pair[0].sprint_id, pair[1].round_id,
                                      pair[1].index))
     stalls = sorted((s for group in drafted.values() for s in group if s.stalled is not None),

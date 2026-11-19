@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion | --account-names]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --remote-signin | --pin | --page-remove | --exclusion | --account-names] [--after-seq N | --after-commit SHA] [--profile NAME] [--log PATH]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -69,6 +69,10 @@ object is `{"status": "not_deployed"}`, exit 75; one whose `inbox.open` is not a
 the page yet). Otherwise a profile of S not in O is `{"status": "met", "profiles": <S minus O,
 sorted>}`, exit 0, and when every profile of S is in O `{"status": "not_met", "profiles": <S,
 sorted>}`, exit 1.
+`--after-seq N` reads only log rows whose `seq` is above N (a log carried over from another host
+keeps its rows below N), and for `--page-signin` it also requires a `signin.ended` row with outcome
+`signed_in` for the profile above N, read from `--log` or the console's own log (`{"status":
+"no_log"}`, exit 75, when it cannot be read).
 
 `--page-add` (#1027, #1037, exclusive with the other modes, `--max-age` ignored) meets when the
 console's own event log shows an account added from the page whose sign-in the page then started.
@@ -83,6 +87,29 @@ so any such row is from a console that has that merge. A non-empty set is `{"sta
 "profiles": [<set, sorted>]}`, exit 0; an empty one `{"status": "pending"}`, exit 75. A log that is
 missing, is not a database or lacks the `events` table is `{"status": "no_log"}`, exit 75. It never
 exits 1: a row that is not there yet may still be recorded.
+For `--page-add`, `--after-seq N` reads only log rows whose `seq` is above N (a log carried over
+from another host keeps its rows below N), and the add and the start must both be above N.
+
+`--remote-signin --profile NAME` (#1323, exclusive with the other modes, `--max-age` ignored, `--after-seq`
+not allowed, `--profile` required) meets when the console's own event log shows the sign-in of the
+profile NAME, which the operator names as the one signed in from a browser on another machine,
+finished by the code of the client's manual link pasted into the page. The console cannot see where
+the owner's browser is (a page read over an SSH forward reaches it from the loopback), so the
+operator's naming is the identification of the remote attempt, and the pasted code is what the log
+shows of it: a sign-in finished with no code (through a forward of the return port, or a browser on
+the console's own machine) is not met. It never asks the console, so the `--url` is not used; the
+log is `--log PATH` or the console's own, opened read-only as for `--page-add`. It is met when, for
+one attempt A (the `seq` of the start row), the log holds a `signin.acted` row at `seq` A whose
+payload has `by` `owner`, `action` `start`, `outcome` `started` and `profile` NAME, a
+`signin.acted` row with `by` `owner`, `action` `code`, `outcome` `sent` and `profile` NAME between
+the start and the end, and a `signin.ended` row for NAME with `attempt` A and `outcome`
+`signed_in`. A code counts only for the latest start of its profile. `--after-commit SHA` (40
+lowercase hex) keeps only rows whose `at` is strictly after the commit's committer time, read with
+`git show -s --format=%cI SHA` in the current directory; the start, the code and the end must all
+be later. Met is `{"status": "met", "profile": NAME, "route": "code"}`, exit 0; otherwise
+`{"status": "pending"}`, exit 75; an unreadable log `{"status": "no_log"}`, exit 75; a commit time
+Git cannot give (a failure, a timeout or an unparsable time) `{"status": "no_commit"}`, exit 75. It
+never exits 1, and it only reads: no request, no write.
 
 `--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
 manager has started under a profile while the owner's page pin of that profile was in force. It
@@ -117,7 +144,9 @@ names it and `profiles_dir() / P` does not exist (`os.path.lexists`), where `pro
 `$CLAUDE_ACCOUNTS_DIR` or else `~/.claude-accounts`, then `/profiles`. Some gone is `{"status":
 "met", "profiles": [<gone, sorted>]}`, exit 0; otherwise `{"status": "not_met", "profiles":
 [<removed, sorted>]}`, exit 1. It writes nothing, sends one GET at most and touches the accounts
-directory only to look for a name.
+directory only to look for a name. `--after-seq N` reads only log rows whose `seq` is above N (a
+log carried over from another host keeps its rows below N), so the add and the removal must both be
+above N.
 
 `--account-names` (#1036, exclusive with the other modes, `--max-age` ignored) meets when every
 signed-in profile carries the name its client reports and the Sign in again action. It decides in
@@ -144,7 +173,9 @@ import argparse
 import http.client
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from collections.abc import Callable
@@ -158,6 +189,7 @@ DEFAULT_MAX_AGE = 600
 LOOPBACK = ("127.0.0.1", "localhost")
 TIMEOUT = 5.0
 NOT_YET = 75
+GIT_TIMEOUT = 10
 # The entries the launcher links into a profile: the `SHARED=(...)` array of claude-account
 # (kept for the accounts sandbox's snapshot, which lists a profile's shared entries).
 SHARED = ("settings.json", "CLAUDE.md", "keybindings.json", "skills", "agents", "commands",
@@ -349,8 +381,10 @@ def exclusion_verdict(rows: list[tuple[str, object]], chosen: object) -> tuple[i
     return 0, {"status": "met", **result}
 
 
-def page_signin_verdict(body: bytes) -> tuple[int, dict]:
-    """Met when a profile signed in from the page has no open sign-in item, else not yet or not met."""
+def page_signin_verdict(body: bytes, signed_in_after: set[str] | None = None) -> tuple[int, dict]:
+    """Met when a profile signed in from the page has no open sign-in item, else not yet or not met.
+
+    A set `signed_in_after` limits the signed-in profiles to those it holds."""
     try:
         document = json.loads(body)
     except ValueError:
@@ -363,6 +397,8 @@ def page_signin_verdict(body: bytes) -> tuple[int, dict]:
         return NOT_YET, {"status": "no_inbox"}
     signed_in = sorted(name for name, run in runs.items()
                        if isinstance(run, dict) and run.get("state") == "signed_in")
+    if signed_in_after is not None:
+        signed_in = [name for name in signed_in if name in signed_in_after]
     if not signed_in:
         return NOT_YET, {"status": "pending"}
     cleared = [name for name in signed_in if f"signin/{name}" not in asks]
@@ -409,8 +445,44 @@ def profiles_dir() -> Path:
     return Path(root) / "profiles"
 
 
-def page_add_verdict(log: Path) -> tuple[int, dict]:
+def _after(after_seq: int | None) -> tuple[str, tuple[int, ...]]:
+    """The SQL tail and its parameters that keep only rows above `after_seq`."""
+    if after_seq is None:
+        return "", ()
+    return " AND seq > ?", (after_seq,)
+
+
+def signed_in_after(log: Path, after_seq: int) -> set[str] | None:
+    """The profiles with a `signin.ended` `signed_in` row above `after_seq`; None if unreadable."""
+    try:
+        connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT payload FROM events WHERE kind = 'signin.ended' AND seq > ? ORDER BY seq",
+            (after_seq,)).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    profiles: set[str] = set()
+    for (text,) in rows:
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            continue
+        profile = payload.get("profile") if isinstance(payload, dict) else None
+        if (isinstance(payload, dict) and payload.get("outcome") == "signed_in"
+                and isinstance(profile, str) and profile):
+            profiles.add(profile)
+    return profiles
+
+
+def page_add_verdict(log: Path, after_seq: int | None = None) -> tuple[int, dict]:
     """Met when the log holds an owner `account.added` row and a later page sign-in start of it."""
+    tail, bound = _after(after_seq)
     try:
         connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
     except (sqlite3.Error, OSError):
@@ -418,8 +490,8 @@ def page_add_verdict(log: Path) -> tuple[int, dict]:
     try:
         connection.execute("PRAGMA query_only = ON")
         rows = connection.execute(
-            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'signin.acted') "
-            "ORDER BY seq").fetchall()
+            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'signin.acted')"
+            f"{tail} ORDER BY seq", bound).fetchall()
     except sqlite3.Error:
         return NOT_YET, {"status": "no_log"}
     finally:
@@ -444,12 +516,34 @@ def page_add_verdict(log: Path) -> tuple[int, dict]:
     return NOT_YET, {"status": "pending"}
 
 
-REMOVED_OUTCOMES = ("removed", "removed_signed_out_already")
+def commit_time(sha: str) -> datetime | None:
+    """The committer time of `sha` in the current directory; None when Git cannot give it."""
+    try:
+        done = subprocess.run(["git", "show", "-s", "--format=%cI", sha], capture_output=True,
+                              text=True, timeout=GIT_TIMEOUT)
+        if done.returncode != 0:
+            return None
+        return datetime.fromisoformat(done.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
 
 
-def page_remove_verdict(log: Path, body_of: Callable[[], bytes | None],
-                        profiles: Path) -> tuple[int, dict]:
-    """Met when the log shows an owner add then removal of a profile the view and disk lack."""
+def _later(text: object, after: datetime | None) -> bool:
+    """Whether the row time `text` parses and is strictly after `after` (always, when None)."""
+    if after is None:
+        return True
+    try:
+        at = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return False
+    if at.tzinfo is None or after.tzinfo is None:
+        return False
+    return at > after
+
+
+def remote_signin_verdict(log: Path, profile: str,
+                          after: datetime | None = None) -> tuple[int, dict]:
+    """Met when the log shows an owner start of `profile`, its pasted code and a signed-in end of that attempt."""
     try:
         connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
     except (sqlite3.Error, OSError):
@@ -457,8 +551,55 @@ def page_remove_verdict(log: Path, body_of: Callable[[], bytes | None],
     try:
         connection.execute("PRAGMA query_only = ON")
         rows = connection.execute(
-            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'account.removal') "
-            "ORDER BY seq").fetchall()
+            "SELECT seq, at, kind, payload FROM events "
+            "WHERE kind IN ('signin.acted', 'signin.ended') ORDER BY seq").fetchall()
+    except sqlite3.Error:
+        return NOT_YET, {"status": "no_log"}
+    finally:
+        connection.close()
+    starts: set[int] = set()
+    latest: int | None = None
+    coded: set[int] = set()
+    for seq, at, kind, text in rows:
+        if not _later(at, after):
+            continue
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(payload, dict) or payload.get("profile") != profile:
+            continue
+        if kind == "signin.acted" and _owner(payload):
+            if payload.get("action") == "start" and payload.get("outcome") == "started":
+                starts.add(seq)
+                latest = seq
+            elif (payload.get("action") == "code" and payload.get("outcome") == "sent"
+                  and latest is not None):
+                coded.add(latest)
+        elif kind == "signin.ended" and payload.get("outcome") == "signed_in":
+            attempt = payload.get("attempt")
+            if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt in starts:
+                if attempt in coded:
+                    return 0, {"status": "met", "profile": profile, "route": "code"}
+    return NOT_YET, {"status": "pending"}
+
+
+REMOVED_OUTCOMES = ("removed", "removed_signed_out_already")
+
+
+def page_remove_verdict(log: Path, body_of: Callable[[], bytes | None],
+                        profiles: Path, after_seq: int | None = None) -> tuple[int, dict]:
+    """Met when the log shows an owner add then removal of a profile the view and disk lack."""
+    tail, bound = _after(after_seq)
+    try:
+        connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return NOT_YET, {"status": "no_log"}
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'account.removal')"
+            f"{tail} ORDER BY seq", bound).fetchall()
     except sqlite3.Error:
         return NOT_YET, {"status": "no_log"}
     finally:
@@ -508,6 +649,12 @@ def pin_verdict(body: bytes) -> tuple[int, dict]:
     return 0, {"status": "met", "profiles": sorted(set(launches))}
 
 
+def _sha(text: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", text):
+        raise argparse.ArgumentTypeError("must be 40 lowercase hex digits")
+    return text
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
@@ -533,6 +680,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--page-add", action="store_true",
                       help="require the console's log to show an account added from the page "
                            "and that profile's sign-in started from the page")
+    mode.add_argument("--remote-signin", action="store_true",
+                      help="require the console's log to show the sign-in of the profile named "
+                           "by --profile, finished by a pasted code")
     mode.add_argument("--pin", action="store_true",
                       help="require a new session or manager started under a profile while the "
                            "owner's pin of it was in force, read from the console's log")
@@ -544,8 +694,16 @@ def build_parser() -> argparse.ArgumentParser:
                       help="require every signed-in profile to carry the account name its client "
                            "reports and the Sign in again action; prints no name")
     parser.add_argument("--log", type=Path, default=None,
-                        help="the console event log for --page-add and --page-remove "
-                             "(default: the console's own)")
+                        help="the console event log for --page-add and --page-remove, and for "
+                             "--page-signin with --after-seq (default: the console's own)")
+    parser.add_argument("--after-seq", type=_positive, default=None,
+                        help="read only log rows whose seq is above this, for --page-signin, "
+                             "--page-add and --page-remove")
+    parser.add_argument("--after-commit", type=_sha, default=None,
+                        help="read only log rows stamped after this commit's time, for "
+                             "--remote-signin")
+    parser.add_argument("--profile", default=None,
+                        help="the profile signed in from another machine, for --remote-signin")
     return parser
 
 
@@ -564,14 +722,33 @@ def _exclusion(url: str, body: bytes) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.after_seq is not None and not (args.page_signin or args.page_add or args.page_remove):
+        parser.error("--after-seq applies to --page-signin, --page-add and --page-remove only")
+    if args.after_commit is not None and not args.remote_signin:
+        parser.error("--after-commit applies to --remote-signin only")
+    if args.profile is not None and not args.remote_signin:
+        parser.error("--profile applies to --remote-signin only")
+    if args.remote_signin and not args.profile:
+        parser.error("--remote-signin needs --profile")
+    if args.remote_signin:
+        after = None
+        if args.after_commit is not None:
+            after = commit_time(args.after_commit)
+            if after is None:
+                print(json.dumps({"status": "no_commit"}, sort_keys=True))
+                return NOT_YET
+        code, result = remote_signin_verdict(args.log or default_log(), args.profile, after)
+        print(json.dumps(result, sort_keys=True))
+        return code
     if args.page_add:
-        code, result = page_add_verdict(args.log or default_log())
+        code, result = page_add_verdict(args.log or default_log(), args.after_seq)
         print(json.dumps(result, sort_keys=True))
         return code
     if args.page_remove:
         code, result = page_remove_verdict(args.log or default_log(), lambda: fetch(args.url),
-                                           profiles_dir())
+                                           profiles_dir(), args.after_seq)
         print(json.dumps(result, sort_keys=True))
         return code
     body = fetch(args.url)
@@ -582,6 +759,14 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
+    if args.page_signin and args.after_seq is not None:
+        ended = signed_in_after(args.log or default_log(), args.after_seq)
+        if ended is None:
+            print(json.dumps({"status": "no_log"}, sort_keys=True))
+            return NOT_YET
+        code, result = page_signin_verdict(body, ended)
+        print(json.dumps(result, sort_keys=True))
+        return code
     if args.exclusion:
         return _exclusion(args.url, body)
     if args.account_names:

@@ -18,7 +18,8 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import approve, folder_trust, register, register_check, service, signin
+from agent_tools.console import (
+    approve, folder_trust, register, register_check, service, signin, sprints)
 from agent_tools.console import event_log
 from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
@@ -26,8 +27,8 @@ from agent_tools.system.forge_api import ForgeError
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_register_service import (
-    DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, Fake, answer_of, git,
-    real_home_state, reconcile_repository)
+    DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, Fake, Held, answer_of,
+    assert_freed, assert_held, closing, git, real_home_state, reconcile_repository)
 
 PATH = "/api/plan-approve"
 RETRY_PATH = "/api/adoption-register"
@@ -1026,6 +1027,22 @@ class AdoptionPollTest(ApproveCase):
 
 
 class PlanApproveCloseTest(ApproveCase):
+    def test_a_registration_queued_behind_a_kept_copy_starts_no_discard_after_the_stop(self):
+        fake = self.answer_after_a_failed_apply()
+        self.kept(PID_B)
+        queued = []
+        self.kwargs["dispatch"] = queued.append
+        self.restart()
+        self.assertEqual(self.post({"path": str(self.repo)})[0], 204)
+        self.assertEqual(len(queued), 1)
+        before = list(fake.order)
+        closer, errors = closing(self.svc)
+        assert_held(self, closer)
+        queued[0]()
+        assert_freed(self, closer, errors)
+        self.assertEqual(fake.order, before)
+        self.assertIsNone(self.svc._registering)
+
     def test_closing_between_the_push_and_the_pull_request_opens_nothing_and_resumes(self):
         self.pusher.wait_for_stop = True
         fake = self.ready(apply_result=APPLIED)
@@ -1082,6 +1099,91 @@ class PlanApproveCloseTest(ApproveCase):
         self.assertEqual(shown["adoption"]["url"], URL)
         self.assertEqual(len(self.opens()), 1)
         self.assertEqual(len(fake.applied), 1)
+
+
+    def test_an_approval_accepted_before_the_stop_holds_close(self):
+        self.ready(apply_result=APPLIED)
+        queued = []
+        self.svc._approval_dispatch = queued.append
+        self.assertEqual(self.approve_plan()[0], 204)
+        self.assertEqual(len(queued), 1)
+        closer, errors = closing(self.svc)
+        assert_held(self, closer)
+        queued[0]()
+        assert_freed(self, closer, errors)
+        self.assertIsNone(self.svc._registering)
+
+    def test_a_failed_approval_thread_start_lists_no_worker(self):
+        self.ready(apply_result=APPLIED)
+        original = threading.Thread.start
+
+        def start(thread):
+            if thread.name == service.APPROVAL_THREAD:
+                raise RuntimeError("can't start new thread")
+            return original(thread)
+
+        with mock.patch.object(threading.Thread, "start", start):
+            status = self.approve_plan()[0]
+        self.assertEqual(status, 500)
+        self.assertEqual(self.svc._approval_workers, [])
+        self.assertIsNone(self.svc._registering)
+        self.svc.close()
+
+
+class CancelReservationTest(CancelChecks, ApproveCase):
+    """A cancel keeps its reservation until its row is in the log (#1330)."""
+
+    def setUp(self):
+        super().setUp()
+        self.arrange_profiles()
+
+    def start(self, fake, **kwargs):
+        return super().start(fake, **{**self.trust, **kwargs})
+
+    def test_the_reservation_is_held_while_the_cancellation_is_appended(self):
+        self.ready(apply_result=SIGNING)
+        self.run_approval("apply_failed")
+        self.kept(PID_B)
+        held = []
+        append = self.svc.log.append
+
+        def recording(events):
+            if any(event[0] == event_log.REGISTRATION_CANCELLED for event in events):
+                held.append(self.svc._registering)
+            return append(events)
+
+        with mock.patch.object(self.svc.log, "append", recording):
+            self.assertEqual(self.cancel({"root": str(self.repo)})[::2], (204, b""))
+        self.assertEqual(held, [str(self.repo)])
+        self.assertIsNone(self.svc._registering)
+
+
+class CancelCloseTest(CancelChecks, ApproveCase):
+    """Close waits for the discard of a Cancel registration, which runs on the request's own thread (#1330)."""
+
+    def setUp(self):
+        super().setUp()
+        self.arrange_profiles()
+
+    def start(self, fake, **kwargs):
+        return super().start(fake, **{**self.trust, **kwargs})
+
+    def test_close_waits_for_the_discard_of_a_cancel(self):
+        held = self.answer_after_a_failed_apply(fake_class=Held, hold="discard")
+        self.addCleanup(held.release.set)
+        git(self.repo, "branch", approve.branch_of(PID_B))
+        answers = []
+        request = threading.Thread(target=lambda: answers.append(
+            self.cancel({"root": str(self.repo)})))
+        request.start()
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        assert_held(self, closer)
+        held.release.set()
+        assert_freed(self, closer, errors)
+        request.join(10)
+        self.assertFalse(request.is_alive())
+        self.assertEqual(answers[0][0], 204)
 
 
 class TrustGrantTest(ApproveCase):
@@ -1639,6 +1741,20 @@ class PlanApproveRealTest(ApproveCase):
             ("open", "fixture/console-approve", branch, "main",
              "Adopt repo onto the agent platform", approve.body(self.planned))])
 
+    def test_a_real_apply_and_its_pull_request_run_no_linux_only_command(self):
+        shims = self.parent / "shims"
+        shims.mkdir()
+        marker = self.parent / "linux-tool-ran"
+        for name in ("systemd-run", "systemctl"):
+            shim = shims / name
+            shim.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" >> {marker}\nexit 1\n")
+            shim.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}):
+            self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        self.assertEqual(self.steps()[-1], "opened")
+        self.assertEqual(len(self.opens()), 1)
+        self.assertFalse(marker.exists())
+
     def test_a_plan_that_drifted_since_it_was_planned_is_refused_in_plain_words_and_nothing_is_pushed(self):
         (self.repo / ".claude/late.md").write_text("# late\n")
         git(self.repo, "add", "-A")
@@ -1743,6 +1859,18 @@ class MergedRegistrationTest(ApproveCase):
         self.assertEqual(self.results(), ["refused", "registered"])
         self.assertEqual(self.retry_items(), [])
         self.assertTrue(self.listed("o/r"))
+
+    def test_a_retry_asked_after_the_stop_is_refused(self):
+        self.merged(NO_REMOTE)
+        self.poll("merged")
+        calls = len(self.register_calls())
+        self.assertEqual(len(self.retry_items()), 1)
+        self.svc._stop.set()
+        with self.assertRaises(sprints.Refused) as caught:
+            self.svc.retry_registration(PID_B)
+        self.assertEqual(str(caught.exception), register.STOPPING)
+        self.assertNotIn(PID_B, self.svc._enrolling)
+        self.assertEqual(len(self.register_calls()), calls)
 
     def test_a_retry_is_refused_in_order_and_runs_nothing(self):
         fake = self.merged(NO_REMOTE)

@@ -14,7 +14,7 @@ project's GitHub repository as `owner/name`, or the empty string when its contra
 `tool_name` and `tool_input`, and `cwd` when the client gives one. `argv[3]` and `argv[4]`, given
 together or not at all, are the console's private directory and the question's own records file
 (`parse_confinement`, `ValueError` unless both are absolute and the file lies strictly inside the
-directory); they are the confinement of #1271 and ADR-console-075. The confinement also holds the
+directory); they are the confinement of #1271 and ADR-console-082. The confinement also holds the
 transcript stores (`transcript_dirs`: `projects` under `$CLAUDE_CONFIG_DIR`, under `~/.claude` and under
 every profile of `$CLAUDE_ACCOUNTS_DIR`, default `~/.claude-accounts`), read from the hook's own
 environment: the profiles share one transcript store, and a transcript holds every tool result of a
@@ -65,7 +65,7 @@ this order:
 9. A command whose first word, by basename, is `git` or `gh` and was not admitted: `reads_denied`.
 10. Anything else is `NO_COMMANDS` when `allowed` is empty and `COMMAND_DENIED` otherwise.
 
-The confinement (#1271, ADR-console-075 D2). With a confinement the only file under its private
+The confinement (#1271, ADR-console-082 D2). With a confinement the only file under its private
 directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
 (symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
 directory or a transcript store, lies inside one, or is an ancestor of one; a reach is

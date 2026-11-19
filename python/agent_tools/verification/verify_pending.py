@@ -23,8 +23,8 @@ due and posts, labels, files and runs nothing. Stdout is one `json.dumps(line, s
 line, each `{repo, issue, check, ac, state, reason}`, with `issue`, `check` and `ac` null for a
 project or issue level line. The states are `due`, `pending`, `pass`, `fail`, `hit`, `miss`, `expired`,
 `rejected`, `closed` and `skipped`; the reasons are closed (`due`, `changed`, `unchanged`,
-`resolved`, `verified`, `not_verified`, `not_this_host`, `lost_contest`, `owner_check`,
-`effects_live`, `effects_paid`, `command_not_verification`, `not_yet`, `timeout`,
+`resolved`, `verified`, `not_verified`, `not_this_host`, `host_retired`, `lost_contest`,
+`owner_check`, `effects_live`, `effects_paid`, `command_not_verification`, `not_yet`, `timeout`,
 `exit_unexpected`, `fail_ask`, `no_block`, `block_invalid`, `block_changed`, `project_unresolved`,
 `tracker_not_github`, `forge_error`, `runner_untrusted`, `owner_asked`, `owner_waiting`,
 `owner_ambiguous`, `owner_answered`, `owner_waived`, plus the `when` reasons that name what is

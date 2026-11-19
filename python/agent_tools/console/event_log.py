@@ -24,10 +24,18 @@ Three kinds record what the owner says to a sprint and what comes of it (#889): 
 `KEPT_KINDS`; `SPRINT_NUDGED` (`sprint.nudged`, the record of an attempt to reach the manager) is
 not, and retention removes it like any other row.
 
+A guest's goal, approval, reply, message and answer rows carry `by`, the guest's normal login
+(#1263); an owner's row carries none.
+
 Two kinds record a manager's questions and the owner's answers (#891): `QUESTIONS_ASKED`
 (`questions.asked`) and `QUESTION_ANSWERED` (`question.answered`), both in `KEPT_KINDS`.
 `QUESTION_WITHDRAWN` (`question.withdrawn`, #1099, kept) records a manager taking back an
 open question.
+
+One kind records what the console did about a look card's approval (#1260): `LOOK_RECORDED`
+(`look.recorded`, kept, payload `sprint_id`, `round`, `index` and `outcome`, `moved`, `posted` or
+`failed`, with the head it found, the comment it posted or the reason it could not), so a restart
+never loses a posted approval or reopens a held answer.
 
 Two kinds record a manager's notices (#1117): `NOTICE_POSTED` (`notice.posted`) and
 `NOTICE_WITHDRAWN` (`notice.withdrawn`), both in `KEPT_KINDS`, so the retention pass never drops
@@ -125,7 +133,7 @@ window opens), so retained hooks keep their profile; once no hook of the session
 that row is removed like any other.
 
 Three kinds record the access list the owner keeps for the guest door (#1237): `SHARING_TAILNET`
-(`sharing.tailnet`, `{"tailnet"}`), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
+(`sharing.tailnet`, `{"shared"}`; a legacy `{"tailnet"}` row still folds to on), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
 and `SHARING_REMOVED` (`sharing.removed`, `{"login"}`). None is in `KEPT_KINDS`, but the retention
 pass leaves, whatever its age, the newest tailnet row and, for each login, the newest colleague or
 removed row when it is a colleague row, the rows `guest.access_list` folds by, so the folded list is
@@ -138,14 +146,15 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (10) once opened: version 0 is created
-as schema 10, versions 1, 2, 3, 4, 5, 6, 7, 8 and 9 are migrated to 10 in one transaction each and
+`PRAGMA user_version` is `SCHEMA_VERSION` (11) once opened: version 0 is created
+as schema 11, versions 1, 2, 3, 4, 5, 6, 7, 8, 9 and 10 are migrated to 11 in one transaction each and
 keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
 """
 
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -153,7 +162,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
+LOGIN_MAX = 254
+_LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
@@ -177,6 +188,7 @@ SPRINT_NUDGED = "sprint.nudged"
 QUESTIONS_ASKED = "questions.asked"
 QUESTION_ANSWERED = "question.answered"
 QUESTION_WITHDRAWN = "question.withdrawn"
+LOOK_RECORDED = "look.recorded"
 NOTICE_POSTED = "notice.posted"
 NOTICE_WITHDRAWN = "notice.withdrawn"
 NOTICE_NUDGED = "notice.nudged"
@@ -215,10 +227,10 @@ SHARING_COLLEAGUE = "sharing.colleague"
 SHARING_REMOVED = "sharing.removed"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
-# kind, the three message kinds, the three question kinds, the two notice kinds, the
-# closing kind, the stop request and the stop's completion) are never removed: not by the
-# retention pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7, 8, 9
-# and 10).
+# kind, the three message kinds, the three question kinds, the look record, the two notice kinds,
+# the closing kind, the stop request and the stop's completion) are never removed: not by the
+# retention pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7, 8, 9, 10
+# and 11).
 # `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
 # than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
 # `MANAGER_WOKEN`, `MANAGER_STALLED`, `MANAGER_NUDGED`, `MANAGER_NO_PROGRESS`), nor is
@@ -227,7 +239,7 @@ KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
                         SPRINT_REPORTED,
                         SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED,
-                        QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN,
+                        QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN, LOOK_RECORDED,
                         NOTICE_POSTED, NOTICE_WITHDRAWN,
                         SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED})
 
@@ -269,12 +281,12 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schemas 3, 4, 5, 6, 7, 8, 9 and 10 add to schema 2: the delete trigger also refuses
+# What schemas 3, 4, 5, 6, 7, 8, 9, 10 and 11 add to schema 2: the delete trigger also refuses
 # every row of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
 # brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the closing kinds
 # and the stop's completion, schema 8 the question kinds, schema 9 the question withdrawal,
-# schema 10 the notice kinds).
+# schema 10 the notice kinds, schema 11 the look record).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
 _KEPT = (
@@ -315,6 +327,13 @@ def cancelled_registration(event: Event) -> tuple[str, str] | None:
     return (root, plan_id)
 
 
+def normal_login(text: object) -> str | None:
+    if (not isinstance(text, str) or len(text) > LOGIN_MAX or not text.isascii()
+            or _LOGIN.fullmatch(text) is None):
+        return None
+    return text.lower()
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -344,7 +363,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version in (2, 3, 4, 5, 6, 7, 8, 9):
+        elif version in (2, 3, 4, 5, 6, 7, 8, 9, 10):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -581,6 +582,15 @@ class OwnerWaitTest(unittest.TestCase):
         self.assertIsNone(waits[0].until)
         self.assertEqual(world.argvs("gh"), [])
 
+    def test_an_ask_bound_only_to_the_retired_host_has_no_wait_but_a_listed_host_keeps_it(self):
+        world = world_with(self)
+        when = {"not_before": "2026-11-18T10:00:00+00:00"}
+        for host, expected in (("anis-desktop", []), (["anis-desktop"], []),
+                               (["anis-desktop", "mbp"], ["not_before"]), ("mbp", ["not_before"])):
+            with self.subTest(host=host):
+                waits = self.waits(world, self.asking(when, host=host))
+                self.assertEqual([w.reason for w in waits], expected)
+
     def test_a_due_prompted_check_does_not_wait(self):
         world = world_with(self)
         ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
@@ -1105,6 +1115,10 @@ def ok_check(**over):
     return check(run={"command": "check-ok"}, **over)
 
 
+RETIRED = {"old-box": "new-box"}
+HOLD_LATER = {"not_before": "2030-01-01T00:00:00+00:00"}
+
+
 class PassBase(unittest.TestCase):
     def setUp(self):
         self.world = world_with(self, "verify-ok", "verify-bad", "verify-later", "darwin-version")
@@ -1124,6 +1138,14 @@ class PassBase(unittest.TestCase):
         patch = mock.patch.object(vx, "workspace", self.fake_workspace)
         patch.start()
         self.addCleanup(patch.stop)
+        reader = mock.patch.object(vx, "script_text", self.fake_script_text)
+        reader.start()
+        self.addCleanup(reader.stop)
+
+    def fake_script_text(self, root, commit, path):
+        """The script as the fake workspace holds it, whatever the commit."""
+        target = self.world.checkout / path
+        return target.read_text(encoding="utf-8") if target.is_file() else None
 
     @contextlib.contextmanager
     def fake_workspace(self, root, commit):
@@ -1134,9 +1156,10 @@ class PassBase(unittest.TestCase):
         self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(*checks)), association), *extra],
                                  labels=list(labels), fail_once=list(fail_once), schedule=list(schedule))
 
-    def run_pass(self, host="mbp", report=False):
+    def run_pass(self, host="mbp", report=False, retired=None):
+        extra = {} if retired is None else {"retired": retired}
         return [entry for node in vr.list_held(SLUG)
-                for entry in vr.pass_issue(self.project, host, node, Refs(), report=report)]
+                for entry in vr.pass_issue(self.project, host, node, Refs(), report=report, **extra)]
 
     def race(self, node, *hosts):
         errors = []
@@ -1530,6 +1553,106 @@ class NeverRunTest(PassBase):
 
     def test_another_hosts_check(self):
         self.assert_never_run("not_this_host", ok_check(host="eleven-m5"))
+
+
+class RetiredHostTest(PassBase):
+    """Issue 1291: a retired host's checks go to its successor, or are reported `host_retired`."""
+
+    def test_the_successor_runs_a_retired_hosts_check(self):
+        self.hold(ok_check(host="old-box"))
+        lines = self.run_pass("new-box", retired=RETIRED)
+        self.assertEqual(lines[0]["state"], "pass")
+        self.assertEqual(self.spawned("verify-ok"), 1)
+        self.assertEqual(self.markers("verify-result")[0].fields["host"], "new-box")
+
+    def test_the_successor_waits_on_the_when_of_a_taken_script_or_probe(self):
+        for run in ({"script": "scripts/check.sh"}, {"probe": "deployed_includes", "sha": MERGE}):
+            with self.subTest(run=run):
+                self.hold(check(host="old-box", run=run, when=HOLD_LATER))
+                self.assertEqual(self.run_pass("new-box", retired=RETIRED),
+                                 [line(0, "AC1", "pending", "not_before")])
+
+    def test_a_linux_only_script_is_one_host_retired_line_and_never_runs(self):
+        ran = self.world.checkout / "ran"
+        for name, text in (("systemd.sh", "systemctl is-active foo"), ("proc.sh", "cat /proc/cpuinfo"),
+                           ("missing.sh", None)):
+            if text is not None:
+                script = self.world.checkout / "scripts" / name
+                script.write_text(f"#!{sys.executable}\nopen({str(ran)!r}, 'w').close()  # {text}\n",
+                                  encoding="utf-8")
+                script.chmod(0o755)
+            for host in ("new-box", "mbp"):
+                with self.subTest(script=name, host=host):
+                    self.hold(check(host="old-box", run={"script": f"scripts/{name}"}))
+                    self.assertEqual(self.run_pass(host, retired=RETIRED),
+                                     [line(0, "AC1", "pending", "host_retired")])
+                    self.assertEqual(self.markers("verify-result"), [])
+                    self.assertFalse(ran.exists())
+
+    def test_a_portable_script_bound_to_a_retired_host_runs_on_the_successor(self):
+        self.hold(check(host="old-box", run={"script": "scripts/check.sh"}))
+        lines = self.run_pass("new-box", retired=RETIRED)
+        self.assertEqual(lines[0]["state"], "pass")
+        self.assertEqual(self.markers("verify-result")[0].fields["host"], "new-box")
+
+    def test_another_host_leaves_a_taken_check_to_the_successor(self):
+        for held in (ok_check(host="old-box"),
+                     check(host="old-box", run={"script": "scripts/check.sh"}, when=HOLD_LATER),
+                     check(host="old-box", run={"probe": "deployed_includes", "sha": MERGE}, when=HOLD_LATER)):
+            with self.subTest(held=held["run"]):
+                self.hold(held)
+                self.assertEqual(self.run_pass("mbp", retired=RETIRED),
+                                 [line(0, "AC1", "pending", "not_this_host")])
+                self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_a_check_the_successor_cannot_run_is_one_host_retired_line(self):
+        for held in (ok_check(host="old-box", effects="live"), ok_check(host="old-box", effects="paid"),
+                     check(host="old-box", run={"command": "nix-activate"}),
+                     check(host="old-box", kind="human", reason="senses", run={"ask": "Is it bright?"}),
+                     check(host="old-box", kind="human", reason="hands",
+                           run={"act": "Plug it in", "then": {"command": "check-ok"}})):
+            for host in ("new-box", "mbp"):
+                with self.subTest(run=held["run"], host=host):
+                    self.hold(held)
+                    self.assertEqual(self.run_pass(host, retired=RETIRED),
+                                     [line(0, "AC1", "pending", "host_retired")])
+                    self.assertEqual(self.markers("owner-action"), [])
+                    self.assertEqual(self.spawned("verify-ok"), 0)
+
+    def test_a_host_list_maps_its_retired_member(self):
+        self.hold(ok_check(host=["old-box", "mbp"]))
+        lines = self.run_pass("new-box", retired=RETIRED)
+        self.assertEqual((lines[0]["state"], self.spawned("verify-ok")), ("pass", 1))
+        self.hold(check(host=["old-box"], kind="human", reason="senses", run={"ask": "Is it bright?"}))
+        self.assertEqual(self.run_pass("new-box", retired=RETIRED), [line(0, "AC1", "pending", "host_retired")])
+
+    def test_a_report_shows_due_and_host_retired(self):
+        self.hold(ok_check(host="old-box"), ok_check(ac="AC2", host="old-box", effects="live"))
+        lines = self.run_pass("new-box", report=True, retired=RETIRED)
+        self.assertEqual([(l["check"], l["state"], l["reason"]) for l in lines],
+                         [(0, "due", "due"), (1, "pending", "host_retired")])
+        self.assertEqual(self.mutations(), [])
+
+    def test_the_runner_retires_anis_desktop_to_eleven_m5(self):
+        self.assertEqual(dict(vr.RETIRED_HOSTS), {"anis-desktop": "eleven-m5"})
+        self.assertIsInstance(vr.RETIRED_HOSTS, types.MappingProxyType)
+        self.hold(ok_check(host="anis-desktop"))
+        node, = vr.list_held(SLUG)
+        lines = vr.pass_issue(self.project, "eleven-m5", node, Refs())
+        self.assertEqual(lines[0]["state"], "pass")
+
+    def test_the_successor_recovers_a_retired_hosts_follow_up_claim(self):
+        observe = check(mode="observe", host="old-box", run={"command": "check-bad"})
+        key = {"block": bkey(observe), "check": "0"}
+        self.hold(observe, extra=[stored_comment(11, result(key["block"], 0, "miss", host="old-box")),
+                                  stored_comment(12, marker("verify-followup", {**key, "host": "old-box"}))])
+        self.run_pass("mbp", retired=RETIRED)
+        self.assertEqual(self.world.issue()["created"], [])
+        self.run_pass("new-box", retired=RETIRED)
+        created = self.world.issue()["created"]
+        self.assertEqual([c["state"] for c in created], ["open"])
+        self.assertEqual(self.markers("verify-result")[0].fields["followup"], str(created[0]["number"]))
+        self.assertEqual(self.world.issue()["state"], "closed")
 
 
 class ForgedMarkerTest(PassBase):

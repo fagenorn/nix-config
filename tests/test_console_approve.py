@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agent_tools.console import approve, event_log, folder_trust, register
@@ -1435,9 +1436,40 @@ class GitHubForgeTest(unittest.TestCase):
         self.assertEqual({name for name in dir(approve.GitHubForge) if not name.startswith("_")},
                          {"find_pull_request", "open_pull_request", "pull_request_state"})
 
-    def test_forge_for(self):
+    def test_forge_for_each_platform(self):
         self.assertIsInstance(approve.forge_for("linux"), approve.GitHubForge)
-        self.assertIsNone(approve.forge_for("darwin"))
+        self.assertIsInstance(approve.forge_for("darwin"), approve.GitHubForge)
+        self.assertIsNone(approve.forge_for("win32"))
+
+    def test_a_darwin_forge_and_push_run_only_gh_and_git(self):
+        records = []
+        branch = "adopt-" + "a" * 12
+
+        def run(argv, **kwargs):
+            records.append((argv, kwargs))
+            if argv[0] == "git":
+                out = None
+            elif "POST" in argv:
+                out = '{"number": 7}'
+            elif "GET" in argv and "repos/o/r/pulls" in argv:
+                out = "[]"
+            else:
+                out = '{"state": "open", "mergeable_state": "clean"}'
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        with unittest.mock.patch.object(approve.manager, "run_in_own_group", run):
+            forge = approve.forge_for("darwin")
+            forge.find_pull_request("o/r", branch, "main")
+            forge.open_pull_request("o/r", branch, "main", "t", "b")
+            forge.pull_request_state("o/r", 7)
+            approve.push("/r", branch, "b" * 40)
+        self.assertEqual([argv[0] for argv, _ in records], ["gh", "gh", "gh", "git"])
+        for argv, kwargs in records:
+            with self.subTest(argv=argv):
+                self.assertFalse(any(word in element
+                                     for word in ("systemd-run", "systemctl", "/proc")
+                                     for element in argv))
+                self.assertIs(kwargs["start_new_session"], True)
 
 
 if __name__ == "__main__":

@@ -150,6 +150,35 @@ profile, handle or Railway project, environment or service, since the repository
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
 
+`owner-services --console-port N --proxy-port N --merge SHA [--launchctl PATH] [--lsof PATH]`
+(`verify_checks.owner_services`, issue 1290) is met when the owner's services run at boot on a Mac with nobody
+logged in at its screen. It only reads, every child's output is captured (the runner publishes the check's output
+in an issue comment), and a child that cannot start or times out reads as a failed reading. It reads the owner's
+login session (`launchctl print gui/UID` exits 0: a session now; exit 112, 113 or 125: no domain; any other exit,
+a timeout or a missing tool is `gui_unread`, not met, so an unreadable domain is never taken for a logout), each
+boot daemon `org.nixos.agent-console`,
+`org.nixos.claude-cache-proxy`, `org.nixos.sops-nix` and `org.nixos.verify-pending` (`launchctl print
+system/LABEL` exits 0: loaded), the console (its state endpoint answers, as `console-state`) and the cache proxy
+(`GET /_proxy/health` is 2xx with a JSON object whose `service` is `cache-proxy`), each owned (its daemon has a
+`pid` and that pid is the only listener `lsof` reports on the port, so a hand-run process beside a daemon that
+failed to bind does not count), the owner's `~/.ssh/id_ed25519` resolving to a file, and the activation record
+of `~/.agents/state/console` (`activation.result` and `activation.log`). The record is read only when it is a
+qualifying activation: the result is a JSON object with a 40 hex `commit`, an integer `exit` of 0 and no `error`;
+`merge` is an ancestor of that commit (`git merge-base --is-ancestor`); the console's newest `activation.finished` row in
+`events.sqlite3` beside them is `ok` for that same commit (the command's exit 0 is not the console's verdict: it
+then checks the revision the host runs); the log reads, is no newer than the
+result, and the result is unchanged when read again (a new activation unlinks it before it truncates the log).
+Otherwise it is `unread`. A read record is `logged_in` when a log line holds `ownerServices: the owner has a login
+session`, else `unmarked` when no line holds `ownerServices: the owner has no login session` (the lines the
+activation cleanup of `hosts/common/darwin-owner-services.nix` prints), else `domain_lines` when a line holds
+`Domain does not support specified action`, else `clean`. The verdict, in this order: a login session now is
+`logged_in` (75); an `unread` or `logged_in` record is `not_yet` (75), so no service reading is graded before a
+qualifying activation; then a daemon not loaded, a console or proxy that does not answer or is not owned, a
+`ssh_key` that does not resolve, or an `unmarked` or `domain_lines` record is `not_met` (1); else `met` (0).
+The report is `{"met", "verdict", "daemons", "console", "proxy", "ssh_key", "activation"}` of booleans and the
+strings above. It names no path, pid, project or account, since the repository is public. A bad port or a
+`--merge` that is not 40 lowercase hex characters is a usage error (2).
+
 `console-failed-start --port N` (`verify_checks.console_failed_start`, issue 1182) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object
 is `unreachable`, exit 75) and applies `failed_start_state` to it: with no open failed-start inbox card it is
@@ -158,6 +187,25 @@ whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` i
 (`FAILED_START_REASONS`). It is `met` (0) when every card does and `not_met` (1) with the sorted failed members
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
+
+`console-no-card --port N --key K [--key K ...]` (`verify_checks.console_no_card`, issue 1327) reads
+`GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not JSON is `unreachable`,
+exit 75) and applies `no_card_state` to it: it is `absent` (0) only when the inbox is readable and no entry of
+`inbox.open` or `inbox.answered` has a `key` among the given keys; it is `listed` (75, never 1) with the number of
+distinct given keys listed. A view that is not an object, an `inbox` that is not an object, an `open` or `answered`
+that is not a list, or an entry that is not an object or whose `key` is missing or not a string is `unreachable`
+(75), never met. The report holds only `verdict` and `listed`, never a key, since the repository is public. It
+reads only that endpoint.
+
+`console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
+issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
+JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
+at the top level or inside the `projects` of an entry of `"type": "quiet_group"`. A project is covered when one of
+its notices with `owner` true names every wanted issue as `#N` not followed by a digit (`#611` does not cover 61 or
+6110); a manager's notice never covers. The report is `{"verdict": "covered" | "missing", "projects": {ID:
+{"notice": ID | null}}}`: `covered` (0) when every wanted project is covered, else `missing` (75), since the owner
+may not have posted yet. A `--notice` that is not `PROJECT=` and comma-separated positive integers, or a project
+given twice, is a usage error (2).
 
 `console-first-screen --port N [--browser PATH]` (`verify_checks.console_first_screen`, issue 1031) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object is
@@ -184,6 +232,25 @@ when `closed` with any other reason (its comments unread), or as `completed` unv
 read. A payload that is not an object, or whose state is neither `open` nor `closed`, or a malformed
 comment page, is a `payload_invalid` forge error (exit 2), as is any other forge error; a bad `--repo`
 or `--issue` (a positive integer) is a usage error (2).
+
+`host-mentions --repo R --phrase P [--phrase P ...] --gone G [--exempt N ...]`
+(`verify_checks.host_mentions`, issue 1291) reads every page of `repos/R/issues?state=open&per_page=100`
+(pull requests skipped) and reports `{"mentioning", "offenders"}`, both ascending issue numbers. An issue
+mentions when any P occurs, ignoring case, in its title or body; it is an offender when it mentions, is
+not named by `--exempt` and either its body does not contain G, ignoring case, or an open criterion of
+its body (an unchecked task-list item, `- [ ]`, that does not itself contain G) contains a P: a criterion
+still naming the host is not answered by a separate paragraph saying it is gone. Exit 0 when there is no offender,
+1 otherwise. A page that is not a list, an element that is not an object or a `number` that is not an
+integer is a `payload_invalid` forge error (exit 2), as is any other forge error.
+
+`host-prompts --repo R [--repo R ...] --host H` (`verify_checks.host_prompts`, issue 1291) lists the open
+issues of each R as `host-mentions` does, pull requests included (the console inbox shows a marker on one), reads one comment listing per open issue (whatever its labels),
+and reports `{"host", "live": [{"repo", "issue", "comment", "reason"}]}` sorted by repo, issue and comment.
+A live `owner-action` marker counts when its `host` field, or one `+`-separated member of it, is H: a
+runner prompt (`verify_answer.is_runner_prompt`) only from an OWNER or MEMBER comment and live over the
+markers of those comments, any other owner-action marker only from an OWNER, MEMBER or COLLABORATOR comment
+and live over the markers of those, as the console inbox reads each. Exit 0 when nothing is live, 1
+otherwise, 2 on a forge error.
 
 `suite-regressions --repo R --workflow W --job J --branch B --merge SHA --n N`
 (`verify_checks.suite_regressions`, issue 1215) is met when no member of the agent workflow suite failed in
@@ -216,6 +283,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import functools
 import http.client
 import io
 import json
@@ -225,6 +293,7 @@ import re
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -237,11 +306,12 @@ from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
-from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote, siblings
 from agent_tools.system.semver import parse_semver
-from agent_tools.verification import verify_exec, verify_issues
+from agent_tools.verification import verify_answer, verify_exec, verify_issues
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -399,6 +469,75 @@ def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
                if held is not None else None)
     report["verified"] = closing is not None and closing.fields.get("outcome") == "verified"
     return (0 if report["verified"] else 1), report
+
+
+def _open_issues(repo: str, pulls: bool = False) -> list[dict]:
+    """Every open issue of `repo` in listing order, pull requests skipped unless `pulls`, the shape checked."""
+    found = []
+    for page in forge_api.api_pages(f"repos/{repo}/issues?state=open&per_page=100"):
+        if not isinstance(page, list):
+            raise _invalid("issue page is not a list")
+        for issue in page:
+            if not isinstance(issue, dict):
+                raise _invalid("issue is not an object")
+            if "pull_request" in issue and not pulls:
+                continue
+            number = issue.get("number")
+            if isinstance(number, bool) or not isinstance(number, int):
+                raise _invalid("issue number is not an integer")
+            found.append(issue)
+    return found
+
+
+OPEN_CRITERION = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[ \]")
+
+
+def host_mentions(repo: str, phrases: Sequence[str], gone: str, exempt: Sequence[int]) -> tuple[int, dict]:
+    """Met when every open issue naming a phrase is exempt or carries the `gone` line in its body and has
+    no open criterion (an unchecked task-list item other than the `gone` line) naming a phrase."""
+    needles = [p.lower() for p in phrases]
+    mentioning, offenders = [], []
+    for issue in _open_issues(repo):
+        title, body = issue.get("title") or "", issue.get("body") or ""
+        text = f"{title}\n{body}".lower()
+        if not any(needle in text for needle in needles):
+            continue
+        mentioning.append(issue["number"])
+        criteria = [line.lower() for line in body.splitlines()
+                    if OPEN_CRITERION.match(line) and gone.lower() not in line.lower()]
+        if issue["number"] not in exempt and (
+                gone.lower() not in body.lower() or any(n in line for line in criteria for n in needles)):
+            offenders.append(issue["number"])
+    return (0 if not offenders else 1), {"mentioning": sorted(mentioning), "offenders": sorted(offenders)}
+
+
+def _names_host(marker: forge_markers.Marker, host: str) -> bool:
+    named = marker.fields.get("host", "")
+    return named == host or host in named.split("+")
+
+
+def host_prompts(repos: Sequence[str], host: str) -> tuple[int, dict]:
+    """Met when no open issue holds a live owner-action prompt that names `host`."""
+    live = []
+    for repo in repos:
+        for issue in _open_issues(repo, pulls=True):
+            comments = forge_markers.list_comments(repo, issue["number"])
+
+            def read(trusted):
+                parsed = (forge_markers.parse(c) for c in comments if c.get("author_association") in trusted)
+                return [m for m in parsed if m is not None]
+            runner = read(verify_issues.TRUSTED)
+            forge = read(forge_owner_action.TRUSTED)
+            for markers, wanted in ((runner, True), (forge, False)):
+                for marker in markers:
+                    if (marker.kind == forge_owner_action.KIND
+                            and verify_answer.is_runner_prompt(marker) == wanted
+                            and _names_host(marker, host)
+                            and forge_markers.is_live(marker, markers)):
+                        live.append({"repo": repo, "issue": issue["number"], "comment": marker.comment_id,
+                                     "reason": marker.fields.get("reason", "")})
+    live.sort(key=lambda row: (row["repo"], row["issue"], row["comment"]))
+    return (0 if not live else 1), {"host": host, "live": live}
 
 
 SUITE_ROW = re.compile(r"^suite-runner:\s+[0-9.]+s wall\s+[0-9.]+s cpu (passed|failed) (\S+)$")
@@ -1514,6 +1653,159 @@ def console_state(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
     return (0 if status == 200 else 1), {"port": port, "status": status}
 
 
+OWNER_SERVICE_LABELS = ("org.nixos.agent-console", "org.nixos.claude-cache-proxy",
+                        "org.nixos.sops-nix", "org.nixos.verify-pending")
+DOMAIN_LINE = "Domain does not support specified action"
+NO_SESSION_LINE = "ownerServices: the owner has no login session"
+SESSION_LINE = "ownerServices: the owner has a login session"
+_JOB_PID = re.compile(r"^\s*pid = (\d+)\s*$", re.MULTILINE)
+# `launchctl print gui/UID` exits with one of these when the domain is not there (no session): 112 no such
+# domain, 113 no such service, 125 "Domain does not support specified action". Any other exit is unreadable.
+NO_DOMAIN_EXITS = (112, 113, 125)
+
+
+def _finished_outcome(store: Path) -> tuple[str, bool] | None:
+    """The console's newest `activation.finished` row as (commit, ok), or None when it cannot be read."""
+    try:
+        connection = sqlite3.connect(f"{store.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return None
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        row = connection.execute("SELECT payload FROM events WHERE kind = 'activation.finished' "
+                                 "ORDER BY seq DESC LIMIT 1").fetchone()
+        payload = json.loads(row[0]) if row else None
+    except (sqlite3.Error, ValueError, TypeError):
+        return None
+    finally:
+        connection.close()
+    if not isinstance(payload, dict) or not isinstance(payload.get("commit"), str):
+        return None
+    return payload["commit"], payload.get("ok") is True
+
+
+def _activation_state(home: Path, merge: str, repo_root: Path, run) -> str:
+    """Issue 1290: `unread` unless a qualifying activation is on record, else what its log says."""
+    state = home / ".agents" / "state" / "console"
+    result, log = state / "activation.result", state / "activation.log"
+    try:
+        first = result.read_bytes()
+        record = json.loads(first)
+        result_ns = result.stat().st_mtime_ns
+    except (OSError, ValueError):
+        return "unread"
+    if not isinstance(record, dict):
+        return "unread"
+    commit, code = record.get("commit"), record.get("exit")
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return "unread"
+    if isinstance(code, bool) or not isinstance(code, int) or code != 0 or "error" in record:
+        return "unread"
+    outcome = _finished_outcome(state / "events.sqlite3")
+    if outcome != (commit, True):
+        return "unread"
+    try:
+        ancestor = run(["git", "-C", str(repo_root), "merge-base", "--is-ancestor", merge, commit])
+    except (OSError, subprocess.TimeoutExpired):
+        return "unread"
+    if ancestor.returncode != 0:
+        return "unread"
+    try:
+        if not log.is_file():
+            return "unread"
+        text = log.read_text(encoding="utf-8", errors="replace")
+        if log.stat().st_mtime_ns > result_ns:
+            return "unread"
+        if result.read_bytes() != first:
+            return "unread"
+    except OSError:
+        return "unread"
+    lines = text.splitlines()
+    if any(SESSION_LINE in line for line in lines):
+        return "logged_in"
+    if not any(NO_SESSION_LINE in line for line in lines):
+        return "unmarked"
+    if any(DOMAIN_LINE in line for line in lines):
+        return "domain_lines"
+    return "clean"
+
+
+def _proxy_answers(port: int, timeout: float) -> bool:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/_proxy/health")
+        response = connection.getresponse()
+        body = response.read()
+        if not 200 <= response.status < 300:
+            return False
+        payload = json.loads(body)
+    except (OSError, http.client.HTTPException, ValueError):
+        return False
+    finally:
+        connection.close()
+    return isinstance(payload, dict) and payload.get("service") == "cache-proxy"
+
+
+def owner_services(*, console_port: int, proxy_port: int, merge: str, home: Path, uid: int,
+                   repo_root: Path, launchctl: str = "/bin/launchctl", lsof: str = "/usr/sbin/lsof",
+                   run=None, timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1290: the owner's boot services run with nobody logged in at the screen."""
+    if run is None:
+        run = functools.partial(subprocess.run, capture_output=True, text=True,
+                                timeout=timeout, check=False)
+
+    def read(argv):
+        try:
+            return run(argv)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def loaded(label):
+        done = read([launchctl, "print", f"system/{label}"])
+        if done is None or done.returncode != 0:
+            return False, None
+        match = _JOB_PID.search(done.stdout or "")
+        return True, int(match.group(1)) if match else None
+
+    def listeners(port):
+        done = read([lsof, "-nP", "-a", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"])
+        if done is None or done.returncode != 0:
+            return set()
+        return {int(line[1:]) for line in (done.stdout or "").splitlines()
+                if re.fullmatch(r"p\d+", line)}
+
+    def owned(pid, port):
+        return pid is not None and listeners(port) == {pid}
+
+    gui = read([launchctl, "print", f"gui/{uid}"])
+    if gui is None or (gui.returncode != 0 and gui.returncode not in NO_DOMAIN_EXITS):
+        return 1, {"met": False, "verdict": "gui_unread"}
+    session = gui.returncode == 0
+    jobs = {label: loaded(label) for label in OWNER_SERVICE_LABELS}
+    console_pid = jobs["org.nixos.agent-console"][1]
+    proxy_pid = jobs["org.nixos.claude-cache-proxy"][1]
+    console = {"answers": console_state(console_port, timeout=timeout)[0] == 0,
+               "owned": owned(console_pid, console_port)}
+    proxy = {"answers": _proxy_answers(proxy_port, timeout), "owned": owned(proxy_pid, proxy_port)}
+    try:
+        ssh_key = (home / ".ssh/id_ed25519").resolve(strict=True).is_file()
+    except (OSError, RuntimeError):
+        ssh_key = False
+    activation = _activation_state(home, merge, repo_root, run)
+    daemons = {label: jobs[label][0] for label in OWNER_SERVICE_LABELS}
+    if session:
+        code, verdict = 75, "logged_in"
+    elif activation in ("unread", "logged_in"):
+        code, verdict = 75, "not_yet"
+    elif (not all(daemons.values()) or not all(console.values()) or not all(proxy.values())
+          or not ssh_key or activation in ("unmarked", "domain_lines")):
+        code, verdict = 1, "not_met"
+    else:
+        code, verdict = 0, "met"
+    return code, {"met": code == 0, "verdict": verdict, "daemons": daemons, "console": console,
+                  "proxy": proxy, "ssh_key": ssh_key, "activation": activation}
+
+
 LONG_GOAL_CHARS = 1000
 NEEDLE = slice(200, 300)
 
@@ -1688,6 +1980,103 @@ def console_failed_start(port: int, *, timeout: float = 5.0) -> tuple[int, dict]
     except ValueError:
         return unreachable
     return failed_start_state(view) if isinstance(view, dict) else unreachable
+
+
+def no_card_state(view: object, keys: Sequence[str]) -> tuple[int, dict]:
+    """Issue 1327: 0 absent when the readable inbox lists none of the keys, 75 listed or unreachable, never 1."""
+    unreadable = 75, {"verdict": "unreachable", "listed": 0}
+    inbox = view.get("inbox") if isinstance(view, dict) else None
+    if not isinstance(inbox, dict):
+        return unreadable
+    listed: set[str] = set()
+    for name in ("open", "answered"):
+        entries = inbox.get(name)
+        if not isinstance(entries, list):
+            return unreadable
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("key"), str):
+                return unreadable
+            listed.add(entry["key"])
+    count = len(set(keys) & listed)
+    if count:
+        return 75, {"verdict": "listed", "listed": count}
+    return 0, {"verdict": "absent", "listed": 0}
+
+
+def console_no_card(port: int, keys: Sequence[str], *, timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1327: `no_card_state` of the live console's view; an unreachable console is not yet (75)."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status, body = response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return 75, {"verdict": "unreachable", "listed": 0}
+    finally:
+        connection.close()
+    if status != 200:
+        return 75, {"verdict": "unreachable", "listed": 0}
+    try:
+        view = json.loads(body, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError):
+        return 75, {"verdict": "unreachable", "listed": 0}
+    return no_card_state(view, keys)
+
+
+def _notice_names_all(text: object, numbers: Sequence[int]) -> bool:
+    """Issue 1291: the text names every number as `#N` not followed by a digit."""
+    return isinstance(text, str) and all(re.search(rf"#{number}(?!\d)", text) for number in numbers)
+
+
+def _view_projects(view: dict) -> Iterator[dict]:
+    """Issue 1291: the project entries of the view, at the top level or inside a quiet group."""
+    entries = view.get("entries")
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "project":
+            yield entry
+        elif entry.get("type") == "quiet_group":
+            members = entry.get("projects")
+            for member in members if isinstance(members, list) else ():
+                if isinstance(member, dict) and member.get("type") == "project":
+                    yield member
+
+
+def console_notice_lists(port: int, wanted: Mapping[str, Sequence[int]], *,
+                         timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1291: each wanted project has one owner notice naming all its issues, 0 covered, 75 missing or unreachable."""
+    unreachable = 75, {"verdict": "unreachable"}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status, body = response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return unreachable
+    finally:
+        connection.close()
+    if status != 200:
+        return unreachable
+    try:
+        view = json.loads(body)
+    except ValueError:
+        return unreachable
+    if not isinstance(view, dict):
+        return unreachable
+    notices: dict[object, list[dict]] = {}
+    for entry in _view_projects(view):
+        listed = entry.get("notices")
+        if isinstance(listed, list):
+            notices.setdefault(entry.get("project_id"), []).extend(
+                item for item in listed if isinstance(item, dict))
+    projects: dict[str, dict] = {}
+    for project, numbers in wanted.items():
+        covering = next((item.get("id") for item in notices.get(project, ())
+                         if item.get("owner") is True and _notice_names_all(item.get("text"), numbers)), None)
+        projects[project] = {"notice": covering}
+    covered = all(report["notice"] is not None for report in projects.values())
+    return (0 if covered else 75), {"verdict": "covered" if covered else "missing", "projects": projects}
 
 
 class BrowserError(Exception):
@@ -1936,6 +2325,14 @@ def _issue_number(value: str) -> int:
     return number
 
 
+def _notice_spec(value: str) -> tuple[str, tuple[int, ...]]:
+    project, separator, numbers = value.partition("=")
+    parts = numbers.split(",")
+    if not (project and separator and all(part.isascii() and part.isdigit() and int(part) >= 1 for part in parts)):
+        raise argparse.ArgumentTypeError("must be PROJECT=N1,N2,... with positive integers")
+    return project, tuple(int(part) for part in parts)
+
+
 def _merge_sha(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
@@ -1999,10 +2396,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
     console.add_argument("--port", type=_port, required=True)
+    owner = checks.add_parser(
+        "owner-services",
+        help="issue 1290: the owner's services run at boot with nobody logged in")
+    owner.add_argument("--console-port", type=_port, required=True)
+    owner.add_argument("--proxy-port", type=_port, required=True)
+    owner.add_argument("--merge", type=_merge_sha, required=True)
+    owner.add_argument("--launchctl", default="/bin/launchctl")
+    owner.add_argument("--lsof", default="/usr/sbin/lsof")
     failed = checks.add_parser(
         "console-failed-start",
         help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
     failed.add_argument("--port", type=_port, required=True)
+    no_card = checks.add_parser(
+        "console-no-card",
+        help="issue 1327: the console lists no inbox card with any of the given keys")
+    no_card.add_argument("--port", type=_port, required=True)
+    no_card.add_argument("--key", type=_nonempty, action="append", required=True)
+    notices = checks.add_parser(
+        "console-notice-lists",
+        help="issue 1291: the owner's notice for each project names every one of its issues")
+    notices.add_argument("--port", type=_port, required=True)
+    notices.add_argument("--notice", type=_notice_spec, action="append", required=True,
+                         metavar="PROJECT=N1,N2,...")
     first = checks.add_parser(
         "console-first-screen",
         help="issue 1031: the live console's first screen shows a long-goal question whole above the fold")
@@ -2013,6 +2429,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="issue 1010: an issue was closed as completed, by its own verify run")
     closed.add_argument("--repo", type=_repo, required=True)
     closed.add_argument("--issue", type=_issue_number, required=True)
+    mentions = checks.add_parser(
+        "host-mentions",
+        help="issue 1291: every open issue naming a retired host is exempt or carries its gone line")
+    mentions.add_argument("--repo", type=_repo, required=True)
+    mentions.add_argument("--phrase", type=_nonempty, action="append", required=True)
+    mentions.add_argument("--gone", type=_nonempty, required=True)
+    mentions.add_argument("--exempt", type=_issue_number, action="append", default=[])
+    prompts = checks.add_parser(
+        "host-prompts",
+        help="issue 1291: no open issue holds a live owner prompt that names a retired host")
+    prompts.add_argument("--repo", type=_repo, action="append", required=True)
+    prompts.add_argument("--host", type=_nonempty, required=True)
     regress = checks.add_parser(
         "suite-regressions",
         help="issue 1215: no suite member that passed before the merge failed in the runs from it on")
@@ -2027,8 +2455,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         code, report = console_state(args.port)
         print(json.dumps(report, sort_keys=True))
         return code
+    if args.check == "owner-services":
+        code, report = owner_services(
+            console_port=args.console_port, proxy_port=args.proxy_port, merge=args.merge,
+            home=Path(os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir), uid=os.getuid(),
+            repo_root=Path("."), launchctl=args.launchctl, lsof=args.lsof)
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "console-failed-start":
         code, report = console_failed_start(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-no-card":
+        code, report = console_no_card(args.port, args.key)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-notice-lists":
+        wanted = [project for project, _ in args.notice]
+        if len(set(wanted)) != len(wanted):
+            parser.error("--notice names a project twice")
+        code, report = console_notice_lists(args.port, dict(args.notice))
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-first-screen":
@@ -2109,6 +2555,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
         elif args.check == "issue-closed":
             code, report = issue_closed(args.repo, args.issue)
+        elif args.check == "host-mentions":
+            code, report = host_mentions(args.repo, args.phrase, args.gone, args.exempt)
+        elif args.check == "host-prompts":
+            code, report = host_prompts(args.repo, args.host)
         elif args.check == "suite-regressions":
             code, report = suite_regressions(args.repo, args.workflow, args.job, args.branch,
                                              args.merge, args.n)

@@ -775,10 +775,32 @@ class LaunchTest(LaunchCase):
             "timed_out", reason="the session did not answer within 300 s"))
         self.assertFalse(self.ask.settings.exists())
 
+    def test_a_darwin_question_launches_the_linux_argv(self):
+        outcome = self.start(self.fake(), platform="darwin")
+
+        self.assertEqual(self.calls[0][0], project_question.launch_command(self.ask, "linux"))
+        self.assertEqual(project_question.launch_command(self.ask, "darwin"),
+                         project_question.launch_command(self.ask, "linux"))
+        self.assertIsNone(project_question.launch_command(self.ask, "win32"))
+        self.assertEqual(outcome, project_question.Outcome(
+            "answered", answer="Answer: it builds the hosts."))
+
+    def test_a_darwin_question_runs_no_linux_tool(self):
+        forbidden = ("systemd-run", "systemctl", "/proc")
+        self.start(self.fake(), platform="darwin")
+
+        argv = self.calls[0][0]
+        self.assertEqual(argv[0], "claude-account")
+        self.assertFalse(any(word in element for word in forbidden for element in argv))
+        document = json.loads(self.settings["text"])
+        hook = shlex.split(document["hooks"]["PreToolUse"][0]["hooks"][0]["command"])
+        self.assertFalse(any(word in element for word in forbidden for element in hook))
+        self.assertIs(self.calls[0][3]["start_new_session"], True)
+
     def test_each_failure_is_a_failed_outcome_with_its_reason(self):
         cancel = threading.Event()
         cases = [
-            ("darwin", {"platform": "darwin", "run": self.fake()}, project_question.UNAVAILABLE_TEXT),
+            ("win32", {"platform": "win32", "run": self.fake()}, project_question.UNAVAILABLE_TEXT),
             ("root", {"run": self.fake(), "ask": self.make_ask(self.routes, self.root / "missing")},
              f"the project root {self.root / 'missing'} is not a directory"),
             ("missing binary", {"run": self.fake(error=FileNotFoundError())},
@@ -797,7 +819,7 @@ class LaunchTest(LaunchCase):
                 outcome = self.start(**kwargs)
                 self.assertEqual(outcome, project_question.Outcome("failed", reason=reason))
                 self.assertFalse(self.ask.settings.exists())
-                if name in ("darwin", "root"):
+                if name in ("win32", "root"):
                     self.assertEqual(self.calls, [])
 
 
@@ -953,6 +975,13 @@ class RecordsLaunchTest(LaunchCase):
         self.assertEqual(
             project_question.hook_command(self.routes),
             project_question.hook_command(self.routes, None, None))
+
+
+class PlatformTest(unittest.TestCase):
+    def test_asker_for_each_platform(self):
+        self.assertIs(project_question.asker_for("linux"), project_question.run_question)
+        self.assertIs(project_question.asker_for("darwin"), project_question.run_question)
+        self.assertIsNone(project_question.asker_for("win32"))
 
 
 class DevenvRouteTest(unittest.TestCase):
@@ -1860,7 +1889,7 @@ class QuestionServiceTest(QuestionCase):
         self.assertEqual(event_log.PROJECT_QUESTION_ANSWERED, ANSWERED_KIND)
         self.assertNotIn(ASKED, event_log.KEPT_KINDS)
         self.assertNotIn(ANSWERED_KIND, event_log.KEPT_KINDS)
-        self.assertEqual(event_log.SCHEMA_VERSION, 10)
+        self.assertEqual(event_log.SCHEMA_VERSION, 11)
 
     def shown(self, svc):
         return {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
@@ -1897,7 +1926,7 @@ def question_threads():
 
 
 class QuestionRecordsServiceTest(QuestionCase):
-    """The job gathers the asked project's own records once per accepted question (ADR-console-075)."""
+    """The job gathers the asked project's own records once per accepted question (ADR-console-082)."""
 
     def seed(self):
         self.store.parent.mkdir(parents=True, exist_ok=True)
@@ -2310,7 +2339,7 @@ class QuestionThreadServiceTest(QuestionCase):
 
 
 class QuestionRequestKeyTest(QuestionCase):
-    """A request may carry a key the console asks once per project (ADR-console-075 D9)."""
+    """A request may carry a key the console asks once per project (ADR-console-082 D9)."""
 
     KEY = "0123456789abcdef" * 2
 

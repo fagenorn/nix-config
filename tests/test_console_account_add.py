@@ -165,7 +165,8 @@ class AdderTest(unittest.TestCase):
 
     def test_adder_for(self):
         self.assertIsInstance(adder_for("linux"), Adder)
-        self.assertIsNone(adder_for("darwin"))
+        self.assertIsInstance(adder_for("darwin"), Adder)
+        self.assertIsNone(adder_for("win32"))
 
 
 if __name__ == "__main__":

@@ -2,12 +2,15 @@
 import http.client
 import json
 import os
+import shutil
+import socket
 import sqlite3
 import tempfile
 import time
 from pathlib import Path
 
 from agent_tools.console import manager as console_manager
+from agent_tools.console import peer
 from agent_tools.console import service as console_service
 from agent_tools.console import sessions as console_sessions
 from agent_tools.console import signin
@@ -191,10 +194,36 @@ def sign_in(store, *names):
         log.close()
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """An HTTP client of the guest door: host `localhost`, connected to the Unix socket at `path`."""
+
+    def __init__(self, path: str, timeout: float = 5):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+
+def guest_socket_path(test) -> Path:
+    """A fresh guest socket path under /tmp (macOS limits a socket path to 104 bytes)."""
+    root = Path(tempfile.mkdtemp(prefix="cg-", dir="/tmp"))
+    test.addCleanup(shutil.rmtree, root, True)
+    return root / "guest" / "guest.sock"
+
+
+def OWNER_PEER(client, server):
+    """A peer reader stand-in: every connection is held by this process, whose user is the owner."""
+    return (peer.Holder(os.getpid(), os.geteuid(), "python3"),)
+
+
 def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, profile_dirs=(),
             **kwargs):
     kwargs.setdefault("branch_pattern_of", lambda repo: "issue-<num>-<slug>")
     kwargs.setdefault("dispatch", lambda job: job())
+    kwargs.setdefault("peer_reader", OWNER_PEER)
     svc = console_service.ConsoleService(
         store, registry, port=0, session_dirs=lambda: list(session_dirs),
         profile_dirs=lambda: list(profile_dirs), repo_of=repo_of, **kwargs)
