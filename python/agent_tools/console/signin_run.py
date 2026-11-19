@@ -38,9 +38,9 @@ and a host of letters, digits and hyphens that starts with a letter or digit, el
 A manual link wins when the client offers one: `wait_link` answers as soon as the manual link is
 known, or, when only the browser link arrived, once `manual_grace` (`MANUAL_GRACE`, 2.0) seconds have
 passed since it did. A run has one answer: the first Link `wait_link` returns for it is returned
-again by every later call, whatever the client prints afterwards. The one exception is a call whose
-`link_wait` ends while the browser link is still inside its grace: it returns the browser link's
-answer without keeping it, and the next call waits out the rest of the grace.
+again by every later call, whatever the client prints afterwards. A call whose `link_wait` ends
+while the browser link is still inside its grace keeps waiting until the grace ends (the page that
+asked makes no second call), so the choice is never made early.
 
 Code input. The client reads the code that the browser shows the owner from its standard input.
 Host finding, anis-desktop, 2026-11-13, client 2.1.322, each run under a throwaway configuration
@@ -64,8 +64,8 @@ and never waits for the link. A run's serial is a per-`SignIns` count starting a
 The client is spawned in a new session (its pid is its process-group id), in a fresh
 `console-login-*` directory (mode 0700) holding only the `browser` script (0700) and the `link` FIFO
 (0600); one daemon watcher thread per run reads the FIFO and the client's output until the client
-exits. `wait_link(profile)` waits at most `link_wait` seconds (`LINK_WAIT`, 15), or until the run
-ends or the Route rule above answers, and returns a `Link` or None. `SignIns` takes `manual_grace`
+exits. `wait_link(profile)` waits at most `link_wait` seconds (`LINK_WAIT`, 15) plus the rest of a
+grace already running, or until the run ends or the Route rule above answers, and returns a `Link` or None. `SignIns` takes `manual_grace`
 (`MANUAL_GRACE`) and `host` (the name `forward_command` names, `default_host()` when None). `send_code(profile, code)` and `cancel(profile)` of a profile
 with no live run raise `NotRunning`; a write the live client's input refuses raises its `OSError`
 unchanged, so the caller can tell it from a missing run. The write never blocks and never holds the
@@ -492,7 +492,6 @@ class SignIns:
         if run is None:
             return None
         give_up = time.monotonic() + self._link_wait
-        provisional = False
         with run.cond:
             while run.chosen is None:
                 now = time.monotonic()
@@ -503,15 +502,12 @@ class SignIns:
                     grace = run.fifo_at + self._manual_grace - now
                     if grace <= 0:
                         break
-                if now >= give_up:
-                    provisional = grace is not None
+                # Inside a grace the deadline does not apply: the grace ends the wait.
+                if grace is None and now >= give_up:
                     break
-                run.cond.wait(give_up - now if grace is None else min(give_up - now, grace))
+                run.cond.wait(give_up - now if grace is None else grace)
             if run.chosen is None:
-                link = self._pick(run)
-                if provisional:
-                    return link
-                run.chosen = link
+                run.chosen = self._pick(run)
             return run.chosen
 
     def _pick(self, run: _Run) -> Link | None:

@@ -562,16 +562,22 @@ class RunTest(unittest.TestCase):
         runs.start("work")
         self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
 
-    def test_a_request_deadline_inside_the_grace_leaves_the_choice_open(self):
+    def test_a_request_deadline_inside_the_grace_waits_out_the_grace_for_the_manual_link(self):
         self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
-                     FAKE_MANUAL_DELAY="2.5")
-        runs = self.make(manual_grace=8, link_wait=1.5)
+                     FAKE_MANUAL_DELAY="1.5")
+        runs = self.make(manual_grace=8, link_wait=0.6)
         runs.start("work")
-        first = runs.wait_link("work")
-        self.assertEqual(route_of(first), (LOOPBACK_LINK, "loopback", 54321, LOOPBACK_FORWARD))
-        until(self, lambda: route_of(runs.wait_link("work"))[1] == "manual")
-        self.assertEqual(route_of(runs.wait_link("work")),
-                         (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_request_deadline_inside_the_grace_still_ends_with_the_grace(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="3.0")
+        runs = self.make(manual_grace=0.8, link_wait=0.4)
+        runs.start("work")
+        expected = (LOOPBACK_LINK, "loopback", 54321, LOOPBACK_FORWARD)
+        self.assertEqual(route_of(runs.wait_link("work")), expected)
+        self.assertEqual(route_of(runs.wait_link("work")), expected)
 
     def test_a_malformed_link_on_the_output_is_skipped_and_the_run_finishes(self):
         self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=BAD_LINK,
