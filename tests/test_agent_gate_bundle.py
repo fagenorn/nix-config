@@ -997,20 +997,79 @@ class NoUpgradeTableTest(unittest.TestCase):
 
 
 class NoUpgradeStructureTest(unittest.TestCase):
-    """D14's two layers, checked structurally rather than only behaviourally."""
+    """D14's two layers: the verdict authority sees only the evidence, and the
+    emitter writes only the state that evidence earns."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
 
     def test_the_verdict_authority_sees_only_the_evidence(self):
         self.assertEqual(list(inspect.signature(gate.decide).parameters),
                          ["evidence", "gate"])
 
-    def test_no_authorization_name_reaches_the_verdict_authority(self):
-        # Literal, and prose counts: a docstring naming the flag is one rename
-        # away from a parameter that honours it. Scoped to `decide` alone --
-        # every other function in the module is free to spell it (D14).
-        self.assertNotIn("override", inspect.getsource(gate.decide))
+    def test_an_authorization_leaves_every_verdict_and_body_unchanged(self):
+        flat = {s: ([1000, 1000, 1000], [999, 999, 999]) for s in gate.STRATA}
+        straddle = dict(flat, claude=([1000, 1000, 1000], [300, 1500, 1400]))
+        # A private directory per row: records are named from the case id, so a
+        # shared one lets a manifest overwrite its neighbour's records.
+        rows = []
+        for state, code, totals in (("approved", 0, None), ("rejected", 3, flat),
+                                    ("unmeasured", 3, straddle)):
+            area = self.tmp / state
+            area.mkdir()
+            path = area / "trials.json"
+            manifest = make_manifest(area, full_cases(area, totals))
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            rows.append((state, code, str(path)))
+        reason, by, at = "further experimentation approved", "anis", "2026-09-02T12:00:00Z"
+        for state, code, path in rows:
+            with self.subTest(state=state):
+                plain_code, plain = run_cli("--trials", path)
+                auth_code, authorized = run_cli("--trials", path, "--override", reason,
+                                                "--override-by", by, "--override-at", at)
+                self.assertEqual((plain_code, auth_code), (code, code))
+                self.assertEqual((plain["state"], authorized["state"]), (state, state))
+                self.assertIsNone(plain["override"])
+                self.assertEqual(authorized["override"], gate.build_override(reason, by, at))
+                drop = ("override", "bundle_id", "generated_at")
+                self.assertEqual({k: v for k, v in plain.items() if k not in drop},
+                                 {k: v for k, v in authorized.items() if k not in drop})
+                self.assertEqual(gate.verify_bundle(authorized), state)
 
-    def test_the_emitter_re_decides_before_it_writes(self):
-        self.assertIn("decide(", inspect.getsource(gate.assemble_bundle))
+    def test_the_emitter_writes_only_the_state_its_evidence_earns(self):
+        v1 = {"identity": json.loads(json.dumps(IDENTITY)),
+              "expansion": {"expanded": False, "checkpoint_ref": None}}
+        v3 = json.loads(json.dumps(v1))
+        del v3["identity"]["pinned"]["builds"]["codex"]
+        profile = gate.gate_profile(1)
+        cutover = gate.gate_profile(3, "cutover")
+        rows = [
+            ("v1-approved", v1, flat(stratum(context(1000, 800))), profile, None, "approved"),
+            ("v1-rejected", v1, flat(stratum(context(1000, 999))), profile, None, "rejected"),
+            ("v1-unmeasured", v1,
+             flat(stratum(context(1000, 1000, base_trials=[1000, 1000, 1000],
+                                  candidate_trials=[400, 1400, 1200]))),
+             profile, None, "unmeasured"),
+            ("v3-approved", v3,
+             claude_evidence(("c1", tagged("c1", [1000] * 3, [1000] * 3))),
+             cutover, "cutover", "approved"),
+        ]
+        refusals = 0
+        for label, manifest, evidence, row_profile, kind, earned in rows:
+            for state in ("approved", "rejected", "unmeasured"):
+                with self.subTest(row=label, handed=state):
+                    if state == earned:
+                        bundle = gate.assemble_bundle(manifest, evidence, [], None, state,
+                                                      row_profile)
+                        self.assertEqual(bundle["state"], earned)
+                        self.assertEqual(gate.verify_bundle(bundle, kind=kind), earned)
+                    else:
+                        refusals += 1
+                        with self.assertRaises(gate.BundleIntegrityError):
+                            gate.assemble_bundle(manifest, evidence, [], None, state,
+                                                 row_profile)
+        self.assertEqual(refusals, 8)
 
 
 def bundle_for(evidence_value, state, override=None):
