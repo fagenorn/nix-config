@@ -6,7 +6,7 @@ runs aborts the activation (exit 134 under a tty). The guard in
 hosts/common/darwin-user-agent-reload-guard.sh turns that call into one log line.
 
 The step run here is the real `system.activationScripts.userLaunchd.text` of each darwin host,
-evaluated purely, so it runs on any machine (the required CI job runs on Linux); only
+read from a pure evaluation, so it runs on any machine (the required CI job runs on Linux); only
 `launchctl`, `sudo` and `id` are fakes, and a regression in the wiring or in nix-darwin's
 step text fails these tests.
 Run: just agent-workflow-tests
@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from . import test_verify_pending_units as units
+from . import host_readings, test_verify_pending_units as units
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hosts/common/darwin-user-agent-reload-guard.sh"
@@ -51,12 +51,9 @@ echo 502
 class ReloadStep(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.user = units.username()
-        # pure: the required CI job runs on Linux, where only a pure evaluation works.
-        evaluated = {host: units.evaluate(f"darwinConfigurations.{host}", """c: u: {
-          text = c.system.activationScripts.userLaunchd.text;
-          agents = builtins.attrNames c.environment.userLaunchAgents;
-        }""", pure=True) for host in units.DarwinHosts.HOSTS}
+        cls.user = host_readings.username()
+        # Read from a pure evaluation: the required CI job runs on Linux, where only that works.
+        evaluated = {host: host_readings.read(host, "user-launchd") for host in units.DarwinHosts.HOSTS}
         cls.got = {host: got["text"] for host, got in evaluated.items()}
         cls.agents = {host: got["agents"] for host, got in evaluated.items()}
 
