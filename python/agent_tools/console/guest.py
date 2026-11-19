@@ -86,7 +86,8 @@ not, the `REASON_CODES` code (`sharing_off`, `name_unread`, `host`, `not_shared`
 and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
 it is a hostname of letters, digits, dots and hyphens with an optional port whose last label is not
 numeric and that carries no address of the request's `X-Forwarded-For` or of this host's own (so an `@`, a
-long value, an address in any numeric spelling or a name built on one is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
+long value, an address in any numeric spelling or a name built on one, dotted or dashed, is never kept);
+`host_local` (exactly one `Host`, `localhost` lowercased); and the
 `forwarded_host_form` (`HOST_FORMS`: `exact` the read name, `with_port` the name with `:443`,
 `other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
@@ -268,15 +269,24 @@ def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     return found
 
 
+def _spellings(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> set:
+    """The ways a host name can carry `address`: dotted or colon text, and the dash form a name must use."""
+    found = {str(address), address.exploded}
+    return found | {text.replace(".", "-").replace(":", "-") for text in found}
+
+
 def _literals(forwarded: Sequence[str], own: frozenset) -> frozenset:
     """The address spellings a kept host must not carry: each forwarded address (a list taken apart) and this host's."""
-    found = {str(address) for address in own}
+    found: set = set()
+    for address in own:
+        found |= _spellings(address)
     for value in forwarded:
         for part in value.split(","):
             try:
-                found.update({part.strip(_OWS), str(_address(part))})
+                address = _address(part)
             except ValueError:
                 continue
+            found |= {part.strip(_OWS).lower()} | _spellings(address)
     return frozenset(found)
 
 

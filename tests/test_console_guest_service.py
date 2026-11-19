@@ -214,6 +214,19 @@ class GuestCase(unittest.TestCase):
             sock.connect(svc.guest_socket)
             return sock.recv(1)
 
+    def in_flight(self, svc, change):
+        """Run `change` once, after the next guest request is parsed and before it is answered."""
+        original = svc.record_guest_request
+        done = []
+
+        def hook(reading, *judged):
+            if not done:
+                done.append(True)
+                change()
+            return original(reading, *judged)
+
+        svc.record_guest_request = hook
+
     def last_request(self, svc):
         return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["last_request"]
 
@@ -1103,6 +1116,22 @@ class ReadingServiceTest(GuestCase):
                 for part in (b"100.64.0", b"fd7a:"):
                     self.assertNotIn(part, owner)
 
+    def test_the_owner_view_never_shows_a_host_name_built_on_an_address(self):
+        self.seed()
+        svc = self.start()
+        for value in ("100-64-0-20.example.invalid", "100.64.0.20.example.invalid",
+                      "ip-100-64-0-20.sslip.invalid", "fd7a-115c-a1e0--a.example.invalid",
+                      "fd7a-115c-a1e0-0000-0000-0000-0000-000a.example.invalid",
+                      "100-64-0-10.example.invalid"):
+            with self.subTest(value=value):
+                self.guest(svc, "GET", "/api/whoami", host=value, forwarded_host=value,
+                           headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+                last = self.reading(svc)
+                self.assertEqual((last["host"], last["forwarded_host"]), (None, None))
+                owner = svc.view_bytes.lower()
+                for part in (b"100-64-0", b"100.64.0", b"fd7a-", b"fd7a:"):
+                    self.assertNotIn(part, owner)
+
     def test_the_owner_view_says_whether_another_device_came(self):
         self.seed()
         svc = self.start()
@@ -1173,6 +1202,29 @@ class ReadingServiceTest(GuestCase):
         self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [OTHER_DEVICE_ADDRESS]}}
         self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
         self.assertEqual(sharing()["last_request"]["client"], "other_device")
+        svc.poll_serve()
+        self.assertIsNone(sharing()["last_request"])
+        self.assertIs(sharing()["other_device_seen"], False)
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertEqual(sharing()["last_request"]["client"], "this_host")
+        self.assertIs(sharing()["other_device_seen"], False)
+
+    def test_a_reading_judged_under_addresses_that_moved_in_flight_is_dropped(self):
+        self.seed()
+        svc = self.start()
+
+        def sharing():
+            return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+
+        def move():
+            self.status = {"Self": {"DNSName": TAILNET + ".",
+                                    "TailscaleIPs": [OTHER_DEVICE_ADDRESS]}}
+            svc.poll_serve()
+
+        self.in_flight(svc, move)
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertIsNone(sharing()["last_request"])
+        self.assertIs(sharing()["other_device_seen"], False)
         svc.poll_serve()
         self.assertIsNone(sharing()["last_request"])
         self.assertIs(sharing()["other_device_seen"], False)
@@ -1422,19 +1474,6 @@ class ReadNameTest(GuestCase):
         self.assertEqual(sharing["tailnet"], TAILNET)
         self.assertNotIn(TAILNET, json.dumps(support.log_rows(self.store)))
 
-    def in_flight(self, svc, change):
-        """Run `change` once, after the next guest request is parsed and before it is answered."""
-        original = svc.record_guest_request
-        done = []
-
-        def hook(reading):
-            if not done:
-                done.append(True)
-                change()
-            return original(reading)
-
-        svc.record_guest_request = hook
-
     def move_and_widen(self, svc):
         self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
         svc.poll_serve()
@@ -1559,11 +1598,11 @@ class ReadNameTest(GuestCase):
                 original = svc.record_guest_request
                 first = []
 
-                def spy(reading):
+                def spy(reading, *judged):
                     if not first:
                         first.append(reading)
                         change(svc)
-                    return original(reading)
+                    return original(reading, *judged)
 
                 svc.record_guest_request = spy
                 got = self.guest(svc, "GET", "/")

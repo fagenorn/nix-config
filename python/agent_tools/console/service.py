@@ -3389,7 +3389,8 @@ class GuestHandler(ConsoleHandler):
                 headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
-                headers.get_all(guest.PROBE_HEADER) or [], own=self.snapshot.policy.addresses))
+                headers.get_all(guest.PROBE_HEADER) or [], own=self.snapshot.policy.addresses),
+                self.snapshot.policy.addresses)
         return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
@@ -4030,9 +4031,14 @@ class ConsoleService:
         return entry, action, approve.apply_items(
             latest, found, entry, action, deferred=self._deferred)
 
-    def record_guest_request(self, reading: Mapping) -> None:
-        """Keep the latest guest-port request's reading for the owner; see the module docstring."""
+    def record_guest_request(self, reading: Mapping, judged: frozenset = frozenset()) -> None:
+        """Keep the latest guest-port request's reading for the owner; see the module docstring.
+
+        A reading judged against `judged` addresses other than the current ones is dropped.
+        """
         with self._ingest:
+            if judged != self._tailnet_addresses:
+                return
             seen = self._other_device_seen or reading.get("client") == guest.OTHER_DEVICE
             if reading == self._guest_reading and seen == self._other_device_seen:
                 return
