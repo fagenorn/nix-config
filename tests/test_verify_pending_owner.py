@@ -17,8 +17,8 @@ from agent_tools.verification import verify_pending
 from agent_tools.verification import verify_run as vr
 from agent_tools.system import forge_api
 
-from .test_verify_pending import (ISSUE, MERGE, SLUG, T0, PassBase, Refs, block, bkey, check, gnode, hold, line, marker,
-                                  ok_check, result, stored_comment)
+from .test_verify_pending import (HOLD_LATER, ISSUE, MERGE, RETIRED, SLUG, T0, PassBase, Refs, block, bkey, check, gnode,
+                                  hold, line, marker, ok_check, result, stored_comment)
 from .test_forge_owner_action import QUESTIONS, box_body
 
 OA_ADD = ["api", "-X", "POST", f"repos/{SLUG}/issues/{ISSUE}/labels", "-f", "labels[]=owner-action"]
@@ -750,6 +750,104 @@ class StaleTest(OwnerBase):
         waived = self.markers("verify-result")[0]
         self.assertEqual(waived.fields["owner"], str(prompt.comment_id))
         self.assertEqual(list(waived.fields)[-2:], ["waived", "owner"])
+
+    def test_a_retired_hosts_check_goes_stale_on_its_successor(self):
+        c = ok_check(host="old-box")
+        seen = marker("verify-seen", {"block": bkey(c), "host": "new-box", "on": "2026-10-25"})
+        self.held_since(self.OLD, c, extra=[stored_comment(11, seen, at="2026-10-25T08:00:00Z")])
+        self.run_pass("mbp", retired=RETIRED)
+        stale, = self.prompts("verify-stale-check")
+        self.assertEqual((stale.fields["host"], stale.fields["cause"], stale.fields["last"]),
+                         ("new-box", "silent", "2026-10-25"))
+
+    def test_a_non_successor_running_first_posts_no_stale_prompt(self):
+        c = ok_check(host="old-box")
+        due = marker("verify-due", {"block": bkey(c), "check": "0", "host": "old-box"})
+        self.held_since(self.OLD, c, extra=[stored_comment(11, due, at="2026-10-21T08:00:00Z")])
+        self.run_pass("mbp", retired=RETIRED)
+        self.assertEqual(self.prompts(), [])
+        ends = [m for m in self.markers("end") if m.fields == {"of": "11", "reason": "host_retired"}]
+        self.assertEqual(len(ends), 1)
+
+    def test_a_check_no_host_can_take_gets_no_stale_prompt(self):
+        self.held_since(self.OLD, ask_check(host="old-box"))
+        self.assertEqual(self.run_pass("mbp", retired=RETIRED), [line(0, "AC1", "pending", "host_retired")])
+        self.assertEqual(self.prompts(), [])
+
+    def test_the_successor_reports_seen_for_a_taken_check(self):
+        self.held_since(self.OLD, ok_check(host="old-box", when=HOLD_LATER))
+        self.run_pass("new-box", retired=RETIRED)
+        self.run_pass("mbp", retired=RETIRED)
+        seen, = self.markers("verify-seen")
+        self.assertEqual(seen.fields["host"], "new-box")
+        self.assertEqual(self.prompts(), [])
+
+    def test_an_ended_retired_hosts_stale_prompt_does_not_block_the_successors(self):
+        c = ok_check(host="old-box")
+        seen = marker("verify-seen", {"block": bkey(c), "host": "new-box", "on": "2026-10-25"})
+        fields = {"reason": "verify-stale-check", "block": bkey(c), "check": "0", "host": "old-box",
+                  "cause": "silent", "last": "never"}
+        old = fm.render("owner-action", fields, "AC1 waits on old-box, which last reported never.",
+                        "- [ ] Accept without old-box")
+        self.held_since(self.OLD, c, extra=[stored_comment(11, seen, at="2026-10-25T08:00:00Z"),
+                                            stored_comment(12, old), stored_comment(13, fm.end_body(12, "closed"))])
+        self.run_pass("mbp", retired=RETIRED)
+        prompts = self.prompts("verify-stale-check")
+        self.assertEqual([p.comment_id for p in prompts][0], 12)
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(prompts[1].fields["host"], "new-box")
+
+
+class RetiredPromptTest(OwnerBase):
+    """Issue 1291: a retired host's prompts and due markers are ended, never read."""
+
+    def old_box_stale(self, c):
+        fields = {"reason": "verify-stale-check", "block": bkey(c), "check": "0", "host": "old-box",
+                  "cause": "silent", "last": "never"}
+        return fm.render("owner-action", fields, "AC1 waits on old-box, which last reported never.",
+                         "- [ ] Accept without old-box")
+
+    def ended(self, comment_id, reason="host_retired"):
+        return [m for m in self.markers("end") if m.fields == {"of": str(comment_id), "reason": reason}]
+
+    def test_a_live_prompt_naming_a_retired_host_is_ended_and_never_read(self):
+        c = ok_check(host="old-box")
+        for ticked in (True, False):
+            with self.subTest(ticked=ticked):
+                self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(c))),
+                                                       stored_comment(11, self.old_box_stale(c))],
+                                         labels=["needs-verification", "owner-action"])
+                if ticked:
+                    self.tick(11, "Accept without old-box")
+                self.run_pass("mbp", retired=RETIRED)
+                self.assertEqual(self.markers("verify-result"), [])
+                self.assertEqual(len(self.ended(11)), 1)
+                self.assertEqual(self.world.issue()["state"], "open")
+                self.assertEqual([p.comment_id for p in self.prompts("verify-stale-check")], [11])
+
+    def test_a_retired_ask_answered_before_retirement_records_nothing(self):
+        self.hold(ask_check(host="old-box"))
+        self.run_pass("old-box", retired={})
+        ask, = self.prompts("verify-ask")
+        self.tick(ask.comment_id, vo.ACCEPT)
+        lines = self.run_pass("new-box", retired=RETIRED)
+        self.assertEqual(lines[0], line(0, "AC1", "pending", "host_retired"))
+        self.assertEqual(self.markers("verify-result"), [])
+        self.assertEqual(len(self.ended(ask.comment_id)), 1)
+        self.assertEqual(self.world.issue()["state"], "open")
+
+    def test_a_retired_check_that_failed_gets_no_decision_prompt(self):
+        c = ok_check(host="old-box", effects="live", on_fail="ask")
+        self.hold(c, extra=[stored_comment(11, result(bkey(c), 0, "fail", host="old-box"))])
+        self.assertEqual(self.run_pass("mbp", retired=RETIRED), [line(0, "AC1", "pending", "host_retired")])
+        self.assertEqual(self.prompts("verify-decision"), [])
+
+    def test_a_final_result_stands_after_retirement(self):
+        c = ask_check(host="old-box")
+        self.hold(c, extra=[stored_comment(11, result(bkey(c), 0, "pass", host="old-box"))])
+        lines = self.run_pass("mbp", retired=RETIRED)
+        self.assertEqual(lines[0], line(0, "AC1", "pass", "resolved"))
+        self.assertEqual(self.world.issue()["state"], "closed")
 
 
 class ForeignOwnerActionTest(OwnerBase):

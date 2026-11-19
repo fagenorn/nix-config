@@ -8,7 +8,12 @@ miss under a claim (P10) and closes the issue once through a contested `verify-c
 associations, so a marker by any other author neither wins a contest nor ends one (P3). "Now" is
 only `Context.now()`, the forge's clock (P6, P7).
 
-A check is this host's when its `host` equals the host, is `any`, or lists it. A run of a check
+A check is this host's when its effective host equals the host, is `any` or lists it. The effective
+host maps each host of `RETIRED_HOSTS` to its successor for a check the unattended gate would run
+and to nobody otherwise; a check nobody can take is one `pending` line with reason `host_retired`
+on every host and is never answered. A writing pass ends a retired host's live prompts and due
+markers with reason `host_retired`; seen and stale follow the effective host, and a taken check
+goes stale only after its successor has reported on the block. A run of a check
 holds a lease (P8), a `verify-run` marker it wins and deletes when it is done, so no two runs of
 one check overlap whatever their host (a run that died leaves a claim `LEASE`, 30 minutes, ends:
 the next run ends it). The lease is a marker contest settled by the smallest live comment id, this
@@ -63,6 +68,7 @@ live approve prompts of a repository, outside any pass.
 """
 import json
 import re
+import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -70,13 +76,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from agent_tools.verification import verify_block, verify_exec, verify_facts, verify_issues, verify_owner
+from agent_tools.verification import (verify_answer, verify_block, verify_exec, verify_facts, verify_issues,
+                                      verify_owner)
 from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.claims.forge_markers import Marker
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
 
 NEEDS = "needs-verification"
+# A retired host to the successor that takes its checks (issue 1291, ADR-verification-010).
+RETIRED_HOSTS: Mapping[str, str] = types.MappingProxyType({"anis-desktop": "eleven-m5"})
 # Delivery labels a verified close drops with NEEDS; removing an absent one is a no-op (404).
 DELIVERY = ("in-progress", "agent:ready")
 FAILED = ("verification-failed", "B60205")
@@ -249,7 +258,8 @@ def runner_trusted(slug: str) -> bool:
 
 
 def pass_repo(project: Project, host: str, refs: verify_block.References, *,
-              issue: int | None = None, report: bool = False) -> list[dict]:
+              issue: int | None = None, report: bool = False,
+              retired: Mapping[str, str] = RETIRED_HOSTS) -> list[dict]:
     """One pass over every listed issue (only `issue` when given); a listing failure propagates.
 
     A pass that writes first checks the runner's own account is trusted and otherwise ends with
@@ -260,7 +270,7 @@ def pass_repo(project: Project, host: str, refs: verify_block.References, *,
     lines: list[dict] = []
     for node in list_held(project.slug):
         if issue is None or node.get("number") == issue:
-            lines.extend(pass_issue(project, host, node, refs, report=report))
+            lines.extend(pass_issue(project, host, node, refs, report=report, retired=retired))
     if not report:
         try:
             lines.extend(forge_owner_action.reconcile(project.slug, issue=issue))
@@ -271,9 +281,9 @@ def pass_repo(project: Project, host: str, refs: verify_block.References, *,
 
 
 def pass_issue(project: Project, host: str, node: dict, refs: verify_block.References, *,
-               report: bool = False) -> list[dict]:
+               report: bool = False, retired: Mapping[str, str] = RETIRED_HOSTS) -> list[dict]:
     """The report lines of one issue's pass; a forge failure ends it with one `forge_error` line."""
-    run = _Pass(project, host, node, refs, report)
+    run = _Pass(project, host, node, refs, report, retired)
     try:
         run.execute()
     except ForgeError:
@@ -299,8 +309,9 @@ def _fenced_of(body: str) -> str:
 
 class _Pass:
     def __init__(self, project: Project, host: str, node: dict, refs: verify_block.References,
-                 report: bool) -> None:
+                 report: bool, retired: Mapping[str, str] = RETIRED_HOSTS) -> None:
         self.project, self.host, self.refs, self.report = project, host, refs, report
+        self.retired = retired
         self.slug = project.slug
         self.number = node["number"]
         self.node = node
@@ -362,6 +373,8 @@ class _Pass:
                                         bindings["tracker"], self.markers)
         checks = self.block["checks"]
         self.states = [None] * len(checks)
+        if not self.report:
+            self.retire()
         for index, check in enumerate(checks):
             self.check(index, check)
         if not self.report:
@@ -385,12 +398,14 @@ class _Pass:
                 elif not self.report:
                     self.follow_up(index, ac, key, previous, _fenced_of(previous.body))
             return
+        bound = self.bound(check)
+        if bound is None:
+            return self.line(index, ac, "pending", "host_retired")
         if not self.report and self.answer(index, check, ac, key, previous):
             return
         if (not self.report and check.get("on_fail", "label") == "ask" and prev == "fail"
                 and "owner" not in previous.fields):
             self.decide_fail(index, ac, previous)
-        bound = check["host"]
         if not (bound == self.host or bound == "any" or (isinstance(bound, list) and self.host in bound)):
             return self.line(index, ac, "pending", "not_this_host")
         gate = verify_exec.gate(check, self.project.bindings["workflow"]["verification"])
@@ -410,6 +425,48 @@ class _Pass:
         if not gate.runnable:
             return self.owner_form(index, check, ac, key, previous, prev, due, gate.reason)
         self.run_leased(index, check, ac, key, previous, prev, due)
+
+    def takeable(self, check: Mapping) -> bool:
+        """Whether the unattended gate would run `check`: what a successor may take from a retired host."""
+        return verify_exec.gate(check, self.project.bindings["workflow"]["verification"]).runnable
+
+    def bound(self, check: Mapping) -> str | list[str] | None:
+        """The check's effective host: `host` with each retired host replaced by its successor when
+        the check is takeable and dropped otherwise; None when no host can take it."""
+        def one(name: str) -> str | None:
+            if name not in self.retired:
+                return name
+            return self.retired[name] if self.takeable(check) else None
+        host = check["host"]
+        if isinstance(host, str):
+            return one(host)
+        mapped = list(dict.fromkeys(name for name in map(one, host) if name is not None))
+        return mapped or None
+
+    def obsolete(self, marker: Marker) -> bool:
+        """Whether `marker` is a runner prompt of this block that names a retired host or a check no host can take."""
+        if not verify_answer.is_runner_prompt(marker) or marker.fields.get("block") != self.block_key:
+            return False
+        if any(name in self.retired for name in marker.fields.get("host", "").split("+")):
+            return True
+        try:
+            check = self.block["checks"][int(marker.fields["check"])]
+        except (ValueError, IndexError):
+            return False
+        return self.bound(check) is None
+
+    def retire(self) -> None:
+        """End the live prompts and due markers of this block that wait on a retired host."""
+        gone = False
+        for m in self.markers:
+            waits = m.kind == verify_issues.DUE and m.fields.get("block") == self.block_key \
+                and m.fields.get("host") in self.retired
+            if (waits or self.obsolete(m)) and forge_markers.is_live(m, self.markers):
+                forge_markers.end(self.slug, self.number, m.comment_id, "host_retired")
+                gone = True
+        if gone:
+            self.markers = verify_issues.visible(
+                forge_markers.list_markers(self.slug, self.number, TRUSTED), self.block_id)
 
     def run_leased(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
                    prev: str | None, due: verify_facts.Due) -> None:
@@ -530,7 +587,8 @@ class _Pass:
         n = self.number
         claim = self.live(verify_issues.FOLLOWUP, key)
         if claim is not None:
-            if claim.fields.get("host") != self.host:
+            claim_host = claim.fields.get("host")
+            if claim_host != self.host and self.retired.get(claim_host) != self.host:
                 return
         else:
             won = self.write(verify_issues.FOLLOWUP, {**key, "host": self.host},
@@ -601,7 +659,7 @@ class _Pass:
 
         A host with an unresolved check of its own that runs passes is reporting, whether or not
         the check is due, so it is never called silent."""
-        if not any(check["host"] == self.host and self.states[i] not in FINAL for i, check in enumerate(checks)):
+        if not any(self.bound(check) == self.host and self.states[i] not in FINAL for i, check in enumerate(checks)):
             return
         today = f"{self.ctx.now():%Y-%m-%d}"
         key = {"block": self.block_key, "host": self.host}
@@ -613,11 +671,16 @@ class _Pass:
 
     def stale(self, index: int, check: Mapping) -> None:
         """Ask the owner once whether a check bound to one host that has gone quiet may be waived."""
-        host = check["host"]
+        host = self.bound(check)
         if not isinstance(host, str) or host == "any" or self.states[index] in (*FINAL, "fail") \
-                or index in self.prompted \
-                or verify_owner.live_prompts(self.markers, verify_owner.REASONS, self.block_key, index) \
-                or verify_owner.prompts(self.markers, verify_owner.STALE, self.block_key, index):
+                or index in self.prompted:
+            return
+        if host != check["host"] and self.live(verify_owner.SEEN, {"block": self.block_key, "host": host}) is None:
+            return  # a taken check goes stale only once its successor has reported on this block
+        if any(not self.obsolete(p) for p in verify_owner.live_prompts(
+                self.markers, verify_owner.REASONS, self.block_key, index)) \
+                or any(p.fields.get("host") == host
+                       for p in verify_owner.prompts(self.markers, verify_owner.STALE, self.block_key, index)):
             return
         now = self.ctx.now()
         due = self.live(verify_issues.DUE, {"block": self.block_key, "check": str(index)})
@@ -634,7 +697,7 @@ class _Pass:
                     f"{host} last reported {last}." if cause == "unresolved"
                     else f"{ac} waits on {host}, which last reported {last}.")
         self.prompt(verify_owner.STALE, index, {"host": host, "cause": cause, "last": last}, sentence,
-                    verify_owner.box(verify_owner.waive_label(host)))
+                    verify_owner.box(verify_owner.waive_label(host)), ("host",))
 
     def owner_form(self, index: int, check: Mapping, ac: str, key: Mapping[str, str], previous: Marker | None,
                    prev: str | None, due: verify_facts.Due, gate_reason: str) -> None:
@@ -817,7 +880,8 @@ class _Pass:
                      else (verify_owner.ACCEPT, verify_owner.REJECT))
             return verify_owner.answer(p, *boxes)
 
-        found = verify_owner.live_prompts(self.markers, reasons, self.block_key, index)
+        found = [p for p in verify_owner.live_prompts(self.markers, reasons, self.block_key, index)
+                 if not self.obsolete(p)]
         prompt = next((p for p in found if verdict_of(p)), None)
         if prompt is None:
             return False
@@ -882,7 +946,8 @@ class _Pass:
                     or m.fields.get("reason") not in verify_owner.REASONS \
                     or "block" not in m.fields or "check" not in m.fields:
                 continue  # another writer's owner-action (a batch's, issue 636) is never this sweep's to end
-            why = verify_owner.settle_reason(m, fresh, held_key, FINAL) or ("closed" if closing else None)
+            why = (verify_owner.settle_reason(m, fresh, held_key, FINAL)
+                   or ("host_retired" if self.obsolete(m) else None) or ("closed" if closing else None))
             if why is not None:
                 forge_markers.end(self.slug, self.number, m.comment_id, why)
                 gone.add(m.comment_id)
