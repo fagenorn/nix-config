@@ -296,7 +296,8 @@ runs, `unknown profile` for a profile that is not listed, `no sign-in is running
 code or a cancel with no live run); any other exception is `console: signin_failed <Type>` (never its
 message) and 500 `sign-in failed`. Each accepted write appends exactly one `signin.acted` row and no
 refusal appends one. The start route alone answers with a body: `200` `application/json`
-`{"attempt": <int>, "link": <string> | null}` (the attempt is the `seq` of the started row, and a
+`{"attempt": <int>, "forward": <string> | null, "link": <string> | null, "port": <int> | null,
+"route": "manual" | "loopback" | "unknown" | null}` (the attempt is the `seq` of the started row, and a
 start while a run is live answers that run's attempt and link and starts no second client), after
 waiting for the link outside the service's lock; a failed start is a `signin.acted` row with outcome
 `failed`, one stderr line `console: signin_start_failed <profile> <kind>` and 502 `the sign-in could
@@ -305,10 +306,14 @@ signin_code_failed <profile> <Type>` and 502 `the code could not be passed on`, 
 The cancel route answers `204`. `POST /api/signin-link` (#1035) hands a page opened after the start the
 live run's link: the same body rule (`MAX_SIGNIN_BYTES`, `signin_run.parse_profile_request`, 400 `bad
 link`) and the same refusals (`no sign-in is running for <profile>` when no run is live), and it
-answers `200` `application/json` `{"attempt": <int>, "link": <string> | null}` after waiting for the
+answers `200` `application/json` with the start route's five members after waiting for the
 link outside the service's lock. It appends no row, starts no client, folds nothing and publishes
 nothing; when the run it was asked of is replaced while it waits it is refused 409 `the sign-in for
 <profile> changed while waiting for its link`, so an attempt is never answered with another run's link.
+
+`route` is `manual` when the client offered its manual link, `loopback` with `port` and `forward` as `signin_run` gives them when the
+browser link returns to a loopback port, `unknown` when its return cannot be read, and all of them
+are null with no link. None of these members is in a row, the view or a stream frame.
 
 `POST /api/account-add` (#1027) runs the same checks with `MAX_ACCOUNT_BYTES` (4096) and
 `account_add.parse_add_request`: 400 `bad account`. Under the lock `_adding` (never `_ingest`) the
@@ -329,11 +334,10 @@ trust_account_registry_unreadable <name>`) and no grant fails the add. A sign-in
 cannot start leaves the row and the profile, appends the start route's `failed` row and answers
 502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
 <name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
-500 `adding the account failed`. Success is `200` `application/json`
-`{"attempt": <int>, "link": <string> | null, "profile": <name>}` with the start route's attempt and
-link; no row, stderr line, view or stream frame carries the link. The token is created once in
-`page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
-the slot in the page's `console-token` meta tag.
+500 `adding the account failed`. Success is `200` `application/json` with the start route's five
+members and `"profile": <name>`; no row, stderr line, view or stream frame carries the link. The
+token is created once in `page-token` beside the event log and reaches a client only inside `GET /`,
+where it replaces the slot in the page's `console-token` meta tag.
 
 `POST /api/account-remove` (#1030) runs the same checks with `MAX_REMOVE_BYTES` (4096) and
 `account_remove.parse_remove_request`: 400 `bad removal`. The service refuses, in this order, each
@@ -2097,8 +2101,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             if route in (SIGNIN_PATH, SIGNIN_LINK_PATH):
                 attempt, link = (console.start_signin(profile) if route == SIGNIN_PATH
                                  else console.signin_link(profile))
-                answer = json.dumps({"attempt": attempt, "link": link}, sort_keys=True,
-                                    separators=(",", ":")).encode()
+                answer = json.dumps({"attempt": attempt, **signin_run.answer_members(link)},
+                                    sort_keys=True, separators=(",", ":")).encode()
             elif route == SIGNIN_CODE_PATH:
                 console.send_signin_code(profile, code)
             else:
@@ -2160,8 +2164,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: account_add_failed {type(error).__name__}", file=sys.stderr)
             self._refuse(500, "adding the account failed")
             return False
-        answer = json.dumps({"attempt": attempt, "link": link, "profile": name}, sort_keys=True,
-                            separators=(",", ":")).encode()
+        answer = json.dumps({"attempt": attempt, **signin_run.answer_members(link),
+                             "profile": name}, sort_keys=True, separators=(",", ":")).encode()
         try:
             self._send(200, "application/json", answer, ("Connection", "close"))
             self.wfile.flush()
@@ -4612,8 +4616,8 @@ class ConsoleService:
         self._fold(appended)
         return appended[0]
 
-    def start_signin(self, profile: str) -> tuple[int, str | None]:
-        """Start the profile's client login, or join the live one; the attempt and the link."""
+    def start_signin(self, profile: str) -> tuple[int, signin_run.Link | None]:
+        """Start the profile's client login, or join the live one; the attempt and the routed link."""
         runs = self._signin_refuse_unless_listed(profile)
         with self._ingest:
             if profile in self._removing:
@@ -4634,8 +4638,8 @@ class ConsoleService:
             self._publish()
         return attempt, runs.wait_link(profile)
 
-    def signin_link(self, profile: str) -> tuple[int, str | None]:
-        """The live run's attempt and link, for a page opened after the start; no row, no client."""
+    def signin_link(self, profile: str) -> tuple[int, signin_run.Link | None]:
+        """The live run's attempt and routed link, for a page opened after the start; no row, no client."""
         runs = self._signin_refuse_unless_listed(profile)
         with self._ingest:
             attempt = self._signin_live.get(profile)
@@ -4647,8 +4651,8 @@ class ConsoleService:
                 raise sprints.Refused(f"the sign-in for {profile} changed while waiting for its link")
         return attempt, link
 
-    def add_account(self, name: str) -> tuple[int, str | None]:
-        """Create the account through the launcher, then start its sign-in; the attempt and link."""
+    def add_account(self, name: str) -> tuple[int, signin_run.Link | None]:
+        """Create the account through the launcher, then start its sign-in; the attempt and routed link."""
         if self._account_adder is None or self._signin_runs is None or self._signin_reader is None:
             raise sprints.Refused(account_add.UNAVAILABLE)
         reason = account_add.refusal(name)

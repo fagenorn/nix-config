@@ -1,6 +1,6 @@
 # ADR-console-024 — The owner signs a profile in from the page
 
-- **Status:** accepted; amended by ADR-console-025, ADR-console-075
+- **Status:** accepted; amended by ADR-console-025, ADR-console-075, ADR-console-080
 - **Decided in:** #842, #1026, #1027, #1035, #1039
 
 ## Context
