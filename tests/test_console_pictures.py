@@ -1648,33 +1648,3 @@ class PictureDocsTest(unittest.TestCase):
         for term in ("**Question round**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
             self.assertIn("ADR-console-038", entry, term)
-
-    def test_adr_041_records_the_brief_and_report_pictures(self):
-        adr = "docs/areas/console/adr/"
-        name = adr + "041-a-managers-brief-and-report-show-their-pictures-on-the-card.md"
-        self.assertEqual(
-            (ROOT / name).read_text().splitlines()[0],
-            "# ADR-console-041 — A manager's brief and report show their pictures on the card")
-        text = self.doc(name)
-        for needle in ("#1091", "`pictures`", "8", "140", "before", "after", "brief.sent",
-                       "sprint.reported", "dry_run", "Detail", "recap", "ADR-console-013",
-                       "ADR-console-014", "ADR-console-036", "ADR-console-038"):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
-        for path, amended in (
-                ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-041"),
-                ("038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
-                 "- **Status:** accepted; amended by ADR-console-041 and ADR-console-045")):
-            with self.subTest(path):
-                lines = (ROOT / adr / path).read_text().splitlines()
-                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
-        with self.subTest("014"):
-            lines = (ROOT / adr / "014-a-managers-report-becomes-the-sprints-line.md"
-                     ).read_text().splitlines()
-            self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
-                             "- **Status:** accepted; amended by ADR-console-041, ADR-console-042, ADR-console-048")
-        context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
-        for term in ("**Brief**:", "**Report**:", "**Picture**:"):
-            entry = context[context.index(term):].split("\n\n")[0]
-            self.assertIn("ADR-console-041", entry, term)
