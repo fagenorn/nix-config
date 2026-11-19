@@ -83,15 +83,15 @@ finds in that guest's scoped view.
 showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if
 not, the `REASON_CODES` code (`sharing_off`, `name_unread`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
 and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
-it is a hostname of letters, digits, dots and hyphens with an optional port (so an `@` or a long
-value is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
+it is a hostname of letters, digits, dots and hyphens with an optional port whose last label is not
+numeric (so an `@`, a long value or an address in any numeric spelling is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
 `forwarded_host_form` (`HOST_FORMS`: `exact` the read name, `with_port` the name with `:443`,
 `other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
 `probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said); `login_valid`
 (at least one login header arrived and every one is a well-formed login, so a combined value such as
 two logins joined by a comma is false); and `client` (`CLIENT_FORMS`, `client_of(forwarded, own)`,
-ADR-console-079): `this_host` when exactly one `X-Forwarded-For` value is one of this host's own
+ADR-console-079; a value is trimmed of spaces and tabs only): `this_host` when exactly one `X-Forwarded-For` value is one of this host's own
 addresses, `other_device` when it is one address and not one of them, and `unknown` otherwise (none,
 more than one header, a list, a value that is no address, one carrying an IPv6 zone, or no own address
 read); an IPv4-mapped IPv6 value compares as its IPv4 address. Only that comparison is kept, never an
@@ -243,17 +243,32 @@ def self_name(status: object) -> str | None:
     return name if valid_tailnet(name) and _SELF_NAME.fullmatch(name) is not None else None
 
 
+_OWS = " \t"  # HTTP optional whitespace; no other character pads a field value
+_NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*")
+
+
+def _names_address(host: str) -> bool:
+    """Whether a Host-shaped value (no port needed) is an IP address in any numeric spelling."""
+    last = host.rsplit(":", 1)[0].rsplit(".", 1)[-1]
+    return _NUMERIC_LABEL.fullmatch(last) is not None
+
+
 def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     """One address from `text`, an IPv4-mapped one as its IPv4 address; `ValueError` for a zone or no address."""
     if not isinstance(text, str):
         raise ValueError("not a string")
-    found = ipaddress.ip_address(text.strip())
+    found = ipaddress.ip_address(text.strip(_OWS))
     if isinstance(found, ipaddress.IPv6Address):
         if found.scope_id is not None:
             raise ValueError("zoned address")
         if found.ipv4_mapped is not None:
             return found.ipv4_mapped
     return found
+
+
+def _kept_host(value: str) -> bool:
+    """Whether a host value may be kept in the reading: host-shaped and no address (ADR-console-079)."""
+    return _HOST.fullmatch(value) is not None and not _names_address(value)
 
 
 def own_addresses(status: object) -> frozenset:
@@ -401,10 +416,10 @@ def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_ho
     return {"admitted": text is None,
             "client": client_of(forwarded, own),
             "forwarded_for": bool(forwarded),
-            "forwarded_host": one if one is not None and _HOST.fullmatch(one) else None,
+            "forwarded_host": one if one is not None and _kept_host(one) else None,
             "forwarded_host_form": form,
             "forwarded_hosts": len(forwarded_hosts),
-            "host": host if host is not None and _HOST.fullmatch(host) else None,
+            "host": host if host is not None and _kept_host(host) else None,
             "host_local": host is not None and host.lower() == LOCAL_HOST,
             "hosts": len(hosts),
             "login_headers": len(logins),

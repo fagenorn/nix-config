@@ -1089,6 +1089,19 @@ class ReadingServiceTest(GuestCase):
                     self.assertNotIn(value.encode(), owner)
         self.assertEqual(support.log_rows(self.store), rows)
 
+    def test_the_owner_view_never_shows_an_address_sent_as_a_host(self):
+        self.seed()
+        svc = self.start()
+        for value in (OTHER_DEVICE_ADDRESS + ":443", OTHER_DEVICE_ADDRESS, SELF_V4 + ":443"):
+            with self.subTest(value=value):
+                self.guest(svc, "GET", "/api/whoami", host=value, forwarded_host=value,
+                           headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+                last = self.reading(svc)
+                self.assertEqual((last["host"], last["forwarded_host"]), (None, None))
+                owner = svc.view_bytes.lower()
+                for part in (b"100.64.0", b"fd7a:"):
+                    self.assertNotIn(part, owner)
+
     def test_the_owner_view_says_whether_another_device_came(self):
         self.seed()
         svc = self.start()

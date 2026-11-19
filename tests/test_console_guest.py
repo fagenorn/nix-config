@@ -326,6 +326,11 @@ class ClientTest(unittest.TestCase):
         rows = [
             ([SELF_V4], own, "this_host"),
             ([" 100.64.0.10 "], own, "this_host"),
+            (["\t100.64.0.10\t"], own, "this_host"),
+            (["\u00a0100.64.0.20\u00a0"], own, "unknown"),
+            (["\u00a0100.64.0.10"], own, "unknown"),
+            (["100.64.0.20\u2003"], own, "unknown"),
+            (["100.64.0.20\n"], own, "unknown"),
             (["FD7A:115C:A1E0:0:0:0:0:A"], own, "this_host"),
             (["::ffff:100.64.0.10"], own, "this_host"),
             ([OTHER_DEVICE_ADDRESS], own, "other_device"),
@@ -344,6 +349,22 @@ class ClientTest(unittest.TestCase):
         for forwarded, addresses, expected in rows:
             with self.subTest(forwarded=forwarded, own=bool(addresses)):
                 self.assertEqual(guest.client_of(forwarded, addresses), expected)
+
+    def test_the_reading_never_keeps_an_address_as_a_host(self):
+        access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        for value in (OTHER_DEVICE_ADDRESS, OTHER_DEVICE_ADDRESS + ":443", SELF_V4 + ":8", "0100.064.0.5",
+                      "1684300805", "0x64000005", "0x64.0.0.5:443"):
+            with self.subTest(value=value):
+                r = guest.reading(access, TAILNET, [value], [value], [COLLEAGUE], [], [])
+                self.assertEqual((r["host"], r["forwarded_host"]), (None, None))
+                self.assertEqual(r["host_local"], False)
+                text = json.dumps(r)
+                for part in ("100.64", "1684300805", "0x64"):
+                    self.assertNotIn(part, text)
+        for value in ("localhost", OTHER_HOST, OTHER_HOST + ":443", "v4.example", "a1.b2.example:8"):
+            with self.subTest(value=value):
+                r = guest.reading(access, TAILNET, [value], [value], [COLLEAGUE], [], [])
+                self.assertEqual((r["host"], r["forwarded_host"]), (value, value))
 
     def test_the_reading_keeps_only_the_comparison(self):
         access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
