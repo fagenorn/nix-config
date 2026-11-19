@@ -28,6 +28,14 @@ issue: `comments` are `(comment id, author association, body)` triples, the bloc
 unparsable block, one without a `checks` list and a check without a string `ac` add nothing. The console reads
 it so that a human criterion the runner will ask itself raises no review card of its own.
 
+`held_settled(comments)` (#1327) is whether the runner has already settled that block, over the same
+triples and the same block, so the console raises no review card for it. It is true when the winning live
+`verify-closed` marker of the block's version has an `outcome` in `CLOSED_OUTCOMES` (`verified`, `expired`:
+the selection the runner makes before it closes the issue), or when the block's `checks` is a non-empty list
+and every check has a live `verify-result` of the block's version whose `state` is in `SETTLED_STATES`
+(`pass`, `hit`). A result of another block version, an ended or untrusted one, a `fail`, one check of two
+passed, a block with `checks: []`, an unparsable block and no block settle nothing.
+
 A prompt that already carries exactly the answer asked for is left alone and the call returns without a write:
 the same box ticked, or for `keep` a `kept` end of it (checked before `GONE`, since the end makes the prompt
 no longer live). Another answer is still `ALREADY`, and an `end` of another reason is still `GONE`. The
@@ -58,6 +66,8 @@ from agent_tools.verification.verify_block import FENCE
 from agent_tools.verification.verify_owner import ACT, APPROVE, ASK, DECISION, STALE
 
 TRUSTED: tuple[str, ...] = verify_issues.TRUSTED
+SETTLED_STATES = ("pass", "hit")
+CLOSED_OUTCOMES = ("verified", "expired")
 ANSWERS: dict[str, tuple[str, ...]] = {ASK: ("passed", "failed", "note"), DECISION: ("passed", "failed"),
                                        APPROVE: ("approve",), STALE: ("keep", "drop"), ACT: ()}
 KINDS = {ASK: "manual-check", ACT: "act", DECISION: "verdict", STALE: "stale-check", APPROVE: "approval"}
@@ -134,6 +144,24 @@ def held_acs(comments: Sequence[tuple[int, str, str]]) -> frozenset[str]:
         return frozenset()
     return frozenset(check["ac"].upper() for check in checks
                      if isinstance(check, dict) and isinstance(check.get("ac"), str))
+
+
+def held_settled(comments: Sequence[tuple[int, str, str]]) -> bool:
+    """Whether the runner has settled the issue's held verify block: closed with an outcome, or every check passed."""
+    held = verify_issues.select([verify_issues.Comment(cid, association, body, "1970-01-01T00:00:00Z")
+                                 for cid, association, body in comments])
+    block = held.block if held is not None else None
+    checks = block.get("checks") if isinstance(block, dict) else None
+    if held is None or not isinstance(checks, list) or not checks:
+        return False
+    closing = verify_issues.live_one(held.markers, verify_issues.CLOSED, {"block": held.key})
+    if closing is not None and closing.fields.get("outcome") in CLOSED_OUTCOMES:
+        return True
+    for index in range(len(checks)):
+        result = verify_issues.latest_result(held.markers, held.key, index)
+        if result is None or result.fields.get("state") not in SETTLED_STATES:
+            return False
+    return True
 
 
 def ambiguous(marker: Marker) -> bool:
