@@ -4,6 +4,8 @@ Run: just agent-workflow-tests
 """
 
 import json
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -350,37 +352,75 @@ class ScopeTest(unittest.TestCase):
         self.assertEqual(guest.picture_ids(walked), frozenset({"a", "b", "c"}))
 
 
+class DoorTest(unittest.TestCase):
+    def test_the_door_refusal_table(self):
+        def st(mode, uid):
+            return os.stat_result((mode, 1, 1, 1, uid, 0, 0, 0, 0, 0))
+
+        D, S = stat.S_IFDIR, stat.S_IFSOCK
+        good_folder, good_sock = st(D | 0o700, 501), st(S | 0o600, 501)
+        rows = [
+            (good_folder, good_sock, None),
+            (st(D | 0o500, 501), st(S | 0o400, 501), None),
+            (st(D | 0o750, 501), good_sock, guest.DOOR_WIDER),
+            (st(D | 0o701, 501), good_sock, guest.DOOR_WIDER),
+            (st(D | 0o1700, 501), good_sock, guest.DOOR_WIDER),
+            (st(D | 0o700, 502), good_sock, guest.DOOR_WIDER),
+            (st(stat.S_IFLNK | 0o700, 501), good_sock, guest.DOOR_WIDER),
+            (good_folder, st(S | 0o660, 501), guest.DOOR_WIDER),
+            (good_folder, st(S | 0o602, 501), guest.DOOR_WIDER),
+            (good_folder, st(S | 0o700, 501), guest.DOOR_WIDER),
+            (good_folder, st(S | 0o4600, 501), guest.DOOR_WIDER),
+            (good_folder, st(S | 0o600, 502), guest.DOOR_WIDER),
+            (good_folder, st(stat.S_IFREG | 0o600, 501), guest.DOOR_WIDER),
+            (None, good_sock, guest.DOOR_WIDER),
+            (good_folder, None, guest.DOOR_WIDER),
+        ]
+        for folder, sock, expected in rows:
+            with self.subTest(folder=folder, sock=sock):
+                self.assertEqual(guest.door_refusal(folder, sock, 501), expected)
+        self.assertEqual((guest.FOLDER_MODE, guest.SOCKET_MODE), (0o700, 0o600))
+        self.assertEqual(guest.DOOR_WIDER, "door_wider")
+
+
 class SharingTest(unittest.TestCase):
     def test_serve_state_table(self):
-        def serving(key=f"{TAILNET}:443", proxy="http://127.0.0.1:27185"):
+        SOCK = "/s/guest/guest.sock"
+
+        def serving(key=f"{TAILNET}:443", proxy=f"unix:{SOCK}"):
             return {"Web": {key: {"Handlers": {"/": {"Proxy": proxy}}}}}
 
         rows = [
-            (None, None, 27185, "off"),
-            ({"Web": {}}, None, 27185, "off"),
-            (None, TAILNET, 27185, "unchecked"),
-            ({}, TAILNET, 27185, "not_proxying"),
-            (serving(), TAILNET, 27185, "serving"),
-            (serving(proxy="http://localhost:27185"), TAILNET, 27185, "serving"),
-            (serving(proxy="http://127.0.0.1:27184"), TAILNET, 27185, "not_proxying"),
-            (serving(key=f"{OTHER_HOST}:443"), TAILNET, 27185, "not_proxying"),
-            ({"Web": []}, TAILNET, 27185, "not_proxying"),
+            (None, None, SOCK, "off"),
+            ({"Web": {}}, None, SOCK, "off"),
+            (None, TAILNET, SOCK, "unchecked"),
+            ({}, TAILNET, SOCK, "not_proxying"),
+            (serving(), TAILNET, SOCK, "serving"),
+            (serving(proxy="unix:/s/other.sock"), TAILNET, SOCK, "not_proxying"),
+            (serving(proxy=f"unix:{SOCK}/"), TAILNET, SOCK, "not_proxying"),
+            (serving(proxy="http://127.0.0.1:27185"), TAILNET, SOCK, "not_proxying"),
+            (serving(proxy="http://localhost:27185"), TAILNET, SOCK, "not_proxying"),
+            (serving(key=f"{TAILNET}:8443"), TAILNET, SOCK, "not_proxying"),
+            (serving(key=f"{OTHER_HOST}:443"), TAILNET, SOCK, "not_proxying"),
+            ({"Web": []}, TAILNET, SOCK, "not_proxying"),
             (serving(), TAILNET, None, "not_proxying"),
+            (serving(proxy="unix:"), TAILNET, "", "not_proxying"),
         ]
-        for status, tailnet, port, expected in rows:
-            with self.subTest(status=status, tailnet=tailnet, port=port):
-                self.assertEqual(guest.serve_state(status, tailnet, port), expected)
+        for status, tailnet, sock, expected in rows:
+            with self.subTest(status=status, tailnet=tailnet, sock=sock):
+                self.assertEqual(guest.serve_state(status, tailnet, sock), expected)
 
     def test_the_view_carries_the_sharing_entry(self):
         self.assertEqual(derive_view([])["sharing"], view.SHARING_OFF)
         self.assertEqual(guest.sharing_entry(guest.NO_ACCESS, "off"), view.SHARING_OFF)
         access = Access(TAILNET, MappingProxyType({
             SECOND: frozenset({"owner/p01", "owner/p00"}), COLLEAGUE: frozenset({"owner/p01"})}))
-        entry = guest.sharing_entry(access, "serving")
+        entry = guest.sharing_entry(access, "serving", socket="/s/g.sock")
         self.assertEqual(entry, {"tailnet": TAILNET, "colleagues": [
             {"login": COLLEAGUE, "projects": ["owner/p01"]},
             {"login": SECOND, "projects": ["owner/p00", "owner/p01"]}], "state": "serving",
-            "last_request": None})
+            "last_request": None, "socket": "/s/g.sock"})
+        self.assertIsNone(view.SHARING_OFF["socket"])
         self.assertEqual(derive_view([], sharing=entry)["sharing"], entry)
         r = guest.reading(access, [TAILNET], [COLLEAGUE], [], [])
         entry = guest.sharing_entry(access, "serving", r)

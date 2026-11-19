@@ -1,7 +1,7 @@
 """The guest door's policy (#1237): the access list, admission, scoping, the owner-port rule and the probe.
 
-A guest is a listed colleague who reaches the console through Tailscale Serve on the console's
-guest port (ADR-console-066). This module holds the pure rules only; `service.py` documents the
+A guest is a listed colleague who reaches the console through Tailscale Serve, which proxies to the
+console's guest socket (ADR-console-066, ADR-console-077). This module holds the pure rules only; `service.py` documents the
 routes and applies them. It uses the standard library alone.
 
 The access list is kept in the event log as three kinds (`event_log` records them and keeps the
@@ -19,6 +19,13 @@ carries exactly one `Host` that, lowercased, is the configured tailnet name exac
 included (`HOST_TEXT`); it carries exactly one login header (`LOGIN_HEADER`) whose normal form is
 a listed colleague (`NOT_SHARED_TEXT`). No text names a project or echoes a login or a host.
 Each text is answered as `403 text/plain` with a trailing newline.
+
+The guest door is a Unix socket (ADR-console-077). `door_refusal(folder, sock, owner_uid)` takes the
+`os.lstat` of the socket's folder and of the socket (None when absent) and returns None only when the
+folder is a directory and the socket a socket, both the owner's, the folder with no mode bit outside
+`FOLDER_MODE` (0700) and the socket none outside `SOCKET_MODE` (0600); a narrower mode is not wider,
+and an execute bit on the socket, setuid, setgid or sticky is. Anything else is `DOOR_WIDER`. It
+reads the two stat results only.
 
 The owner's port refuses a request that carries any header whose name, lowercased, starts with
 `tailscale-` or is `x-forwarded-for` (`owner_port_refusal`, `OWNER_PORT_TEXT`): a request through
@@ -54,15 +61,16 @@ hyphens with an optional port (so an `@` or a long value is never kept), and its
 two logins joined by a comma is false). No member is
 ever a login or a probe value. It does not change admission, and `whoami` is unchanged.
 
-`sharing_entry(access, state, last_request)` is the owner's `sharing` view member; `last_request` is
-the latest `reading` or None. `state` is one of
+`sharing_entry(access, state, last_request, socket)` is the owner's `sharing` view member; `last_request` is
+the latest `reading` or None and `socket` the bound guest socket path or None. `state` is one of
 `SERVE_STATES`: `off` (no tailnet is configured), `unchecked` (the Serve status was not read),
-`not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest port) and
-`serving`. `serve_state(status, tailnet, guest_port)` reads the parsed `tailscale serve status
+`not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest socket) and
+`serving`. `serve_state(status, tailnet, guest_socket)` reads the parsed `tailscale serve status
 --json` ServeConfig, `{"Web": {"<tailnet>:443": {"Handlers": {"/": {"Proxy":
-"http://127.0.0.1:<guest port>"}}}}}`, and treats any other shape as not proxying.
+"unix:<guest socket>"}}}}}`, and treats any other shape, or a proxy that is not exactly
+`unix:` plus the bound socket path, as not proxying.
 
-`serve_reader(path)` is the reader of that status: a callable that runs the Windows Tailscale client
+`serve_reader(path)` is the reader of that status: a callable that runs this host's Tailscale client
 at `path` as `serve status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns
 the parsed JSON, or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it
 never raises.
@@ -74,7 +82,9 @@ the service, which raises `Refused` for a write refused on its merits.
 """
 
 import json
+import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -97,6 +107,9 @@ FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliver
                              "pending", "movement", "owner_notices"})
 SERVE_TIMEOUT_SECONDS = 15.0
 SERVE_STATES = ("off", "unchecked", "not_proxying", "serving")
+DOOR_WIDER = "door_wider"
+FOLDER_MODE = 0o700
+SOCKET_MODE = 0o600
 
 LOGIN_HEADER = "Tailscale-User-Login"
 PROBE_HEADER = "X-Console-Probe"
@@ -341,7 +354,17 @@ def picture_ids(view: object) -> frozenset[str]:
     return frozenset(found)
 
 
-def serve_state(status: object, tailnet: str | None, guest_port: int | None) -> str:
+def door_refusal(folder: os.stat_result | None, sock: os.stat_result | None,
+                 owner_uid: int) -> str | None:
+    if (folder is not None and stat.S_ISDIR(folder.st_mode) and folder.st_uid == owner_uid
+            and stat.S_IMODE(folder.st_mode) & ~FOLDER_MODE == 0
+            and sock is not None and stat.S_ISSOCK(sock.st_mode) and sock.st_uid == owner_uid
+            and stat.S_IMODE(sock.st_mode) & ~SOCKET_MODE == 0):
+        return None
+    return DOOR_WIDER
+
+
+def serve_state(status: object, tailnet: str | None, guest_socket: str | None) -> str:
     if tailnet is None:
         return "off"
     if status is None:
@@ -349,8 +372,7 @@ def serve_state(status: object, tailnet: str | None, guest_port: int | None) -> 
     node: object = status
     for step in ("Web", f"{tailnet}:443", "Handlers", "/", "Proxy"):
         node = node.get(step) if isinstance(node, Mapping) else None
-    if (isinstance(guest_port, int) and not isinstance(guest_port, bool)
-            and node in (f"http://127.0.0.1:{guest_port}", f"http://localhost:{guest_port}")):
+    if isinstance(guest_socket, str) and guest_socket and node == "unix:" + guest_socket:
         return "serving"
     return "not_proxying"
 
@@ -370,9 +392,11 @@ def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = su
     return read
 
 
-def sharing_entry(access: Access, state: str, last_request: Mapping | None = None) -> dict:
+def sharing_entry(access: Access, state: str, last_request: Mapping | None = None,
+                  socket: str | None = None) -> dict:
     return {"tailnet": access.tailnet,
             "colleagues": [{"login": login, "projects": sorted(access.colleagues[login])}
                            for login in sorted(access.colleagues)],
             "state": state,
-            "last_request": last_request}
+            "last_request": last_request,
+            "socket": socket}

@@ -12,7 +12,7 @@ holder of another uid, else the answer is `403` `text/plain` `peer.NOT_OWNER_TEX
 `peer.UNREADABLE_TEXT`, `Connection: close`, with nothing read, appended or published, and one
 stderr line `console: peer_refused <other_user|not_found|unreadable>` (ADR-console-076). There is
 one lookup per connection, and at most `PEER_LOOKUPS` lookups run at once: a connection that finds
-no free slot is answered as `unreadable` (fail closed) rather than queued. The guest port is not checked. A request line or header block the
+no free slot is answered as `unreadable` (fail closed) rather than queued. The guest door is not judged by this rule; it has its own (below). A request line or header block the
 inherited parser refuses as malformed is answered `400` before this check; it is not a route of the
 port and carries nothing of the console.
 
@@ -72,12 +72,26 @@ stream `Content-Length`):
                     `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
-Guest door (#1237, ADR-console-066). With `guest_port` (`console --guest-port`, default
-`DEFAULT_GUEST_PORT`, loopback only) the service binds a second server on `127.0.0.1`, served by
-`GuestHandler` on its own thread, for Tailscale Serve to proxy to; without it there is no second
-server, no `guest-token` file and `guest_address` is None. A guest request is admitted by
+Guest door (#1237, ADR-console-066, #1299, ADR-console-077). With `guest_socket` (`console
+--guest-socket PATH`, absolute) the service binds a Unix socket at PATH (`GuestServer`), served by
+`GuestHandler` on its own thread, for Tailscale Serve to proxy to as `unix:PATH`; without it there
+is no second server, no `guest-token` file and `guest_socket` is None. The service binds exactly two
+listeners, the owner's TCP port and this socket. At start the console state folder, when the console
+creates it, is mode 0700, the socket's folder is made mode 0700 (an existing one is tightened) and the
+socket is chmod 0600 at once after the bind, both the owner's; a folder that is a symlink, not a
+directory or not the owner's, or a non-socket file at PATH, is a `GuestSocketError` and the console
+does not start. A socket file at PATH is removed only when a connect to it is refused (a stale file); a
+connect that succeeds is `GuestSocketError` with `errno.EADDRINUSE` and leaves the running console's
+file alone; any other connect error is a `GuestSocketError` and leaves the file. `close` and a failed
+construction remove the socket file this console bound (the same device and inode) and nothing else.
+Every guest connection is judged in `verify_request` before a byte is read: `guest.door_refusal` on
+the `os.lstat` of the folder and the socket (any bit beyond 0700 or 0600, or not the owner's, refuses),
+then the peer's uid (`guest_peer_reader`, default `peer.unix_reader_for(sys.platform)`; `peer.unix_refusal`
+admits only root and `owner_uid`; an absent or failing reader refuses as `unreadable`). A refusal closes
+the connection with no answer, appends nothing, records no reading and prints one stderr line `console:
+guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitted by
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
-nothing appended (the one thing a guest-port request may publish is the reading below): sharing
+nothing appended (the one thing a guest-door request may publish is the reading below): sharing
 off (no tailnet name), a `Host` that is not exactly the configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
 `GET /api/whoami` is answered to any request before admission: it reports the `Host` it saw, how
 many `Host` and login headers arrived, whether `X-Forwarded-For` did, and whether the login named
@@ -96,15 +110,15 @@ route: a handler compares `route` only with registered names, and a method other
 read is `405` `Allow: GET`. The owner's port refuses, on every route, a request carrying a
 `Tailscale-*` header or `X-Forwarded-For` with `403` `guest.OWNER_PORT_TEXT`, after the `Host` check.
 With `serve_reader` (`console --tailscale PATH`, `guest.serve_reader`) a daemon thread `SERVE_THREAD`
-calls `poll_serve` at once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads the Windows
+calls `poll_serve` at once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads this host's
 Tailscale client's `serve status --json` outside the ingest lock, keeps the reading in memory only (never
 in the log) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve proxies
-the tailnet name to the bound guest port. A reader that raises is one stderr line `console:
+the tailnet name to `unix:<the bound guest socket>`. A reader that raises is one stderr line `console:
 serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); without a reader no
 thread starts and the state stays `unchecked`.
 The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
 a different token, refused on every owner route, as the page token is on the guest picture read.
-The service keeps the last guest-port request's `guest.reading` (every request the port parses,
+The service keeps the last guest-door request's `guest.reading` (every request the door parses,
 whatever its method) in memory only (never logged, null after a restart) as the owner's
 `sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it.
 
@@ -1515,10 +1529,13 @@ session. Nothing in this path reads the tracker or the forge.
 
 import contextlib
 import dataclasses
+import errno
 import hmac
 import http.server
 import json
+import socket
 import socketserver
+import stat
 import sys
 import os
 import threading
@@ -1565,7 +1582,6 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
 PEER_LOOKUPS = 8  # concurrent holder lookups on the owner port (#1294)
-DEFAULT_GUEST_PORT = 27185
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
@@ -3345,12 +3361,12 @@ class GuestHandler(ConsoleHandler):
         raise AttributeError(name)
 
 
-class GuestPortError(OSError):
-    """The guest port could not be bound; `port` is the one that failed."""
+class GuestSocketError(OSError):
+    """The guest socket could not be made; `path` is the one that failed."""
 
-    def __init__(self, port: int, error: OSError):
+    def __init__(self, path: str, error: OSError):
         super().__init__(error.errno, error.strerror)
-        self.port = port
+        self.path = path
 
 
 class ConsoleServer(socketserver.ThreadingTCPServer):
@@ -3362,6 +3378,74 @@ class ConsoleServer(socketserver.ThreadingTCPServer):
     def __init__(self, port: int, console: "ConsoleService", handler=ConsoleHandler):
         self.console = console
         super().__init__((HOST, port), handler)
+
+
+class GuestServer(socketserver.ThreadingUnixStreamServer):
+    """The guest door: a Unix socket at `path` in a private folder, every connection judged first."""
+    daemon_threads = True
+    request_queue_size = BACKLOG
+
+    def __init__(self, path: Path, console: "ConsoleService"):
+        self.console = console
+        self._path = Path(path)
+        self._bound: tuple[int, int] | None = None
+        super().__init__(str(path), GuestHandler)
+
+    def server_bind(self) -> None:
+        path = self._path
+        folder = path.parent
+        folder.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass
+        found = os.lstat(folder)
+        if not stat.S_ISDIR(found.st_mode) or found.st_uid != self.console.owner_uid:
+            raise PermissionError(
+                errno.EPERM, "the guest socket folder is not the owner's own directory")
+        os.chmod(folder, guest.FOLDER_MODE)
+        try:
+            held = os.lstat(path)
+        except FileNotFoundError:
+            held = None
+        if held is not None:
+            if not stat.S_ISSOCK(held.st_mode):
+                raise FileExistsError(
+                    errno.EEXIST, "a file that is not a socket holds the guest socket path")
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(1)
+                probe.connect(str(path))
+            except ConnectionRefusedError:
+                os.unlink(path)
+            else:
+                raise OSError(errno.EADDRINUSE, "another console listens on the guest socket")
+            finally:
+                probe.close()
+        super().server_bind()
+        bound = os.lstat(path)
+        self._bound = (bound.st_dev, bound.st_ino)
+        os.chmod(path, guest.SOCKET_MODE)
+
+    def verify_request(self, request, client_address) -> bool:
+        code = self.console.guest_refusal(request)
+        if code is not None:
+            print(f"console: guest_refused {code}", file=sys.stderr)
+        return code is None
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.remove_socket()
+
+    def remove_socket(self) -> None:
+        if self._bound is None:
+            return
+        try:
+            found = os.lstat(self._path)
+            if stat.S_ISSOCK(found.st_mode) and (found.st_dev, found.st_ino) == self._bound:
+                os.unlink(self._path)
+        except OSError:
+            pass
 
 
 class _ProfileRemoving(Exception):
@@ -3451,16 +3535,19 @@ class ConsoleService:
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None,
                  screenshot_dirs: Iterable[Path] = (),
-                 guest_port: int | None = None,
+                 guest_socket: Path | None = None,
                  guest_token_path: Path | None = None,
                  serve_reader: Callable[[], object | None] | None = None,
                  serve_seconds: float = SERVE_SECONDS,
                  peer_reader: peer.PeerReader | None = peer.reader_for(sys.platform),
                  owner_uid: int | None = None,
-                 peer_lookups: int = PEER_LOOKUPS):
+                 peer_lookups: int = PEER_LOOKUPS,
+                 guest_peer_reader: peer.UnixPeerReader | None = peer.unix_reader_for(sys.platform)):
         self.peer_reader = peer_reader
         self.peer_slots = threading.BoundedSemaphore(peer_lookups)
         self.owner_uid = os.geteuid() if owner_uid is None else owner_uid
+        self.guest_peer_reader = guest_peer_reader
+        self._guest_socket_path = None if guest_socket is None else Path(guest_socket)
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
@@ -3645,17 +3732,15 @@ class ConsoleService:
         self._guest_pictures: dict[str, frozenset[str]] = {}
         self._guest_token: str | None = None
         self._guest_page: bytes | None = None
-        self._guest_server: ConsoleServer | None = None
+        self._guest_server: GuestServer | None = None
         self._guest_thread: threading.Thread | None = None
-        self._guest_port_number: int | None = None
         self._server = ConsoleServer(port, self)
         try:
-            if guest_port is not None:
+            if self._guest_socket_path is not None:
                 try:
-                    self._guest_server = ConsoleServer(guest_port, self, GuestHandler)
+                    self._guest_server = GuestServer(self._guest_socket_path, self)
                 except OSError as error:
-                    raise GuestPortError(guest_port, error) from error
-                self._guest_port_number = self._guest_server.server_address[1]
+                    raise GuestSocketError(str(self._guest_socket_path), error) from error
             self._token = write_guard.load_token(
                 Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
                 else token_path)
@@ -3722,8 +3807,28 @@ class ConsoleService:
         return self._server.server_address[:2]
 
     @property
-    def guest_address(self) -> tuple[str, int] | None:
-        return None if self._guest_server is None else self._guest_server.server_address[:2]
+    def guest_socket(self) -> str | None:
+        return None if self._guest_server is None else str(self._guest_socket_path)
+
+    def guest_refusal(self, sock: socket.socket) -> str | None:
+        """Why the guest connection `sock` is refused (door first, then peer), else None."""
+        path = self._guest_socket_path
+        stats = []
+        for target in (path.parent, path):
+            try:
+                stats.append(os.lstat(target))
+            except OSError:
+                stats.append(None)
+        refused = guest.door_refusal(stats[0], stats[1], self.owner_uid)
+        if refused is not None:
+            return refused
+        if self.guest_peer_reader is None:
+            return "unreadable"
+        try:
+            uid = self.guest_peer_reader(sock)
+        except Exception:
+            uid = None
+        return peer.unix_refusal(uid, self.owner_uid)
 
     @property
     def guest_token(self) -> str | None:
@@ -3876,8 +3981,8 @@ class ConsoleService:
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
         access = self._access
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
-            access, guest.serve_state(self._serve_status, access.tailnet, self._guest_port_number),
-            self._guest_reading)))
+            access, guest.serve_state(self._serve_status, access.tailnet, self.guest_socket),
+            self._guest_reading, self.guest_socket)))
         found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
         evidence_key = None
         if found is not None and found["step"] == "apply_failed" and found.get("evidence") is not None:

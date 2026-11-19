@@ -93,7 +93,13 @@ class Case(unittest.TestCase):
             connection.close()
 
     def wire(self, address, request, shut=False, timeout=5.0):
-        with socket.create_connection(address, timeout=timeout) as sock:
+        if isinstance(address, str):
+            opened = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            opened.settimeout(timeout)
+            opened.connect(address)
+        else:
+            opened = socket.create_connection(address, timeout=timeout)
+        with opened as sock:
             sock.sendall(request)
             if shut:
                 sock.shutdown(socket.SHUT_WR)
@@ -326,12 +332,12 @@ class BoundedLookupsTest(Case):
         self.assertEqual(self.raw(svc, "GET", "/api/state")[0], 200)
 
 
-class GuestPortTest(Case):
-    def test_the_guest_port_is_not_peer_checked(self):
+class GuestSocketTest(Case):
+    def test_the_owner_peer_reader_is_not_consulted_on_the_guest_door(self):
         rec = Recording(other)
-        svc = self.start(rec, guest_port=0)
+        svc = self.start(rec, guest_socket=support.guest_socket_path(self))
         host = "desk.invented-tailnet.ts.net"
-        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
+        connection = support.UnixHTTPConnection(svc.guest_socket)
         try:
             connection.putrequest("GET", "/api/whoami", skip_host=True)
             connection.putheader("Host", host)
@@ -342,7 +348,7 @@ class GuestPortTest(Case):
         finally:
             connection.close()
         answer = self.wire(
-            svc.guest_address,
+            svc.guest_socket,
             b"POST /api/looked HTTP/1.1\r\nHost: " + host.encode() + b"\r\nExpect: 100-continue\r\n"
             b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n", timeout=1.0)
         self.assertNotIn(NOT_OWNER, answer)
