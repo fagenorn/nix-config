@@ -26,9 +26,13 @@ Scan rule for a `.py` source:
    never holds PHRASE. ADR: E's subtree holds a string
    constant ADR_PATH matches, a path expression whose literal text ADR_PATH
    matches, a Name with ADR, or a path expression with a part holding AREAS
-   and another part whose text has an `adr` segment. A path expression is a
+   and another part whose text has an `adr` segment, or an f-string, `+` chain,
+   `.format` or `%` on a string whose parts hold AREAS and whose text has an
+   `adr` segment, or a glob or rglob call whose receiver text and pattern text,
+   joined by `/`, ADR_PATH matches. A path expression is a
    string, an f-string, a `+` concatenation, a `/` chain, a call of Path,
-   PurePath, joinpath or os.path.join, or `"/".join` of a list or tuple; its
+   PurePath, joinpath or os.path.join, `"/".join` of a list or tuple, or
+   `.format` or `%` on a string; its
    literal text puts `_` for each formatted value or other segment, nothing
    between the operands of `+` and `/` between the segments of the others. Its
    parts are the operands of `/`, the receiver (of joinpath) and the arguments
@@ -39,12 +43,16 @@ Scan rule for a `.py` source:
    subtree holds a string constant, an f-string or a Name with PHRASE. MATCH:
    E itself (through `not` and each operand of `and`/`or`) is a wording
    comparison, or E is a Name with MATCH. A wording comparison is a Compare, or
-   a call named in MATCH_CALLS, whose parts (the compared operands, or the
+   a call named in MATCH_CALLS or PROBE_CALLS (a count or position), whose parts (the compared operands, or the
    receiver plus positional arguments) hold a TEXT part and a PHRASE part.
    A comprehension is evaluated in its own copy of the environment, each
    generator binding its targets before its conditions and element; a lambda
    body binds its parameters to no kind.
-4. Bindings follow statement order with flow. An assignment, a for target, a
+4. Fixture methods. The `self.` attributes that `setUpClass` and `setUp` (and their async
+   forms; the owner is the first parameter, `cls` or `self`) leave start every method of
+   the class.
+
+5. Bindings follow statement order with flow. An assignment, a for target, a
    with variable and a walrus replace the target's kinds (an augmented
    assignment adds); a target is a name or an attribute chain, and binding a
    name forgets the chains that start with it. `if`, `try` and `match` branches start from the same state
@@ -52,7 +60,7 @@ Scan rule for a `.py` source:
    changing. A nested def is walked from a copy of the state at its definition
    with its parameters bound to no kind; its assertions belong to the unit.
    Findings are collected only on the final walk, in the converged states.
-5. An assertion is a call whose func is an Attribute named `assert*`, or an
+6. An assertion is a call whose func is an Attribute named `assert*`, or an
    `assert` statement. Its operands are the values compared: the first
    positional argument of assertTrue, assertFalse, assertIsNone and
    assertIsNotNone, the first two of the other unittest comparisons, every
@@ -61,7 +69,10 @@ Scan rule for a `.py` source:
    is a finding, recorded once at its line, when one operand has TEXT and
    another has PHRASE (rule A), when an operand or the assert test holds a
    Compare or a Call whose parts hold a TEXT part and a PHRASE part (rule B),
-   or when an operand has MATCH (rule C).
+   or when an operand has MATCH (rule C). A call on a saved pattern,
+   `PATTERN.method(text)` with a Name or attribute chain as receiver, counts for
+   rule B only through MATCH_CALLS or PROBE_CALLS, because it asks for a shape,
+   not for words.
 
 A `.sh` member is a finding on every line that names a record, because a shell
 member never names one. A suite member of any other kind fails the scan, and a
@@ -80,7 +91,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ADR_PATH = re.compile(r"docs/areas/[^/\s'\"\x60]+/adr(?:/|$)")
 ADR_SEGMENT = re.compile(r"(?:^|/)adr(?:/|$)")
 AREAS_ROOT = re.compile(r"(?:^|/)docs/areas/?$")
-CREDENTIAL_WORDS = re.compile(r"token|credential|secret|password|keychain", re.IGNORECASE)
+# `logins_in` is the check that a record names no login, a credential-shaped leak check.
+CREDENTIAL_WORDS = re.compile(r"token|credential|secret|password|keychain|\blogins_in\b", re.IGNORECASE)
 GUARD_FILES = frozenset({"tests/test_claude_permission_guard.py", "tests/test_guard_policy.py"})
 SUITE_RECIPE = "agent-workflow-tests *args:"
 SUITE_GLOBS = ("tests/*.py", "home/common/agent-skills/tests/*.py")
@@ -88,6 +100,7 @@ PATH_BUILDERS = frozenset({"Path", "PurePath", "PurePosixPath", "PureWindowsPath
 GLOB_CALLS = frozenset({"glob", "rglob"})
 READ_CALLS = frozenset({"read_text", "read_bytes", "read", "readlines", "open"})
 MATCH_CALLS = frozenset({"startswith", "endswith", "search", "match", "fullmatch"})
+PROBE_CALLS = frozenset({"count", "find", "rfind", "index", "rindex"})
 ONE_OPERAND = frozenset({"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"})
 TWO_OPERANDS = frozenset({
     "assertEqual", "assertNotEqual", "assertIn", "assertNotIn", "assertIs", "assertIsNot",
@@ -128,6 +141,7 @@ KEPT_AT_START = frozenset({
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_008_lists_the_picture_read",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_038_records_the_question_pictures",
     "tests/test_console_guest_service.py::AccessWriteTest.test_adr_008_lists_the_access_list_writes",
+    "tests/test_docs_tree.py::DocsTreeTest.test_the_guest_socket_amendment_is_recorded_as_adr_077",
 })
 # A sync merge that brings a kept test in from main adds it here, never above.
 KEPT_FROM_MAIN: frozenset[str] = frozenset()
@@ -211,9 +225,45 @@ def _static_text(node: ast.AST) -> str | None:
         if isinstance(node.op, ast.Add):
             return None if left is None and right is None else _text(node.left) + _text(node.right)
         return f"{_text(node.left)}/{_text(node.right)}"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return _static_text(node.left) if _is_string(node.left) else None
+    if isinstance(node, ast.Call) and _call_name(node) == "format" and isinstance(node.func, ast.Attribute):
+        return _static_text(node.func.value) if _is_string(node.func.value) else None
     parts = _joining_parts(node)
     if parts is not None:
         return "/".join(_text(part) for part in parts)
+    return None
+
+
+def _is_string(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _assembled_parts(node: ast.AST) -> list[ast.AST] | None:
+    """The parts an f-string, a `+` chain, a `.format` or a `%` assembles into one path, else None."""
+    if isinstance(node, ast.JoinedStr):
+        return [v.value if isinstance(v, ast.FormattedValue) else v for v in node.values]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _plus_operands(node)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) and _is_string(node.left):
+        right = node.right
+        return [node.left, *(right.elts if isinstance(right, (ast.Tuple, ast.List)) else [right])]
+    if isinstance(node, ast.Call) and _call_name(node) == "format" and isinstance(node.func, ast.Attribute):
+        if _is_string(node.func.value):
+            return [node.func.value, *node.args, *(k.value for k in node.keywords)]
+    return None
+
+
+def _plus_operands(node: ast.AST) -> list[ast.AST]:
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _plus_operands(node.left) + _plus_operands(node.right)
+    return [node]
+
+
+def _glob_text(node: ast.AST) -> str | None:
+    """The receiver's text and the pattern's text of a glob call, joined, else None."""
+    if isinstance(node, ast.Call) and _call_name(node) in GLOB_CALLS and isinstance(node.func, ast.Attribute) and node.args:
+        return f"{_text(node.func.value)}/{_text(node.args[0])}"
     return None
 
 
@@ -342,6 +392,16 @@ class _Scan:
                 operands += sub.args + [k.value for k in sub.keywords]
                 if any("ADR" in self.facts(o, scope) for o in operands):
                     found.add("TEXT")
+            combined = _glob_text(sub)
+            if combined is not None and ADR_PATH.search(combined):
+                found.add("ADR")
+            assembled = _assembled_parts(sub)
+            if (
+                assembled is not None
+                and ADR_SEGMENT.search(_text(sub))
+                and any("AREAS" in self.facts(part, scope) for part in assembled)
+            ):
+                found.add("ADR")
             if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Div):
                 parts = [sub.left, sub.right]
             elif isinstance(sub, ast.Call) and _call_name(sub) in GLOB_CALLS and isinstance(sub.func, ast.Attribute):
@@ -367,9 +427,18 @@ class _Scan:
     def is_wording_comparison(self, node: ast.AST, env: dict) -> bool:
         if isinstance(node, ast.Compare):
             return self.parts_pin_wording([node.left, *node.comparators], env)
-        if isinstance(node, ast.Call) and _call_name(node) in MATCH_CALLS:
+        if isinstance(node, ast.Call) and _call_name(node) in MATCH_CALLS | PROBE_CALLS:
             return self.parts_pin_wording(self.call_parts(node), env)
         return False
+
+    def call_pins_wording(self, call: ast.Call, env: dict) -> bool:
+        """A call with record text and a phrase among its parts, but not `pattern.method(text)`
+        on a saved pattern, which asks for a shape and not for words."""
+        if _call_name(call) not in MATCH_CALLS | PROBE_CALLS and isinstance(call.func, ast.Attribute):
+            receiver = self.facts(call.func.value, env)
+            if _key(call.func.value) is not None and "PHRASE" in receiver and "TEXT" not in receiver:
+                return False
+        return self.parts_pin_wording(self.call_parts(call), env)
 
     @staticmethod
     def operands(call: ast.Call) -> list[ast.AST]:
@@ -413,7 +482,7 @@ class _Scan:
             for sub, scope in self.walk(argument, env):
                 if isinstance(sub, ast.Compare) and self.is_wording_comparison(sub, scope):
                     return True
-                if isinstance(sub, ast.Call) and self.parts_pin_wording(self.call_parts(sub), scope):
+                if isinstance(sub, ast.Call) and self.call_pins_wording(sub, scope):
                     return True
             if self.is_match(argument, env):
                 return True
@@ -521,6 +590,29 @@ class _Scan:
         return env
 
 
+FIXTURE_METHODS = ("setUpClass", "asyncSetUpClass", "setUp", "asyncSetUp")
+
+
+def _fixture_attributes(scan: _Scan, cls: ast.ClassDef, module_env: dict) -> dict:
+    """The `self.` attributes a class's fixture methods leave, as each test method starts with them."""
+    carried: dict[str, frozenset[str]] = {}
+    outer = scan.collect
+    scan.collect = False
+    methods = {m.name: m for m in cls.body if isinstance(m, FUNCTIONS)}
+    for name in FIXTURE_METHODS:
+        method = methods.get(name)
+        if method is None or not _parameters(method):
+            continue
+        env = dict(module_env)
+        _unbind_parameters(method, env)
+        env.update(carried)
+        end = scan.block(method.body, env)
+        owner = _parameters(method)[0] + "."
+        carried.update({"self." + key[len(owner):]: kinds for key, kinds in end.items() if key.startswith(owner)})
+    scan.collect = outer
+    return carried
+
+
 def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
     if path.endswith(".sh"):
         return [
@@ -530,7 +622,10 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
         ]
     tree = ast.parse(source, filename=path)
     if not any(
-        (text := _static_text(node)) is not None and (ADR_PATH.search(text) or AREAS_ROOT.search(text))
+        any(
+            text is not None and (ADR_PATH.search(text) or AREAS_ROOT.search(text))
+            for text in (_static_text(node), _glob_text(node))
+        )
         for node in ast.walk(tree)
     ):
         return []  # no literal text can name a record or the areas root
@@ -544,9 +639,11 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
             units = [(f"{node.name}.{m.name}", m) for m in node.body if isinstance(m, FUNCTIONS)]
         else:
             continue
+        carried = _fixture_attributes(scan, node, module_env) if isinstance(node, ast.ClassDef) else {}
         for name, unit in units:
             env = dict(module_env)
             _unbind_parameters(unit, env)
+            env.update(carried)
             scan.found = set()
             scan.collect = True
             scan.block(unit.body, env)
@@ -770,6 +867,11 @@ KEPT_FIXTURE = _fixture(r'''
         def test_token_no_wording(self):
             text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
             self.assertEqual(len(text.split()), 3)
+
+        def test_leak_check_wording(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertIn("words", text)
+            self.assertEqual(logins_in(text), [])
 ''')
 
 COUNT_PHRASE = _fixture(r'''
@@ -864,6 +966,66 @@ KEYWORD_OPERANDS = _fixture(r'''
             self.assertIn("more words", text, msg="diagnostic")
 ''')
 
+SETUP_ATTRIBUTE = _fixture(r'''
+    class T(unittest.TestCase):
+        def setUp(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+''')
+
+SETUP_CLASS_ATTRIBUTE = _fixture(r'''
+    class T(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            cls.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+''')
+
+SETUP_OTHER_TEXT = _fixture(r'''
+    class T(unittest.TestCase):
+        def setUp(self):
+            self.text = (ROOT / "docs/areas/a/CONTEXT.md").read_text()
+
+        def test_x(self):
+            self.assertIn("words", self.text)
+''')
+
+SETUP_ATTRIBUTE_REBOUND = _fixture(r'''
+    class T(unittest.TestCase):
+        def setUp(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+
+        def test_x(self):
+            self.text = "other"
+            self.assertIn("words", self.text)
+''')
+
+PATTERN_FINDALL = _fixture(r'''
+    LOGIN_LIKE = re.compile(r"[\w.+-]+@[\w-]+")
+
+
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertEqual(LOGIN_LIKE.findall(text), [])
+''')
+
+SAVED_COUNT = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            hits = text.count("words")
+            self.assertGreater(hits, 0)
+            where = text.find("words")
+            self.assertNotEqual(where, -1)
+            size = len(text)
+            self.assertGreater(size, 0)
+''')
+
 def _read_of(expression):
     return (
         "class T(unittest.TestCase):\n    def test_x(self):\n        a = 'a'\n"
@@ -896,6 +1058,11 @@ RECORD_GLOBS = {
     "glob over a segmented areas root": 'Path("docs", "areas").glob("*/adr/*.md")',
     "glob of the root with a full pattern": 'ROOT.glob("docs/areas/*/adr/*.md")',
     "glob of the root with a + pattern": 'ROOT.glob("docs/areas/" + "*/adr/*.md")',
+    "glob of docs with an areas pattern": '(ROOT / "docs").glob("areas/*/adr/*.md")',
+    "rglob of docs with an areas pattern": '(ROOT / "docs").rglob("areas/**/adr/*.md")',
+    "glob of an area with an adr pattern": '(ROOT / "docs/areas/a").glob("adr/*.md")',
+    "glob of a literal receiver": 'Path("docs").glob("areas/*/adr/*.md")',
+    "glob of a variable receiver": 'ROOT.joinpath("docs").glob("areas/" + "*/adr/*.md")',
 }
 NOT_RECORD_READS = {
     "a CONTEXT.md by + concatenation": 'Path("docs/areas/" + a + "/CONTEXT.md").read_text()',
@@ -907,6 +1074,20 @@ NOT_RECORD_READS = {
 NOT_RECORD_GLOBS = {
     "a CONTEXT.md glob over the areas root": '(ROOT / "docs/areas").glob("*/CONTEXT.md")',
     "a glob of the tests": 'ROOT.glob("tests/*.py")',
+    "a CONTEXT.md glob of docs": '(ROOT / "docs").glob("areas/*/CONTEXT.md")',
+}
+AREAS_HEAD = "AREAS = ROOT / 'docs/areas'\nAREAS_S = 'docs/areas'\n"
+AREAS_READS = {
+    "an f-string over an areas path name": 'open(f"{AREAS}/{a}/adr/001-x.md").read()',
+    "an f-string over an areas string name": 'Path(f"{AREAS_S}/{a}/adr/001-x.md").read_text()',
+    "a + concatenation over an areas name": 'Path(AREAS_S + "/" + a + "/adr/001-x.md").read_text()',
+    "a format over an areas name": 'Path("{}/{}/adr/001-x.md".format(AREAS_S, a)).read_text()',
+    "a % format over an areas name": 'Path("%s/%s/adr/001-x.md" % (AREAS_S, a)).read_text()',
+}
+NOT_AREAS_READS = {
+    "an f-string naming a CONTEXT.md": 'Path(f"{AREAS_S}/{a}/CONTEXT.md").read_text()',
+    "an f-string with no areas name": 'Path(f"{a}/adr/001-x.md").read_text()',
+    "a + concatenation naming a CONTEXT.md": 'Path(AREAS_S + "/" + a + "/CONTEXT.md").read_text()',
 }
 
 TEST_ID = "tests/test_f.py::T.test_x"
@@ -961,6 +1142,30 @@ class WordingScanTest(unittest.TestCase):
         for label, expression in NOT_RECORD_GLOBS.items():
             with self.subTest(label):
                 self.assertEqual(self.found(_glob_of(expression)), [])
+
+    def test_a_record_path_built_from_an_areas_name_is_scanned(self):
+        for label, expression in AREAS_READS.items():
+            with self.subTest(label):
+                self.assertEqual(self.found(AREAS_HEAD + _read_of(expression)), [(TEST_ID, 7)])
+        for label, expression in NOT_AREAS_READS.items():
+            with self.subTest(label):
+                self.assertEqual(self.found(AREAS_HEAD + _read_of(expression)), [])
+
+    def test_record_text_read_in_a_fixture_method_is_found_in_the_tests(self):
+        with self.subTest("setUp"):
+            self.assertEqual(self.found(SETUP_ATTRIBUTE), [(TEST_ID, 6)])
+        with self.subTest("setUpClass"):
+            self.assertEqual(self.found(SETUP_CLASS_ATTRIBUTE), [(TEST_ID, 7)])
+        with self.subTest("a fixture reading a CONTEXT.md"):
+            self.assertEqual(self.found(SETUP_OTHER_TEXT), [])
+        with self.subTest("the attribute rebound in the test"):
+            self.assertEqual(self.found(SETUP_ATTRIBUTE_REBOUND), [])
+
+    def test_a_saved_pattern_applied_to_record_text_is_no_phrase(self):
+        self.assertEqual(self.found(PATTERN_FINDALL), [])
+
+    def test_a_saved_phrase_count_or_position_is_found(self):
+        self.assertEqual(self.found(SAVED_COUNT), [(TEST_ID, 5), (TEST_ID, 7)])
 
     def test_record_text_kept_on_an_instance_attribute_is_found(self):
         with self.subTest("read then asserted through the attribute"):
@@ -1094,6 +1299,7 @@ class WordingScanTest(unittest.TestCase):
         findings = wording_findings("tests/test_k.py", KEPT_FIXTURE)
         cases = {
             "tests/test_k.py::K.test_token_wording": [],
+            "tests/test_k.py::K.test_leak_check_wording": [],
             "tests/test_k.py::K.test_tokn_wording": ["missing: tests/test_k.py::K.test_tokn_wording"],
             "tests/test_k.py::K.test_plain_wording": [
                 "no credential word: tests/test_k.py::K.test_plain_wording"

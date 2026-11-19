@@ -12,7 +12,7 @@ Issue 1285's audit found about 64 tests whose assertions were that a record unde
 - No test asserts that text read from a decision record contains, equals, starts or ends with given words, directly or through a comparison's saved result.
 - A record's file name, header, number and citations are checked by `context_map_lint` and `tests/test_docs_tree.py`, so no record's structure depends on a wording test.
 - `tests/test_decision_record_wording.py` scans every member of the `agent-workflow-tests` recipe plus `tests/*.py` and `home/common/agent-skills/tests/*.py`, and fails on such an assertion. A shell member may not name a record at all, and a member of any other kind fails the scan. The two guard test files are never scanned.
-- Wording tests whose source names a token, credential, secret, password or keychain, and that were on main when the scan landed, are kept unchanged and listed by name. A listed test that is gone, no longer names one of those words, or no longer pins wording fails the scan. Adding a test to the list is a new decision with its own record.
+- Wording tests whose source names a token, credential, secret, password or keychain, or calls the login leak check `logins_in`, and that were on main when the scan landed, are kept unchanged and listed by name. A listed test that is gone, no longer names one of those words, or no longer pins wording fails the scan. Adding a test to the list is a new decision with its own record.
 
 ## Considered options
 

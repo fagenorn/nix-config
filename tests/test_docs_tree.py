@@ -575,12 +575,48 @@ class DocsTreeTest(unittest.TestCase):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
 
-    def test_the_guest_socket_record_names_no_real_tailnet_or_login(self):
-        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("077-*.md"))
+    def test_the_guest_socket_amendment_is_recorded_as_adr_077(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("077-*.md"))
         self.assertEqual(len(found), 1, found)
-        text = re.sub(r"\s+", " ", found[0].read_text())
+        raw = found[0].read_text()
+        text = re.sub(r"\s+", " ", raw)
+        self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-077 \u2014 "))
+        for needle in (
+            "- **Status:** accepted", "- **Decided in:** #1298, #1299", "ADR-console-066",
+            "ADR-console-076",
+            "eleven-m5", "Unix socket", "mode-0700", "peer user", "second line", "administrator",
+            "sudo tailscale serve --bg --https=443 unix:<socket-path>", "tailscale serve status",
+            "sudo tailscale serve --https=443 off", "<host>.<tailnet>.ts.net", "<colleague-login>",
+            "tailscaled", "console-guest-door", "Funnel", "D2", "tailscale.exe",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
         self.assertEqual(tailnet_names_other_than_placeholder(text), [])
         self.assertEqual(logins_in(text), [])
+        d2 = text.split("**D2.", 1)[1].split("**D3.", 1)[0]
+        for needle in ("admits only root", "the owner's own user",
+                       "Any other peer is refused before a request is read"):
+            with self.subTest(d2=needle):
+                self.assertIn(needle, d2)
+        d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
+        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged",
+                       "19 Nov", "exactly `localhost`", "exactly one `X-Forwarded-Host`",
+                       "no port form", "the login check stays as it is", "mode 0600", "wider",
+                       "fail closed"):
+            with self.subTest(d4=needle):
+                self.assertIn(needle, d4)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        guest = context.split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertNotIn("not yet built", guest)
+        self.assertIn("ADR-console-077", guest)
+        console = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("ADR-console-077", console)
+        self.assertNotIn("guest port", console)
+        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
+                                      "through-tailscale-serve-on-a-guest-port.md"
+                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
+        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
 
     def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
         self.assertEqual(
