@@ -106,8 +106,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-open { flex: 0 0 auto; }
-.share-line, .share-last, .share-none { margin-top: 6px; }
-.share-tailnet-row, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-name, .share-line, .share-last, .share-none { margin-top: 6px; }
+.share-switch, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-people { list-style: none; }
 .share-person { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--hair); }
 .share-who { color: var(--sub1); overflow-wrap: anywhere; }
@@ -2973,7 +2973,6 @@ document.getElementById("capacity").addEventListener("click", () => {
 });
 let sharingOpen = false;
 let sharingReturn = null;
-let tailnetDraft = null;
 let loginDraft = "";
 const sharePicks = new Set();
 const sharePosts = new Map();
@@ -2983,10 +2982,18 @@ const SHARE_LINES = new Map([
   ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest door."],
 ]);
 const SHARE_WHY = new Map([
-  ["sharing_off", "sharing is off"], ["host", "the Host is not localhost or the forwarded Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+  ["sharing_off", "sharing is off"], ["name_unread", "the console could not read this host's tailnet name"], ["host", "the Host is not localhost or the forwarded Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+function shareName(sharing) {
+  return typeof sharing.tailnet === "string" ? "This host's tailnet name, read from Tailscale: " + sharing.tailnet + "." : null;
+}
 function shareLine(sharing) {
-  const words = SHARE_LINES.get(sharing.state);
-  return sharing.tailnet === null || words === undefined ? "Sharing is off: no tailnet name is set." : words(sharing.tailnet);
+  if (typeof sharing.tailnet !== "string") {
+    return sharing.shared === true
+      ? "Sharing is on, but the console can't read this host's tailnet name from Tailscale, so guests can't get in."
+      : "Sharing is off, and the console can't read this host's tailnet name from Tailscale.";
+  }
+  if (sharing.shared !== true || sharing.state === "off") return "Sharing is off.";
+  return (SHARE_LINES.get(sharing.state) || SHARE_LINES.get("unchecked"))(sharing.tailnet);
 }
 function shareLast(r) {
   if (r === null || typeof r !== "object") return "No request has come to the guest door yet.";
@@ -2996,8 +3003,8 @@ function shareLast(r) {
   const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
   return "Last request on the guest door: " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
-function shareTailnet(tailnet) {
-  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ tailnet }) });
+function shareSwitch(shared) {
+  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) });
 }
 async function postShare(key, send, done, cls) {
   const current = sharePosts.get(key);
@@ -3053,7 +3060,7 @@ function renderSharing(view) {
     body.replaceChildren();
     return;
   }
-  const sharing = view.sharing || { tailnet: null, colleagues: [], state: "off", last_request: null };
+  const sharing = view.sharing || { shared: false, tailnet: null, colleagues: [], state: "off", last_request: null };
   const projects = view.recent_projects || [];
   for (const id of [...sharePicks]) if (!projects.includes(id)) sharePicks.delete(id);
   let kept = null;
@@ -3067,20 +3074,15 @@ function renderSharing(view) {
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Sharing"));
   head.appendChild(actionButton("share-close btn-quiet", "Close", closeSharing));
-  const row = el("div", "share-tailnet-row");
-  const tailnet = accountField("share-tailnet field-line", "Tailnet name", "<host>.<tailnet>.ts.net");
-  const typed = tailnetDraft === null ? sharing.tailnet || "" : tailnetDraft;
-  tailnet.value = typed;
-  tailnet.addEventListener("input", () => {
-    tailnetDraft = tailnet.value;
-    renderSharing(lastView);
-  });
-  row.appendChild(tailnet);
-  shareAct(row, "tailnet", "share-tailnet-save btn-quiet", "Save", () => postShare("tailnet", () => shareTailnet(typed.trim()), () => { if (tailnetDraft === typed) tailnetDraft = null; }, "share-tailnet-save"), typed.trim() === "");
-  if (sharing.tailnet !== null) {
-    shareAct(row, "tailnet", "share-off btn-danger", "Turn sharing off", () => postShare("tailnet", () => shareTailnet(null), () => {}, "share-off"), false);
+  const row = el("div", "share-switch");
+  if (sharing.shared === true) {
+    shareAct(row, "sharing", "share-off btn-danger", "Turn sharing off", () => postShare("sharing", () => shareSwitch(false), () => {}, "share-off"), false);
+  } else {
+    shareAct(row, "sharing", "share-on btn-quiet", "Turn sharing on", () => postShare("sharing", () => shareSwitch(true), () => {}, "share-on"), false);
   }
-  const parts = [head, el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row];
+  const parts = [head];
+  if (shareName(sharing) !== null) parts.push(el("p", "share-name", shareName(sharing)));
+  parts.push(el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row);
   if (sharing.colleagues.length === 0) parts.push(el("p", "share-none", "No colleague has access."));
   else {
     const list = el("ul", "share-people");

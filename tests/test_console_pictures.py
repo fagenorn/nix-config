@@ -1604,9 +1604,9 @@ class PictureDocsTest(unittest.TestCase):
             status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                    "ADR-console-076")
+                    "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1294"))
+        self.assertTrue(decided.endswith("#1089, #1120, #1176, #1193, #1237, #1294, #1305"))
         text = self.doc(adr008)
         for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
                        "ADR-console-036"):

@@ -159,7 +159,9 @@ KEPT_AT_START = frozenset({
     "tests/test_docs_tree.py::DocsTreeTest.test_the_guest_socket_amendment_is_recorded_as_adr_077",
 })
 # A sync merge that brings a kept test in from main adds it here, never above.
-KEPT_FROM_MAIN: frozenset[str] = frozenset()
+KEPT_FROM_MAIN: frozenset[str] = frozenset({
+    "tests/test_docs_tree.py::DocsTreeTest.test_the_tailnet_name_source_is_recorded_as_adr_078",
+})
 KEPT_CREDENTIAL_TESTS = KEPT_AT_START | KEPT_FROM_MAIN
 
 EMPTY: frozenset[str] = frozenset()

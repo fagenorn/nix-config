@@ -69,8 +69,10 @@ another console still listens on, is `console: cannot listen on unix:<PATH>: <er
 it there is no guest door.
 
 `--tailscale PATH` (no default) names this host's Tailscale client (#1237): it is read with
-`serve status --json` every minute to show whether Serve proxies the tailnet name to the guest socket
-(`agent_tools.console.guest`). Without it the console never reads Serve and shows the state as unchecked.
+`serve status --json` every minute to show whether Serve proxies the tailnet name to the guest socket,
+and with `status --json` for this host's own tailnet name, the one name the guest door admits
+(#1305, ADR-console-078; `agent_tools.console.guest`). Without it the console never reads Serve, shows
+the state as unchecked and its guest door shares with nobody.
 
 It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
@@ -135,7 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "(default: no guest door)")
     parser.add_argument("--tailscale", metavar="PATH", default=None,
                         help="this host's Tailscale client, read with `serve status --json` every minute "
-                             "to show whether Serve proxies the tailnet name to the guest socket")
+                             "to show whether Serve proxies the tailnet name to the guest socket, and "
+                             "with `status --json` for this host's tailnet name; without it the guest "
+                             "door shares with nobody")
     parser.add_argument("--screenshots", type=Path, action="append", default=[], metavar="DIR",
                         help="a folder whose PNGs a manual check may show (repeatable)")
     return parser
@@ -161,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
                 Path(agent_tools.__file__).resolve().parent.parent, revision=activation_run.host_revision),
             activator=activation_run.Activator(service.default_store().parent),
             choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots,
-            serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale))
+            serve_reader=None if args.tailscale is None else guest.serve_reader(args.tailscale),
+            status_reader=None if args.tailscale is None else guest.status_reader(args.tailscale))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1
