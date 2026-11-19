@@ -43,6 +43,20 @@ def check_command(case, command, tailscale=None):
     case.assertRegex(rest[1], r"^/(home|Users)/[^/ ]+/tmp/clarity-screenshots$")
 
 
+def assert_outside_sandbox(case, env):
+    """`env` is the one from before the sandbox. A failure names variables, never prints the environment (it holds credentials)."""
+    if env is None:
+        env = os.environ
+    for name in accounts_sandbox.VARIABLES:
+        # `.get`: a variable unset before the sandbox must be unset here, not a KeyError.
+        case.assertEqual(env.get(name), accounts_sandbox.ORIGINAL[name], name)
+    root = str(accounts_sandbox.root())
+    case.assertEqual(sorted(k for k, v in env.items() if root in v), [])  # no variable points into the sandbox
+    others = set(env) | set(os.environ)
+    case.assertEqual(
+        sorted(k for k in others if k not in accounts_sandbox.VARIABLES and env.get(k) != os.environ.get(k)), [])
+
+
 NIX_CONFIG = ["nix", "--extra-experimental-features", "nix-command flakes", "config", "show", "--json"]
 NO_LINUX_BUILDER = (
     "no x86_64-linux builder: nix's system, extra-platforms and builders name none, and evaluating "
@@ -299,10 +313,8 @@ class LinuxBuilderTest(unittest.TestCase):
                 evaluate.assert_not_called()
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0][0][-3:], ["config", "show", "--json"])
-                kwargs = calls[0][1]
-                env = os.environ if kwargs.get("env") is None else kwargs["env"]
                 self.assertIsNotNone(accounts_sandbox.root())
-                self.assertFalse(Path(env["HOME"]).resolve().is_relative_to(accounts_sandbox.root()))
+                assert_outside_sandbox(self, calls[0][1].get("env"))
 
     def test_a_host_that_builds_x86_64_linux_runs_the_linux_unit(self):
         self.machines.write_text("# linux builders\nssh://b x86_64-linux /key\n")
@@ -328,32 +340,36 @@ class LinuxBuilderTest(unittest.TestCase):
 
 
 class NixCacheTest(unittest.TestCase):
-    """The environment this module's `nix eval` children start with (#1286); nothing here evaluates."""
+    """The environment this module's `nix` children start with (#1286); nothing here evaluates."""
 
-    def test_the_modules_evaluations_run_outside_the_sandbox(self):
-        root = accounts_sandbox.root()
-        self.assertIsNotNone(root)
+    def test_the_modules_setup_methods_run_nix_outside_the_sandbox(self):
+        self.assertIsNotNone(accounts_sandbox.root())
         calls = []
 
         def fake(argv, **kwargs):
             calls.append((argv, kwargs))
-            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+            if argv[-3:] == ["config", "show", "--json"]:
+                out = LinuxBuilderTest.config(system="x86_64-linux")
+            else:
+                out = json.dumps({"plist": plistlib.dumps({}).decode()})
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
 
-        with mock.patch.object(units.subprocess, "run", fake):
-            units.evaluate("nixosConfigurations.anis-desktop", "c: u: {}")
-            units.evaluate("darwinConfigurations.mbp", "c: u: {}", pure=True)
-        self.assertEqual(len(calls), 4)
-        variables = accounts_sandbox.VARIABLES
-        for _, kwargs in calls:
-            env = os.environ if kwargs.get("env") is None else kwargs["env"]
-            self.assertIn("HOME", env)
-            for v in variables:
-                if v in env:
-                    self.assertFalse(Path(env[v]).resolve().is_relative_to(root), v)
-            self.assertEqual(
-                {k: x for k, x in env.items() if k not in variables},
-                {k: x for k, x in os.environ.items() if k not in variables},
-            )
+        outputs = {LinuxUnit: [f"nixosConfigurations.{LinuxUnit.HOST}"],
+                   DarwinAgent: [f"darwinConfigurations.{h}" for h in DarwinAgent.HOSTS]}
+        with mock.patch.object(subprocess, "run", fake), \
+                mock.patch.object(LinuxUnit, "got", None, create=True), \
+                mock.patch.object(DarwinAgent, "got", None, create=True), \
+                mock.patch.object(DarwinAgent, "plist", None, create=True):
+            for case, wanted in outputs.items():
+                with self.subTest(case.__name__):
+                    before = len(calls)
+                    case.setUpClass()
+                    mine = calls[before:]
+                    for output in wanted:
+                        self.assertTrue(any(output in " ".join(argv) for argv, _ in mine), output)
+                    for _, kwargs in mine:
+                        assert_outside_sandbox(self, kwargs.get("env"))
+        self.assertTrue(any(argv[-3:] == ["config", "show", "--json"] for argv, _ in calls))
 
 
 if __name__ == "__main__":
