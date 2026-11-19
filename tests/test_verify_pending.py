@@ -1641,11 +1641,6 @@ class RetiredHostTest(PassBase):
         lines = vr.pass_issue(self.project, "eleven-m5", node, Refs())
         self.assertEqual(lines[0]["state"], "pass")
 
-    def test_the_docstrings_name_the_retired_rule(self):
-        self.assertIn("RETIRED_HOSTS", vr.__doc__)
-        self.assertIn("host_retired", vr.__doc__)
-        self.assertIn("host_retired", verify_pending.__doc__)
-
     def test_the_successor_recovers_a_retired_hosts_follow_up_claim(self):
         observe = check(mode="observe", host="old-box", run={"command": "check-bad"})
         key = {"block": bkey(observe), "check": "0"}

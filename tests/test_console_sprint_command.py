@@ -1060,11 +1060,6 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)
 
-    def test_the_ask_help_names_the_look_member(self):
-        self.assertIn(
-            '"look": {"issue": <n>, "pr": <n>, "head": "<40-hex>", '
-            '"approve": "<exact text of one option>"}', " ".join(sprint.__doc__.split()))
-
     def test_the_contract_says_how_a_question_carries_pictures(self):
         text = CONTRACT.read_text(encoding="utf-8")
         for needle in ("pictures", "file", "line", "before", "after", "8", "140"):

@@ -195,6 +195,7 @@ agent-workflow-tests *args:
     tests/test_context_map_lint.py \
     tests/test_docs_tree.py \
     tests/test_decision_record_wording.py \
+    tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \

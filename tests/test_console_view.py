@@ -2866,14 +2866,6 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual({e["project_id"]: e["notice_post"] for e in view_["entries"]},
                          {"p00": True, "p01": False, "p02": False})
 
-    def test_the_notice_wire_is_written(self):
-        doc = view.__doc__
-
-        self.assertIn('"notices": [<notice entry>, ...]', doc)
-        self.assertIn("<notice entry> = ", doc)
-        self.assertIn("NOTICE_OTHER_TEXT", doc)
-        self.assertIn("#1119", doc)
-
 
 class SprintMessageViewTest(unittest.TestCase):
     TEXT = "leave the importer's schema alone"
