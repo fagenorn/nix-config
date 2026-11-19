@@ -146,7 +146,11 @@ whatever its method) in memory only (never logged, null after a restart) as the 
 `client` tells this host's own requests from another device's (ADR-console-079), and `sharing.other_device_seen`
 becomes true on the first reading whose `client` is `other_device` and stays true until the service
 stops or a poll reads own addresses that differ from the ones before, which drops the reading and the
-flag taken under the old ones (memory only, false after a restart).
+flag taken under the old ones (memory only, false after a restart); a status read that gives no address
+changes none of this. A reading of another device is confirmed by one fresh status read before it is kept
+(else it is kept as `unknown`), and a poll that reads a tailnet name other than the one a reading was judged
+under drops that reading, so a request sent just before a change of address or name is never kept as one
+judged under the old.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -3390,7 +3394,7 @@ class GuestHandler(ConsoleHandler):
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
                 headers.get_all(guest.PROBE_HEADER) or [], own=self.snapshot.policy.addresses),
-                self.snapshot.policy.addresses)
+                self.snapshot.policy)
         return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
@@ -3781,6 +3785,8 @@ class ConsoleService:
         self._tailnet_name: str | None = None
         self._tailnet_addresses: frozenset = frozenset()
         self._other_device_seen = False
+        self._confirming = threading.Lock()
+        self._guest_reading_name: str | None = None
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
         self._guest_reading: dict | None = None
@@ -4031,18 +4037,29 @@ class ConsoleService:
         return entry, action, approve.apply_items(
             latest, found, entry, action, deferred=self._deferred)
 
-    def record_guest_request(self, reading: Mapping, judged: frozenset = frozenset()) -> None:
+    def record_guest_request(self, reading: Mapping, judged: guest.Policy = guest.NO_POLICY) -> None:
         """Keep the latest guest-port request's reading for the owner; see the module docstring.
 
-        A reading judged against `judged` addresses other than the current ones is dropped.
+        A reading of another device is first confirmed by a fresh status read, so a request from this
+        host's own address that moved since the last poll is never taken for another device's; one the
+        read cannot confirm is kept as `unknown`. A reading judged under addresses or a name other than
+        the current ones is dropped.
         """
+        if reading.get("client") == guest.OTHER_DEVICE:
+            with self._confirming:
+                confirmed = self.poll_serve()
+            if not confirmed:
+                reading = {**reading, "client": guest.UNKNOWN_CLIENT}
         with self._ingest:
-            if judged != self._tailnet_addresses:
+            if judged.addresses != self._tailnet_addresses or (
+                    judged.name is not None and self._tailnet_name is not None
+                    and judged.name != self._tailnet_name):
                 return
             seen = self._other_device_seen or reading.get("client") == guest.OTHER_DEVICE
             if reading == self._guest_reading and seen == self._other_device_seen:
                 return
             self._guest_reading = dict(reading)
+            self._guest_reading_name = judged.name
             self._other_device_seen = seen
             self._publish(guests=False)
 
@@ -7701,10 +7718,14 @@ class ConsoleService:
         """The reading the page and Activate go by: none while a successful run awaits a reading begun after it."""
         return None if self._activation_after is not None else self._activation
 
-    def poll_serve(self) -> None:
-        """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door)."""
+    def poll_serve(self) -> bool:
+        """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door).
+
+        Returns whether the status gave this host's own addresses. A read that gives none keeps the
+        addresses before it, so a failed read moves nothing.
+        """
         if self._serve_reader is None and self._status_reader is None:
-            return
+            return False
         found = None
         if self._serve_reader is not None:
             try:
@@ -7723,13 +7744,17 @@ class ConsoleService:
         with self._ingest:
             self._serve_status = found
             self._tailnet_name = name
-            if addresses != self._tailnet_addresses:
+            if addresses and addresses != self._tailnet_addresses:
                 # a reading and the other-device flag were judged against the old addresses: a
                 # self-probe from a moved address read as another device (ADR-console-079)
                 self._guest_reading = None
                 self._other_device_seen = False
-            self._tailnet_addresses = addresses
+                self._tailnet_addresses = addresses
+            if (name is not None and self._guest_reading_name is not None
+                    and name != self._guest_reading_name):
+                self._guest_reading = None  # judged under a name that has gone (ADR-console-079 D3)
             self._publish()
+        return bool(addresses)
 
     def activate(self, commit: str) -> None:
         """Start one activation of `commit`, the shown tip; see the module docstring."""

@@ -1205,13 +1205,61 @@ class ReadingServiceTest(GuestCase):
         # the host moves to OTHER_DEVICE_ADDRESS and probes itself before the next poll
         self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [OTHER_DEVICE_ADDRESS]}}
         self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
-        self.assertEqual(sharing()["last_request"]["client"], "other_device")
+        # the request confirms the addresses first, so the self-probe is never kept as another device
+        self.assertIsNone(sharing()["last_request"])
+        self.assertIs(sharing()["other_device_seen"], False)
         svc.poll_serve()
         self.assertIsNone(sharing()["last_request"])
         self.assertIs(sharing()["other_device_seen"], False)
         self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
         self.assertEqual(sharing()["last_request"]["client"], "this_host")
         self.assertIs(sharing()["other_device_seen"], False)
+
+    def test_a_failed_status_read_moves_no_address_and_forgets_no_visit(self):
+        self.seed()
+        svc = self.start()
+
+        def sharing():
+            return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertIs(sharing()["other_device_seen"], True)
+        good = self.status
+        for failed in (None, {"Self": {"DNSName": TAILNET + "."}}):
+            self.status = failed
+            svc.poll_serve()
+            self.status = good
+            svc.poll_serve()
+            self.assertIs(sharing()["other_device_seen"], True)
+            self.assertEqual(sharing()["last_request"]["client"], "other_device")
+
+    def test_a_request_of_another_device_that_the_status_read_cannot_confirm_is_unknown(self):
+        self.seed()
+        svc = self.start()
+        self.status = None
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        state = json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+        self.assertIs(state["other_device_seen"], False)
+        self.assertEqual(state["last_request"]["client"], "unknown")
+
+    def test_a_reading_judged_under_a_name_that_has_gone_is_dropped(self):
+        self.seed()
+        svc = self.start()
+        renamed = OTHER_HOST
+
+        def sharing():
+            return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+
+        # a probe at the new name arrives before the poll reads it: refused, form other
+        self.guest(svc, "GET", "/api/whoami", forwarded_host=renamed,
+                   headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertEqual(sharing()["last_request"]["forwarded_host_form"], "other")
+        self.status = {"Self": {**self.status["Self"], "DNSName": renamed + "."}}
+        svc.poll_serve()
+        self.assertIsNone(sharing()["last_request"])
+        self.assertIs(sharing()["other_device_seen"], True)
+        svc.poll_serve()
+        self.assertIsNone(sharing()["last_request"])
 
     def test_a_reading_judged_under_addresses_that_moved_in_flight_is_dropped(self):
         self.seed()
@@ -1591,8 +1639,8 @@ class ReadNameTest(GuestCase):
             self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
             svc.poll_serve()
 
-        for label, change, text in (("switch", switch, guest.SHARING_OFF_TEXT),
-                                    ("name", name, guest.HOST_TEXT)):
+        for label, change, text, kept in (("switch", switch, guest.SHARING_OFF_TEXT, True),
+                                          ("name", name, guest.HOST_TEXT, False)):
             with self.subTest(change=label), tempfile.TemporaryDirectory() as tmp:
                 self.store = Path(tmp) / "state/console/events.sqlite3"
                 self.registry = Path(tmp) / "state/fleet/registry.json"
@@ -1611,7 +1659,11 @@ class ReadNameTest(GuestCase):
                 svc.record_guest_request = spy
                 got = self.guest(svc, "GET", "/")
                 self.assertEqual(got[0], 200)
-                self.assertIs(self.last_request(svc)["admitted"], True)
+                # a reading judged under a name that has gone is dropped, not shown
+                if kept:
+                    self.assertIs(self.last_request(svc)["admitted"], True)
+                else:
+                    self.assertIsNone(self.last_request(svc))
                 got = self.guest(svc, "GET", "/")
                 self.assertEqual((got[0], got[2]), (403, text.encode() + b"\n"))
                 self.assertIs(self.last_request(svc)["admitted"], False)
@@ -1655,6 +1707,15 @@ class HeldCheckServiceTest(GuestCase):
         self.guest(svc, "GET", "/api/whoami",
                    headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
 
+    def test_a_probe_sent_before_a_rename_is_read_waits_instead_of_failing(self):
+        self.seed()
+        svc = self.start()
+        self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST, logins=[COLLEAGUE],
+                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+        self.status = {"Self": {**self.status["Self"], "DNSName": OTHER_HOST + "."}}
+        svc.poll_serve()
+        self.assertEqual(self.check(svc), (75, "no_request"))
+
     def test_the_held_check_reads_the_running_service(self):
         self.seed()
         svc = self.start()
@@ -1665,7 +1726,7 @@ class HeldCheckServiceTest(GuestCase):
         self.assertEqual(check(), (0, "met"))
         self.status = {"Self": {"DNSName": OTHER_HOST + ".", "TailscaleIPs": [SELF_V4, SELF_V6]}}
         svc.poll_serve()
-        self.assertEqual(check(), (75, "stale"))
+        self.assertEqual(check(), (75, "no_request"))
         self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST, logins=[FORGED],
                    headers={"X-Forwarded-For": "100.64.0.1",
                             "X-Console-Probe": "other-probe@example.invalid"})

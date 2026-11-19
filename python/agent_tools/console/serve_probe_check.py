@@ -37,8 +37,8 @@ The rules, read in this order, each printing one line:
    string when `forwarded_host_form` is `exact` or `with_port`; `host` a string or null;
    `forwarded_host_form` one of `guest.HOST_FORMS`; `reason` null or one of `guest.REASON_CODES`;
    `client` one of `guest.CLIENT_FORMS`): `bad_reading`, exit 1; a reading that is exactly the
-   previous console's (every member but `client`) reads as `client` `unknown`, so it waits at rule 7
-   for the activated console rather than failing;
+   previous console's (every member but `client`, in a `sharing` that has no `other_device_seen`)
+   reads as `client` `unknown`, so it waits at rule 7 for the activated console rather than failing;
 6. `forwarded_for` is false, a local request and not one through Serve: `not_through_serve`, 75;
 7. `client` is `this_host`, a request this host sent to itself, which proves nothing about the
    tailnet's access rules (ADR-console-079 D5): `from_this_host`, 75; `client` is `unknown`, the
@@ -143,7 +143,8 @@ def main(argv: list[str] | None = None, *,
     if reading is None:
         _print({"status": "no_request"})
         return NOT_YET
-    if isinstance(reading, dict) and set(reading) == set(guest.READING_MEMBERS) - {"client"}:
+    if (isinstance(reading, dict) and "other_device_seen" not in sharing
+            and set(reading) == set(guest.READING_MEMBERS) - {"client"}):
         reading = {**reading, "client": guest.UNKNOWN_CLIENT}  # the previous console's schema
     if not _well_formed(reading):
         _print({"status": "bad_reading"})

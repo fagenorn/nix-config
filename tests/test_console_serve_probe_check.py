@@ -32,6 +32,12 @@ GOOD = {"admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
 
 
 def state_of(reading):
+    return {"sharing": {"shared": True, "tailnet": TAILNET, "last_request": reading,
+                        "other_device_seen": True}}
+
+
+def legacy_state_of(reading):
+    """The previous console's `sharing`: it has no `other_device_seen`."""
     return {"sharing": {"shared": True, "tailnet": TAILNET, "last_request": reading}}
 
 
@@ -130,11 +136,16 @@ class HeldCheckTest(unittest.TestCase):
             (state_of(reading(client="unknown")), 75, "client_unknown"),
             (state_of(reading(client="elsewhere")), 1, "bad_reading"),
             (state_of(reading(client=None)), 1, "bad_reading"),
-            (state_of({k: v for k, v in GOOD.items() if k != "client"}), 75, "client_unknown"),
-            (state_of({k: v for k, v in GOOD.items() if k not in ("client", "probe")}), 1, "bad_reading"),
-            (state_of({**{k: v for k, v in GOOD.items() if k != "client"}, "extra": 1}), 1, "bad_reading"),
+            (legacy_state_of({k: v for k, v in GOOD.items() if k != "client"}), 75, "client_unknown"),
+            (legacy_state_of({k: v for k, v in GOOD.items() if k not in ("client", "probe")}),
+             1, "bad_reading"),
+            (legacy_state_of({**{k: v for k, v in GOOD.items() if k != "client"}, "extra": 1}),
+             1, "bad_reading"),
+            (legacy_state_of({k: v for k, v in GOOD.items() if k not in ("client", "forwarded_for")}
+                             | {"forwarded_for": False}), 75, "not_through_serve"),
+            (state_of({k: v for k, v in GOOD.items() if k != "client"}), 1, "bad_reading"),
             (state_of({k: v for k, v in GOOD.items() if k not in ("client", "forwarded_for")}
-                      | {"forwarded_for": False}), 75, "not_through_serve"),
+                      | {"forwarded_for": False}), 1, "bad_reading"),
             (state_of(reading(forwarded_for=False, client="this_host")), 75, "not_through_serve"),
             (state_of(reading(client="this_host", forwarded_host_form="with_port",
                               forwarded_host=TAILNET + ":443", reason="host")),
