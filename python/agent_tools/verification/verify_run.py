@@ -335,7 +335,7 @@ class _Pass:
                  report: bool, retired: Mapping[str, str] = RETIRED_HOSTS) -> None:
         self.project, self.host, self.refs, self.report = project, host, refs, report
         self.retired = retired
-        self.scripts: dict[tuple[str, str], bool] = {}
+        self.scripts: dict[tuple[str, str], bool | None] = {}
         self.slug = project.slug
         self.number = node["number"]
         self.node = node
@@ -455,14 +455,22 @@ class _Pass:
         for a script, the script at the commit it runs at is readable and names nothing Linux-only."""
         gate = verify_exec.gate(check, self.project.bindings["workflow"]["verification"])
         run = check.get("run") or {}
-        return gate.runnable and ("script" not in run or self.portable(run))
+        return gate.runnable and ("script" not in run or self.portable(run) is True)
 
-    def portable(self, run: Mapping) -> bool:
-        """Whether the script of `run` is readable and names nothing only Linux has (read once per pass)."""
+    def unreadable(self, check: Mapping) -> bool:
+        """Whether `check` is a script the unattended gate would run but this host cannot read at its commit:
+        whether it is portable is unknown here, so no prompt of it is ended on this host's word."""
+        run = check.get("run") or {}
+        return "script" in run and self.portable(run) is None \
+            and verify_exec.gate(check, self.project.bindings["workflow"]["verification"]).runnable
+
+    def portable(self, run: Mapping) -> bool | None:
+        """Whether the script of `run` names nothing only Linux has; None when it cannot be read here
+        (a git fetch that failed on this host says nothing of the script), read once per pass."""
         path, commit = run["script"], run.get("at") or self.block["merge"]
         if (commit, path) not in self.scripts:
             text = verify_exec.script_text(self.project.root, commit, path)
-            self.scripts[commit, path] = text is not None and LINUX_ONLY.search(text) is None
+            self.scripts[commit, path] = None if text is None else LINUX_ONLY.search(text) is None
         return self.scripts[commit, path]
 
     def bound(self, check: Mapping) -> str | list[str] | None:
@@ -473,7 +481,8 @@ class _Pass:
         """Whether `marker` is a runner prompt of this block that waits on a retired host or a check no host can take.
 
         An approve or stale prompt names the check's host in `host`; an ask or act prompt names the host
-        that posted it, which says nothing about who can answer, so only `bound` decides those."""
+        that posted it, which says nothing about who can answer, so only `bound` decides those, and never
+        for a script this host cannot read (`unreadable`)."""
         if not verify_answer.is_runner_prompt(marker) or marker.fields.get("block") != self.block_key:
             return False
         if marker.fields.get("reason") in (verify_owner.APPROVE, verify_owner.STALE) \
@@ -483,7 +492,7 @@ class _Pass:
             check = self.block["checks"][int(marker.fields["check"])]
         except (ValueError, IndexError):
             return False
-        return self.bound(check) is None
+        return self.bound(check) is None and not self.unreadable(check)
 
     def retire(self) -> None:
         """End the live prompts and due markers of this block that wait on a retired host, and hand an

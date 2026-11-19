@@ -3,6 +3,7 @@ import contextlib
 import dataclasses
 import io
 import json
+import sys
 import unittest
 from datetime import datetime
 from email.utils import format_datetime
@@ -872,6 +873,21 @@ class RetiredPromptTest(OwnerBase):
         self.assertEqual(moved.fields["host"], "new-box")
         self.assertNotIn("old-box", moved.body)
         self.assertIn("new-box", moved.body.split("\n")[1])
+
+    def test_a_script_unreadable_on_another_host_ends_no_live_prompt(self):
+        script = self.world.checkout / "scripts" / "fails.sh"
+        script.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(1)\n", encoding="utf-8")
+        script.chmod(0o755)
+        self.hold(check(host="old-box", run={"script": "scripts/fails.sh"}, on_fail="ask"))
+        self.assertEqual(self.run_pass("new-box", retired=RETIRED), [line(0, "AC1", "fail", "fail_ask")])
+        decision, = self.live_prompts()
+        self.assertEqual(decision.fields["reason"], "verify-decision")
+        script.unlink()  # a host whose git fetch of the merge commit failed
+        for host in ("mbp", "new-box"):
+            with self.subTest(host=host):
+                self.run_pass(host, retired=RETIRED)
+                self.assertEqual(self.markers("end"), [])
+                self.assertEqual([p.comment_id for p in self.live_prompts()], [decision.comment_id])
 
     def test_a_retired_check_that_failed_gets_no_decision_prompt(self):
         c = ok_check(host="old-box", effects="live", on_fail="ask")
