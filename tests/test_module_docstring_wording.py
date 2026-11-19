@@ -42,19 +42,23 @@ Scan rule for a `.py` source:
    name also forgets the chains that start with `<name>.`), and only then are
    the class bindings installed, so unbinding `self` never drops
    `self.SENTENCES`. Statements are walked in order, compound bodies in order
-   in the same environment (no branch join, except for an `if`): an assignment replaces each
+   in the same environment (no branch join, except for the branching statements below): an assignment replaces each
    target's kinds (a Tuple target is bound element-wise when the value is a
    Tuple or List of the same length, else each element gets the value's kinds);
    an augmented assignment adds; binding a name forgets the chains that start
    with `<name>.`; a `for` target gets the union of the element kinds of a
    literal Tuple, List or Set iterable, else the iterable's kinds, before the
    body; a `with ... as v` binds `v` to the context expression's kinds; `if`,
-   `while` bodies are walked in order in the same environment. An `if` walks
+   `with` bodies are walked in order in the same environment. An `if` walks
    its body and its else branch each from a copy of the incoming environment
    (the incoming environment standing for a missing else), and the environment
    after it holds, per name, the union of the kinds the branches end with. A
    `match` walks each case from a copy of the incoming environment and joins
-   the case ends with the incoming environment. A `try` walks its body from a
+   the case ends with the incoming environment. A `for` or `while` body may run zero
+   times or many: the body is walked from the join of the incoming environment and
+   the end of the previous pass (the `for` target bound first), repeated until that
+   join stops growing; the `else` is walked from that join, and the environment
+   after the loop is the join of the two. A `try` walks its body from a
    copy; each handler starts from the join (per-name union) of the incoming
    environment and the environment after the body, since the body may stop
    anywhere; else continues from the end of the body; finally starts from the
@@ -81,8 +85,10 @@ Scan rule for a `.py` source:
    finding when its first non-blank character is not `#`, it matches
    SHELL_DOC, and it matches SHELL_PHRASE_TEST, or matches SHELL_COMPARE and,
    has a non-empty quoted literal directly beside the operator, on either side
-   (SHELL_COMPARE_PHRASE; a `!= ""` check compares with no phrase, and a
-   double-quoted `-c` program is no literal beside the operator). A docstring
+   (SHELL_COMPARE_PHRASE; a `!= ""` check compares with no phrase, a
+   double-quoted `-c` program is no literal beside the operator, and a
+   double-quoted span that starts with `$` or a backtick, such as `"$doc"`, is an
+   expansion, not a literal). A docstring
    existence check is no finding in any member kind.
 
 A suite member of any kind other than `.py` and `.sh` fails the scan, and a
@@ -125,8 +131,10 @@ SHELL_PHRASE_TEST = re.compile(
 )
 # A non-empty quoted literal (optionally backslash-escaped quotes) right after or right
 # before ==/!=; a glob star may sit inside a right-hand [[ ]] pattern.
+# A double-quoted span that starts with $ or a backtick is an expansion, not a literal.
 SHELL_COMPARE_PHRASE = re.compile(
-    r'''(?:==|!=)\s*\*?\\?["'][^"'\\]+|(?:^|[\s(\[])\\?["'][^"'\\]+\\?["']\s*(?:==|!=)'''
+    r'''(?:==|!=)\s*\*?\\?(?:"(?![$`])|')[^"'\\]+'''
+    r'''|(?:^|[\s(\[])\\?(?:"(?![$`])|')[^"'\\]+\\?["']\s*(?:==|!=)'''
 )
 # The count of leading operands (exception, regex) of each assertion that also takes a callable.
 CALLABLE_FORM = {"assertRaises": 1, "assertWarns": 1, "assertRaisesRegex": 2, "assertWarnsRegex": 2}
@@ -318,6 +326,29 @@ class _Walk:
         for statement in statements:
             self.statement(statement, env)
 
+    def loop(self, node: ast.stmt, env: dict) -> None:
+        # The body may run zero times or many: each pass starts from the join of the entry
+        # and the previous pass's end, until that join stops growing.
+        head = dict(env)
+        while True:
+            body = dict(head)
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                if isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)):
+                    kinds = frozenset().union(*(self.kinds(e, body) for e in node.iter.elts))
+                else:
+                    kinds = self.kinds(node.iter, body)
+                self.bind(node.target, None, kinds, body)
+            self.block(node.body, body)
+            grown = _join(head, body)
+            if grown == head:
+                break
+            head = grown
+        orelse = dict(head)
+        self.block(node.orelse, orelse)
+        joined = _join(head, orelse)
+        env.clear()
+        env.update(joined)
+
     def statement(self, node: ast.stmt, env: dict) -> None:
         if isinstance(node, ast.Assign):
             self.lambdas(node.value, env)
@@ -343,14 +374,8 @@ class _Walk:
                 self.assertion(call, env)
         elif isinstance(node, ast.Assert):
             self.check(node.lineno, [node.test], env)
-        elif isinstance(node, (ast.For, ast.AsyncFor)):
-            if isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)):
-                kinds = frozenset().union(*(self.kinds(e, env) for e in node.iter.elts))
-            else:
-                kinds = self.kinds(node.iter, env)
-            self.bind(node.target, None, kinds, env)
-            self.block(node.body, env)
-            self.block(node.orelse, env)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            self.loop(node, env)
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 self.lambdas(item.context_expr, env)
@@ -364,9 +389,6 @@ class _Walk:
             joined = _join(taken, other)
             env.clear()
             env.update(joined)
-        elif isinstance(node, ast.While):
-            self.block(node.body, env)
-            self.block(node.orelse, env)
         elif TRIES and isinstance(node, TRIES):
             body = dict(env)
             self.block(node.body, body)
@@ -630,6 +652,38 @@ MATCH_CASES = HEAD + _body(r'''
         self.assertIn("after", text)
 ''')
 
+LOOP_REBIND = HEAD + _body(r'''
+        text = mod.__doc__
+        for x in xs:
+            text = run_cli(x).stdout
+            self.assertIn("usage:", text)
+        self.assertIn("phrase", text)
+        while cond():
+            text = run_cli("y").stdout
+        self.assertIn("other", text)
+''')
+
+LOOP_ELSE = HEAD + _body(r'''
+        text = mod.__doc__
+        for x in xs:
+            text = run_cli(x).stdout
+        else:
+            self.assertIn("phrase", text)
+        while cond():
+            text = run_cli("y").stdout
+        else:
+            self.assertIn("other", text)
+''')
+
+LOOP_CARRIED = HEAD + _body(r'''
+        text = run_cli(["--help"]).stdout
+        other = text
+        for x in xs:
+            self.assertIn("phrase", other)
+            other = text
+            text = mod.__doc__
+''')
+
 REBOUND = HEAD + _body(r'''
         doc = mod.__doc__
         doc = run_cli(["--help"]).stdout
@@ -692,6 +746,15 @@ class DocstringScanTest(unittest.TestCase):
     def test_each_match_case_is_scanned_from_the_incoming_bindings(self):
         self.assertEqual(self.found(MATCH_CASES), [(TEST_ID, 9), (TEST_ID, 10)])
 
+    def test_a_loop_body_that_may_not_run_keeps_the_entry_bindings(self):
+        self.assertEqual(self.found(LOOP_REBIND), [(TEST_ID, 7), (TEST_ID, 10)])
+
+    def test_a_loop_else_is_scanned_from_the_entry_bindings(self):
+        self.assertEqual(self.found(LOOP_ELSE), [(TEST_ID, 7), (TEST_ID, 11)])
+
+    def test_a_binding_made_late_in_a_loop_body_reaches_the_next_pass(self):
+        self.assertEqual(self.found(LOOP_CARRIED), [(TEST_ID, 6)])
+
     def test_a_help_usage_check_passes(self):
         self.assertEqual(self.found(HELP_USAGE), [])
 
@@ -722,9 +785,11 @@ class DocstringTreeTest(unittest.TestCase):
             "python3 -c 'import m; assert \"words\" in m.__doc__'\n"
             "python3 -c 'import m; assert m.__doc__ == \"words\"'\n"
             "python3 -c \"import m; assert m.__doc__ == 'words'\"\n"
+            "doc=$(python3 -c 'import m; print(m.__doc__)'); [ \"$doc\" == \"words\" ]\n"
+            "doc=$(python3 -c 'import m; print(m.__doc__)'); [ \"words\" == \"$doc\" ]\n"
         )
         found = self.findings({"justfile": JUSTFILE_HEAD + "    tests/x.sh\n", "tests/x.sh": script})
-        self.assertEqual(found, [("tests/x.sh", 2), ("tests/x.sh", 3), ("tests/x.sh", 4), ("tests/x.sh", 5)])
+        self.assertEqual(found, [("tests/x.sh", n) for n in range(2, 8)])
 
     def test_a_shell_docstring_existence_check_or_comment_passes(self):
         script = (
@@ -735,6 +800,8 @@ class DocstringTreeTest(unittest.TestCase):
             "python3 -c \"import m; assert m.__doc__ != ''\"\n"
             "python3 -c \"import m; assert len(m.__doc__) != 0\"\n"
             "[ \"$(python3 -c 'import m; print(m.__doc__)')\" != \"\" ]\n"
+            "doc=$(python3 -c 'import m; print(m.__doc__)'); [ \"$doc\" != \"\" ]\n"
+            "python3 -c \"import m; assert m.__doc__ is not None\" && [ \"$a\" != \"\" ]\n"
         )
         found = self.findings({"justfile": JUSTFILE_HEAD + "    tests/x.sh\n", "tests/x.sh": script})
         self.assertEqual(found, [])
