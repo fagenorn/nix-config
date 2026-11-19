@@ -111,6 +111,7 @@ withdrawal removes the sprint).
     question_replaced  The manager of <title> replaced a question: <the replaced question's ask>
                        (`The manager of <title> replaced <n> questions` when n > 1 were replaced)
     answer_differs   An answer for <project_id>: You chose '<answer>' over the recommended '<recommended>': <question>
+                     (`<login> chose` instead of `You chose` when a guest answered, #1263)
     sprint_done      The sprint for <project_id> is done: <the closing report's first line>
     manager_restarted The manager of <title> was restarted
     manager_takeover A new manager took over <title>
@@ -157,8 +158,8 @@ from agent_tools.console.event_log import (
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import (
-    BALL_TEXT, MANAGER_SESSION_NAME, SprintState, goal_title, merge_refused, sprint_states,
-    sprint_title)
+    BALL_TEXT, MANAGER_SESSION_NAME, SprintState, actor_of, goal_title, merge_refused,
+    sprint_states, sprint_title)
 from agent_tools.console.view import (
     INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, is_waiting, item_headline, repo_name,
     sprint_ball, sprint_state, sprint_waiting)
@@ -298,7 +299,8 @@ def _answer_moment(event: Event) -> tuple[str, str] | None:
             or not isinstance(answer, str) or not isinstance(recommended, str)
             or event.payload.get("differs") is not True):
         return None
-    return (ANSWER_DIFFERS, f"An answer for {event.project}: You chose '{answer}' over the "
+    who = actor_of(event.payload) or "You"
+    return (ANSWER_DIFFERS, f"An answer for {event.project}: {who} chose '{answer}' over the "
                             f"recommended '{recommended}': {question}")
 
 

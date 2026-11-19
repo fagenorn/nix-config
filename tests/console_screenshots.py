@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty-nine screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-four screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -76,12 +76,30 @@ Contract:
   `HEAD_ASK`: the field shown, the working question's line, the panel's Read line), `ask-goal`
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
-  `sharing-panel` is the owner's Sharing panel opened over one invented colleague of `owner/web`
-  after one admitted guest request; `guest-page` is that colleague's read-only page through a
+  `sharing-panel` is the owner's Sharing panel, with Serve on, opened over one invented colleague
+  of `owner/web` after one admitted request from this host itself, so it shows the no-other-device
+  line; `sharing-reached` is that panel after a further request from another device;
+  `sharing-off` is that panel with sharing switched off and
+  the read name shown, and `sharing-unreadable` is it with sharing on and no readable name, so
+  it shows its line; neither makes a guest request; `guest-page` is that colleague's read-only page through a
   stand-in Serve that adds the tailnet Host and login header, refused when a page with a door
   meta (`#console-door`) is not the guest page. On the base commit's page, which has neither
   the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
   `guest-page` is the page the guest port served then, so a base run still writes every file.
+  `guest-steer` is `guest-page` over a fixture of three `owner/web` sprints and a release confirm: two
+  sprints the colleague started (every row of theirs carries `"by"`), one whose brief is approved and
+  whose newest message is the colleague's answer to a plain question, so the line `Answered by
+  COLLEAGUE: ...` shows, and one whose brief version 1 waits, so the page shows an open card the colleague
+  can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
+  and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
+  draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed. Each
+  width waits for what the owner judges to be visible, which fails the run when it is not:
+  `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
+  `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
+  straight into the event log, so the base commit's service, which ignores `by`, serves a page
+  without those parts. On a page whose service does not read the actor (`reads_actors()` is False,
+  `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
+  file and the pictures are the before pictures of the actors.
   `register-apply` and `register-draft` are the console's registration of `sample-app`, a
   repository with no contract whose ready plan proposes the command its adoption commit runs
   through (`PROPOSAL_LINE`, #1268), served with a stand-in adopter and forge so the plan can be
@@ -95,7 +113,7 @@ Contract:
   page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
   picture, and any other reading fails.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 78 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 88 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -147,14 +165,17 @@ Contract:
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
   same fixtures; swapping in only the base `page.html` is not a before picture, since the head view's
-  `questions` object draws nothing on it. The after pictures run with `PYTHONPATH` at the branch.
+  `questions` object draws nothing on it. The after pictures run with `PYTHONPATH` at the branch. `guest_door_kwargs` and `guest_door` pick the
+base commit's guest port or the branch's guest socket, so a base run still serves the guest states.
 """
 from __future__ import annotations
 
 import argparse
 import http.client
+import inspect
 import json
 import os
+import socket
 import struct
 import sys
 import tempfile
@@ -172,7 +193,7 @@ from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
 
 from .console_test_support import hook_body, write_registry
 
@@ -183,7 +204,8 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
-          "register-draft", "sharing-panel", "guest-page")
+          "register-draft", "sharing-panel",
+          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -196,7 +218,11 @@ LOOK_HEAD = "3f9c1d27a05be84c61d9f0273b8e5a14c7d0962e"
 LOOK_FOUND = "8e41b0a6d2c7f35918ae04b7c6d1259f3e0a7b84"
 TAILNET = "desk.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
-SHARING_STATES = ("sharing-panel", "guest-page")
+SELF_ADDRESS = "100.64.0.10"
+OTHER_DEVICE_ADDRESS = "100.64.0.20"
+SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
+                  "guest-page", "guest-steer")
+SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
 REGISTER_STATES = ("register-apply", "register-draft")
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
@@ -570,6 +596,57 @@ class _Seed:
             "answers": ["passed", "failed", "note"], "paid": False, "confirm": "",
             "answered": False, "held_work": 1, "blocking": [], "version": "v1"})
 
+    def approval(self, project: str, issue: int, ago: float) -> None:
+        """One open release confirm of `issue`: a `verify-approve` card waiting on the owner."""
+        self.put(ago, "inbox.seen", project, {
+            "key": f"{project}#{issue}/9002", "project_id": project, "repo": project,
+            "issue": issue, "comment_id": 9002,
+            "url": f"https://github.com/{project}/issues/{issue}#issuecomment-9002",
+            "reason": "verify-approve", "kind": "approval",
+            "question": "Approve the release of the importer change?", "detail": "",
+            "check_id": "", "questions": [], "items": [], "answers": ["approve"],
+            "paid": False, "confirm": f"{project}#{issue}", "answered": False,
+            "held_work": 1, "blocking": [], "version": "v1"})
+
+    def colleague_sprint(self, project: str, title: str, *, started: float, by: str,
+                         answered: bool = False) -> tuple[str, str]:
+        """One sprint stated by the colleague `by`, every row of theirs carrying `"by"`.
+
+        Without `answered` its brief version 1 is sent and waits. With it the brief is approved, one
+        message is sent, one plain question is asked and answered last, so the answer is the
+        sprint's newest message.
+        """
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        base = {"sprint_id": sid, "goal": goal}
+        actor = {"by": by}
+        self.put(started, "goal.stated", project, {**base, **actor})
+        self.put(started - 1 * MINUTE, "manager.started", project, {
+            "sprint_id": sid, "profile": "work-main",
+            "session_name": manager.session_name(project, sid)})
+        self.put(started - 4 * MINUTE, "brief.sent", project, {**base, "version": 1, "brief": {
+            "title": title, "done": f"{title}, merged and checked.",
+            "slices": ["the first slice", "the second slice"], "excluded": [],
+            "risks": ["a partial write"], "asks": []}})
+        if not answered:
+            return sid, goal
+        self.put(started - 8 * MINUTE, "brief.approved", project, {**base, "version": 1, **actor})
+        self.put(started - 10 * MINUTE, "sprint.messaged", project,
+                 {**base, "text": TELL_TEXT, **actor})
+        asked = self.put(started - 12 * MINUTE, "questions.asked", project, {
+            **base, "blocker": False, "questions": [{
+                "question": "Which store should the checkpoint use?",
+                "blocks": "the first slice",
+                "options": ["the existing database", "a new file"],
+                "recommended": "the existing database"}]})
+        self.put(started - 14 * MINUTE, "question.answered", project, {
+            **base, "round": asked.seq, "index": 0,
+            "question": "Which store should the checkpoint use?", "answer": "a new file",
+            "chosen": "a new file", "recommended": "the existing database", "differs": True,
+            **actor})
+        return sid, goal
+
     def account(self, name: str, week: float) -> None:
         """A signed-in profile with one capacity reading whose week window is `week` used."""
         self._at[0] = _iso(self.now_s)
@@ -640,11 +717,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
-    elif state in SHARING_STATES:
+    elif state in (*SHARING_STATES, "owner-actors"):
         seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
+        if state == "sharing-off":
+            seed.put(MINUTE, SHARING_TAILNET, None, {"shared": False})
         seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
-        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        if state in ("guest-steer", "owner-actors"):
+            seed.colleague_sprint(web, "Add resumable uploads", started=40 * MINUTE,
+                                  by=COLLEAGUE, answered=True)
+            seed.colleague_sprint(web, "Fix the settings page", started=20 * MINUTE, by=COLLEAGUE)
+            sid, goal = seed.sprint(web, "Try a new cache", started=30 * MINUTE,
+                                    report=6 * MINUTE)
+            seed.message(web, sid, goal, sent=2 * MINUTE)
+            seed.approval(web, 12, MINUTE)
+        else:
+            seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
+            seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -904,6 +992,11 @@ def reads_other() -> bool:
     return "other" in Activation.__dataclass_fields__
 
 
+def reads_actors() -> bool:
+    """Whether this page's service reads who started a sprint (`SprintState` has `started_by`)."""
+    return "started_by" in SprintState.__dataclass_fields__
+
+
 def _activation_reader(paths: tuple[str, ...]):
     """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
     def read(roots):
@@ -921,8 +1014,58 @@ def proposes_environment() -> bool:
     return hasattr(contract_draft, "proposed_lines")
 
 
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    """An HTTP client of a guest door that is a Unix socket at `path`."""
+
+    def __init__(self, path: str, timeout: float = 5):
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._path)
+
+
+def guest_door_kwargs(constructor, folder: Path) -> dict:
+    """The constructor arguments that open the guest door: the branch's socket, else the base's port."""
+    if "guest_socket" in inspect.signature(constructor).parameters:
+        return {"guest_socket": folder / "guest" / "guest.sock"}
+    return {"guest_port": 0}
+
+
+def guest_door(service) -> str | tuple[str, int]:
+    """Where `service` listens for guests: its socket path, else (the base commit) its address."""
+    return service.guest_socket if hasattr(service, "guest_socket") else service.guest_address
+
+
+def _door_connection(door: str | tuple[str, int], timeout: float) -> http.client.HTTPConnection:
+    if isinstance(door, str):
+        return _UnixHTTPConnection(door, timeout)
+    return http.client.HTTPConnection(*door, timeout=timeout)
+
+
+def _tailnet_kwargs(guest_dir: Path | None, readable: bool, service: list) -> dict:
+    """The readers of this host's tailnet name and of Serve for a guest door; a base constructor takes none (#1305).
+
+    A readable name carries this host's own address, and Serve proxies the tailnet name to the
+    service's own guest socket; `service` is filled with that service as it is built, so the proxy
+    names the path the service keeps.
+    """
+    parameters = inspect.signature(ConsoleService).parameters
+    if guest_dir is None or "status_reader" not in parameters:
+        return {}
+    kwargs: dict = {"status_reader": (lambda: {"Self": {"DNSName": TAILNET + ".",
+                                                        "TailscaleIPs": [SELF_ADDRESS]}})
+                    if readable else (lambda: None), "serve_seconds": 3600}
+    if readable and "serve_reader" in parameters:
+        kwargs["serve_reader"] = lambda: {"Web": {f"{TAILNET}:443": {"Handlers": {
+            "/": {"Proxy": "unix:" + service[0].guest_socket}}}}}
+    return kwargs
+
+
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
-                  guest: bool = False) -> ConsoleService:
+                  guest_dir: Path | None = None, tailnet_readable: bool = True) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
             launches.append(launch)
@@ -937,6 +1080,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         forge["activation_reader"] = _activation_reader(fixture.activating)
     if fixture.registering:
         forge.update(adopter=_Inert(), forge=_Inert())
+    bound: list = []
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
@@ -944,9 +1088,14 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         activity=lambda root: None,
         slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
-        dispatch=lambda job: job(), guest_port=0 if guest else None,
-        repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
+        dispatch=lambda job: job(),
+        repo_of=lambda cwd: cwd, ping_log=lambda: None,
+        **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge)
+    bound.append(service)
     service.start()
+    if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
+        service.poll_serve()
     service.poll_spend()
     if fixture.activating:
         service.poll_activation()
@@ -958,38 +1107,58 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
     return service
 
 
-def _guest_get(address: tuple[str, int], path: str = "/", *, host: str | None = TAILNET,
-               login: str | None = COLLEAGUE) -> http.client.HTTPResponse:
-    """One GET to `address` carrying the tailnet Host and the colleague's login header."""
-    headers = {}
-    if host is not None:
-        headers["Host"] = host
+def _guest_headers(door: str | tuple[str, int]) -> dict:
+    """The headers Serve sends to `door`: a port door (the base commit) reads the tailnet name as its
+    `Host`; a socket door reads `Host: localhost` and the name as its one `X-Forwarded-Host`."""
+    if isinstance(door, str):
+        return {"Host": "localhost", "X-Forwarded-Host": TAILNET}
+    return {"Host": TAILNET}
+
+
+def _guest_get(door: str | tuple[str, int], path: str = "/", *,
+               login: str | None = COLLEAGUE,
+               forwarded_for: str | None = None) -> http.client.HTTPResponse:
+    """One GET to `door` carrying the door's host headers, the colleague's login header and, when given, `X-Forwarded-For`."""
+    headers = _guest_headers(door)
     if login is not None:
         headers["Tailscale-User-Login"] = login
-    connection = http.client.HTTPConnection(*address, timeout=10)
+    if forwarded_for is not None:
+        headers["X-Forwarded-For"] = forwarded_for
+    connection = _door_connection(door, 10)
     connection.request("GET", path, headers=headers)
     return connection.getresponse()
+
+
+def guest_requests(state: str, door: str | tuple[str, int]) -> None:
+    """The guest-door requests a sharing `state` makes before it is shot: `sharing-panel` one from
+    this host itself, `sharing-reached` that and then one from another device, any other none."""
+    if state in ("sharing-panel", "sharing-reached"):
+        _guest_get(door, forwarded_for=SELF_ADDRESS).read()
+    if state == "sharing-reached":
+        _guest_get(door, forwarded_for=OTHER_DEVICE_ADDRESS).read()
 
 
 class _Serve:
     """A loopback stand-in for Tailscale Serve in front of the guest port.
 
-    Each GET is forwarded to `guest_address` with `Host: TAILNET` and `Tailscale-User-Login:
-    COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For` and `Host` dropped; the status and
+    Each GET is forwarded to the guest door `door` with the door's host headers (`_guest_headers`:
+    `Host: TAILNET` for a port door, `Host: localhost` and `X-Forwarded-Host: TAILNET` for a socket
+    door) and `Tailscale-User-Login: COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For`,
+    `X-Forwarded-Host` and `Host` dropped; the status and
     headers are copied and the body is streamed until EOF, each chunk flushed (the view stream
     is event-stream). `.address` is where a browser reads it; `.close()` stops it.
     """
 
-    def __init__(self, guest_address: tuple[str, int]):
+    def __init__(self, door: str | tuple[str, int]):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 kept = {name: value for name, value in self.headers.items()
                         if not name.lower().startswith("tailscale-")
-                        and name.lower() not in ("x-forwarded-for", "host")}
-                connection = http.client.HTTPConnection(*guest_address, timeout=3600)
+                        and name.lower() not in ("x-forwarded-for", "x-forwarded-host", "host")}
+                connection = _door_connection(door, 3600)
                 try:
                     connection.request("GET", self.path, headers={
-                        **kept, "Host": TAILNET, "Tailscale-User-Login": COLLEAGUE})
+                        **kept, **_guest_headers(door), "Tailscale-User-Login": COLLEAGUE})
                     response = connection.getresponse()
                     self.send_response_only(response.status)
                     for name, value in response.getheaders():
@@ -1035,18 +1204,20 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
             raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
         try:
             for state in states:
-                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp:
+                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
+                        tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
                     now_s = datetime.now(timezone.utc).timestamp()
                     service = start_service(
                         build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
-                        guest=state in SHARING_STATES)
+                        guest_dir=Path(door) if state in SHARING_STATES else None,
+                        tailnet_readable=state != "sharing-unreadable")
                     serve = None
                     try:
                         host, port = service.address
-                        if state == "sharing-panel":
-                            _guest_get(service.guest_address).read()
-                        elif state == "guest-page":
-                            serve = _Serve(service.guest_address)
+                        if state in SHARING_PANELS:
+                            guest_requests(state, guest_door(service))
+                        elif state in ("guest-page", "guest-steer"):
+                            serve = _Serve(guest_door(service))
                             host, port = serve.address
                         for width in widths:
                             path = "spend" if state == "spend-page" else ""
@@ -1203,10 +1374,16 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
-        if state == "guest-page" and page.query_selector("#console-door") is not None:
+        if state in ("guest-page", "guest-steer") and page.query_selector("#console-door") is not None:
             page.wait_for_selector("#top-who:not([hidden])")
             if page.query_selector("#capacity") is not None:
                 raise RuntimeError("the guest shot is not the guest page")
+        if state == "guest-steer" and reads_actors():
+            for selector in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
+                page.wait_for_selector(selector)
+        if state == "owner-actors" and reads_actors():
+            for selector in (".started-by", "text=Answered by"):
+                page.wait_for_selector(selector)
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')
@@ -1227,7 +1404,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "accounts-panel":
             page.click("#capacity")
             page.wait_for_selector("#accounts:not([hidden])")
-        if state == "sharing-panel" and page.query_selector("#sharing-open") is not None:
+        if state in SHARING_PANELS and page.query_selector("#sharing-open") is not None:
             page.click("#sharing-open")
             page.wait_for_selector("#sharing:not([hidden])")
         tell = None

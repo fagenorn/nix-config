@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check for issue 1291: every open issue that names the retired host (a phrase, case ignored) is exempt or carries the gone line in its body. Reads the forge only.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks host-mentions "$@"

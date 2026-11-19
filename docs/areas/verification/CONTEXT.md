@@ -23,6 +23,10 @@ A comment asking the owner to approve, act on, decide or look at a stale check. 
 **Probe**:
 A read-only observation a check makes of the live system, such as a forge setting or a log window. A probe never changes state.
 
+**Retired host**:
+A host that will not run passes again, mapped in the runner to the successor that takes the checks the unattended gate would run; a check no host can take is reported `host_retired`.
+_Avoid_: dead host
+
 **Verification pass**:
 One scheduled run of the verify-pending runner on a host. It reads the due checks of every held issue in the fleet registry, runs the runnable ones and closes the issues whose checks pass.
 _Avoid_: verify run

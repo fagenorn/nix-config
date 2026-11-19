@@ -635,6 +635,17 @@ class QuestionDigestTest(unittest.TestCase):
         self.assertEqual(found[0]["kind"], "answer_differs")
         self.assertEqual(ANSWER_DIFFERS, "answer_differs")
 
+    def test_a_guest_answer_names_its_actor_in_the_digest(self):
+        guest = sentences(self.made(by="colleague@example.invalid"))
+        self.assertEqual(guest, [
+            "An answer for owner/p01: colleague@example.invalid chose 'sqlite' over the "
+            "recommended 'files': Which store keeps the checkpoints?"])
+        self.assertNotIn("You chose", guest[0])
+        self.assertEqual(sentences(self.made()), [
+            "An answer for owner/p01: You chose 'sqlite' over the recommended 'files': "
+            "Which store keeps the checkpoints?"])
+        self.assertEqual(sentences(self.made(by="Owner")), sentences(self.made()))
+
     def test_an_answer_in_the_owners_own_words_says_what_was_said(self):
         self.assertEqual(sentences(self.made(answer="neither, ask me later", chosen=None)), [
             "An answer for owner/p01: You chose 'neither, ask me later' over the recommended "

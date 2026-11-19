@@ -104,6 +104,7 @@ from agent_tools.console.view import (
     project_states,
     read_states,
     registry_changes,
+    sprint_ball,
 )
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_issues
@@ -1114,7 +1115,7 @@ class BriefViewTest(unittest.TestCase):
             "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
             "project_id": "p00", "sprint_id": sid, "title": "Ship the importer",
             "version": 2, "brief": PARTS, "pictures": [], "answered": False,
-            "waiting_since": "t9"}])
+            "waiting_since": "t9", "started_by": None}])
         self.assertEqual(view["statement"]["inbox_items"], 1)
         self.assertEqual(view["statement"]["headline"], "1 thing needs you")
         self.assertEqual(view["statement"]["sentence"], BRIEF_SENTENCE)
@@ -1127,6 +1128,29 @@ class BriefViewTest(unittest.TestCase):
         self.assertEqual([e["key"] for e in view["inbox"]["open"]],
                          ["brief/" + b, "brief/" + a, "k1"])
         self.assertEqual(view["statement"]["inbox_items"], 3)
+
+    def test_a_brief_of_a_sprint_with_a_stop_requested_is_no_item(self):
+        sid = "a" * 16
+        stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
+        view = derive_view([state("p00", 1)], sprints={sid: stopping})
+        self.assertEqual(view["inbox"]["open"], [])
+
+    def test_a_stopping_sprints_pending_brief_is_not_the_owners_ball_nor_a_task(self):
+        sid = "a" * 16
+        stopping = dataclasses.replace(briefed(sprint(sid)), stop_at="t10")
+        view = derive_view([state("p00", 1)], sprints={sid: stopping}, now_ms=T0_MS)
+        self.assertNotEqual(view["entries"][0]["sprints"][0]["ball"], "owner")
+        self.assertNotEqual(sprint_ball(stopping, T0_MS, 0, ()), "owner")
+        self.assertEqual(sprint_ball(briefed(sprint(sid)), T0_MS, 0, ()), "owner")
+        self.assertEqual(view["statement"]["inbox_items"], 0)
+        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+
+    def test_a_brief_of_a_closed_or_stopped_sprint_is_no_item(self):
+        a, b = "a" * 16, "b" * 16
+        view = derive_view([state("p00", 1)], sprints={
+            a: closed(briefed(sprint(a)), 5 * MIN, ((12, "landed"),)),
+            b: dataclasses.replace(briefed(sprint(b)), stopped_at="t10")})
+        self.assertEqual(view["inbox"]["open"], [])
 
     def test_a_decided_or_unregistered_brief_is_no_item(self):
         a, b, c = "a" * 16, "b" * 16, "c" * 16
@@ -1776,7 +1800,8 @@ def question_entry(index, text, options, recommended, blocks, sid=A):
                            "recommended_index": options.index(recommended),
                            "needs_words_index": []}],
             "pictures": [], "look": None,
-            "items": [], "answers": [], "answered": False, "waiting_since": T0}
+            "items": [], "answers": [], "answered": False, "waiting_since": T0,
+            "started_by": None}
 
 
 FIRST = question_entry(0, "Which store keeps the checkpoints?", ["sqlite", "files"], "files",
@@ -1801,6 +1826,15 @@ class QuestionViewTest(unittest.TestCase):
             state_, questions=(dataclasses.replace(first, needs_words=("files",)), *rest))
         shown = derive_view([state("p00", 1)], sprints={A: state_})
         self.assertEqual(shown["inbox"]["open"][0]["questions"][0]["needs_words_index"], [1])
+
+    def test_an_owner_only_question_says_so_and_others_say_nothing(self):
+        state_ = asked(started(A))
+        first, *rest = state_.questions
+        state_ = dataclasses.replace(
+            state_, questions=(dataclasses.replace(first, owner_only=True), *rest))
+        entries = derive_view([state("p00", 1)], sprints={A: state_})["inbox"]["open"]
+        self.assertIs(entries[0]["owner_only"], True)
+        self.assertNotIn("owner_only", entries[1])
 
     def test_questions_follow_briefs_and_lead_tracker_items(self):
         b = "b" * 16
@@ -2563,7 +2597,7 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(project["outside_sprints"]["sessions"], [])
         self.assertIs(project["quiet"], True)
         waiting = stopped(briefed(started(A)), C, C + MIN)
-        self.assertEqual(len(line(waiting, C + MIN + DAY - 1)["inbox"]["open"]), 1)
+        self.assertEqual(line(waiting, C + MIN + DAY - 1)["inbox"]["open"], [])
         gone = line(waiting, C + MIN + DAY)
         self.assertEqual(gone["inbox"]["open"], [])
         self.assertEqual(gone["statement"]["inbox_items"], 0)
@@ -2643,6 +2677,67 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(derive_view([state("p00", 1)])["unstopped"], [])
 
 
+class ActorViewTest(unittest.TestCase):
+    GUEST = "colleague@example.invalid"
+
+    def test_an_answer_message_carries_the_question_it_answers_and_others_carry_none(self):
+        sid = "d" * 16
+        when = at_row(9)
+
+        def row(seq, kind, **payload):
+            return Event(seq, when, kind, "owner/p00",
+                         {"sprint_id": sid, "goal": "one", **payload})
+
+        ask = {"question": "Which store?", "blocks": "b", "options": ["sqlite", "files"],
+               "recommended": "files"}
+        rows = [row(20, event_log.GOAL_STATED), row(21, event_log.BRIEF_SENT, version=1, brief=PARTS_ROW),
+                row(22, event_log.BRIEF_APPROVED, version=1),
+                row(23, event_log.QUESTIONS_ASKED, blocker=False, questions=[ask]),
+                row(24, event_log.QUESTION_ANSWERED, round=23, index=0, question="Which store?",
+                    answer="sqlite", chosen="sqlite", recommended="files", differs=True)]
+        shown = derive_view([state("owner/p00", 1)], sprints=sprint_states(rows), now_ms=T0_MS)
+        messages = shown["entries"][0]["sprints"][0]["messages"]
+        (answer,) = [m for m in messages if m["kind"] == "answer"]
+        self.assertEqual(answer["question"], "Which store?")
+        self.assertTrue(all(m["question"] is None for m in messages if m["kind"] != "answer"))
+
+    def test_the_sprint_its_cards_and_its_messages_carry_their_actor(self):
+        from .test_console_sprints import guest_rows
+        u, v = "d" * 16, "e" * 16
+        rows = [*guest_rows(A, self.GUEST), *guest_rows(B)]
+        when = at_row(9)
+
+        def row(seq, kind, sid, **payload):
+            return Event(seq, when, kind, "owner/p00",
+                         {"sprint_id": sid, "goal": "one", **payload})
+
+        ask = {"question": "Which store?", "blocks": "b", "options": ["sqlite", "files"],
+               "recommended": "files"}
+        rows += [
+            row(20, event_log.GOAL_STATED, u, by=self.GUEST),
+            row(21, event_log.BRIEF_SENT, u, version=1, brief=PARTS_ROW),
+            row(22, event_log.GOAL_STATED, v, by=self.GUEST),
+            row(23, event_log.BRIEF_SENT, v, version=1, brief=PARTS_ROW),
+            row(24, event_log.BRIEF_APPROVED, v, version=1),
+            row(25, event_log.QUESTIONS_ASKED, v, blocker=False, questions=[ask]),
+        ]
+        shown = derive_view([state("owner/p00", 1)], sprints=sprint_states(rows),
+                            now_ms=T0_MS)
+        by_id = {s["sprint_id"]: s for s in shown["entries"][0]["sprints"]}
+        mine, owners = by_id[A], by_id[B]
+        self.assertEqual(mine["started_by"], self.GUEST)
+        self.assertEqual([m["by"] for m in mine["messages"]], [self.GUEST] * len(mine["messages"]))
+        self.assertTrue(mine["messages"])
+        self.assertEqual(mine["approval"]["by"], self.GUEST)
+        self.assertIsNone(owners["started_by"])
+        self.assertTrue(owners["messages"])
+        self.assertEqual([m["by"] for m in owners["messages"]], [None] * len(owners["messages"]))
+        items = {i["key"]: i for i in shown["inbox"]["open"]}
+        self.assertEqual(items[f"brief/{u}"]["started_by"], self.GUEST)
+        question = next(i for k, i in items.items() if k.startswith(f"question/{v}/"))
+        self.assertEqual(question["started_by"], self.GUEST)
+
+
 class SprintViewTest(unittest.TestCase):
     def test_a_sprint_shows_its_goal_state_and_age(self):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
@@ -2652,7 +2747,7 @@ class SprintViewTest(unittest.TestCase):
             "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief",
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
-            "stated_at": T0, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
+            "stated_at": T0, "started_by": None, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
@@ -2866,14 +2961,6 @@ class NoticeViewTest(unittest.TestCase):
         self.assertEqual({e["project_id"]: e["notice_post"] for e in view_["entries"]},
                          {"p00": True, "p01": False, "p02": False})
 
-    def test_the_notice_wire_is_written(self):
-        doc = view.__doc__
-
-        self.assertIn('"notices": [<notice entry>, ...]', doc)
-        self.assertIn("<notice entry> = ", doc)
-        self.assertIn("NOTICE_OTHER_TEXT", doc)
-        self.assertIn("#1119", doc)
-
 
 class SprintMessageViewTest(unittest.TestCase):
     TEXT = "leave the importer's schema alone"
@@ -2885,7 +2972,7 @@ class SprintMessageViewTest(unittest.TestCase):
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
             "action_text": None, "read_at": None, "reply": None, "reply_at": None,
-            "words": None, "new": False}])
+            "words": None, "new": False, "by": None, "question": None}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")

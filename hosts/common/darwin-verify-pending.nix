@@ -1,5 +1,10 @@
 # Issue 632: the verify-pending job on every darwin host.
 #
+# On a login host the job is a launchd user agent in gui/<uid>; on a boot host
+# (`ownerServices.atBoot`, issue 1290) it is a system daemon that runs as the owner, so it
+# runs with nobody logged in at the console. The kick then starts it in the system domain
+# (`sudo -n launchctl kickstart system/<label>`, the owner has passwordless sudo there).
+#
 # The job runs the home module's pass command (home/common/verify-pending) every
 # 15 minutes and at load. It is declared with `command`, never
 # `serviceConfig.ProgramArguments`, so launchd waits for the Nix volume before
@@ -17,10 +22,13 @@
   ...
 }:
 let
-  vp = config.home-manager.users.${username}.verifyPending;
+  atBoot = config.ownerServices.atBoot;
+  user = config.home-manager.users.${username};
+  vp = user.verifyPending;
+  asuser = lib.optionalString (!atBoot) ''launchctl asuser "$(id -u ${username})" '';
 in
 {
-  launchd.user.agents.verify-pending = {
+  launchd.user.agents.verify-pending = lib.mkIf (!atBoot) {
     command = vp.command;
     serviceConfig = {
       Label = vp.label;
@@ -28,6 +36,20 @@ in
       RunAtLoad = true;
     };
   };
+
+  launchd.daemons.verify-pending = lib.mkIf atBoot {
+    command = vp.command;
+    serviceConfig = {
+      Label = vp.label;
+      StartInterval = 900;
+      RunAtLoad = true;
+      UserName = username;
+      EnvironmentVariables.HOME = user.home.homeDirectory;
+    };
+  };
+
+  # The kick (home/common/verify-pending) starts and probes the job in the system domain.
+  home-manager.users.${username}.verifyPending.launchdDomain = lib.mkIf atBoot "system";
 
   # Issue 705: skip nix-darwin's user-agent reload when the gui domain is absent (nobody
   # logged in at the console), with one log line, instead of aborting the switch. The
@@ -39,10 +61,11 @@ in
   ];
 
   # Last postActivation entry (home-manager's activation runs earlier in the same
-  # script). The `launchctl asuser ... sudo -u ... --set-home` form reaches the
-  # user's GUI domain as home-manager does; `|| true` keeps the `set -e` activation
-  # from failing on it, and the kick returns at once.
+  # script). On a login host the `launchctl asuser ... sudo -u ... --set-home` form reaches
+  # the user's GUI domain as home-manager does; a boot host has no GUI domain and its job is
+  # in the system domain, so it runs the kick as the owner directly. `|| true` keeps the
+  # `set -e` activation from failing on it, and the kick returns at once.
   system.activationScripts.postActivation.text = lib.mkAfter ''
-    launchctl asuser "$(id -u ${username})" sudo -u ${username} --set-home ${vp.kick} "$(readlink -f "$systemConfig")" || true
+    ${asuser}sudo -u ${username} --set-home ${vp.kick} "$(readlink -f "$systemConfig")" || true
   '';
 }

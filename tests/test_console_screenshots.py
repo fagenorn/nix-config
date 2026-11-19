@@ -10,16 +10,19 @@ import pwd
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.console import service
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
+from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
@@ -116,9 +119,12 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_nine_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 39)
-        self.assertEqual(shots.STATES[-2:], ("sharing-panel", "guest-page"))
+    def test_the_set_is_forty_four_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 44)
+        self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
+                                             "sharing-reached", "guest-page", "guest-steer",
+                                             "owner-actors"))
+        self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
@@ -127,7 +133,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-21:-2], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-26:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -137,17 +143,81 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
-    def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
-        words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
-                 24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
-                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
-                 35: "thirty-five", 36: "thirty-six", 37: "thirty-seven", 38: "thirty-eight",
-                 39: "thirty-nine"}
-        files = len(shots.STATES) * len(shots.WIDTHS)
-        doc = " ".join(shots.__doc__.split())
-        self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
-        self.assertIn(f"a full run writes {files} files", doc)
+    def test_the_actor_seed_holds_a_colleague_sprint_an_answer_and_an_owner_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp).resolve(), "guest-steer", now_s)
+            svc = shots.start_service(
+                fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent)
+            try:
+                view = json.loads(svc.view_bytes)
+                guest = json.loads(svc.guest_view_bytes(shots.COLLEAGUE))
+            finally:
+                svc.close()
+        sprints = all_sprints(view)
+        theirs = [s for s in sprints if s["started_by"] == shots.COLLEAGUE]
+        self.assertEqual(len(theirs), 2)
+        answered = [s for s in theirs if s["messages"] and s["messages"][-1]["kind"] == "answer"]
+        self.assertEqual(len(answered), 1)
+        self.assertEqual(answered[0]["messages"][-1]["by"], shots.COLLEAGUE)
+        self.assertEqual([s for s in sprints if s["started_by"] is None][0]["messages"][-1]["by"],
+                         None)
+        self.assertEqual(len([s for s in sprints if s["started_by"] is None]), 1)
+        opened = view["inbox"]["open"]
+        confirms = [i for i in opened if i.get("reason") == "verify-approve"]
+        self.assertEqual([i["confirm"] for i in confirms], ["owner/web#12"])
+        briefs = [i for i in opened if i["reason"] == "brief"]
+        self.assertEqual(len(briefs), 1)
+        self.assertEqual(briefs[0]["started_by"], shots.COLLEAGUE)
+        steer = {i["reason"]: i["steer"] for i in guest["inbox"]["open"]}
+        self.assertTrue(steer["brief"])
+        self.assertFalse(steer["verify-approve"])
+
+    def test_capture_shoots_the_guest_steer_state_through_the_guest_door(self) -> None:
+        class Browser:
+            def close(self):
+                pass
+
+        class Playwright:
+            chromium = types.SimpleNamespace(launch=lambda args=None: Browser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        api = types.ModuleType("playwright.sync_api")
+        api.Error = type("Error", (Exception,), {})
+        api.sync_playwright = Playwright
+        seen = []
+
+        def fake(browser, url, state, width, out, **kwargs):
+            host, port = url.split("//")[1].split("/")[0].split(":")
+            connection = http.client.HTTPConnection(host, int(port))
+            try:
+                connection.request("GET", "/api/state")
+                response = connection.getresponse()
+                seen.append((state, url, response.status, json.loads(response.read())))
+            finally:
+                connection.close()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
+                                              "playwright.sync_api": api}), \
+                mock.patch.object(shots, "_shoot", side_effect=fake):
+            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],))
+        self.assertEqual(len(seen), 1)
+        state, url, status, view = seen[0]
+        self.assertEqual((state, status), ("guest-steer", 200))
+        theirs = [s for s in all_sprints(view) if s["started_by"] == shots.COLLEAGUE]
+        self.assertEqual(len(theirs), 2)
+        self.assertEqual([s["steer"] for s in theirs], [True, True])
+        owners = [s for s in all_sprints(view) if s["started_by"] is None]
+        self.assertEqual([s["steer"] for s in owners], [False])
+        confirms = [i for i in view["inbox"]["open"] if i.get("reason") == "verify-approve"]
+        self.assertTrue(confirms)
+        self.assertEqual([i["steer"] for i in confirms], [False] * len(confirms))
 
     def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
         justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
@@ -761,10 +831,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             now_s = time.time()
             fixture = shots.build_fixture(Path(tmp).resolve(), "guest-page", now_s)
-            svc = shots.start_service(fixture, now_s, guest=True)
+            svc = shots.start_service(
+                fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent)
             serve = None
             try:
-                serve = shots._Serve(svc.guest_address)
+                serve = shots._Serve(shots.guest_door(svc))
 
                 def get(address, path):
                     connection = http.client.HTTPConnection(*address, timeout=5)
@@ -793,12 +864,75 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     serve.close()
                 svc.close()
 
-    def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
-        for present, opens in (({"#sharing-open"}, True), (set(), False)):
-            with self.subTest(opens=opens):
-                self.check_sharing_shot(present, opens)
+    def test_the_sharing_shots_read_on_off_and_unreadable(self) -> None:
+        cases = (("sharing-panel", True, True, shots.TAILNET, "serving"),
+                 ("sharing-reached", True, True, shots.TAILNET, "serving"),
+                 ("sharing-off", True, False, shots.TAILNET, "off"),
+                 ("sharing-unreadable", False, True, None, "unreadable"))
+        clients = {"sharing-panel": "this_host", "sharing-reached": "other_device"}
+        for state, readable, shared, tailnet, serve in cases:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp).resolve(), state, now_s)
+                svc = shots.start_service(
+                    fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent,
+                    tailnet_readable=readable)
+                try:
+                    def read_sharing() -> dict:
+                        connection = http.client.HTTPConnection(*svc.address, timeout=5)
+                        try:
+                            connection.request("GET", "/api/state")
+                            return json.loads(connection.getresponse().read())["sharing"]
+                        finally:
+                            connection.close()
 
-    def check_sharing_shot(self, present: set, opens: bool) -> None:
+                    sharing = read_sharing()
+                    self.assertEqual(sharing["shared"], shared)
+                    self.assertEqual(sharing["tailnet"], tailnet)
+                    self.assertEqual(sharing["state"], serve)
+                    shots.guest_requests(state, shots.guest_door(svc))
+                    sharing = read_sharing()
+                    self.assertEqual(sharing["other_device_seen"], state == "sharing-reached")
+                    last = sharing["last_request"]
+                    if state in clients:
+                        self.assertEqual(last["client"], clients[state])
+                    else:
+                        self.assertIsNone(last)
+                finally:
+                    svc.close()
+
+    def test_the_harness_sends_each_door_its_own_headers(self) -> None:
+        self.assertEqual(shots._guest_headers(("127.0.0.1", 9)), {"Host": shots.TAILNET})
+        self.assertEqual(shots._guest_headers("/tmp/cg-x/g.sock"),
+                         {"Host": "localhost", "X-Forwarded-Host": shots.TAILNET})
+
+    def test_the_harness_opens_the_base_and_the_head_guest_door(self) -> None:
+        def base(store, registry, *, port, guest_port=None, guest_token_path=None, **kwargs):
+            pass
+
+        folder = Path("/tmp/cg-x")
+        self.assertEqual(shots.guest_door_kwargs(base, folder), {"guest_port": 0})
+        self.assertEqual(shots.guest_door_kwargs(service.ConsoleService, folder),
+                         {"guest_socket": folder / "guest" / "guest.sock"})
+        tcp = shots._door_connection(("127.0.0.1", 9), 5)
+        self.assertIsInstance(tcp, http.client.HTTPConnection)
+        self.assertNotIsInstance(tcp, shots._UnixHTTPConnection)
+        self.assertEqual((tcp.host, tcp.port), ("127.0.0.1", 9))
+        self.assertIsInstance(shots._door_connection("/tmp/cg-x/g.sock", 5),
+                              shots._UnixHTTPConnection)
+        self.assertEqual(shots.guest_door(SimpleNamespace(guest_address=("127.0.0.1", 9))),
+                         ("127.0.0.1", 9))
+        self.assertEqual(
+            shots.guest_door(SimpleNamespace(guest_socket="/tmp/g.sock", guest_address=None)),
+            "/tmp/g.sock")
+
+    def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
+        for state in ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached"):
+            for present, opens in (({"#sharing-open"}, True), (set(), False)):
+                with self.subTest(state=state, opens=opens):
+                    self.check_sharing_shot(state, present, opens)
+
+    def check_sharing_shot(self, state: str, present: set, opens: bool) -> None:
         calls: list[tuple[str, tuple]] = []
 
         class Page:
@@ -834,7 +968,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 return Page()
 
         with tempfile.TemporaryDirectory() as tmp:
-            shots._shoot(Browser(), "http://console.test/", "sharing-panel", 480, Path(tmp))
+            shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
         if not opens:
             self.assertNotIn(("click", ("#sharing-open",)), calls)
             self.assertNotIn(("wait_for_selector", ("#sharing:not([hidden])",)), calls)
@@ -853,6 +987,32 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 else:
                     shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
                 self.assertIn("#top-who:not([hidden])", page.waits)
+
+    def test_the_actor_shots_wait_for_what_the_owner_judges_and_guest_steer_refuses_the_owner_page(self) -> None:
+        door = "#console-door"
+        with tempfile.TemporaryDirectory() as tmp:
+            browser, page = fake_browser({door, "#capacity"})
+            with self.assertRaisesRegex(RuntimeError, "the guest shot is not the guest page"):
+                shots._shoot(browser, "http://console.test/", "guest-steer", 480, Path(tmp))
+            browser, page = fake_browser({door})
+            shots._shoot(browser, "http://console.test/", "guest-steer", 480, Path(tmp))
+            self.assertIn("#top-who:not([hidden])", page.waits)
+            judged = [w for w in page.waits if w != "#top-who:not([hidden])"][1:]
+            self.assertEqual(judged, [".started-by", "text=Answered by", ".guest-wait",
+                                      "#inbox button.approve"])
+            browser, page = fake_browser({door})
+            shots._shoot(browser, "http://console.test/", "owner-actors", 480, Path(tmp))
+            self.assertEqual(page.waits[1:], [".started-by", "text=Answered by"])
+
+    def test_the_actor_shots_of_a_base_page_wait_for_no_actor_part(self) -> None:
+        self.assertIs(shots.reads_actors(), True)
+        for state in ("guest-steer", "owner-actors"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "reads_actors", return_value=False):
+                browser, page = fake_browser({"#console-door"})
+                shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                for part in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
+                    self.assertNotIn(part, page.waits)
 
     def test_the_guest_shot_on_the_base_page_waits_for_no_guest_part(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

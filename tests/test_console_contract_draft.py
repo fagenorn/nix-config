@@ -12,7 +12,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agent_tools import canonical
@@ -663,6 +666,41 @@ class ContractDraftTest(unittest.TestCase):
         before = (git(root, "status", "--porcelain"), git(root, "rev-parse", "HEAD^{tree}"))
         cd.read(root)
         self.assertEqual((git(root, "status", "--porcelain"), git(root, "rev-parse", "HEAD^{tree}")), before)
+
+    def test_a_set_cancel_ends_a_transport_child_of_the_remote_read(self):
+        root = str(sample(self.parent, remote=True))
+        shims = self.parent / "shims"
+        shims.mkdir()
+        pidfile = self.parent / "transport.pid"
+        shim = shims / "git"
+        shim.write_text(
+            f'#!/bin/sh\ncase " $* " in\n*" ls-remote "*) sleep 60 & echo $! > {pidfile}; wait;;\n'
+            f'*) exec {shutil.which("git")} "$@";;\nesac\n')
+        shim.chmod(0o755)
+        cancel = threading.Event()
+        found = []
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}):
+            reader = threading.Thread(target=lambda: found.append(cd.read(root, cancel)))
+            reader.start()
+            end = time.monotonic() + 10
+            while not pidfile.exists() and time.monotonic() < end:
+                time.sleep(0.02)
+            self.assertTrue(pidfile.exists())
+            time.sleep(0.2)
+            cancel.set()
+            reader.join(10)
+        self.assertFalse(reader.is_alive())
+        self.assertIsNone(found[0]["default_branch"])
+        child = int(pidfile.read_text())
+        end = time.monotonic() + 5
+        alive = True
+        while alive and time.monotonic() < end:
+            try:
+                os.kill(child, 0)
+                time.sleep(0.05)
+            except ProcessLookupError:
+                alive = False
+        self.assertFalse(alive)
 
     def test_the_draft_id_is_the_canonical_digest(self):
         root, fields = self.remote_fields()

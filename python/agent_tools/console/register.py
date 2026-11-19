@@ -39,7 +39,8 @@ or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `s
 `kind` one of `RUN_KINDS`: `cancelled` (the `cancel` event is set), `failed` (any other exit),
 `unreadable` (stdout is not a JSON object), `timed_out` (`subprocess.TimeoutExpired`), `not_installed`
 (`FileNotFoundError`, or `PermissionError` on the executable) and `unavailable` (any other
-`OSError`). `adopter_for(platform)` is `Adopter()` where `manager.supported(platform)`, else None.
+`OSError`). `adopter_for(platform)` is `Adopter()` on Linux and macOS (what `manager.supported` admits), else None
+(ADR-console-081: registration and the adoption it opens run wherever a manager does).
 
 Plain lines. `plan_lines(document)` is the D4 list of ADR-console-028, each line only when its count
 is above zero, in this order: `moves N agent file(s)` (followed by ` under .agents/` when every move
@@ -197,6 +198,7 @@ RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_
            "drafting", "behind")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
 UNAVAILABLE = "registering a project is not available on this host"
+STOPPING = "the console is stopping"
 EMPTY = "type the path of a repository"
 RELATIVE = "type the full path of the repository, starting with / or ~"
 OUTCOME_TEXT = {

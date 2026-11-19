@@ -97,9 +97,9 @@ manager gets (`manager.settings_document` in bypass), and each wake is the conso
 (`nudge.relay_arguments(name, nudge.NUDGE_TEXT, True)`, a sender that bypasses and can only
 message), so the client delivers it instead of holding it. It refuses, exit 75 with one stderr line
 `bypass-proof: <reason>`, before anything starts (no workdir, `teardown` empty, the record is still
-written) when `CLAUDECODE` is set, the host is not Linux, no profile is given or chosen
+written) when `CLAUDECODE` is set, the host is neither Linux nor macOS, no profile is given or chosen
 (`chosen-profile`) or it is `default` (that account's sessions and trust live under `~/.claude`,
-not the accounts directory), or `claude-account` or `systemd-run` is not on `PATH`.
+not the accounts directory), or `claude-account` (and on Linux `systemd-run`) is not on `PATH`.
 
 Setup, in order: the name `wakes-<UTC YYYYmmddHHMMSS>` (project id `bypass-proof/<name>`); a workdir
 holding `repo/` (`git init -b main`, one empty commit), a stub `bin/sprint` that appends a line to
@@ -1162,7 +1162,9 @@ def _wake_refusal(profile):
     if profile == "default":
         raise ProofRefused("the default account keeps its sessions and trust under ~/.claude, not "
                            "under the accounts directory: pass a named profile")
-    for program in ("claude-account", "systemd-run"):
+    programs = ("claude-account", "systemd-run") if sys.platform.startswith("linux") \
+        else ("claude-account",)
+    for program in programs:
         if shutil.which(program) is None:
             raise ProofRefused(f"{program} is not on PATH")
     return profile

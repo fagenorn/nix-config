@@ -560,7 +560,7 @@ class GoalRouteTest(Case):
             "state": "drafting",
             "state_text": "drafting the brief",
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
-            "stated_at": at,
+            "stated_at": at, "started_by": None,
             "age_text": "goal set just now", "manager_text": "managers are not available on this host yet",
             "manager_state": "unavailable", "manager_until": None, "retry": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,

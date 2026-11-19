@@ -161,6 +161,17 @@ def is_workspace(path: str) -> bool:
     return p.name == WORKSPACE_LEAF and _WORKSPACE_PARENT.fullmatch(p.parent.name) is not None
 
 
+def script_text(root: Path, commit: str, path: str) -> str | None:
+    """The text of the file `path` at `commit` in `root`, or None when it cannot be read."""
+    try:
+        if not ensure_commit(root, commit):
+            return None
+        shown = _git(root, "show", f"{commit}:{path}")
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return shown.stdout if shown.returncode == 0 else None
+
+
 @contextlib.contextmanager
 def workspace(root: Path, commit: str) -> Iterator[Path]:
     """A detached worktree of `root` at `commit`, removed on exit however the block ends."""

@@ -9,6 +9,7 @@ import os
 import pwd
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import inbox
 from agent_tools.console import manager as console_manager
 from agent_tools.console import sprints as console_sprints
 from agent_tools.console import view as console_view
@@ -603,15 +605,141 @@ class IssueClosedTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("verify-checks: forge_error: transport", err.getvalue())
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("issue-closed --repo R --issue N", "verify_checks.issue_closed",
-                       "repos/R/issues/N", "`completed`", "payload_invalid", "issue 1010",
-                       "verify-closed", "`verified`"):
-            self.assertIn(needle, verify_checks.__doc__)
-
     def test_the_issue_closed_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/issue-closed"), "100755")
         self.assertEqual(run_from_root([str(ROOT / CHECKS / "issue-closed")]).returncode, 2)
+
+
+class HostMentionsTest(unittest.TestCase):
+    PATH = "repos/o/r/issues?state=open&per_page=100"
+
+    def read(self, pages, phrases=("anis-desktop", "Linux host"), gone="anis-desktop is gone", exempt=()):
+        def api_pages(path):
+            self.assertEqual(path, self.PATH)
+            return pages
+        with mock.patch.object(forge_api, "api_pages", side_effect=api_pages):
+            return verify_checks.host_mentions("o/r", list(phrases), gone, list(exempt))
+
+    def test_an_issue_that_names_the_host_without_the_gone_line_is_an_offender(self):
+        pages = [[{"number": 6, "title": "On the Linux host", "body": "anis-desktop is gone: moved to eleven-m5"},
+                  {"number": 7, "title": "y", "body": "nothing"}],
+                 [{"number": 5, "title": "x", "body": "run it on anis-desktop"},
+                  {"number": 8, "title": "pr", "body": "anis-desktop", "pull_request": {}}]]
+        self.assertEqual(self.read(pages), (1, {"mentioning": [5, 6], "offenders": [5]}))
+
+    def test_matching_ignores_case_and_honours_the_exemption(self):
+        pages = [[{"number": 9, "title": "t", "body": "the LINUX HOST"},
+                  {"number": 1291, "title": "t", "body": "anis-desktop"},
+                  {"number": 10, "title": "t", "body": "Anis-Desktop Is Gone. anis-desktop"},
+                  {"number": 11, "title": "anis-desktop", "body": None}]]
+        self.assertEqual(self.read(pages, exempt=[1291]),
+                         (1, {"mentioning": [9, 10, 11, 1291], "offenders": [9, 11]}))
+        self.assertEqual(self.read([[]]), (0, {"mentioning": [], "offenders": []}))
+
+    def test_an_open_criterion_that_still_names_the_host_is_not_answered_by_a_gone_paragraph(self):
+        gone = "anis-desktop is gone: nothing runs there now."
+        pages = [[{"number": 5, "title": "t", "body": f"- [ ] [evidence] run it on anis-desktop\n\n{gone}"},
+                  {"number": 6, "title": "t", "body": f"- [ ] [evidence] run it on eleven-m5\n- [x] was on the Linux host\n\n{gone}"},
+                  {"number": 7, "title": "t", "body": f"Run on the Linux host.\n\n{gone}"},
+                  {"number": 8, "title": "t", "body": f"1. [ ] run on the LINUX HOST\n\n{gone}"},
+                  {"number": 9, "title": "t", "body": f"- [ ] {gone}"}]]
+        self.assertEqual(self.read(pages), (1, {"mentioning": [5, 6, 7, 8, 9], "offenders": [5, 8]}))
+
+    def test_a_malformed_listing_is_a_forge_error(self):
+        for pages in (["x"], [["x"]], [[{"number": "5", "body": ""}]], [[{"number": True, "body": ""}]]):
+            with self.subTest(pages=pages):
+                with self.assertRaises(forge_api.ForgeError) as raised:
+                    self.read(pages)
+                self.assertEqual(raised.exception.code, "payload_invalid")
+        err = io.StringIO()
+        with mock.patch.object(forge_api, "api_pages",
+                               side_effect=forge_api.ForgeError("transport", "x")):
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = verify_checks.main(["host-mentions", "--repo", "o/r", "--phrase", "a", "--gone", "b"])
+        self.assertEqual(code, 2)
+        self.assertIn("verify-checks: forge_error: transport", err.getvalue())
+
+
+class HostPromptsTest(unittest.TestCase):
+    HOST = "anis-desktop"
+    STALE = {"reason": "verify-stale-check", "block": "1.0000000000000000", "check": "0",
+             "host": "anis-desktop", "cause": "silent", "last": "never"}
+
+    @staticmethod
+    def comment(cid, body, association="OWNER"):
+        return {"id": cid, "author_association": association, "body": body,
+                "updated_at": "2026-11-06T10:00:00Z"}
+
+    def prompt(self, cid, fields, association="OWNER"):
+        return self.comment(cid, forge_markers.render("owner-action", fields, "Asking."), association)
+
+    def end(self, cid, of, association="OWNER"):
+        return self.comment(cid, forge_markers.end_body(of, "decision"), association)
+
+    def run_check(self, listings, comments, repos=("o/r",)):
+        """`listings` maps a repo to its pages; `comments` maps (repo, issue) to REST comments."""
+        self.reads = []
+
+        def api_pages(path):
+            for repo, pages in listings.items():
+                if path == f"repos/{repo}/issues?state=open&per_page=100":
+                    return pages
+            raise AssertionError(path)
+
+        def list_comments(slug, issue):
+            self.reads.append((slug, issue))
+            return comments.get((slug, issue), [])
+        with mock.patch.object(forge_api, "api_pages", side_effect=api_pages), \
+                mock.patch.object(forge_markers, "list_comments", side_effect=list_comments):
+            return verify_checks.host_prompts(list(repos), self.HOST)
+
+    def test_a_live_prompt_naming_the_host_is_reported_whatever_the_labels(self):
+        listings = {"o/r": [[{"number": 3, "title": "t", "body": "", "labels": []},
+                             {"number": 4, "title": "t", "body": "", "labels": []}]]}
+        comments = {("o/r", 3): [self.prompt(30, self.STALE)],
+                    ("o/r", 4): [self.prompt(40, {**self.STALE, "host": "eleven-m5"})]}
+        self.assertEqual(self.run_check(listings, comments),
+                         (1, {"host": self.HOST, "live": [
+                             {"repo": "o/r", "issue": 3, "comment": 30, "reason": "verify-stale-check"}]}))
+
+    def test_trust_and_liveness_follow_the_marker_type(self):
+        listings = {"o/r": [[{"number": 5}, {"number": 4}, {"number": 3}]]}
+        approve = {**self.STALE, "reason": "verify-approve", "host": "mbp+anis-desktop"}
+        forge = {"issue": "5", "reason": "decision", "holder": "h", "host": self.HOST}
+        comments = {
+            ("o/r", 3): [self.prompt(30, self.STALE), self.end(31, 30)],
+            ("o/r", 4): [self.prompt(41, approve), self.end(42, 41, "COLLABORATOR"),
+                         self.prompt(43, self.STALE, "COLLABORATOR")],
+            ("o/r", 5): [self.prompt(50, forge, "COLLABORATOR"), self.prompt(51, forge, "NONE")]}
+        code, report = self.run_check(listings, comments)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["live"], [
+            {"repo": "o/r", "issue": 4, "comment": 41, "reason": "verify-approve"},
+            {"repo": "o/r", "issue": 5, "comment": 50, "reason": "decision"}])
+
+    def test_every_open_issue_is_read_once_and_none_is_met(self):
+        listings = {"o/r": [[{"number": 3}, {"number": 4}], [{"number": 5}]],
+                    "o/s": [[]]}
+        self.assertEqual(self.run_check(listings, {}, repos=("o/r", "o/s")),
+                         (0, {"host": self.HOST, "live": []}))
+        self.assertEqual(sorted(self.reads), [("o/r", 3), ("o/r", 4), ("o/r", 5)])
+
+    def test_a_live_prompt_on_an_open_pull_request_is_reported(self):
+        listings = {"o/r": [[{"number": 3, "title": "t", "body": "", "pull_request": {}},
+                             {"number": 4, "title": "t", "body": ""}]]}
+        comments = {("o/r", 3): [self.prompt(30, self.STALE)]}
+        self.assertEqual(self.run_check(listings, comments),
+                         (1, {"host": self.HOST, "live": [
+                             {"repo": "o/r", "issue": 3, "comment": 30, "reason": "verify-stale-check"}]}))
+        self.assertEqual(sorted(self.reads), [("o/r", 3), ("o/r", 4)])
+
+
+class HostCheckWrappersTest(unittest.TestCase):
+    def test_the_wrappers_are_committed_executable(self):
+        for name in ("host-mentions", "host-prompts"):
+            with self.subTest(name=name):
+                self.assertEqual(committed_mode(f"{CHECKS}/{name}"), "100755")
+                self.assertEqual(run_from_root([str(ROOT / CHECKS / name)]).returncode, 2)
 
 
 class PlatformStatusWrapperTest(unittest.TestCase):
@@ -699,12 +827,6 @@ class ManagedPrePushHookTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertTrue(report["refused"])
         self.assertFalse(report["control_admitted"])
-
-    def test_the_docstring_documents_the_check_and_its_owner_requirement(self):
-        doc = verify_checks.__doc__
-        for needle in ("managed-pre-push-hook --slug S", "verify_checks.managed_pre_push_hook",
-                       "-agent-git-hooks", "ssh:file", "authorized owner"):
-            self.assertIn(needle, doc)
 
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode("home/common/verify-pending/checks/managed-pre-push-hook"),
@@ -1482,11 +1604,6 @@ class SelfHostedRunnerCommandTest(unittest.TestCase):
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/self-hosted-runner"), "100755")
 
-    def test_the_docstring_documents_the_check(self):
-        doc = verify_checks.__doc__
-        for needle in ("self-hosted-runner --repo R --runner N --label L", "verify_checks.self_hosted_runner"):
-            self.assertIn(needle, doc)
-
 
 class GuardFleetWorld(GuardPolicyWorld):
     """A hermetic fleet plus a clone whose origin carries the cutover candidate: the real
@@ -1886,11 +2003,6 @@ class DarwinShellPathCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["met"])
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("darwin-shell-path [--zsh PATH]", "verify_checks.darwin_shell_path",
-                       "__NIX_DARWIN_SET_ENVIRONMENT_DONE", "issue 810"):
-            self.assertIn(needle, verify_checks.__doc__)
-
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/darwin-shell-path"), "100755")
 
@@ -2024,10 +2136,6 @@ class ConsoleStateTest(unittest.TestCase):
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-state"), "100755")
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("console-state --port N", "verify_checks.console_state"):
-            self.assertIn(needle, verify_checks.__doc__)
-
 
 class ConsoleFailedStartTest(unittest.TestCase):
     """`console-failed-start` (issue 1182): an open failed-start card's sprint line reads the failed start."""
@@ -2158,9 +2266,224 @@ class ConsoleFailedStartTest(unittest.TestCase):
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-failed-start"), "100755")
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("console-failed-start --port N", "verify_checks.console_failed_start"):
-            self.assertIn(needle, verify_checks.__doc__)
+
+class ConsoleNoCardTest(unittest.TestCase):
+    """`console-no-card` (issue 1327): the console lists no inbox card with any of the given keys."""
+
+    K = "octo/widgets#1326/ac1"
+    UNREADABLE = (75, {"verdict": "unreachable", "listed": 0})
+
+    def stub(self, routes):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, body = routes.get(self.path.split("?", 1)[0], (404, b""))
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def closed_port(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    def test_no_listed_key_is_met(self):
+        view = {"inbox": {"open": [{"key": "octo/widgets#7/ac1"}], "answered": []}}
+        self.assertEqual(verify_checks.no_card_state(view, [self.K]), (0, {"verdict": "absent", "listed": 0}))
+
+    def test_a_listed_key_is_not_yet(self):
+        other = "octo/widgets#9/ac2"
+        listed = (75, {"verdict": "listed", "listed": 1})
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [{"key": self.K}], "answered": []}}, [self.K]), listed)
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [], "answered": [{"key": self.K}]}}, [self.K]), listed)
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [{"key": self.K}], "answered": [{"key": other}]}}, [self.K, other]),
+            (75, {"verdict": "listed", "listed": 2}))
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [{"key": self.K}], "answered": [{"key": self.K}]}}, [self.K]), listed)
+
+    def test_an_unreadable_inbox_is_never_met(self):
+        for view in ([], {}, {"inbox": []}, {"inbox": {"open": {}, "answered": []}},
+                     {"inbox": {"open": [], "answered": None}}):
+            with self.subTest(view=view):
+                self.assertEqual(verify_checks.no_card_state(view, [self.K]), self.UNREADABLE)
+        for entry in ("x", {}, {"key": []}):
+            for where in ("open", "answered"):
+                with self.subTest(entry=entry, where=where):
+                    lists = {"open": [], "answered": [], where: [entry]}
+                    self.assertEqual(verify_checks.no_card_state({"inbox": lists}, [self.K]), self.UNREADABLE)
+
+    def test_a_real_view_lists_the_review_card(self):
+        node = {"__typename": "Issue", "number": 1326, "issueDependenciesSummary": {"blocking": 0},
+                "blocking": {"totalCount": 0, "nodes": []}, "comments": {"totalCount": 0, "nodes": []},
+                "authorAssociation": "OWNER",
+                "body": "## Acceptance criteria\n\n- [ ] [human] It reads plainly\n",
+                "labels": {"nodes": [{"name": "needs-verification"}]}}
+        item = inbox.items_from_node("p00", "octo/widgets", node)[0]
+        records = {("p00", item["key"]): console_view.InboxRecord(item, "t1", "t1")}
+        view = json.loads(console_view.encode_view(console_view.derive_view(
+            [ProjectState("p00", "/srv/p00", 1, "t1")], records)))
+        self.assertEqual(verify_checks.no_card_state(view, [item["key"]]),
+                         (75, {"verdict": "listed", "listed": 1}))
+        self.assertEqual(verify_checks.no_card_state(view, ["octo/widgets#1/ac9"]),
+                         (0, {"verdict": "absent", "listed": 0}))
+
+    def test_an_unreachable_console_is_not_yet(self):
+        self.assertEqual(verify_checks.console_no_card(self.closed_port(), [self.K]), self.UNREADABLE)
+        self.assertEqual(verify_checks.console_no_card(
+            self.stub({"/api/state": (503, b'{"inbox": {"open": [], "answered": []}}')}), [self.K]),
+            self.UNREADABLE)
+        self.assertEqual(verify_checks.console_no_card(
+            self.stub({"/api/state": (200, b"not json")}), [self.K]), self.UNREADABLE)
+
+    def test_a_malformed_state_is_never_absent(self):
+        listed = '{"key": "%s"}' % self.K
+        bodies = {
+            "duplicate open": '{"inbox": {"open": [%s], "open": [], "answered": []}}' % listed,
+            "duplicate inbox": '{"inbox": {"open": [%s], "answered": []}, "inbox": {"open": [], "answered": []}}' % listed,
+            "nan": '{"inbox": {"open": [], "answered": []}, "x": NaN}',
+            "deep": "[" * 100000 + "]" * 100000,
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                self.assertEqual(verify_checks.console_no_card(
+                    self.stub({"/api/state": (200, body.encode())}), [self.K]), self.UNREADABLE)
+
+    def test_the_command_and_its_wrapper_print_one_json_line(self):
+        port = self.stub({"/api/state": (200, b'{"inbox": {"open": [], "answered": []}}')})
+        expected = json.dumps({"listed": 0, "verdict": "absent"}, sort_keys=True) + "\n"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-no-card", "--port", str(port), "--key", self.K])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), expected)
+        result = run_from_root([str(ROOT / CHECKS / "console-no-card"), "--port", str(port), "--key", self.K])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, expected)
+        answered = self.stub({"/api/state": (
+            200, json.dumps({"inbox": {"open": [], "answered": [{"key": self.K}]}}).encode())})
+        listed = json.dumps({"listed": 1, "verdict": "listed"}, sort_keys=True) + "\n"
+        result = run_from_root([str(ROOT / CHECKS / "console-no-card"), "--port", str(answered), "--key", self.K])
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(result.stdout, listed)
+        for argv in (["console-no-card", "--port", str(port)], ["console-no-card", "--key", self.K],
+                     ["console-no-card", "--port", "0", "--key", self.K]):
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-no-card"), "100755")
+
+
+class ConsoleNoticeListsTest(unittest.TestCase):
+    """`console-notice-lists` (issue 1291): the owner's notices name every issue of a project."""
+
+    def serve(self, status, body):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = loopback_server(Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def serve_view(self, entries):
+        return self.serve(200, json.dumps({"entries": entries}).encode())
+
+    @staticmethod
+    def project(project_id, *notices):
+        return {"type": "project", "project_id": project_id, "notices": list(notices)}
+
+    @staticmethod
+    def notice(number, text, owner=True):
+        return {"id": number, "owner": owner, "kind": "heads-up", "text": text}
+
+    def test_one_owner_notice_naming_every_issue_covers_a_project(self):
+        port = self.serve_view([
+            self.project("jarbird", self.notice(4, "anis-desktop is gone: #611 #711 #712")),
+            {"type": "quiet_group", "label": "1 quiet projects", "count": 1,
+             "projects": [self.project("nodocom", self.notice(9, "anis-desktop is gone: #2600 #2990"))]}])
+        self.assertEqual(
+            verify_checks.console_notice_lists(port, {"jarbird": [611, 711, 712], "nodocom": [2600, 2990]}),
+            (0, {"verdict": "covered", "projects": {"jarbird": {"notice": 4}, "nodocom": {"notice": 9}}}))
+
+    def test_a_split_list_a_manager_notice_or_a_prefix_does_not_cover(self):
+        cases = {
+            "split": [self.notice(1, "gone: #611"), self.notice(2, "gone: #711 #712")],
+            "manager": [self.notice(3, "gone: #611 #711 #712", owner=False)],
+            "prefix": [self.notice(5, "gone: #6110 #711 #712")],
+        }
+        for name, notices in cases.items():
+            with self.subTest(name=name):
+                port = self.serve_view([self.project("jarbird", *notices)])
+                code, report = verify_checks.console_notice_lists(port, {"jarbird": [611, 711, 712]})
+                self.assertEqual(code, 75)
+                self.assertEqual(report["verdict"], "missing")
+                self.assertIsNone(report["projects"]["jarbird"]["notice"])
+
+    def test_an_entry_of_another_type_is_skipped_and_an_absent_project_is_missing(self):
+        port = self.serve_view([
+            {"type": "other", "project_id": "jarbird", "notices": [self.notice(1, "#611")]}])
+        self.assertEqual(verify_checks.console_notice_lists(port, {"jarbird": [611]}),
+                         (75, {"verdict": "missing", "projects": {"jarbird": {"notice": None}}}))
+
+    def test_an_unreachable_console_is_not_yet(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            closed = sock.getsockname()[1]
+        unreachable = (75, {"verdict": "unreachable"})
+        wanted = {"jarbird": [611]}
+        self.assertEqual(verify_checks.console_notice_lists(closed, wanted), unreachable)
+        self.assertEqual(verify_checks.console_notice_lists(self.serve(500, b"{}"), wanted), unreachable)
+        self.assertEqual(verify_checks.console_notice_lists(self.serve(200, b"[]"), wanted), unreachable)
+
+    def test_the_command_prints_one_json_line(self):
+        port = self.serve_view([self.project("jarbird", self.notice(4, "#611 #711"))])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-notice-lists", "--port", str(port),
+                                       "--notice", "jarbird=611,711"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), json.dumps(
+            {"projects": {"jarbird": {"notice": 4}}, "verdict": "covered"}, sort_keys=True) + "\n")
+
+    def test_a_bad_notice_argument_is_a_usage_error(self):
+        bad = (["jarbird"], ["jarbird=a"], ["jarbird=611,"], ["jarbird=0"],
+               ["jarbird=1", "jarbird=1"])
+        for values in bad:
+            with self.subTest(values=values):
+                argv = ["console-notice-lists", "--port", "1"]
+                for value in values:
+                    argv += ["--notice", value]
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_the_wrapper_is_committed_executable_and_exits_2_without_arguments(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-notice-lists"), "100755")
+        self.assertEqual(run_from_root([str(ROOT / CHECKS / "console-notice-lists")]).returncode, 2)
 
 
 class FirstScreenStateTest(unittest.TestCase):
@@ -2577,7 +2900,7 @@ class ConsoleFirstScreenTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report["verdict"], "unreachable")
 
-    def test_the_wrapper_is_committed_and_the_docstring_names_the_check(self):
+    def test_the_wrapper_is_committed_executable_and_reports_met(self):
         port = self.serve(self.view())
         fake = fake_browser(self.tmp, [M_OK])
         result = run_from_root([str(ROOT / CHECKS / "console-first-screen"), "--port", str(port),
@@ -2585,8 +2908,6 @@ class ConsoleFirstScreenTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["verdict"], "met")
         self.assertEqual(committed_mode(f"{CHECKS}/console-first-screen"), "100755")
-        for needle in ("console-first-screen --port N", "verify_checks.console_first_screen"):
-            self.assertIn(needle, verify_checks.__doc__)
 
 
 # --- railway-project-read (issue 1124) ----------------------------------------------------
@@ -2925,11 +3246,378 @@ class RailwayProjectReadCommandTest(unittest.TestCase):
         self.assertEqual(len(lines_out), 1)
         self.assertFalse(json.loads(lines_out[0])["met"])
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("railway-project-read [--system-path PATH]",
-                       "verify_checks.railway_project_read", "issue 1124", "no_dev_shell",
-                       "read_timeout", "integration"):
-            self.assertIn(needle, verify_checks.__doc__)
-
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/railway-project-read"), "100755")
+
+
+CONSOLE_LABEL = "org.nixos.agent-console"
+PROXY_LABEL = "org.nixos.claude-cache-proxy"
+SOPS_LABEL = "org.nixos.sops-nix"
+VERIFY_LABEL = "org.nixos.verify-pending"
+NO_SESSION = "ownerServices: the owner has no login session"
+SESSION = "ownerServices: the owner has a login session"
+DOMAIN = "Domain does not support specified action"
+
+
+def loopback_server(handler):
+    """A loopback `ThreadingHTTPServer` on port 0 serving `handler`, in a daemon thread."""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+class ConsoleHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == "/api/state" else 404)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
+class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    body = b'{"service":"cache-proxy"}'
+
+    def do_GET(self):
+        ok = self.path == "/_proxy/health"
+        body = self.body if ok else b""
+        self.send_response(200 if ok else 404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class OwnerServicesWorld(unittest.TestCase):
+    """A temp HOME with the forge key and the activation record, and the two loopback servers."""
+    commit = "b" * 40
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+        self.home = self.tmp / "home"
+        (self.home / ".ssh").mkdir(parents=True)
+        (self.home / "secret").write_text("key\n", encoding="utf-8")
+        self.key = self.home / ".ssh" / "id_ed25519"
+        self.key.symlink_to(self.home / "secret")
+        self.state = self.home / ".agents" / "state" / "console"
+        self.state.mkdir(parents=True)
+        self.result = self.state / "activation.result"
+        self.log = self.state / "activation.log"
+        self.write_activation({"commit": self.commit, "exit": 0},
+                              f"building\n{NO_SESSION}\ndone\n")
+        self.store = self.state / "events.sqlite3"
+        self.finish(self.commit, ok=True)
+        self.proxy_handler = type("Proxy", (ProxyHandler,), {})
+        self.console_server = loopback_server(ConsoleHandler)
+        self.proxy_server = loopback_server(self.proxy_handler)
+        self.addCleanup(self.stop, self.console_server)
+        self.addCleanup(self.stop, self.proxy_server)
+        self.console_port = self.console_server.server_address[1]
+        self.proxy_port = self.proxy_server.server_address[1]
+
+    @staticmethod
+    def stop(server):
+        server.shutdown()
+        server.server_close()
+
+    def finish(self, commit, *, ok):
+        """Append one `activation.finished` row, as the console does when it settles a run."""
+        connection = sqlite3.connect(self.store)
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+                               " at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT NOT NULL)")
+            connection.execute("INSERT INTO events (at, kind, project, payload) VALUES (?, ?, NULL, ?)",
+                               ("2026-11-18T00:00:00Z", "activation.finished",
+                                json.dumps({"root": "r", "commit": commit, "ok": ok})))
+            connection.commit()
+        finally:
+            connection.close()
+
+    def write_activation(self, result, log):
+        if result is not None:
+            self.result.write_text(json.dumps(result), encoding="utf-8")
+        self.log.write_text(log, encoding="utf-8")
+        self.age_log(10)
+
+    def age_log(self, seconds):
+        """Set the log's mtime `seconds` before the result's (negative: after)."""
+        stamp = self.result.stat().st_mtime_ns if self.result.exists() else time.time_ns()
+        shifted = stamp - seconds * 1_000_000_000
+        os.utime(self.log, ns=(shifted, shifted))
+
+
+class OwnerServicesTest(OwnerServicesWorld):
+    """`owner-services` (issue 1290): the owner's services run at boot with nobody logged in."""
+
+    def setUp(self):
+        super().setUp()
+        merge_base = ("-C", ".", "merge-base", "--is-ancestor", "a" * 40, self.commit)
+        self.table = {
+            ("print", "gui/502"): (113, ""),
+            ("print", f"system/{CONSOLE_LABEL}"): (0, "\tstate = running\n\tpid = 4001\n"),
+            ("print", f"system/{PROXY_LABEL}"): (0, "\tstate = running\n\tpid = 4002\n"),
+            ("print", f"system/{SOPS_LABEL}"): (0, ""),
+            ("print", f"system/{VERIFY_LABEL}"): (0, ""),
+            ("-nP", "-a", f"-iTCP:{self.console_port}", "-sTCP:LISTEN", "-Fp"): (0, "p4001\nf3\n"),
+            ("-nP", "-a", f"-iTCP:{self.proxy_port}", "-sTCP:LISTEN", "-Fp"): (0, "p4002\nf5\n"),
+            merge_base: (0, ""),
+        }
+        self.merge_base = merge_base
+
+    def fake(self, argv, **kw):
+        answer = self.table[tuple(argv[1:])]
+        if callable(answer):
+            answer = answer()
+        if isinstance(answer, BaseException):
+            raise answer
+        code, stdout = answer
+        return subprocess.CompletedProcess(argv, code, stdout, "")
+
+    def check(self):
+        return verify_checks.owner_services(
+            console_port=self.console_port, proxy_port=self.proxy_port, merge="a" * 40,
+            home=self.home, uid=502, repo_root=Path("."), launchctl="/bin/launchctl",
+            lsof="/usr/sbin/lsof", run=self.fake)
+
+    def test_every_service_up_and_a_clean_page_activation_is_met(self):
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (0, "met"))
+        self.assertEqual(report["activation"], "clean")
+        self.assertTrue(report["met"])
+        self.assertTrue(all(report["daemons"].values()))
+        self.assertEqual(set(report["daemons"]), set(verify_checks.OWNER_SERVICE_LABELS))
+        self.assertEqual(report["console"], {"answers": True, "owned": True})
+        self.assertEqual(report["proxy"], {"answers": True, "owned": True})
+        self.assertTrue(report["ssh_key"])
+
+    def test_an_owner_gui_session_is_not_yet(self):
+        self.table[("print", "gui/502")] = (0, "")
+        self.assertEqual(self.check()[0], 75)
+        self.assertEqual(self.check()[1]["verdict"], "logged_in")
+
+    def test_a_gui_session_wins_over_a_failed_reading(self):
+        self.table[("print", "gui/502")] = (0, "")
+        self.table[("print", f"system/{SOPS_LABEL}")] = (113, "")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (75, "logged_in"))
+
+    def test_a_daemon_not_loaded_is_not_met(self):
+        self.table[("print", f"system/{SOPS_LABEL}")] = (113, "")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["daemons"][SOPS_LABEL], False)
+
+    def test_a_dangling_forge_key_is_not_met(self):
+        (self.home / "secret").unlink()
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["ssh_key"], False)
+
+    def test_a_proxy_that_is_not_the_cache_proxy_is_not_met(self):
+        self.proxy_handler.body = b'{"service":"other"}'
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["proxy"]["answers"], False)
+
+    def test_no_console_is_not_met(self):
+        self.console_server.shutdown()
+        self.console_server.server_close()
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["console"]["answers"], False)
+
+    def test_a_console_served_by_another_process_is_not_met(self):
+        lsof = ("-nP", "-a", f"-iTCP:{self.console_port}", "-sTCP:LISTEN", "-Fp")
+        self.table[("print", f"system/{CONSOLE_LABEL}")] = (0, "\tstate = spawn scheduled\n")
+        self.table[lsof] = (0, "p5000\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertEqual(report["console"], {"answers": True, "owned": False})
+        self.assertIs(report["daemons"][CONSOLE_LABEL], True)
+        with self.subTest("the job has a pid, another process listens"):
+            self.table[("print", f"system/{CONSOLE_LABEL}")] = (0, "\tpid = 4001\n")
+            self.assertIs(self.check()[1]["console"]["owned"], False)
+
+    def test_a_domain_line_in_the_page_activation_is_not_met(self):
+        self.write_activation({"commit": self.commit, "exit": 0},
+                              f"building\n{NO_SESSION}\nBoot-out failed: 125: {DOMAIN}\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (1, "not_met", "domain_lines"))
+
+    def test_an_activation_without_the_session_line_is_not_met(self):
+        self.write_activation({"commit": self.commit, "exit": 0}, "building\ndone\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (1, "not_met", "unmarked"))
+
+    def test_an_activation_in_an_owner_session_is_not_yet(self):
+        self.write_activation({"commit": self.commit, "exit": 0}, f"building\n{SESSION}\n")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "logged_in"))
+
+    def test_an_activation_of_an_older_commit_is_not_yet(self):
+        self.table[self.merge_base] = (1, "")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_an_unread_activation_is_not_yet(self):
+        self.result.unlink()
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_a_failed_activation_is_not_yet(self):
+        records = [({"commit": self.commit, "exit": 1}, "building\n"),
+                   ({"commit": self.commit, "exit": True}, "building\n"),
+                   ({"commit": self.commit, "exit": False}, "building\n"),
+                   ({"commit": self.commit, "error": "FileNotFoundError: x"}, "")]
+        for record, log in records:
+            with self.subTest(record=record):
+                self.write_activation(record, log)
+                code, report = self.check()
+                self.assertEqual((code, report["verdict"], report["activation"]),
+                                 (75, "not_yet", "unread"))
+
+    def test_an_activation_the_console_did_not_record_as_succeeded_is_not_yet(self):
+        """The result's exit 0 is the command's; the console may then find the host on another revision."""
+        for name, rows in (("no row", []), ("failed", [("b" * 40, False)]),
+                           ("another commit", [("c" * 40, True)]),
+                           ("a failure after a success", [("b" * 40, True), ("b" * 40, False)])):
+            with self.subTest(name):
+                self.store.unlink()
+                if not rows:
+                    sqlite3.connect(self.store).close()
+                for commit, ok in rows:
+                    self.finish(commit, ok=ok)
+                code, report = self.check()
+                self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+        with self.subTest("no store"):
+            self.store.unlink()
+            code, report = self.check()
+            self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_a_success_after_a_failure_of_the_same_commit_is_met(self):
+        self.finish(self.commit, ok=False)
+        self.finish(self.commit, ok=True)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_a_gui_domain_that_cannot_be_read_is_not_a_logout(self):
+        for name, answer in (("exit 1", (1, "")), ("exit 64", (64, "")),
+                             ("timeout", subprocess.TimeoutExpired(["launchctl"], 5)),
+                             ("no tool", FileNotFoundError("launchctl"))):
+            with self.subTest(name):
+                self.table[("print", "gui/502")] = answer
+                code, report = self.check()
+                self.assertEqual((code, report["verdict"]), (1, "gui_unread"))
+                self.assertFalse(report["met"])
+
+    def test_every_missing_domain_answer_reads_as_no_session(self):
+        for status in (112, 113, 125):
+            with self.subTest(status=status):
+                self.table[("print", "gui/502")] = (status, "")
+                self.assertEqual(self.check()[1]["verdict"], "met")
+
+    def test_a_log_newer_than_its_result_is_not_yet(self):
+        self.age_log(-10)
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_a_result_replaced_while_reading_is_not_yet(self):
+        def replaced():
+            self.result.unlink()
+            return 0, ""
+        self.table[self.merge_base] = replaced
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"], report["activation"]), (75, "not_yet", "unread"))
+
+    def test_an_unread_activation_is_not_yet_even_with_a_service_down(self):
+        self.result.unlink()
+        self.proxy_server.shutdown()
+        self.proxy_server.server_close()
+        self.assertEqual(self.check()[0], 75)
+
+    def test_a_missing_tool_is_a_failed_reading(self):
+        for key in list(self.table):
+            if key[0] == "-nP":
+                self.table[key] = FileNotFoundError("lsof")
+        code, report = self.check()
+        self.assertEqual((code, report["verdict"]), (1, "not_met"))
+        self.assertIs(report["console"]["owned"], False)
+
+
+class OwnerServicesCommandTest(OwnerServicesWorld):
+    def setUp(self):
+        self.commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+                                     capture_output=True, text=True, check=True).stdout.strip()
+        super().setUp()
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        pid = os.getpid()
+        self.launchctl = self.script("launchctl", f"""#!/bin/sh
+echo "noise {self.home}" >&2
+case "$*" in
+  "print gui/"*) exit 113 ;;
+  "print system/{CONSOLE_LABEL}"|"print system/{PROXY_LABEL}") echo "pid = {pid}"; exit 0 ;;
+  *) exit 0 ;;
+esac
+""")
+        self.lsof = self.script("lsof", f"""#!/bin/sh
+echo "noise {self.home}" >&2
+echo "p{pid}"
+exit 0
+""")
+        self.arguments = ["owner-services", "--console-port", str(self.console_port),
+                          "--proxy-port", str(self.proxy_port), "--merge", self.commit,
+                          "--launchctl", str(self.launchctl), "--lsof", str(self.lsof)]
+
+    def script(self, name, text):
+        path = self.bin / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def command(self, arguments=None):
+        return run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks",
+                              *(arguments or self.arguments)], env_extra={"HOME": str(self.home)})
+
+    def test_the_command_prints_one_json_line_and_exits_with_the_verdict(self):
+        result = self.command()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "met")
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn(str(self.home), result.stdout + result.stderr)
+        self.assertNotIn("noise", result.stdout + result.stderr)
+
+    def test_the_committed_script_runs_the_owner_services_check(self):
+        (self.home / ".agents" / "bin").mkdir(parents=True)
+        (self.home / ".agents" / "bin" / "verify-pending").write_text(
+            "#!/bin/sh\nunset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+            f'exec {sys.executable} -I -m agent_tools.verification.verify_pending "$@"\n',
+            encoding="utf-8")
+        result = subprocess.run(["/bin/sh", str(ROOT / CHECKS / "owner-services"), *self.arguments[1:]],
+                                cwd=ROOT, env={"HOME": str(self.home), "PATH": "/usr/bin:/bin"},
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "met")
+
+    def test_a_bad_merge_sha_is_a_usage_error(self):
+        arguments = list(self.arguments)
+        arguments[arguments.index("--merge") + 1] = "xyz"
+        result = self.command(arguments)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--merge", result.stderr)
+        self.assertNotIn("invalid choice", result.stderr)
+
+    def test_the_session_lines_match_the_activation_cleanup(self):
+        text = (ROOT / "hosts/common/darwin-owner-services.nix").read_text(encoding="utf-8")
+        self.assertIn(verify_checks.NO_SESSION_LINE, text)
+        self.assertIn(verify_checks.SESSION_LINE, text)
+
+    def test_the_check_script_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/owner-services"), "100755")

@@ -14,7 +14,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from . import test_verify_pending_units as units
+from . import host_readings, test_verify_pending_units as units
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAGMENT = ROOT / "data/zshrc/darwin/01-nix-path-order"
@@ -113,9 +113,7 @@ class FragmentReorders(unittest.TestCase):
 class DarwinHostsLoadTheFragment(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.init = {host: units.evaluate(
-            f"darwinConfigurations.{host}", "c: u: { init = u.programs.zsh.initContent; }",
-            pure=True)["init"] for host in units.DarwinHosts.HOSTS}
+        cls.init = {host: host_readings.read(host, "zsh-init")["init"] for host in units.DarwinHosts.HOSTS}
 
     def test_each_darwin_host_zshrc_contains_the_fragment(self):
         text = FRAGMENT.read_text()

@@ -32,12 +32,17 @@ drops the owner (P3). `write_choice(path, profile)` writes `<name>\n` atomically
 `CHOICE_FILE` names (`chosen-profile`) and removes the file for None; `read_choice(path)` reads it
 back, None for a missing, empty or unreadable file.
 
-Command (Linux only; `launch_command` is None elsewhere and `launcher_for` gives None). The
-manager runs in its own transient systemd scope and in the background, so it outlives the console
-unit and a restart of it does not end it:
+Command (Linux and macOS; `launch_command` is None on any other host and `launcher_for` gives None).
+On Linux the manager runs in its own transient systemd scope and in the background, so it outlives
+the console unit and a restart of it does not end it:
 
     systemd-run --user --scope --quiet --collect --description=agent manager <name> --
         claude-account run --bg --name <name> --settings <file> "<prompt>"
+
+On macOS the command is the client argv alone, `claude-account run --bg --name <name> --settings
+<file> "<prompt>"`: `run_launch` starts it with `start_new_session`, so it is in its own session
+and outside the console job's process group, and the console's launchd job sets
+`AbandonProcessGroup`, so the job's group cleanup does not touch it (ADR-console-075).
 
 The name is `<project> sprint <sprint id>`. The prompt is one argv element, `PROMPT_LEAD` (`You
 are the manager of one sprint, started by the console. Run "sprint contract" first and follow
@@ -69,24 +74,29 @@ so `auto`. `settings_document(env, permission)` is that content and `write_setti
 permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
 stopped or removed session (`service._refresh_settings`).
 
-Runner. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
+Runner. On macOS `run_launch` runs it with `run_in_own_group`, so a launch that times out ends the
+wrapper and the client it waits for together, not the wrapper alone. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
 device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
 open cannot hold the launch), in its own session, in the project root, within `LAUNCH_TIMEOUT`
 seconds. The client's environment (`client_environment(profile, environ)`, shared with the nudge
 commands) is the console's without `CLAUDE_CONFIG_DIR`, `CONSOLE_SPRINT_ID`
 and `CONSOLE_SPRINT_SECRET`, plus `CLAUDE_ACCOUNT=<profile>` and `$HOME/.agents/bin` first on
 `PATH` (where `sprint` and `resolve-project` are installed). `LAUNCH_TOOLS` names every program the
-launch runs by name on `PATH`.
+Linux launch runs by name on `PATH`; `launch_tools(platform)` is that tuple on Linux, without
+`systemd-run` on macOS and empty elsewhere.
 
 Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret>`: the host is
-not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
+neither Linux nor macOS (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
 The view never shows a reason as given: `plain_reason` maps it to one of `PLAIN_TEXTS` (a table of
 substrings, in order, first hit wins), while the `manager.failed` row and the `console:
 manager_failed` stderr line keep it as given.
 
-Stopping. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
+Stopping. A stop command runs with `run_stop` (`run_in_own_group` in its own session, registered), and
+`reap_stops()`, which the console calls as it closes, kills every one still in flight, so a hung stop
+does not outlive a console restart whose launchd job leaves process groups alone (ADR-console-075);
+managers are not touched. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
 session (ADR-console-018), so a check that states a real goal still stops its test manager first and
 the withdrawal's own stop finds nothing listed (ADR-console-016).
 `stop_session(session_id, profile)` runs `claude-account run stop <short id>` under the session's own
@@ -98,7 +108,7 @@ within <n> s`, the last non-empty stderr line, or `the stop exited <n>`. `stop_l
 registry, stop)` reads `registry()` fresh and calls `stop(session_id, profile)` for each listed
 session whose name is in `names` (profile `default` when the record has none), attempts every one
 even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
-`stopper_for(platform)` is `stop_session` where `supported(platform)`, else None: the owner's stop
+`stopper_for(platform)` is `stop_session` where `supported(platform)` (Linux and macOS), else None: the owner's stop
 of a sprint (#892) uses it through the console service.
 `remove_session(session_id, profile)` runs `claude-account run rm <short id>` under the session's
 own profile within `REMOVE_TIMEOUT` seconds, and its failures are `RemoveFailed` (a `StopFailed`)
@@ -167,7 +177,7 @@ LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
-           "`sprint ask`.")
+           "`sprint ask`, marking the question `owner_only`.")
 
 UNAVAILABLE_TEXT = "managers are not available on this host yet"
 FAILED_TEXT = "could not start a manager"
@@ -398,16 +408,26 @@ def quota_wait(capacity: Mapping, profile: str | None) -> Wait | None:
 
 
 def supported(platform: str) -> bool:
-    return platform.startswith("linux")
+    return platform.startswith("linux") or platform == "darwin"
+
+
+def launch_tools(platform: str) -> tuple[str, ...]:
+    if platform.startswith("linux"):
+        return LAUNCH_TOOLS
+    if platform == "darwin":
+        return tuple(tool for tool in LAUNCH_TOOLS if tool != "systemd-run")
+    return ()
 
 
 def launch_command(launch: Launch, platform: str) -> list[str] | None:
     if not supported(platform):
         return None
+    client = ["claude-account", "run", "--bg", "--name", launch.session_name,
+              "--settings", str(launch.settings), launch.prompt]
+    if not platform.startswith("linux"):
+        return client
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
-            f"--description=agent manager {launch.session_name}", "--",
-            "claude-account", "run", "--bg", "--name", launch.session_name,
-            "--settings", str(launch.settings), launch.prompt]
+            f"--description=agent manager {launch.session_name}", "--", *client]
 
 
 def stopper_for(platform: str) -> Callable[[str, str], None] | None:
@@ -504,7 +524,46 @@ def _kill_group(process: subprocess.Popen) -> None:
     process.wait()
 
 
-def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.run,
+_STOPS_LOCK = threading.Lock()
+_STOPS: set[threading.Event] = set()
+
+
+def run_stop(argv: list[str], *, timeout: float, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
+    """`run_in_own_group` for a stop command, registered so `reap_stops` can end it.
+
+    A stop in the console's own process group would survive the console on macOS, where the
+    console's launchd job sets `AbandonProcessGroup` for the sake of its managers, and no timeout
+    would be left to end it; in its own group it is one the console can find and kill.
+    """
+    cancel = threading.Event()
+    with _STOPS_LOCK:
+        _STOPS.add(cancel)
+    try:
+        return run_in_own_group(argv, timeout=timeout, check=check, cancel=cancel,
+                                start_new_session=True, **kwargs)
+    finally:
+        with _STOPS_LOCK:
+            _STOPS.discard(cancel)
+
+
+def reap_stops(wait: float = 2.0) -> None:
+    """End every stop command in flight (its whole group), waiting up to `wait` seconds for each to be reaped.
+
+    The console calls it as it closes; the managers themselves are not touched.
+    """
+    with _STOPS_LOCK:
+        pending = set(_STOPS)
+    for cancel in pending:
+        cancel.set()
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        with _STOPS_LOCK:
+            if not pending & _STOPS:
+                return
+        time.sleep(0.02)
+
+
+def run_launch(launch: Launch, *, platform: str = sys.platform, run=None,
                environ: Mapping[str, str] = os.environ) -> None:
     secret = launch.env[SECRET_ENV]
 
@@ -521,6 +580,10 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
     except LaunchFailed as error:
         raise fail(str(error)) from error
     env = client_environment(launch.profile, environ)
+    if run is None:
+        # On macOS the account wrapper waits for its client; a timeout must end that whole group,
+        # or the client could still start a manager after the failure is recorded.
+        run = run_in_own_group if platform == "darwin" else subprocess.run
     with tempfile.TemporaryFile() as err:
         try:
             result = run(argv, cwd=launch.cwd, env=env, stdin=subprocess.DEVNULL,
@@ -541,7 +604,7 @@ def short_id(session_id: str) -> str:
     return session_id[:SHORT_ID_LENGTH]
 
 
-def stop_session(session_id: str, profile: str, *, run=subprocess.run,
+def stop_session(session_id: str, profile: str, *, run=run_stop,
                  environ: Mapping[str, str] = os.environ) -> None:
     argv = ["claude-account", "run", "stop", short_id(session_id)]
     with tempfile.TemporaryFile() as err:

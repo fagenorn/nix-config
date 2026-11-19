@@ -19,7 +19,8 @@ from agent_tools.console import capacity, probe, service, signin, signin_run
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
-from .test_console_signin_run import CODE, FAKE, LINK, LINUX, until
+from .process_liveness import process_alive
+from .test_console_signin_run import CODE, FAKE, LINK, LOOPBACK_LINK, MANUAL_LINK, NOISE_LINK, until
 from .test_console_stream import next_frame, open_stream
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -81,7 +82,8 @@ class Case(unittest.TestCase):
         if runs:
             def factory(on_end):
                 return signin_run.SignIns(on_end=on_end, environ=self.environ,
-                                          clock=lambda: self.mono[0], link_wait=link_wait)
+                                          clock=lambda: self.mono[0], link_wait=link_wait,
+                                          manual_grace=0.2, host="console-host")
         self.svc = support.service(
             self, self.store, self.registry, profile_dirs=[self.spare, self.work],
             clock=lambda: self.now[0], session_poll_seconds=3600, probe_tick_seconds=3600,
@@ -137,11 +139,7 @@ class Case(unittest.TestCase):
         return [line for line in lines if "argv" in line]
 
     def alive(self, pid):
-        try:
-            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        except OSError:
-            return False
-        return fields[0] != "Z"
+        return process_alive(pid)
 
     def grandchild(self):
         found = []
@@ -223,13 +221,36 @@ class SigninWriteTest(Case):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json")
         self.assertEqual(headers["Cache-Control"], "no-store")
-        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK})
+        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK, "route": "unknown",
+                                            "port": None, "forward": None})
         self.assertEqual(self.view()["signin_runs"]["work"],
                          {"state": "running", "at": None, "attempt": attempt})
         self.assertEqual(self.post(CODE_PATH)[0], 204)
         until(self, lambda: {"code": CODE} in [json.loads(line) for line in
                                                 self.record.read_text().splitlines()])
         self.assertEqual(self.wait_ended()[0][1]["attempt"], attempt)
+
+    def test_the_start_and_the_link_answer_the_manual_route_the_client_offers(self):
+        self.environ.update(FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK)
+        self.begin()
+        started = self.post(SIGNIN)
+        attempt = self.acted_rows()[0][0]
+        later = self.post(LINK_PATH)
+        for status, _, body in (started, later):
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {"attempt": attempt, "link": MANUAL_LINK,
+                                                "route": "manual", "port": None,
+                                                "forward": None})
+
+    def test_a_loopback_only_client_answers_its_port_and_forward_command(self):
+        self.environ["FAKE_LINK"] = LOOPBACK_LINK
+        self.begin()
+        status, _, body = self.post(SIGNIN)
+        attempt = self.acted_rows()[0][0]
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {
+            "attempt": attempt, "link": LOOPBACK_LINK, "route": "loopback", "port": 54321,
+            "forward": "ssh -N -L 54321:localhost:54321 console-host"})
 
     def test_a_code_the_clients_input_refuses_answers_502_and_the_run_stays_running(self):
         self.environ["FAKE_MODE"] = "deaf"
@@ -281,7 +302,8 @@ class SigninWriteTest(Case):
         status, headers, body = self.post(LINK_PATH)
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json")
-        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK})
+        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK, "route": "unknown",
+                                            "port": None, "forward": None})
         self.assertEqual(self.acted_rows(), acted)
         self.assertEqual(len(self.invocations()), 1)
 
@@ -557,7 +579,6 @@ class SigninRunServiceTest(Case):
         self.assertEqual(self.view()["signin_runs"]["work"],
                          {"state": "running", "at": None, "attempt": acted[0][0]})
 
-    @unittest.skipUnless(LINUX, "reads /proc")
     def test_a_timed_out_or_cancelled_sign_in_is_killed_and_offered_again(self):
         self.environ["FAKE_MODE"] = "hang"
         svc = self.begin()
@@ -579,7 +600,6 @@ class SigninRunServiceTest(Case):
         self.assertEqual((ended[1][1]["outcome"], ended[1][1]["attempt"]), ("cancelled", again))
         self.assertEqual(self.item("signin/work")["run"]["state"], "cancelled")
 
-    @unittest.skipUnless(LINUX, "reads /proc")
     def test_an_unsuccessful_run_whose_status_read_fails_is_offered_again(self):
         for outcome in ("cancelled", "timed_out"):
             with self.subTest(outcome=outcome):
@@ -657,7 +677,9 @@ class SigninSecrecyTest(Case):
             thread.start()
             for count, extra in enumerate((
                     {}, {"FAKE_EXIT": "1"},
-                    {"FAKE_EXIT": "0", "FAKE_LINK": "javascript:SENTINEL-LINK-bad"}), start=1):
+                    {"FAKE_EXIT": "0", "FAKE_LINK": "javascript:SENTINEL-LINK-bad"},
+                    {"FAKE_EXIT": "0", "FAKE_LINK": LOOPBACK_LINK, "FAKE_MANUAL": MANUAL_LINK,
+                     "FAKE_NOISE": NOISE_LINK}), start=1):
                 self.environ.update(extra)
                 self.assertEqual(self.post(SIGNIN)[0], 200)
                 self.assertEqual(self.post(LINK_PATH)[0], 200)
@@ -675,6 +697,8 @@ class SigninSecrecyTest(Case):
                      *(frame.decode() for frame in frames)):
             self.assertNotIn("SENTINEL-LINK", text)
             self.assertNotIn("SENTINEL-CODE", text)
+            self.assertNotIn("redirect_uri", text)
+            self.assertNotIn("SENTINEL-OUT", text)
 
 
 if __name__ == "__main__":
