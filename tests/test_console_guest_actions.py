@@ -651,15 +651,16 @@ class GuestDoorWriteTest(GuestWriteCase):
                         closed.clear()
                         owner = svc.view_bytes
                         guests = {login: svc.guest_view_bytes(login) for login in (COLLEAGUE, SECOND)}
+                        sent = threading.Event()
+                        hold["event"] = sent if ordering == "send first" else None
                         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
                             sock.settimeout(5)
                             sock.connect(svc.guest_socket)
                             if ordering == "send first":
-                                sent = threading.Event()
-                                hold["event"] = sent
                                 sock.sendall(request)
                                 sent.set()
                                 got = read_answer(sock)
+                                self.assertTrue(closed.wait(5))
                                 hold["event"] = None
                             else:
                                 self.assertTrue(closed.wait(5))
