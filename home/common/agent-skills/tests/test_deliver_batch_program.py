@@ -7,6 +7,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import copy
 import itertools
 import json
 from pathlib import Path
@@ -14,6 +15,7 @@ import re
 import shutil
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from program_harness import server_for  # noqa: E402
@@ -192,13 +194,6 @@ class ArgsTest(unittest.TestCase):
                 self.assertEqual((result["stage"], result["missing"]), ("setup", [field]))
                 self.assertEqual(labels(calls), ["setup"])
 
-    def test_setup_reads_the_contract_and_max_parallel(self):
-        _, calls, _ = run()
-        text = prompt(calls, "setup")
-        self.assertIn("resolve-project resolve --repo-root /r", text)
-        self.assertIn("bindings.workflow.orchestration.max_parallel", text)
-        self.assertIn("bindings.vcs.merge.required_checks", text)
-
     def test_declared_required_checks_are_optional_but_checked(self):
         result, _, _ = run(patch={"setup": {"required_checks": None}, "facts-1": {"state": "CLOSED"}})
         self.assertEqual(result["stage"], "done")
@@ -308,12 +303,6 @@ class IntakeTest(unittest.TestCase):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2]),
                           patch={"facts-1": {"blockers": [{"issue": 2, "state": "OPEN"}]}})
         self.assertIn("acquire-1", labels(calls))
-
-    def test_facts_agent_reads_claim_status_and_the_decision_marker(self):
-        _, calls, _ = run()
-        text = prompt(calls, "facts-1")
-        self.assertIn(f"forge-claim status --repo owner/repo --issue 1 --holder {HOLDER}", text)
-        self.assertIn("forge-claim owner-action status --repo owner/repo --issue 1 --reason decision", text)
 
     def test_every_facts_agent_answers_before_any_acquire(self):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]))
@@ -452,16 +441,6 @@ class AlreadyFixedTest(unittest.TestCase):
         self.assertIsNone(result["relaunch"])
         self.assertFalse([c["label"] for c in calls if "gh issue close" in c.get("prompt", "")])
 
-    def test_facts_agent_checks_the_symptom_at_origin_of_the_integration_branch(self):
-        _, calls, _ = run()
-        text = prompt(calls, "facts-1")
-        self.assertIn("createdAt", text)
-        self.assertIn("git -C /r grep -n -F", text)
-        self.assertIn("origin/dev", text)
-        self.assertIn("git -C /r log origin/dev -S", text)
-        self.assertIn("--since=", text)
-        self.assertIn("already_fixed", text)
-
     def test_a_continued_or_own_claimed_issue_is_never_already_fixed(self):
         for args, facts in ((dict(ARGS, conts={"1": {"setup": {}}}), {"already_fixed": FIXED}),
                             (ARGS, {"already_fixed": FIXED, "claim": {"verdict": "held_by", "by": HOLDER}})):
@@ -499,11 +478,6 @@ class ClaimTest(unittest.TestCase):
     def test_children_run_up_to_max_parallel(self):
         _, _, active = run(args=dict(ARGS, issues=[1, 2, 3]))
         self.assertEqual(active, 2)
-
-    def test_acquire_names_the_batch_holder_and_branch(self):
-        _, calls, _ = run()
-        self.assertIn(f"forge-claim acquire --repo owner/repo --issue 1 --holder {HOLDER} --branch issue-1-x",
-                      prompt(calls, "acquire-1"))
 
     def test_claim_lost_to_another_host_skips_the_child(self):
         for verdict in ("held_by", "lost_to"):
@@ -1521,12 +1495,6 @@ class LandTest(unittest.TestCase):
                        "gh issue close 1 --repo owner/repo"):
             self.assertIn(needle, close)
 
-    def test_pr_body_refs_unless_the_integration_branch_is_the_default(self):
-        _, calls, _ = run()
-        self.assertIn("Refs #1", prompt(calls, "land-pr-1"))
-        _, calls, _ = run(patch={"setup": {"integration_branch": "main"}})
-        self.assertIn("Closes #1", prompt(calls, "land-pr-1"))
-
     def test_landings_never_interleave(self):
         _, calls, _ = run(args=dict(ARGS, issues=[1, 2]))
         land = [c["label"] for c in calls if c["label"].startswith(("renew-", "land-", "close-out-")) and not c["label"].startswith(EARLY_OPEN)]
@@ -1609,13 +1577,6 @@ class LandTest(unittest.TestCase):
         self.assertLess(names.index("land-checks-1-2"), names.index("land-fix-1"))
         self.assertEqual(names.count("land-merge-1"), 1)
 
-    def test_the_checks_prompt_calls_a_head_with_no_check_pending_and_reads_classic_protection(self):  # #1008
-        _, calls, _ = run()
-        text = prompt(calls, "land-pr-1")
-        self.assertIn("A head with no check reported at all is pending too, never passed", text)
-        self.assertIn("whenever that reply lists no required status checks, from classic branch protection", text)
-        self.assertIn("passed (every name passing at head; a passed answer naming none is read as pending)", text)
-
     def test_a_landing_poll_waits_for_the_first_check_before_it_answers_pending(self):  # #1008
         wait = ("While no check is reported on head, do not answer yet: read the list again about once a minute, running alone "
                 "timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and "
@@ -1637,12 +1598,6 @@ class LandTest(unittest.TestCase):
                                       **folded({"state": "passed", "head": SHA, "required": ["ci", "lint"],
                                                 "passed": ["ci", "lint"]})))
         self.assertEqual(row(result, 1)["outcome"], "landed")
-
-    def test_close_out_ends_the_landing_owner_actions(self):
-        _, calls, _ = run()
-        close = prompt(calls, "close-out-1")
-        for reason in ("conflict", "needs-label", "decision"):
-            self.assertIn(f"forge-claim owner-action end --repo owner/repo --issue 1 --reason {reason}", close)
 
     def test_a_conflicting_resync_is_resolved_and_reviewed(self):
         result, calls, _ = run(patch=BEHIND, replies={
@@ -2359,17 +2314,6 @@ class TransientTest(unittest.TestCase):
         for label in ("acquire-1", "land-pr-1", "land-merge-1"):
             with self.subTest(label=label):
                 self.assertIn("transient", prompt(calls, label))
-
-    def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
-        timeout = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
-                   "the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then "
-                   "answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.")
-        _, calls, _ = run()
-        for label in ("acquire-1", "land-pr-1", "land-merge-1", "close-out-1"):
-            with self.subTest(label=label):
-                self.assertIn(timeout, prompt(calls, label))
-        _, calls, _ = run(replies={"close-out-1": None})
-        self.assertIn(timeout, prompt(calls, "land-unlock-1"))
 
     RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
 
@@ -3416,10 +3360,6 @@ class ReadoptTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed-held")
         self.assertNotIn("gh issue close", prompt(calls, "close-out-1"))
 
-    def test_readopt_reads_the_accepted_head(self):
-        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
-        self.assertIn("Accepted head:", prompt(calls, "readopt-1"))
-
     def test_a_relaunch_after_a_rejected_fix_review_reruns_the_gates_before_landing(self):
         # Run 1: CI fails, the fix is pushed, its review rejects it: ci-failed, PR head = the fix.
         first, _, _ = run(patch=folded(CI_RED), replies={
@@ -4018,18 +3958,6 @@ class WholeTestFileLandTest(unittest.TestCase):
         self.assertIn("before pushing, run in full every test file", text)
 
 
-class KeptObligationLandTest(unittest.TestCase):
-    """#787: the byte-budget trims left these obligations of the land prompts in place."""
-
-    def test_another_branchs_pr_is_left_untouched(self):
-        _, calls, _ = run()
-        self.assertIn("even when it references this issue; leave it untouched.", prompt(calls, "land-pr-1"))
-
-    def test_a_rerun_must_not_merge_twice(self):
-        _, calls, _ = run()
-        self.assertIn("a re-run must not merge twice.", prompt(calls, "land-merge-1"))
-
-
 class CodexUnavailableDetailTest(unittest.TestCase):
     """#790: a codex-unavailable child stop shows the reviewer's reason in the table."""
 
@@ -4585,10 +4513,6 @@ class AmendTest(unittest.TestCase):
                                      "2": {"stage": "setup", "cont": reviewed(2)}})
         self.assertEqual(result["relaunch"]["amend"], {"2": [AMEND_EDIT]})
         self.assertEqual(set(result["relaunch"]["conts"]), {"1", "2"})
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 X1, X2, X3 = "1" * 40, "2" * 40, "3" * 40
@@ -6806,14 +6730,6 @@ class OwnRedOutsideLockTest(unittest.TestCase):
                 self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-lock"))
                 self.assertEqual(self.landing(out), ["land-pr-1", "land-unlock-1"])
 
-    def test_the_diagnosis_under_the_lock_is_bounded(self):
-        _, calls, _ = run(patch=folded(CI_RED))
-        fix = prompt(calls, "land-fix-1")
-        for needle in ("read only the failed job log, the check details and the branch's diff, and run no build and no test before the release",
-                       "When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file",
-                       "Only when the failure clearly has no cause in the code (no commit is needed), keep the lock"):
-            self.assertIn(needle, fix)
-
     def test_a_red_first_poll_after_a_conflict_resolved_before_the_lock_releases_the_reviewed_head(self):
         """#941 then #1001: the lock was first taken at the reviewed head, so that head, never the ready one, is released and retaken from."""
         red_at_b = {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B}, "checks": dict(CI_RED, head=B)}
@@ -7611,10 +7527,6 @@ class AwaitingLookBatchTest(unittest.TestCase):
         self.assertEqual(len(children_of(calls, 1, "ready")), 1)
         self.assertEqual(row(result, 1)["outcome"], "landed")
 
-    def test_the_facts_step_reads_the_look_marker(self):
-        _, calls, _ = run()
-        self.assertIn("look-approval marked --repo owner/repo --issue 1", prompt(calls, "facts-1"))
-
     def test_an_awaiting_look_row_is_not_relaunched(self):
         d = direct_lane(1, 2)
         children = {"1": [marked_ready(1), awaiting(1)],
@@ -7622,3 +7534,166 @@ class AwaitingLookBatchTest(unittest.TestCase):
         result, _, _ = run(args=dict(ARGS, issues=[1, 2]), replies=d["replies"], patch=d["patch"], children=children)
         self.assertEqual(result["relaunch"]["issues"], [2])
         self.assertNotIn("1", result["relaunch"].get("conts", {}))
+
+
+PROMPT_SCENARIOS = {
+    "happy": lambda: run()[1],
+    "main-integration": lambda: run(patch={"setup": {"integration_branch": "main"}})[1],
+    "close-out-unanswered": lambda: run(replies={"close-out-1": None})[1],
+    "open-pr": lambda: run(patch={"facts-1": {"open_pr": OPEN_PR}})[1],
+    "own-red": lambda: run(patch=folded(CI_RED))[1],
+}
+_SCENARIO_CALLS = {}
+
+
+def scenario_calls(name):
+    """The calls of one scenario, run once per process, a failure included; callers never mutate the list."""
+    if name not in _SCENARIO_CALLS:
+        try:
+            _SCENARIO_CALLS[name] = (PROMPT_SCENARIOS[name](), None)
+        except Exception as failure:
+            _SCENARIO_CALLS[name] = (None, failure)
+    calls, failure = _SCENARIO_CALLS[name]
+    if failure is not None:
+        raise failure
+    return calls
+
+
+def _rows(scenario, label, origin, *phrases):
+    return tuple((scenario, label, phrase, origin) for phrase in phrases)
+
+
+LONG_BASH_TIMEOUT = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
+                     "the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then "
+                     "answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.")
+
+PROMPT_PHRASES = {
+    "clerk": (
+        *_rows("happy", "setup", "ArgsTest.test_setup_reads_the_contract_and_max_parallel",
+               "resolve-project resolve --repo-root /r", "bindings.workflow.orchestration.max_parallel",
+               "bindings.vcs.merge.required_checks"),
+        *_rows("happy", "facts-1", "IntakeTest.test_facts_agent_reads_claim_status_and_the_decision_marker",
+               f"forge-claim status --repo owner/repo --issue 1 --holder {HOLDER}",
+               "forge-claim owner-action status --repo owner/repo --issue 1 --reason decision"),
+        *_rows("happy", "facts-1", "AlreadyFixedTest.test_facts_agent_checks_the_symptom_at_origin_of_the_integration_branch",
+               "createdAt", "git -C /r grep -n -F", "origin/dev", "git -C /r log origin/dev -S", "--since=", "already_fixed"),
+        *_rows("happy", "acquire-1", "ClaimTest.test_acquire_names_the_batch_holder_and_branch",
+               f"forge-claim acquire --repo owner/repo --issue 1 --holder {HOLDER} --branch issue-1-x"),
+        *_rows("happy", "land-pr-1", "LandTest.test_pr_body_refs_unless_the_integration_branch_is_the_default", "Refs #1"),
+        *_rows("main-integration", "land-pr-1", "LandTest.test_pr_body_refs_unless_the_integration_branch_is_the_default",
+               "Closes #1"),
+        *_rows("happy", "land-pr-1",
+               "LandTest.test_the_checks_prompt_calls_a_head_with_no_check_pending_and_reads_classic_protection",
+               "A head with no check reported at all is pending too, never passed",
+               "whenever that reply lists no required status checks, from classic branch protection",
+               "passed (every name passing at head; a passed answer naming none is read as pending)"),
+        *_rows("happy", "close-out-1", "LandTest.test_close_out_ends_the_landing_owner_actions",
+               "forge-claim owner-action end --repo owner/repo --issue 1 --reason conflict",
+               "forge-claim owner-action end --repo owner/repo --issue 1 --reason needs-label",
+               "forge-claim owner-action end --repo owner/repo --issue 1 --reason decision"),
+        *(row for label in ("acquire-1", "land-pr-1", "land-merge-1", "close-out-1")
+          for row in _rows("happy", label, "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout",
+                           LONG_BASH_TIMEOUT)),
+        *_rows("close-out-unanswered", "land-unlock-1",
+               "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout", LONG_BASH_TIMEOUT),
+        *_rows("open-pr", "readopt-1", "ReadoptTest.test_readopt_reads_the_accepted_head", "Accepted head:"),
+        *_rows("happy", "land-pr-1", "KeptObligationLandTest.test_another_branchs_pr_is_left_untouched",
+               "even when it references this issue; leave it untouched."),
+        *_rows("happy", "land-merge-1", "KeptObligationLandTest.test_a_rerun_must_not_merge_twice",
+               "a re-run must not merge twice."),
+        *_rows("happy", "facts-1", "AwaitingLookBatchTest.test_the_facts_step_reads_the_look_marker",
+               "look-approval marked --repo owner/repo --issue 1"),
+    ),
+    "implementer": (
+        *_rows("own-red", "land-fix-1", "OwnRedOutsideLockTest.test_the_diagnosis_under_the_lock_is_bounded",
+               "read only the failed job log, the check details and the branch's diff, and run no build and no test before the release",
+               "When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file",
+               "Only when the failure clearly has no cause in the code (no commit is needed), keep the lock"),
+    ),
+}
+
+
+def row_failure(role, row, calls):
+    """Why the row's call does not carry its phrase as the role's call, or None; only the last agent call of the label counts."""
+    _, label, phrase, _ = row
+    found = [c for c in calls if c["label"] == label and c["kind"] == "agent"]
+    if not found:
+        return f"no agent call labelled {label}"
+    last = found[-1]
+    if last["agentType"] != role:
+        return f"{label} is a {last['agentType']} call, not {role}"
+    if phrase not in last["prompt"]:
+        return f"{label} lacks {phrase}"
+    return None
+
+
+class PromptPhraseTableTest(unittest.TestCase):
+    """#1312: the phrases a batch prompt must carry, one table per agent role, replacing the tests that only searched a prompt.
+
+    A row is a phrase that one labelled call of one scenario must contain; the role is the agentType the program gives the call.
+    """
+
+    def check_role(self, role):
+        for row in PROMPT_PHRASES[role]:
+            scenario, label, phrase, _ = row
+            with self.subTest(scenario=scenario, label=label, phrase=phrase):
+                self.assertIsNone(row_failure(role, row, scenario_calls(scenario)))
+
+    def test_the_clerk_prompts_carry_their_phrases(self):
+        self.check_role("clerk")
+
+    def test_the_implementer_prompts_carry_their_phrases(self):
+        self.check_role("implementer")
+
+    def test_row_failure_names_each_cause(self):
+        calls = [{"kind": "agent", "label": "x", "prompt": "alpha beta", "agentType": "clerk"},
+                 {"kind": "agent", "label": "x", "prompt": "gamma", "agentType": "clerk"},
+                 {"kind": "other", "label": "x", "prompt": "alpha"},
+                 {"kind": "agent", "label": "y", "prompt": "alpha", "agentType": "implementer"}]
+        self.assertIsNone(row_failure("clerk", ("s", "x", "gamma", "o"), calls))
+        self.assertEqual(row_failure("clerk", ("s", "x", "alpha", "o"), calls), "x lacks alpha")
+        self.assertEqual(row_failure("clerk", ("s", "y", "alpha", "o"), calls), "y is a implementer call, not clerk")
+        self.assertEqual(row_failure("clerk", ("s", "z", "alpha", "o"), calls), "no agent call labelled z")
+        self.assertIs(scenario_calls("happy"), scenario_calls("happy"))
+
+    def test_a_failing_scenario_runs_once_and_every_later_row_reports_its_failure(self):
+        runs = []
+
+        def broken():
+            runs.append(1)
+            raise RuntimeError("harness timed out")
+
+        with mock.patch.dict(PROMPT_SCENARIOS, {"broken": broken}), mock.patch.dict(_SCENARIO_CALLS):
+            for _ in range(3):
+                with self.assertRaisesRegex(RuntimeError, "harness timed out"):
+                    scenario_calls("broken")
+        self.assertEqual(len(runs), 1)
+
+    def test_removing_any_phrase_fails_exactly_its_row(self):
+        for role, table in PROMPT_PHRASES.items():
+            for row in table:
+                scenario, label, phrase, _ = row
+                with self.subTest(role=role, scenario=scenario, label=label, phrase=phrase):
+                    same = [r for r in table if r[0] == scenario]
+                    original = scenario_calls(scenario)
+                    baseline = {r for r in same if row_failure(role, r, original) is not None}
+                    mutated = copy.deepcopy(original)
+                    last = [c for c in mutated if c["label"] == label and c["kind"] == "agent"][-1]
+                    last["prompt"] = last["prompt"].replace(phrase, "")
+                    vanished = {r for r in same if r[1] == label and r[2] not in last["prompt"]}
+                    failing = {r for r in same if row_failure(role, r, mutated) is not None}
+                    self.assertEqual(failing, {row} | vanished | baseline)
+
+    def test_the_table_lists_each_row_once_under_a_known_scenario(self):
+        self.assertEqual(set(PROMPT_PHRASES), {"clerk", "implementer"})
+        triples = [(r[0], r[1], r[2]) for table in PROMPT_PHRASES.values() for r in table]
+        for table in PROMPT_PHRASES.values():
+            self.assertEqual(len(set(table)), len(table))
+        self.assertEqual(len(set(triples)), len(triples))
+        used = {r[0] for table in PROMPT_PHRASES.values() for r in table}
+        self.assertTrue(used <= set(PROMPT_SCENARIOS), used - set(PROMPT_SCENARIOS))
+        self.assertEqual(used, set(PROMPT_SCENARIOS))
+
+
+if __name__ == "__main__":
+    unittest.main()
