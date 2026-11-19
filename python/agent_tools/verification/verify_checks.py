@@ -306,7 +306,7 @@ from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
-from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote, siblings
@@ -2017,8 +2017,8 @@ def console_no_card(port: int, keys: Sequence[str], *, timeout: float = 5.0) -> 
     if status != 200:
         return 75, {"verdict": "unreachable", "listed": 0}
     try:
-        view = json.loads(body)
-    except ValueError:
+        view = json.loads(body, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError):
         return 75, {"verdict": "unreachable", "listed": 0}
     return no_card_state(view, keys)
 

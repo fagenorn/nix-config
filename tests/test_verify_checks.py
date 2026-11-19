@@ -2342,9 +2342,23 @@ class ConsoleNoCardTest(unittest.TestCase):
     def test_an_unreachable_console_is_not_yet(self):
         self.assertEqual(verify_checks.console_no_card(self.closed_port(), [self.K]), self.UNREADABLE)
         self.assertEqual(verify_checks.console_no_card(
-            self.stub({"/api/state": (503, b"{}")}), [self.K]), self.UNREADABLE)
+            self.stub({"/api/state": (503, b'{"inbox": {"open": [], "answered": []}}')}), [self.K]),
+            self.UNREADABLE)
         self.assertEqual(verify_checks.console_no_card(
             self.stub({"/api/state": (200, b"not json")}), [self.K]), self.UNREADABLE)
+
+    def test_a_malformed_state_is_never_absent(self):
+        listed = '{"key": "%s"}' % self.K
+        bodies = {
+            "duplicate open": '{"inbox": {"open": [%s], "open": [], "answered": []}}' % listed,
+            "duplicate inbox": '{"inbox": {"open": [%s], "answered": []}, "inbox": {"open": [], "answered": []}}' % listed,
+            "nan": '{"inbox": {"open": [], "answered": []}, "x": NaN}',
+            "deep": "[" * 100000 + "]" * 100000,
+        }
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                self.assertEqual(verify_checks.console_no_card(
+                    self.stub({"/api/state": (200, body.encode())}), [self.K]), self.UNREADABLE)
 
     def test_the_command_and_its_wrapper_print_one_json_line(self):
         port = self.stub({"/api/state": (200, b'{"inbox": {"open": [], "answered": []}}')})
@@ -2357,6 +2371,12 @@ class ConsoleNoCardTest(unittest.TestCase):
         result = run_from_root([str(ROOT / CHECKS / "console-no-card"), "--port", str(port), "--key", self.K])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, expected)
+        answered = self.stub({"/api/state": (
+            200, json.dumps({"inbox": {"open": [], "answered": [{"key": self.K}]}}).encode())})
+        listed = json.dumps({"listed": 1, "verdict": "listed"}, sort_keys=True) + "\n"
+        result = run_from_root([str(ROOT / CHECKS / "console-no-card"), "--port", str(answered), "--key", self.K])
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertEqual(result.stdout, listed)
         for argv in (["console-no-card", "--port", str(port)], ["console-no-card", "--key", self.K],
                      ["console-no-card", "--port", "0", "--key", self.K]):
             with self.subTest(argv=argv):
