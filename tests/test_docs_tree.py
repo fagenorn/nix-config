@@ -764,7 +764,8 @@ class DocsTreeTest(unittest.TestCase):
         adr_path = "docs/areas/console/adr/"
         self.assertEqual(
             head(adr_path + "015-a-stated-goal-starts-a-manager.md", "- **Status:**"),
-            "- **Status:** accepted; amended by ADR-console-017, ADR-console-023, ADR-console-064")
+            "- **Status:** accepted; amended by ADR-console-017, ADR-console-023, ADR-console-064, "
+            "ADR-console-075")
         self.assertTrue(head(adr_path + "015-a-stated-goal-starts-a-manager.md",
                              "- **Decided in:**").endswith(", #1182"))
         self.assertEqual(
@@ -835,6 +836,28 @@ class DocsTreeTest(unittest.TestCase):
                               "and-a-finished-registration-leaves-only-its-project.md").read_text()
         status = next(row for row in adr035.splitlines() if row.startswith("- **Status:**"))
         self.assertIn("ADR-console-070", status)
+
+    def test_the_macos_manager_decision_is_recorded_as_adr_075(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("075-*.md"))
+        self.assertEqual(len(found), 1, found)
+        self.assertTrue(found[0].read_text().splitlines()[0].startswith("# ADR-console-075 \u2014 "))
+        text = found[0].read_text()
+        for needle in ("AbandonProcessGroup", "start_new_session", "#894",
+                       "ADR-console-028", "ADR-console-058"):
+            self.assertIn(needle, text)
+        adr = "docs/areas/console/adr/"
+        for name in ("016-what-the-owner-says-to-a-sprint-reaches-its-manager.md",
+                     "024-the-owner-signs-a-profile-in-from-the-page.md",
+                     "025-the-owner-adds-an-account-from-the-page.md",
+                     "026-the-owner-removes-an-account-from-the-page.md"):
+            line = next(row for row in (REPO_ROOT / adr / name).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            self.assertTrue(line.endswith("ADR-console-075"), (name, line))
+        self.assertNotIn("macOS sends no nudge", self.doc(
+            adr + "016-what-the-owner-says-to-a-sprint-reaches-its-manager.md"))
+        self.assertNotIn("Sign-in from the page is on Linux only", self.doc(
+            adr + "024-the-owner-signs-a-profile-in-from-the-page.md"))
+        self.assertIn("ADR-console-075", self.doc("docs/areas/console/CONTEXT.md"))
 
     def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
         self.assertEqual(
@@ -1075,7 +1098,7 @@ class DocsTreeTest(unittest.TestCase):
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-025")):
+                 "- **Status:** accepted; amended by ADR-console-025, ADR-console-075")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, status)

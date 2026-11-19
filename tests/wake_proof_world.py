@@ -21,7 +21,7 @@ waiting for its client, which registers its session only after `S` seconds, in t
 process group), `STOP_FAILS` and `STOP_HANGS` (a stop whose client child outlives the wrapper's
 wait; the child's pid is logged in `stop_child.pid`).
 
-`LINUX_ONLY` marks a test that needs a launch to succeed: the step refuses other hosts.
+`MANAGER_HOST` marks a test that needs a launch to succeed: the step refuses a host that cannot start managers.
 """
 import json
 import os
@@ -37,9 +37,10 @@ from pathlib import Path
 from agent_tools.console import manager
 
 from .guard_policy_world import MANIFEST, REPO_ROOT
+from .process_liveness import process_alive
 
 PROFILE = "work"
-LINUX_ONLY = unittest.skipUnless(manager.supported(sys.platform), manager.UNAVAILABLE_TEXT)
+MANAGER_HOST = unittest.skipUnless(manager.supported(sys.platform), manager.UNAVAILABLE_TEXT)
 SESSION_ID = "m1aaaaaaaaaaaaaa"
 
 FAKE_SYSTEMD_RUN = """#!{python}
@@ -98,7 +99,10 @@ def save(state):
 
 
 def proc_start(pid):
-    stat = Path("/proc/" + str(pid) + "/stat").read_text(encoding="utf-8")
+    path = Path("/proc/" + str(pid) + "/stat")
+    if not path.exists():
+        return None
+    stat = path.read_text(encoding="utf-8")
     return stat.rsplit(")", 1)[1].split()[19]
 
 
@@ -266,7 +270,7 @@ def _executable(path: Path, text: str) -> None:
 
 
 class WakeProofWorld:
-    def __init__(self, test_case: unittest.TestCase) -> None:
+    def __init__(self, test_case: unittest.TestCase, *, systemd_run: bool = True) -> None:
         tmp = tempfile.TemporaryDirectory()
         test_case.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name).resolve()
@@ -289,7 +293,8 @@ class WakeProofWorld:
             raise AssertionError("git is not on PATH; the wake proof world needs it")
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        _executable(self.bin / "systemd-run", FAKE_SYSTEMD_RUN.format(python=sys.executable))
+        if systemd_run:
+            _executable(self.bin / "systemd-run", FAKE_SYSTEMD_RUN.format(python=sys.executable))
         _executable(self.bin / "git", FAKE_GIT.format(python=sys.executable, real=real_git))
         _executable(self.bin / "claude-account", FAKE_CLIENT.format(
             python=sys.executable, profile=PROFILE, session_id=SESSION_ID,
@@ -359,8 +364,4 @@ class WakeProofWorld:
 
     @staticmethod
     def _running(pid: int) -> bool:
-        try:
-            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        except OSError:
-            return False
-        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+        return process_alive(pid)

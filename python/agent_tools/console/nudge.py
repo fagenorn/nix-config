@@ -33,13 +33,17 @@ console found quiet (#929); it follows the relay's rules in every respect (stdou
 `RELAY_TIMEOUT`, delivered only on `SENT`, else `NudgeFailed(UNCONFIRMED_TEXT)`) and needs no
 session id.
 
-    wake: systemd-run --user --scope --quiet --collect --description=agent manager <name> --
-          claude-account run --resume <session id> --bg [--name <name> --settings <file>]
-          "<NUDGE_TEXT>"
+    wake (Linux): systemd-run --user --scope --quiet --collect --description=agent manager <name> --
+                  claude-account run --resume <session id> --bg [--name <name> --settings <file>]
+                  "<NUDGE_TEXT>"
+    wake (macOS): claude-account run --resume <session id> --bg [--name <name> --settings <file>]
+                  "<NUDGE_TEXT>"
 
-The wake resumes by session id inside a transient user scope, so a supervisor it starts outlives
-the console unit (ADR-console-015). `--resume <id> --bg` wakes a stopped session in place under
-the same id, but starts a copy of a session that is running; the caller must therefore use the
+On Linux the wake resumes by session id inside a transient user scope, so a supervisor it starts
+outlives the console unit (ADR-console-015). On macOS there is no scope: the wake is the same
+`claude-account` command, started in its own session by the runner (`start_new_session`), so a
+supervisor it starts is no part of the console's process group (ADR-console-075). `--resume <id>
+--bg` wakes a stopped session in place under the same id, but starts a copy of a session that is running; the caller must therefore use the
 wake only for a session the session listing does not show (issue #831). A wake with no session id
 raises `NudgeFailed(UNKNOWN_SESSION)` and runs nothing.
 
@@ -62,8 +66,9 @@ Runner. `run_nudge` starts the command with no terminal (`stdin` to the null dev
 a temporary file for the relay and to the null device for the wake; stderr to a temporary file,
 never a pipe), in its own session, in the project root, within `RELAY_TIMEOUT` or `WAKE_TIMEOUT`
 seconds (a command that exceeds them has its whole process group killed, `manager.run_in_own_group`), in the environment `manager.client_environment(profile, environ)`. `NUDGE_TOOLS` names
-every program a nudge runs by name on `PATH`. `nudger_for(platform)` is `run_nudge` on Linux and
-None elsewhere.
+every program a nudge runs by name on `PATH` on Linux; `nudge_tools(platform)` is that tuple on
+Linux, `("claude-account",)` on macOS and empty elsewhere. `nudger_for(platform)` is `run_nudge` on
+Linux and macOS and None elsewhere.
 
 Full listing. `read_full_entries(profile, cwd)` and `read_full_listing(profile, cwd)` run `claude-account run agents --json --all` (the
 command `listing_command()`) in the project root with no terminal, in its own session, stdout and
@@ -72,13 +77,13 @@ stderr to temporary files, in `manager.client_environment(profile, environ)`, wi
 an object, in order; `read_full_listing` returns the `sessionId` of every such entry with a
 non-empty string `sessionId`, whatever its `kind` or `state` (a completed background session is
 listed too); other entries are skipped. `full_lister_for(platform)` is
-`read_full_listing` on Linux and None elsewhere. Its failures are `ListingUnreadable` with a
+`read_full_listing` on Linux and macOS and None elsewhere. Its failures are `ListingUnreadable` with a
 one-line reason: `the project root <cwd> is not a directory` (nothing run),
 `claude-account is not installed`, `the listing did not return within 30 s`, the last non-empty
 stderr line of a listing that failed else `the listing exited <n>`, or `the listing is not a JSON
 array`.
 
-Failures are `NudgeFailed` with a one-line reason: the host is not Linux
+Failures are `NudgeFailed` with a one-line reason: the host is neither Linux nor macOS
 (`manager.UNAVAILABLE_TEXT`), `the manager's session is not known`, `the project root <cwd> is not
 a directory`, `<program> is not installed`, `the nudge did not return within <n> s`, the last
 non-empty stderr line of a nudge that failed, `the nudge exited <n>`, or, for a relay that exited
@@ -114,6 +119,7 @@ RELAY_TIMEOUT = 180
 WAKE_TIMEOUT = 60
 SENT_MARK = "SENT"
 NUDGE_TOOLS = ("claude-account", "systemd-run")
+MACOS_NUDGE_TOOLS = ("claude-account",)
 UNKNOWN_SESSION = "the manager's session is not known"
 UNCONFIRMED_TEXT = "the relay did not confirm the message"
 LISTING_TIMEOUT = 30
@@ -163,9 +169,17 @@ def nudge_command(nudge: Nudge, platform: str) -> list[str] | None:
     text = RESTART_TEXT if nudge.route == REVIVE else NUDGE_TEXT
     flags = (["--name", nudge.session_name, "--settings", nudge.settings]
              if nudge.settings is not None else [])
+    client = ["claude-account", "run", "--resume", nudge.session_id, "--bg", *flags, text]
+    if not platform.startswith("linux"):
+        return client
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
-            f"--description=agent manager {nudge.session_name}", "--",
-            "claude-account", "run", "--resume", nudge.session_id, "--bg", *flags, text]
+            f"--description=agent manager {nudge.session_name}", "--", *client]
+
+
+def nudge_tools(platform: str) -> tuple[str, ...]:
+    if platform.startswith("linux"):
+        return NUDGE_TOOLS
+    return MACOS_NUDGE_TOOLS if manager.supported(platform) else ()
 
 
 def _last_line(text: str) -> str | None:

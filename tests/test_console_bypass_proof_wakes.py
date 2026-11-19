@@ -13,7 +13,7 @@ from agent_tools.console import bypass_proof, manager, nudge
 from agent_tools.verification import verify_exec
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .wake_proof_world import LINUX_ONLY, WakeProofWorld
+from .wake_proof_world import MANAGER_HOST, WakeProofWorld
 
 STEPS = list(bypass_proof.WAKE_TEARDOWN_STEPS)
 
@@ -37,7 +37,7 @@ def stops_and_removals(world):
     return [argv[1:] for argv in world.argv_log() if argv[1:3] in (["run", "stop"], ["run", "rm"])]
 
 
-@LINUX_ONLY
+@MANAGER_HOST
 class BypassProofWakesTest(unittest.TestCase):
     def test_two_wakes_reach_the_bypass_manager_and_each_reads_its_inbox(self):
         world = WakeProofWorld(self)
@@ -296,17 +296,50 @@ class BypassProofWakesTest(unittest.TestCase):
         self.assertEqual(world.scratch_entries(), [])
 
 
+@unittest.skipUnless(sys.platform == "darwin", "the darwin wake")
+class BypassProofWakesMacTest(unittest.TestCase):
+    def test_a_macos_wake_needs_no_systemd_run(self):
+        world = WakeProofWorld(self, systemd_run=False)
+
+        code, report, stderr, _ = world.run()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(report["outcome"], "passed")
+        self.assertEqual(verdicts(report), ["delivered", "delivered"])
+        self.assertFalse((world.bin / "systemd-run").exists())
+        self.assertTrue(all("systemd-run" not in argv[0] for argv in world.argv_log()))
+
+
 class BypassProofWakesPortableTest(unittest.TestCase):
     """What holds on every host: the refusals that come first, the arguments and the verdict rule."""
 
-    def test_a_host_that_is_not_linux_is_refused(self):
-        with mock.patch.object(sys, "platform", "darwin"), \
+    def test_a_host_that_cannot_start_managers_is_refused(self):
+        with mock.patch.object(sys, "platform", "win32"), \
                 mock.patch.dict(os.environ, {}, clear=False) as environ:
             environ.pop("CLAUDECODE", None)
             with self.assertRaises(bypass_proof.ProofRefused) as refused:
                 bypass_proof._wake_refusal("work")
 
         self.assertEqual(str(refused.exception), manager.UNAVAILABLE_TEXT)
+
+    def refusal_on(self, platform):
+        def which(program):
+            return None if program == "systemd-run" else "/bin/" + program
+
+        with mock.patch.object(sys, "platform", platform), \
+                mock.patch.object(bypass_proof.shutil, "which", which), \
+                mock.patch.dict(os.environ, {}, clear=False) as environ:
+            environ.pop("CLAUDECODE", None)
+            return bypass_proof._wake_refusal("work")
+
+    def test_the_wake_proof_needs_no_systemd_run_on_macos(self):
+        self.assertEqual("work", self.refusal_on("darwin"))
+
+    def test_the_wake_proof_still_needs_systemd_run_on_linux(self):
+        with self.assertRaises(bypass_proof.ProofRefused) as refused:
+            self.refusal_on("linux")
+
+        self.assertIn("systemd-run is not on PATH", str(refused.exception))
 
     def test_a_profile_named_default_is_refused(self):
         with mock.patch.object(manager, "supported", return_value=True), \

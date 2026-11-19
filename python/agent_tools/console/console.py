@@ -15,36 +15,36 @@ used (a schema version this build does not read, a database error) is stderr
 `console: event log unusable: <error>` and exit 1; a page token that cannot be read or is malformed is
 stderr `console: page token unusable: <error>` and exit 1. A bad argument is exit 2.
 
-The service is given `manager.launcher_for(sys.platform)`: on Linux a stated goal starts that
+The service is given `manager.launcher_for(sys.platform)`: on Linux and macOS a stated goal starts that
 sprint's manager (`agent_tools.console.manager`), elsewhere there is no launcher and every sprint
 says managers are not available on this host yet.
 
-It is also given `nudge.nudger_for(sys.platform)`: on Linux a message the owner leaves a sprint with a
+It is also given `nudge.nudger_for(sys.platform)`: on Linux and macOS a message the owner leaves a sprint with a
 running manager is relayed to it (or its stopped session is woken in place) by one fixed sentence
 (`agent_tools.console.nudge`); elsewhere there is no nudger and no nudge is made. It is given
 `nudge.full_lister_for(sys.platform)` too (#949): before a wake the service reads the manager
 profile's full session listing, and a wake of a session it no longer shows passes the sprint's
 session name and settings file again; elsewhere every wake is bare.
 
-Last, it is given `manager.stopper_for(sys.platform)` (#892): on Linux the owner's stop of a sprint
+Last, it is given `manager.stopper_for(sys.platform)` (#892): on Linux and macOS the owner's stop of a sprint
 ends its manager's background session (`manager.stop_session`); elsewhere there is no stopper and a
 stop is recorded without a call.
 
-It is also given `probe.prober_for(sys.platform)` (#1009): on Linux every listed profile is read every
+It is also given `probe.prober_for(sys.platform)` (#1009): on Linux and macOS every listed profile is read every
 10 minutes by one small request under it (`agent_tools.console.probe`); elsewhere no probe is made.
 
-It is also given `signin.reader_for(sys.platform)` (#1010): on Linux each probe job first reads the
+It is also given `signin.reader_for(sys.platform)` (#1010): on Linux and macOS each probe job first reads the
 profile's sign-in from the client's status command (`agent_tools.console.signin`); elsewhere none is read.
 
-It is also given `signin_run.runs_for(sys.platform)` (#1026): on Linux the owner starts, passes
+It is also given `signin_run.runs_for(sys.platform)` (#1026): on Linux and macOS the owner starts, passes
 a code to and cancels a profile's own client login from the page (`agent_tools.console.signin_run`);
 elsewhere there are no runs and the sign-in routes refuse.
 
-It is also given `account_add.adder_for(sys.platform)` (#1027), so on Linux the owner adds an account
+It is also given `account_add.adder_for(sys.platform)` (#1027), so on Linux and macOS the owner adds an account
 from the page through `claude-account add` (`agent_tools.console.account_add`).
 
 It is also given `account_remove.signer_out_for(sys.platform)` and `account_remove.remover_for(sys.platform)`
-(#1030), so on Linux the owner removes an account from the page, signed out first
+(#1030), so on Linux and macOS the owner removes an account from the page, signed out first
 (`agent_tools.console.account_remove`).
 
 It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux the owner names a

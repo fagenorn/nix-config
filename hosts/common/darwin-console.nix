@@ -27,6 +27,10 @@ let
       Label = "org.nixos.agent-console";
       RunAtLoad = true;
       KeepAlive = true;
+      # The manager the console starts runs in its own session (ADR-console-075), but launchd
+      # kills the process group of a dying job; this key turns that off, so a restart of the
+      # console or an activation never ends a manager (issue 894).
+      AbandonProcessGroup = true;
       EnvironmentVariables = {
         PATH = ac.path;
         HOME = home;

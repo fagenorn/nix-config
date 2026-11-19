@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -31,6 +32,14 @@ PROMPT = LEAD + "make it resumable"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
            "`sprint ask`.")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 def cap(*rows, all_out=False, resumes_at=None):
@@ -107,6 +116,13 @@ class CommandTest(Case):
             "--name", NAME, "--settings", str(self.settings), PROMPT])
         self.assertFalse([part for part in command if "s3cret" in part])
 
+    def test_the_macos_command_runs_the_manager_in_its_own_session(self):
+        command = manager.launch_command(self.launch(), "darwin")
+        self.assertEqual(command, [
+            "claude-account", "run", "--bg", "--name", NAME, "--settings", str(self.settings),
+            PROMPT])
+        self.assertFalse([part for part in command if "s3cret" in part])
+
     def test_the_prompt_sends_the_manager_to_its_contract_then_states_the_goal(self):
         goal = "keep  `the` goal's \"text\" verbatim"
         launch = manager.new_launch(SID, "owner/p01", goal, "/srv/p01", "work", "s3cret", self.dir)
@@ -155,12 +171,22 @@ class CommandTest(Case):
                 self.assertEqual(support.goal_of(lead + "finish it"), "finish it")
         self.assertIn("notice_block", manager.__doc__)
 
-    def test_no_command_is_built_on_macos(self):
-        self.assertIsNone(manager.launch_command(self.launch(), "darwin"))
-        self.assertIs(manager.supported("darwin"), False)
+    def test_managers_are_supported_on_linux_and_macos_only(self):
         self.assertIs(manager.supported("linux"), True)
-        self.assertIsNone(manager.launcher_for("darwin"))
+        self.assertIs(manager.supported("darwin"), True)
+        self.assertIs(manager.supported("win32"), False)
         self.assertIs(manager.launcher_for("linux"), manager.run_launch)
+        self.assertIs(manager.launcher_for("darwin"), manager.run_launch)
+        self.assertIs(manager.stopper_for("darwin"), manager.stop_session)
+        self.assertIsNone(manager.launch_command(self.launch(), "win32"))
+        self.assertIsNone(manager.launcher_for("win32"))
+        self.assertIsNone(manager.stopper_for("win32"))
+
+    def test_launch_tools_name_what_each_platform_runs(self):
+        self.assertEqual(manager.launch_tools("linux"), manager.LAUNCH_TOOLS)
+        self.assertEqual(manager.launch_tools("darwin"),
+                         ("bash", "dirname", "mkdir", "chmod", "ln"))
+        self.assertEqual(manager.launch_tools("win32"), ())
 
 
 class RunTest(Case):
@@ -188,6 +214,49 @@ class RunTest(Case):
         self.assertEqual(kwargs["timeout"], 60)
         self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
                                          "CLAUDE_ACCOUNT": "work"})
+
+    def test_a_macos_launch_starts_in_its_own_session(self):
+        launch = self.launch(root=str(self.root))
+        run = self.fake()
+        manager.run_launch(launch, platform="darwin", run=run, environ=self.ENVIRON)
+        self.assertEqual(len(run.calls), 1)
+        argv, kwargs = run.calls[0]
+        self.assertEqual(argv, manager.launch_command(launch, "darwin"))
+        self.assertEqual(argv[0], "claude-account")
+        self.assertNotIn("systemd-run", argv)
+        self.assertFalse([part for part in argv if "s3cret" in part])
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["cwd"], str(self.root))
+        self.assertEqual(kwargs["env"], {"PATH": "/h/.agents/bin:/p", "HOME": "/h",
+                                         "CLAUDE_ACCOUNT": "work"})
+
+    def fake_client(self, body):
+        """A `claude-account` on its own PATH that runs `body`; returns the environ for `run_launch`."""
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        client = bin_dir / "claude-account"
+        client.write_text("#!/bin/sh\n" + body)
+        client.chmod(0o755)
+        return {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "PIDFILE": str(self.tmp / "pid")}
+
+    def wait_dead(self, pid, seconds=5.0):
+        end = time.monotonic() + seconds
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        return not alive(pid)
+
+    def test_a_macos_launch_that_times_out_ends_the_whole_group(self):
+        environ = self.fake_client('sh -c \'echo $$ > "$PIDFILE"; exec sleep 60\' &\nwait\n')
+        launch = self.launch(root=str(self.root))
+        with mock.patch.object(manager, "LAUNCH_TIMEOUT", 1):
+            with self.assertRaises(manager.LaunchFailed) as raised:
+                manager.run_launch(launch, platform="darwin", environ=environ)
+        self.assertEqual(str(raised.exception), "the launch did not return within 1 s")
+        pid = int((self.tmp / "pid").read_text())
+        self.addCleanup(lambda: os.kill(pid, 9) if alive(pid) else None)
+        self.assertTrue(self.wait_dead(pid), "the client the wrapper waited for is still running")
 
     def test_the_identity_is_written_to_a_private_settings_file(self):
         self.run_fake()
@@ -264,9 +333,15 @@ class RunTest(Case):
             pass
 
     def test_claude_account_launches_with_only_the_declared_tools(self):
+        self.launches_with_only_the_declared_tools("linux")
+
+    def test_claude_account_launches_on_macos_with_only_the_declared_tools(self):
+        self.launches_with_only_the_declared_tools("darwin")
+
+    def launches_with_only_the_declared_tools(self, platform):
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir()
-        for name in manager.LAUNCH_TOOLS:
+        for name in manager.launch_tools(platform):
             if name == "systemd-run":
                 continue
             found = shutil.which(name)
@@ -274,9 +349,10 @@ class RunTest(Case):
                 self.skipTest(f"{name} is not installed")
             (bin_dir / name).symlink_to(found)
         bash = shutil.which("bash")
-        (bin_dir / "systemd-run").write_text(
-            f'#!{bash}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
-        (bin_dir / "systemd-run").chmod(0o755)
+        if platform == "linux":
+            (bin_dir / "systemd-run").write_text(
+                f'#!{bash}\nwhile [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
+            (bin_dir / "systemd-run").chmod(0o755)
         (bin_dir / "claude-account").symlink_to(
             REPO_ROOT / "home/common/claude-code/accounts/bin/claude-account")
         out = self.tmp / "out"
@@ -289,7 +365,7 @@ class RunTest(Case):
         home = self.tmp / "home"
         home.mkdir()
         (self.tmp / "accounts/profiles/work").mkdir(parents=True)
-        manager.run_launch(self.launch(root=str(self.root)), platform="linux", environ={
+        manager.run_launch(self.launch(root=str(self.root)), platform=platform, environ={
             "PATH": str(bin_dir), "HOME": str(home),
             "CLAUDE_ACCOUNTS_DIR": str(self.tmp / "accounts"), "CLAUDE_BIN": str(claude),
             "CLAUDE_CACHE_PROXY": "0"})
@@ -327,11 +403,11 @@ class RunTest(Case):
             text, run = self.reason()
             self.assertEqual(text, "the project root /nonexistent/x is not a directory")
             self.assertEqual(run.calls, [])
-        with self.subTest("macos"):
+        with self.subTest("unsupported"):
             self.root_for = str(self.root)
             run = self.fake()
             with self.assertRaises(manager.LaunchFailed) as caught:
-                manager.run_launch(self.launch(root=self.root_for), platform="darwin", run=run,
+                manager.run_launch(self.launch(root=self.root_for), platform="win32", run=run,
                                    environ=self.ENVIRON)
             self.assertEqual(str(caught.exception), manager.UNAVAILABLE_TEXT)
             self.assertEqual(run.calls, [])
@@ -602,6 +678,39 @@ class StopTest(unittest.TestCase):
         self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
         self.assertEqual(kwargs["timeout"], 60)
+
+    def test_a_stop_in_flight_is_ended_with_its_group_when_the_console_closes(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        client = tmp / "claude-account"
+        client.write_text('#!/bin/sh\nsh -c \'echo $$ > "$PIDFILE"; exec sleep 60\' &\nwait\n')
+        client.chmod(0o755)
+        environ = {"PATH": f"{tmp}:/usr/bin:/bin", "HOME": str(tmp), "PIDFILE": str(tmp / "pid")}
+        outcome = []
+
+        def stop():
+            try:
+                manager.stop_session(self.FULL, "work", environ=environ)
+                outcome.append(None)
+            except manager.StopFailed as error:
+                outcome.append(error)
+
+        worker = threading.Thread(target=stop, daemon=True)
+        worker.start()
+        end = time.monotonic() + 5
+        while not (tmp / "pid").exists() and time.monotonic() < end:
+            time.sleep(0.02)
+        pid = int((tmp / "pid").read_text())
+        self.addCleanup(lambda: os.kill(pid, 9) if alive(pid) else None)
+        self.assertTrue(alive(pid))
+        manager.reap_stops()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertIsInstance(outcome[0], manager.StopFailed)
+        end = time.monotonic() + 5
+        while alive(pid) and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(alive(pid))
 
     def test_a_failed_stop_raises_its_one_line_reason(self):
         def failing(argv, **kwargs):

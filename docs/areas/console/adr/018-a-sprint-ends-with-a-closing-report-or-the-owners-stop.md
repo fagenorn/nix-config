@@ -1,6 +1,6 @@
 # ADR-console-018 — A sprint ends with a closing report or the owner's stop
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-075
 - **Decided in:** #834, #928, #892, #980
 
 ## Context
@@ -15,7 +15,7 @@ ADR-console-014 left a done sprint on the page until its goal was withdrawn, and
 
 **The ten-minute timeout.** A stop ends the manager's session when its closing report arrives, or after ten minutes (`STOP_WAIT_MS`) without one, whichever comes first. The session poll finishes it; the owner is never left waiting on a manager that cannot answer.
 
-**One session stop, shared.** The stop of the session is the shared stop of #928 (`manager.stop_listed`, `claude-account run stop <short id>`), run off the lock. The completion is `manager.stopped`; a failed attempt is `manager.stop_failed`, retried by the session poll once a minute has passed. A host without a stopper (not Linux) runs no managers: an open sprint's due stop is recorded without a call and a withdrawal stops nothing.
+**One session stop, shared.** The stop of the session is the shared stop of #928 (`manager.stop_listed`, `claude-account run stop <short id>`), run off the lock. The completion is `manager.stopped`; a failed attempt is `manager.stop_failed`, retried by the session poll once a minute has passed. A host without a stopper (neither Linux nor macOS, ADR-console-075) runs no managers: an open sprint's due stop is recorded without a call and a withdrawal stops nothing.
 
 **Launch, nudge and stop never overlap.** One sprint's launch, nudge and stop each hold a reservation that excludes the other two, as launches and nudges already excluded each other. A stop waits for a launch or wake in flight and the poll takes it after. A stopped manager is never woken, nudged or relaunched: its message box and its retry are gone. A stopping manager is still nudged, so its stop message reaches it, never while its stop runs.
 

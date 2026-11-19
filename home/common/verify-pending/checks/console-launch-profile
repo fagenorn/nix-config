@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for issues 1012 and 894: `claude` launches under the console's profile, and with the
+# console stopped under a named profile, on this host. Every launch runs a stub client under a
+# temporary HOME and accounts directory, so nothing of the owner's is written.
+# Exit 0 met, 1 not met, 75 not yet. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.launch_profile_check "$@"

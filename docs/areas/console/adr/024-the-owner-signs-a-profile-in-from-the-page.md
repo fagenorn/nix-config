@@ -1,6 +1,6 @@
 # ADR-console-024 — The owner signs a profile in from the page
 
-- **Status:** accepted; amended by ADR-console-025
+- **Status:** accepted; amended by ADR-console-025, ADR-console-075
 - **Decided in:** #842, #1026, #1027, #1035, #1039
 
 ## Context
@@ -29,5 +29,5 @@ ADR-console-022 made a signed-out profile, or one whose sign-in ends within thre
 
 - A signed-out profile is fixed from the page, with no terminal.
 - The console starts a second kind of client, the sign-in, besides the launcher and the status reader; both stay under the secrecy of D7.
-- Sign-in from the page is on Linux only. The macOS half is held on #894.
+- Sign-in from the page is on Linux and macOS (amended by ADR-console-075, #894). The Mac half's host evidence is an owner check in its own issue, split from #894, which blocks nothing.
 - Related: ADR-console-002 (the page rules), ADR-console-008 (the page writes), ADR-console-022 (the sign-in reading).

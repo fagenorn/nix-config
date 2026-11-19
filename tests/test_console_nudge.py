@@ -156,6 +156,37 @@ class NudgeCommandTest(unittest.TestCase):
             nudge_command(self.nudge(RELAY), "linux"),
             nudge_command(Nudge(SID, RELAY, NAME, "s-1", "work", self.root, "/s/x"), "linux"))
 
+    def test_a_macos_wake_resumes_the_session_in_its_own_session(self):
+        settings = "/s/" + SID + ".settings.json"
+        for route, text in ((WAKE, NUDGE_TEXT), (REVIVE, RESTART_TEXT)):
+            for path, flags in ((None, []), (settings, ["--name", NAME, "--settings", settings])):
+                with self.subTest(route=route, settings=path):
+                    n = Nudge(SID, route, NAME, "s-1", "work", self.root, path)
+                    self.assertEqual(
+                        ["claude-account", "run", "--resume", "s-1", "--bg", *flags, text],
+                        nudge_command(n, "darwin"))
+
+    def test_a_macos_relay_is_the_linux_relay(self):
+        for route in (RELAY, nudge_module.CONTINUE):
+            for bypass in (False, True):
+                with self.subTest(route=route, bypass=bypass):
+                    n = Nudge(SID, route, NAME, "s-1", "work", self.root, sender_bypass=bypass)
+                    self.assertEqual(nudge_command(n, "linux"), nudge_command(n, "darwin"))
+
+    def test_run_nudge_on_macos_starts_a_wake_in_its_own_session(self):
+        run = self.fake()
+        run_nudge(self.nudge(WAKE), platform="darwin", run=run,
+                  environ={"PATH": "/p", "HOME": "/h"})
+        self.assertEqual(1, len(run.calls))
+        argv, kwargs = run.calls[0]
+        self.assertEqual("claude-account", argv[0])
+        self.assertIs(True, kwargs["start_new_session"])
+
+    def test_nudge_tools_name_what_each_platform_runs(self):
+        self.assertEqual(nudge_module.NUDGE_TOOLS, nudge_module.nudge_tools("linux"))
+        self.assertEqual(("claude-account",), nudge_module.nudge_tools("darwin"))
+        self.assertEqual((), nudge_module.nudge_tools("win32"))
+
     def listing(self, stdout="", returncode=0, stderr=b"", raises=None):
         calls = []
 
@@ -220,9 +251,10 @@ class NudgeCommandTest(unittest.TestCase):
                 if cwd != self.root:
                     self.assertEqual([], run.calls)
 
-    def test_full_lister_for_is_linux_only(self):
+    def test_full_lister_for_is_linux_and_macos_only(self):
         self.assertIs(nudge_module.read_full_listing, nudge_module.full_lister_for("linux"))
-        self.assertIsNone(nudge_module.full_lister_for("darwin"))
+        self.assertIs(nudge_module.read_full_listing, nudge_module.full_lister_for("darwin"))
+        self.assertIsNone(nudge_module.full_lister_for("win32"))
 
     def test_the_restart_sentence_is_fixed_and_names_contract_then_recap(self):
         self.assertEqual(
@@ -237,8 +269,8 @@ class NudgeCommandTest(unittest.TestCase):
         self.assertEqual(UNKNOWN_SESSION, str(raised.exception))
         self.assertEqual([], run.calls)
 
-    def test_there_is_no_command_off_linux(self):
-        self.assertIsNone(nudge_command(self.nudge(RELAY), "darwin"))
+    def test_there_is_no_command_on_an_unsupported_host(self):
+        self.assertIsNone(nudge_command(self.nudge(RELAY), "win32"))
 
     def test_no_argv_element_or_environment_value_carries_anything_but_the_fixed_sentence(self):
         self.assertEqual(
@@ -315,7 +347,7 @@ class NudgeCommandTest(unittest.TestCase):
                 run_nudge(nudge, platform=platform, environ={}, run=run)
             return str(raised.exception), run
 
-        self.assertEqual(manager.UNAVAILABLE_TEXT, reason(self.nudge(), "darwin")[0])
+        self.assertEqual(manager.UNAVAILABLE_TEXT, reason(self.nudge(), "win32")[0])
         gone = str(Path(self.root) / "missing")
         self.assertEqual(f"the project root {gone} is not a directory",
                          reason(self.nudge(root=gone))[0])
@@ -379,9 +411,10 @@ class NudgeCommandTest(unittest.TestCase):
             # The process can end between the open and the read: the read then fails with ESRCH.
             return False
 
-    def test_nudger_for_is_linux_only(self):
+    def test_nudger_for_is_linux_and_macos_only(self):
         self.assertIs(run_nudge, nudger_for("linux"))
-        self.assertIsNone(nudger_for("darwin"))
+        self.assertIs(run_nudge, nudger_for("darwin"))
+        self.assertIsNone(nudger_for("win32"))
 
 
 if __name__ == "__main__":

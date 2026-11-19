@@ -164,6 +164,10 @@ class DarwinAgent(unittest.TestCase):
         for got, plist in self.hosts():
             self.assertEqual(plist["EnvironmentVariables"], {"PATH": got["path"], "HOME": got["home"]})
 
+    def test_the_agent_leaves_a_managers_process_group_alone(self):
+        for _, plist in self.hosts():
+            self.assertIs(plist["AbandonProcessGroup"], True)
+
     def test_the_agent_path_is_gh_the_owner_and_system_profiles_then_the_system_tools(self):
         for got, _ in self.hosts():
             segments = got["path"].split(":")
@@ -177,7 +181,7 @@ class DarwinAgent(unittest.TestCase):
             log = f"{got['home']}/Library/Logs/agent-console.log"
             self.assertEqual(plist["StandardOutPath"], log)
             self.assertEqual(plist["StandardErrorPath"], log)
-            keys = {"Label", "ProgramArguments", "RunAtLoad", "KeepAlive",
+            keys = {"Label", "ProgramArguments", "RunAtLoad", "KeepAlive", "AbandonProcessGroup",
                     "EnvironmentVariables", "StandardOutPath", "StandardErrorPath"}
             self.assertEqual(set(plist), keys | ({"UserName"} if got["atBoot"] else set()))
 

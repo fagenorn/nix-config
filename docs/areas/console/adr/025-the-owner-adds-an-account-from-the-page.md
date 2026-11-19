@@ -1,6 +1,6 @@
 # ADR-console-025 — The owner adds an account from the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-075
 - **Decided in:** #842, #1027, #1035, #1039
 
 ## Context
@@ -21,7 +21,7 @@ ADR-console-024 let the owner sign a profile in from the page, but a profile has
 
 **D6. The page.** This amends ADR-console-002. The Add account control sits at the bottom of the accounts panel. The account name is a fourth typed thing and its draft, selection and focus survive every frame. The add box carries the continuation until the view shows the add's attempt ended, whether or not the profile's sign-in card shows: a note that the sign-in started, the link or Get sign-in link (the start write again, which joins the live run, when the add answered with no link), the code field and Cancel. The link is kept in memory like the sign-in link of ADR-console-024 D3. On that page the card points to "Add account in the accounts panel" instead of carrying a second code field, also when the card showed before the add answered. The outcome (signed in, did not finish, timed out, cancelled) stays in the add box until Add account is pressed again. A run that vanishes from the view, or that the view replaces with an older attempt's retained outcome (a restart), after the add's attempt was seen running, ends the continuation with no outcome. The typed code stays in the add box.
 
-**D7. Linux only.** The console adds an account only where it starts a sign-in, which is Linux. The macOS half is held on #894.
+**D7. Linux and macOS.** The console adds an account only where it starts a sign-in, which is Linux and macOS (amended by ADR-console-075, #894). The Mac half's host evidence is #894's own `console-page-account` check, which adds and removes a throwaway profile through the page.
 
 ## Consequences
 

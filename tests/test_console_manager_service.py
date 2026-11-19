@@ -494,6 +494,25 @@ class ManagerServiceTest(Case):
         self.assertEqual((sprint["manager_text"], sprint["retry"]),
                          ("managers are not available on this host yet", False))
 
+    def test_a_macos_console_offers_managers_on_an_open_sprint(self):
+        launcher = manager.launcher_for("darwin")
+        self.assertIs(launcher, manager.run_launch)
+        queue = support.Queued()
+        svc = self.start(launcher=launcher, dispatch=queue)
+        sid = self.state(svc)
+        self.assertIs(view_of(svc)["managers"], True)
+        self.assertEqual(len(queue.jobs), 1)
+        sprint = self.sprint(svc, sid)
+        self.assertNotEqual(sprint["manager_state"], "unavailable")
+        self.assertNotEqual(sprint["manager_text"], manager.UNAVAILABLE_TEXT)
+        svc.close()
+
+    def test_closing_the_console_ends_the_stops_in_flight(self):
+        svc = self.start()
+        with mock.patch.object(manager, "reap_stops") as reaped:
+            svc.close()
+        reaped.assert_called_once_with()
+
     def test_main_passes_the_platform_launcher(self):
         recorded = {}
 
