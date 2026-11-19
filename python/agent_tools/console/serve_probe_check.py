@@ -35,10 +35,14 @@ The rules, read in this order, each printing one line:
    `forwarded_for`, `host_local`, `login_valid`, `probe`, `probe_login_arrived` booleans;
    `forwarded_hosts`, `hosts` and `login_headers` integers; `forwarded_host` a string or null, a
    string when `forwarded_host_form` is `exact` or `with_port`; `host` a string or null;
-   `forwarded_host_form` one of `guest.HOST_FORMS`; `reason` null or one of `guest.REASON_CODES`):
-   `bad_reading`, exit 1;
+   `forwarded_host_form` one of `guest.HOST_FORMS`; `reason` null or one of `guest.REASON_CODES`;
+   `client` one of `guest.CLIENT_FORMS`): `bad_reading`, exit 1;
 6. `forwarded_for` is false, a local request and not one through Serve: `not_through_serve`, 75;
-7. the reading's `reason` is `sharing_off` or `name_unread`: it was taken while sharing was off or the
+7. `client` is `this_host`, a request this host sent to itself, which proves nothing about the
+   tailnet's access rules (ADR-console-079 D5): `from_this_host`, 75; `client` is `unknown`, the
+   console could not tell this host's address from another device's: `client_unknown`, 75; only
+   `other_device` goes on;
+8. the reading's `reason` is `sharing_off` or `name_unread`: it was taken while sharing was off or the
    name unread, and rules 2 and 3 show both have changed since; or the reading's kept
    `forwarded_host` is a string and its `forwarded_host_form` disagrees with the current tailnet
    name: the form is `exact` or `with_port` and the forwarded host, lowercased, is neither the
@@ -46,21 +50,21 @@ The rules, read in this order, each printing one line:
    `stale`, 75. The form was judged against the name in force when the request arrived (no name
    read, or an older one, reads `other`) and the name read may have changed since, so the check
    compares the kept forwarded host with the current name and waits for a request at it;
-8. `forwarded_host_form` is not `exact`, or `forwarded_hosts`, `hosts` or `login_headers` is not 1,
+9. `forwarded_host_form` is not `exact`, or `forwarded_hosts`, `hosts` or `login_headers` is not 1,
    or `host_local` is false: `not_met`, exit 1;
-9. `probe_login_arrived` is true, the prescribed forged login reached the service as a login whatever
+10. `probe_login_arrived` is true, the prescribed forged login reached the service as a login whatever
    probe header came with it, or `login_valid` is false, a login header arrived that is not one
    well-formed login (a combined value can carry the forged login without matching it): `not_met`, 1;
-10. `probe` is false, the Host half is shown and the prescribed probe value is still awaited:
+11. `probe` is false, the Host half is shown and the prescribed probe value is still awaited:
     `no_probe`, 75;
-11. otherwise `met`, exit 0.
+12. otherwise `met`, exit 0.
 
 A `with_port` or other result, or a `Host` that is not `localhost`, is not met: it shows the strict
 rule refuses what Serve sends, and the owner decides any change to the rule (ADR-console-077 D4),
 never this check.
 
 Output: exactly one stdout line, `json.dumps(result, sort_keys=True)`. From rule 6 on it has
-`admitted`, `forwarded_for`, `forwarded_host_form`, `host_local`, `login_headers`, `login_valid`,
+`admitted`, `client`, `forwarded_for`, `forwarded_host_form`, `host_local`, `login_headers`, `login_valid`,
 `probe`, `probe_login_arrived`, `reason` and `status`, and nothing else: it never prints a host value, the tailnet name or any login,
 because the output is recorded on the pull request. A usage error exits 2.
 
@@ -115,6 +119,7 @@ def _well_formed(reading: object) -> bool:
             and (reading["host"] is None or isinstance(reading["host"], str))
             and (isinstance(host, str) or form not in ("exact", "with_port"))
             and form in guest.HOST_FORMS
+            and reading["client"] in guest.CLIENT_FORMS
             and (reason is None or reason in guest.REASON_CODES.values()))
 
 
@@ -140,11 +145,15 @@ def main(argv: list[str] | None = None, *,
         _print({"status": "bad_reading"})
         return 1
     shown = {name: reading[name] for name in
-             (*_FLAGS, "forwarded_host_form", "login_headers", "reason")}
+             (*_FLAGS, "client", "forwarded_host_form", "login_headers", "reason")}
     form = reading["forwarded_host_form"]
     tailnet = sharing["tailnet"].lower()
     if not reading["forwarded_for"]:
         status, code = "not_through_serve", NOT_YET
+    elif reading["client"] == guest.THIS_HOST:
+        status, code = "from_this_host", NOT_YET
+    elif reading["client"] == guest.UNKNOWN_CLIENT:
+        status, code = "client_unknown", NOT_YET
     elif reading["reason"] in _STALE_REASONS or isinstance(reading["forwarded_host"], str) and (
             reading["forwarded_host"].lower() in (tailnet, tailnet + ":443")) != (form != "other"):
         status, code = "stale", NOT_YET

@@ -1583,14 +1583,14 @@ class HeldCheckServiceTest(GuestCase):
         self.assertEqual(check(), (75, "no_request"))
         self.probe(svc)
         self.assertEqual(check(), (0, "met"))
-        self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
+        self.status = {"Self": {"DNSName": OTHER_HOST + ".", "TailscaleIPs": [SELF_V4, SELF_V6]}}
         svc.poll_serve()
         self.assertEqual(check(), (75, "stale"))
         self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST, logins=[FORGED],
                    headers={"X-Forwarded-For": "100.64.0.1",
                             "X-Console-Probe": "other-probe@example.invalid"})
         self.assertEqual(check(), (1, "not_met"))
-        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [SELF_V4, SELF_V6]}}
         svc.poll_serve()
         self.guest(svc, "GET", "/api/whoami", host=TAILNET,
                    headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
@@ -1598,7 +1598,7 @@ class HeldCheckServiceTest(GuestCase):
         self.status = None
         svc.poll_serve()
         self.assertEqual(check(), (75, "name_unread"))
-        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [SELF_V4, SELF_V6]}}
         svc.poll_serve()
         svc.set_sharing(False)
         self.assertEqual(check(), (75, "sharing_off"))
@@ -1610,6 +1610,15 @@ class HeldCheckServiceTest(GuestCase):
         self.probe(svc)
         svc.set_sharing(True)
         self.assertEqual(self.check(svc), (75, "stale"))
+        self.probe(svc)
+        self.assertEqual(self.check(svc), (0, "met"))
+
+    def test_a_self_probe_does_not_meet_the_check(self):
+        self.seed()
+        svc = self.start()
+        self.guest(svc, "GET", "/api/whoami",
+                   headers={"X-Forwarded-For": SELF_V4, "X-Console-Probe": FORGED})
+        self.assertEqual(self.check(svc), (75, "from_this_host"))
         self.probe(svc)
         self.assertEqual(self.check(svc), (0, "met"))
 
