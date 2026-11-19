@@ -50,6 +50,10 @@ if (args.timer) { setTimeout(() => { globalThis.lateTimer = 1 }, 30).unref(); re
 if (args.wait) { await new Promise(r => setTimeout(r, 150)); return { late: typeof lateTimer !== 'undefined' } }
 if (args.chatty) { console.log('debug'); return { ok: true } }
 if (args.setuplike) { console.log(JSON.stringify({ ok: true, host: 'h1' })); return { ok: true } }
+if (args.shapedfail) { console.log(JSON.stringify({ ok: false, error: { code: 'x' } })); return { ok: true } }
+if (args.shapedok) { console.log(JSON.stringify({ ok: true, out: { stale: 1 } })); return { ok: true } }
+if (args.deep) { process.argv.push('--leak'); Intl.DateTimeFormat.prototype.leak = 1; return { ok: true } }
+if (args.deepprobe) return { argv: process.argv.includes('--leak'), intl: typeof Intl.DateTimeFormat.prototype.leak }
 if (args.builtins) { Array.prototype.leak = 7; process.env.RV_LEAK = 'yes'; process.on('SIGUSR2', () => {}); return { ok: true } }
 if (args.probe) return { arr: typeof [].leak, env: process.env.RV_LEAK === undefined ? null : process.env.RV_LEAK, listeners: process.listenerCount('SIGUSR2') }
 if (args.echo) return { echo: args.echo }
@@ -184,6 +188,20 @@ class ReuseMatchesAFreshProcessTest(NodeCase):
                 after_first = s.pid
                 out = s.run(harness, self.fixture, probe)
                 self.assertEqual(fresh["result"], {"arr": "undefined", "env": None, "listeners": 0})
+                self.assertEqual(first["result"], {"ok": True})
+                self.assertIsNone(after_first)
+                self.assertEqual(out, fresh)
+
+    def test_a_scenario_that_changes_an_object_a_global_holds_one_level_down_is_answered_then_the_next_runs_in_a_new_process(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                probe = {"args": {"deepprobe": True}}
+                fresh = run_fresh(NODE, harness, self.fixture, probe)
+                s = self.server()
+                first = s.run(harness, self.fixture, {"args": {"deep": True}})
+                after_first = s.pid
+                out = s.run(harness, self.fixture, probe)
+                self.assertEqual(fresh["result"], {"argv": False, "intl": "undefined"})
                 self.assertEqual(first["result"], {"ok": True})
                 self.assertIsNone(after_first)
                 self.assertEqual(out, fresh)
@@ -329,6 +347,20 @@ class FailureShapesTest(NodeCase):
                 self.assertIsNone(s.pid)
                 self.assertEqual(s.run(harness, self.fixture, {"args": {"echo": "next"}})["result"], {"echo": "next"})
                 self.assertNotIn(s.pid, (None, pid))
+
+    def test_a_program_that_prints_an_object_shaped_like_a_reply_to_its_own_request_is_never_answered_by_a_stale_reply(self):
+        for name, harness in HARNESSES.items():
+            for branch in ("shapedfail", "shapedok"):
+                with self.subTest(harness=name, branch=branch):
+                    s = self.server()
+                    s.run(harness, self.fixture, {"args": {}})
+                    pid = s.pid
+                    with self.assertRaises(AssertionError) as raised:
+                        s.run(harness, self.fixture, {"args": {branch: True}})
+                    self.assertIn("harness failed: the harness wrote a line that is not a reply", str(raised.exception))
+                    self.assertIsNone(s.pid)
+                    self.assertEqual(s.run(harness, self.fixture, {"args": {"echo": "next"}})["result"], {"echo": "next"})
+                    self.assertNotIn(s.pid, (None, pid))
 
     def test_a_request_larger_than_the_pipe_sent_to_a_process_that_reads_nothing_times_out(self):
         mute = self.tmp / "mute-node"

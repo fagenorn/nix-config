@@ -1,20 +1,22 @@
 // Serves many harness scenarios from one node process (issue 1288), so a test file pays node's start-up and each program's compile once.
 // Usage: node program_server.mjs, no arguments. It answers any harness that exports makeRunner(programText) => async runScenario(scenario) => JSON text.
 //
-// Wire format. Stdin: one request per line, {"harness": "<abs path to a harness .mjs>", "program": "<abs path to a program .js>", "scenario": {...}}.
-// Stdout: exactly one line per request, in order, and nothing else.
-//   success  {"ok":true,"out":<the text runScenario resolved to, spliced in unchanged>[,"restart":true]}
-//   failure  {"ok":false,"error":"<text>"[,"restart":true]}, the text being one of
+// Wire format. Stdin: one request per line, {"id": <any JSON value>, "harness": "<abs path to a harness .mjs>", "program": "<abs path to a program .js>", "scenario": {...}}.
+// Stdout: exactly one line per request, in order, and nothing else. Every reply carries the request's "id" unchanged (null when the line did
+// not parse), so a reader can tell the reply to its own request from any other line a program printed.
+//   success  {"id":<id>,"ok":true,"out":<the text runScenario resolved to, spliced in unchanged>[,"restart":true]}
+//   failure  {"id":<id>,"ok":false,"error":"<text>"[,"restart":true]}, the text being one of
 //            "the program never settled", "unhandled rejection: <stack>", "uncaught exception: <stack>",
 //            "program threw: <stack>" (a runner that rejects: the batch harness lets a program throw escape),
 //            "the program set process.exitCode to <code>",
 //            "bad request: <message>" (the line is not JSON, lacks a string harness, a string program or an object scenario,
 //            or the harness fails to import or the program to read or compile).
 // "restart": true means the scenario changed state a fresh process would not carry: an own property (a key added or removed, or any descriptor field
-// changed, or the prototype) of globalThis, of any object a global holds (Array, JSON, process, ...), of its `prototype` or of anything on their
-// prototype chains (so Array.prototype, Object.prototype and Function.prototype are covered); process.env; the listener count of any process event;
+// changed, or the prototype) of globalThis or of any object reachable from it through data properties and prototypes, however deep (Array, JSON,
+// process.argv, Intl.DateTimeFormat.prototype, Object.prototype, ...); process.env; the listener count of any process event;
 // or it left a timer or immediate pending that no longer held the event loop open (an unref()ed one, which a fresh process would have exited
-// without running). The limit: state held in an object no global reaches (a module's private data, a closure) is not seen. The server writes that
+// without running). The limit: state held in an object only an accessor or a closure reaches is not seen (an accessor is never called, so a lazily
+// installed global, process.stdin, process.stdout and process.stderr are not looked into; a module's private data is not seen either). The server writes that
 // reply, reads no further request and ends on its own with exit 0, so the next scenario starts from a clean process.
 // A scenario that returns with process.exitCode set to a nonzero value fails, as a one-shot run exits with that code; the server clears it.
 //
@@ -54,20 +56,23 @@ let busy = false
 let active = null
 
 const write = line => { process.stdout.write(line + '\n') }
-const fail = (error, restart) => write(JSON.stringify(restart ? { ok: false, error, restart: true } : { ok: false, error }))
+const fail = (id, error, restart) => write(JSON.stringify(restart ? { id, ok: false, error, restart: true } : { id, ok: false, error }))
 const stackOf = e => String((e && e.stack) || e)
 const isObject = v => (typeof v === 'object' && v !== null) || typeof v === 'function'
-// The objects whose own state is watched: globalThis, every object or function a global holds as data (accessors are never called, so no lazy global
-// is installed by looking), its `prototype`, and every prototype chain above those.
+// The objects whose own state is watched: globalThis and every object or function reachable from it by data properties and prototypes, however
+// deep (accessors are never called, so no lazy global is installed by looking).
 const rootsOf = () => {
   const roots = new SetOf([globalThis])
-  const add = o => { for (let p = o; p !== null && !roots.has(p); p = protoOf(p)) roots.add(p) }
-  for (const k of ownKeys(globalThis)) {
-    const d = descriptorOf(globalThis, k)
-    if (!('value' in d) || !isObject(d.value) || d.value === globalThis) continue
-    add(d.value)
-    const proto = descriptorOf(d.value, 'prototype')
-    if (proto && 'value' in proto && isObject(proto.value)) add(proto.value)
+  const todo = [globalThis]
+  const add = o => { if (!roots.has(o)) { roots.add(o); todo.push(o) } }
+  while (todo.length > 0) {
+    const o = todo.pop()
+    const proto = protoOf(o)
+    if (proto !== null) add(proto)
+    for (const k of ownKeys(o)) {
+      const d = descriptorOf(o, k)
+      if ('value' in d && isObject(d.value)) add(d.value)
+    }
   }
   return roots
 }
@@ -121,20 +126,22 @@ process.on('uncaughtException', e => record('uncaught exception', e))
 async function handle(line) {
   let runner
   let scenario
+  let id = null
   try {
     const req = JSON.parse(line)
+    if (req && req.id !== undefined) id = req.id
     if (!req || typeof req.harness !== 'string' || typeof req.program !== 'string' || !req.scenario || typeof req.scenario !== 'object') {
       throw new Error('a request needs a string harness, a string program and an object scenario')
     }
     scenario = req.scenario
     runner = await runnerOf(req.harness, req.program)
   } catch (e) {
-    fail(`bad request: ${(e && e.message) || e}`)
+    fail(id, `bad request: ${(e && e.message) || e}`)
     busy = false
     next()
     return
   }
-  const run = { text: undefined, error: undefined, before: snapshot() }
+  const run = { id, text: undefined, error: undefined, before: snapshot() }
   active = run
   process.stdin.unref()
   runner(scenario).then(t => { run.text = t }, e => { if (active === run) record('program threw', e) })
@@ -156,9 +163,9 @@ process.on('beforeExit', () => {
   let restart
   try { restart = changed(run.before) || timers.size > 0 } catch { restart = true }
   if (run.error === undefined && code !== undefined && code !== 0 && code !== '0') run.error = `the program set process.exitCode to ${code}`
-  if (run.error !== undefined) fail(run.error, restart)
-  else if (run.text === undefined) fail('the program never settled', restart)
-  else write('{"ok":true,"out":' + run.text + (restart ? ',"restart":true' : '') + '}')
+  if (run.error !== undefined) fail(run.id, run.error, restart)
+  else if (run.text === undefined) fail(run.id, 'the program never settled', restart)
+  else write('{"id":' + JSON.stringify(run.id) + ',"ok":true,"out":' + run.text + (restart ? ',"restart":true' : '') + '}')
   busy = false
   if (restart) {
     // No process.exit: a pipe write is asynchronous on macOS, so the reply must flush while the loop drains.

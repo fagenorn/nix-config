@@ -9,9 +9,10 @@ every cached server. `ProgramServer.run(harness, program, scenario)` returns the
 `node <harness> <program>` prints for that scenario on stdin; `run_fresh` is that one-shot call itself.
 
 Wire format, shared with program_server.mjs (its header is the full statement): `node program_server.mjs`
-reads one request per line, `{"harness": ..., "program": ..., "scenario": ...}`, and writes exactly one line
-per request, `{"ok": true, "out": <what one-shot mode prints>[, "restart": true]}` or
-`{"ok": false, "error": <text>[, "restart": true]}`. `"restart": true` means the scenario changed the global
+reads one request per line, `{"id": ..., "harness": ..., "program": ..., "scenario": ...}`, and writes exactly one line
+per request, `{"id": ..., "ok": true, "out": <what one-shot mode prints>[, "restart": true]}` or
+`{"id": ..., "ok": false, "error": <text>[, "restart": true]}`. The `id` is a per-server counter string the reply must echo, so a line a program printed is
+never taken for its reply however it is shaped. `"restart": true` means the scenario changed the global
 object: the server answers, then ends on its own, and the next run starts a new process.
 
 The request is written by a helper thread so the timeout covers a write the process is not reading.
@@ -21,8 +22,8 @@ pipes and a temporary file as stderr, so a program that logs a lot never blocks 
 thread reads stdout lines into a queue (a `None` at EOF) and `run` waits for one line with the timeout.
 On a timeout `run` kills and reaps the process and raises `AssertionError("<failure>: no reply within <t> s")`;
 on EOF or a broken pipe it raises `AssertionError("<failure>: the harness exited with <code>: <stderr>")`;
-on a line that is not a reply (not an object with a boolean `ok` and the `out` or `error` key it needs: a program that wrote to stdout), or a
-reply with another line queued behind it, it kills and reaps the process and raises
+on a line that is not the reply to this request (not an object carrying this request's `id`, a boolean `ok` and the `out` or `error` key it needs:
+a program that wrote to stdout), it kills and reaps the process and raises
 `AssertionError("<failure>: the harness wrote a line that is not a reply: <line>")`;
 on an `ok: false` reply it raises `AssertionError("<failure>: <error>")` followed by the stderr text written
 since the run began, when any. A restart reply closes the process before `run` returns or raises, so `pid` is
@@ -61,6 +62,7 @@ class ProgramServer:
         self._lines = None
         self._reader = None
         self._err = None
+        self._sent = 0
 
     @property
     def pid(self) -> int | None:
@@ -93,7 +95,9 @@ class ProgramServer:
         if self._proc is None:
             self._start()
         offset = os.fstat(self._err.fileno()).st_size
-        request = json.dumps({"harness": str(harness), "program": str(program), "scenario": scenario}) + "\n"
+        self._sent += 1
+        request_id = f"r{self._sent}"
+        request = json.dumps({"id": request_id, "harness": str(harness), "program": str(program), "scenario": scenario}) + "\n"
         # The write runs in its own thread: a request larger than the pipe, sent to a node that has stopped reading, blocks, and the timeout must cover it.
         deadline = time.monotonic() + timeout
         stdin = self._proc.stdin
@@ -121,11 +125,14 @@ class ProgramServer:
             raise AssertionError(f"{failure}: the harness exited with {code}: {stderr}")
         try:
             reply = json.loads(line)
-            if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool) or ("out" if reply["ok"] else "error") not in reply:
+            # The id is what tells the reply to this request from a line a program printed, of any shape: the real reply may still be on its way.
+            if (
+                not isinstance(reply, dict)
+                or reply.get("id") != request_id
+                or not isinstance(reply.get("ok"), bool)
+                or ("out" if reply["ok"] else "error") not in reply
+            ):
                 raise ValueError("not a reply")
-            # A stray line that happens to be a reply-shaped object leaves the real reply queued behind it. A restart reply is followed by EOF, so only a live process is checked.
-            if not reply.get("restart") and not self._lines.empty():
-                raise ValueError("a line follows the reply")
         except ValueError:
             # A program that wrote to stdout put a line ahead of its reply: the stream is out of step, so the process is discarded, never reused.
             stderr = self._stderr_since(offset)
