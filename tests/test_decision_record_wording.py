@@ -864,6 +864,12 @@ class SuiteWordingTest(unittest.TestCase):
         self.assertEqual(kept_list_problems(KEPT_CREDENTIAL_TESTS, self.sources, self.findings), [])
         self.assertTrue(KEPT_AT_START.isdisjoint(KEPT_FROM_MAIN))
 
+    def test_no_suite_test_pins_a_decision_records_wording(self):
+        left = sorted(
+            {f"{test}:{line}" for test, line in self.findings if test not in KEPT_CREDENTIAL_TESTS}
+        )
+        self.assertEqual(left, [], "\n".join(left))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,8 +21,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
 DESK = REPO_ROOT / "python/agent_tools/console/page.html"
 PYPROJECT = REPO_ROOT / "python/pyproject.toml"
-SERVICE = REPO_ROOT / "python/agent_tools/console/service.py"
-ADR_DIR = REPO_ROOT / "docs/areas/console/adr"
 
 
 HARNESS = r"""
@@ -635,20 +633,6 @@ class SpendStaticTest(unittest.TestCase):
         self.assertEqual(
             merged.get(".trend-day", merged.get(".trend li", {})).get("min-width"), "0")
         self.assertEqual(merged.get(".row-name", {}).get("overflow-wrap"), "anywhere")
-
-
-class SpendDecisionCitationTest(unittest.TestCase):
-    def test_the_service_cites_the_spend_page_decision_under_the_number_main_left_free(
-            self) -> None:
-        # origin/main took 050 and 051 for the wait-signals (#1110) and owner-check (#1111)
-        # decisions; the Spend page decision is the next free number, and a file under the
-        # cited number, once it exists, must be the decision made in #1135.
-        cited = re.findall(
-            r"GET /spend. serves the Spend page.*?\(#1135, ADR-console-(\d+)\)",
-            SERVICE.read_text(encoding="utf-8"), re.S)
-        self.assertEqual(cited, ["052"])
-        for path in ADR_DIR.glob("%s-*.md" % cited[0]):
-            self.assertIn("- **Decided in:** #1135", path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
