@@ -476,14 +476,14 @@ class RunReadsEachHostOnce(unittest.TestCase):
         "tests.test_runner_home": ("runner-home",),
         "tests.test_system_packages": ("system-packages",),
         "tests.test_owner_services_units": ("owner-services", "owner-activation"),
+        "tests.test_github_runners": ("runners", "runner-triples"),
     }
     # test ids the sweep does not run because they evaluate for real
-    REAL_EVALUATIONS = ()
+    REAL_EVALUATIONS = ("tests.test_github_runners.RegisterRunnersTest.test_one_recipe_run_evaluates_the_real_configuration",)
     MENTIONS_ALLOWED = {
         "tests/host_readings.py": "the cache itself",
         "tests/test_host_readings.py": "the cache's own tests",
         "tests/test_branch_protection.py": "CI's Nix Eval job text, not an evaluation",
-        "tests/test_github_runners.py": "evaluates directly until its runners tests read the cache",
     }
 
     @staticmethod
