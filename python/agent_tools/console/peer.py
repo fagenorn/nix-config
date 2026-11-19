@@ -35,6 +35,13 @@ listed, or whose descriptor cannot be read, is not seen (like another user's pro
 `read_lsof` and `read_proc` never raise: any `OSError`, `subprocess.TimeoutExpired` or `ValueError`
 is `None`. `reader_for(platform)` names the reader (`darwin` lsof, `linux*` proc, else `None`).
 
+The guest door (ADR-console-077 D2) reads the peer of an accepted Unix socket connection. On
+macOS `LOCAL_PEERCRED` at level `SOL_LOCAL` (0) returns `struct xucred` (76 bytes: version 0,
+effective uid, group count, groups); on Linux `SO_PEERCRED` returns `struct ucred` (pid, uid,
+gid). `read_xucred` and `read_ucred` never raise and read `None` for anything not a well-formed
+credential; `unix_reader_for(platform)` names the reader and `unix_refusal(uid, owner_uid)`
+admits only root (Serve runs in the `tailscaled` service) and the owner.
+
 What the lookup cannot see: a non-root lookup sees only its own user's processes, so another
 user's connection has no holder (not-owner), and a descriptor an owner process hands to another
 user's process is seen only through the owner's holder (ADR-console-076 D6).
@@ -42,6 +49,7 @@ user's process is seen only through the owner's holder (ADR-console-076 D6).
 
 import os
 import socket
+import struct
 import subprocess
 import sys
 from collections.abc import Callable
@@ -52,6 +60,14 @@ LSOF = "/usr/sbin/lsof"
 LOOKUP_TIMEOUT_SECONDS = 2.0
 NOT_OWNER_TEXT = "this console answers only its owner's own processes"
 UNREADABLE_TEXT = "the connecting process could not be read"
+
+ROOT_UID = 0
+SOL_LOCAL = 0
+LOCAL_PEERCRED = 1
+XUCRED_SIZE = 76
+XUCRED_VERSION = 0
+SO_PEERCRED = getattr(socket, "SO_PEERCRED", 17)
+UCRED_SIZE = 12
 
 Address = tuple[str, int]
 
@@ -64,6 +80,7 @@ class Holder:
 
 
 PeerReader = Callable[[Address, Address], tuple[Holder, ...] | None]
+UnixPeerReader = Callable[[socket.socket], int | None]
 
 
 def refusal(holders: tuple[Holder, ...] | None, owner_uid: int) -> tuple[str, str] | None:
@@ -187,3 +204,38 @@ def reader_for(platform: str) -> PeerReader | None:
     if platform.startswith("linux"):
         return read_proc
     return None
+
+
+def read_xucred(sock: socket.socket) -> int | None:
+    try:
+        data = sock.getsockopt(SOL_LOCAL, LOCAL_PEERCRED, XUCRED_SIZE)
+        if len(data) != XUCRED_SIZE:
+            return None
+        version, uid = struct.unpack_from("=II", data)
+    except (OSError, struct.error, ValueError, TypeError):
+        return None
+    return uid if version == XUCRED_VERSION else None
+
+
+def read_ucred(sock: socket.socket) -> int | None:
+    try:
+        data = sock.getsockopt(socket.SOL_SOCKET, SO_PEERCRED, UCRED_SIZE)
+        if len(data) != UCRED_SIZE:
+            return None
+        return struct.unpack("=iII", data)[1]
+    except (OSError, struct.error, ValueError, TypeError):
+        return None
+
+
+def unix_reader_for(platform: str) -> UnixPeerReader | None:
+    if platform == "darwin":
+        return read_xucred
+    if platform.startswith("linux"):
+        return read_ucred
+    return None
+
+
+def unix_refusal(uid: object, owner_uid: int) -> str | None:
+    if isinstance(uid, bool) or not isinstance(uid, int):
+        return "unreadable"
+    return None if uid in (ROOT_UID, owner_uid) else "not_permitted"

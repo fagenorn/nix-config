@@ -14,12 +14,14 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.console import service
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
+from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
@@ -716,10 +718,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             now_s = time.time()
             fixture = shots.build_fixture(Path(tmp).resolve(), "guest-page", now_s)
-            svc = shots.start_service(fixture, now_s, guest=True)
+            svc = shots.start_service(
+                fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent)
             serve = None
             try:
-                serve = shots._Serve(svc.guest_address)
+                serve = shots._Serve(shots.guest_door(svc))
 
                 def get(address, path):
                     connection = http.client.HTTPConnection(*address, timeout=5)
@@ -747,6 +750,31 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 if serve is not None:
                     serve.close()
                 svc.close()
+
+    def test_the_harness_sends_each_door_its_own_headers(self) -> None:
+        self.assertEqual(shots._guest_headers(("127.0.0.1", 9)), {"Host": shots.TAILNET})
+        self.assertEqual(shots._guest_headers("/tmp/cg-x/g.sock"),
+                         {"Host": "localhost", "X-Forwarded-Host": shots.TAILNET})
+
+    def test_the_harness_opens_the_base_and_the_head_guest_door(self) -> None:
+        def base(store, registry, *, port, guest_port=None, guest_token_path=None, **kwargs):
+            pass
+
+        folder = Path("/tmp/cg-x")
+        self.assertEqual(shots.guest_door_kwargs(base, folder), {"guest_port": 0})
+        self.assertEqual(shots.guest_door_kwargs(service.ConsoleService, folder),
+                         {"guest_socket": folder / "guest" / "guest.sock"})
+        tcp = shots._door_connection(("127.0.0.1", 9), 5)
+        self.assertIsInstance(tcp, http.client.HTTPConnection)
+        self.assertNotIsInstance(tcp, shots._UnixHTTPConnection)
+        self.assertEqual((tcp.host, tcp.port), ("127.0.0.1", 9))
+        self.assertIsInstance(shots._door_connection("/tmp/cg-x/g.sock", 5),
+                              shots._UnixHTTPConnection)
+        self.assertEqual(shots.guest_door(SimpleNamespace(guest_address=("127.0.0.1", 9))),
+                         ("127.0.0.1", 9))
+        self.assertEqual(
+            shots.guest_door(SimpleNamespace(guest_socket="/tmp/g.sock", guest_address=None)),
+            "/tmp/g.sock")
 
     def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
         for present, opens in (({"#sharing-open"}, True), (set(), False)):

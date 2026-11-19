@@ -66,11 +66,11 @@ Wire format, one object:
      "spend": <spend view> | null,
      "sharing": {"tailnet": <name> | null, "colleagues": [{"login", "projects"}, ...],
                  "state": "off" | "unchecked" | "not_proxying" | "serving",
-                 "last_request": <guest-port reading> | null}}
+                 "last_request": <guest-door reading> | null, "socket": <guest socket path> | null}}
 
 `sharing` is the owner's access list for the guest door and its Serve state (#1237,
 `guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
-(`guest.scrub`). `last_request` is the last guest-port request's `guest.reading` (counts and flags,
+(`guest.scrub`). `last_request` is the last guest-door request's `guest.reading` (counts and flags,
 never a login), null before the first one.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
@@ -962,7 +962,7 @@ ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {ne
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
 SHARING_OFF = MappingProxyType({
-    "tailnet": None, "colleagues": [], "state": "off", "last_request": None})
+    "tailnet": None, "colleagues": [], "state": "off", "last_request": None, "socket": None})
 
 
 @dataclass(frozen=True)

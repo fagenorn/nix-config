@@ -60,7 +60,7 @@ SHARED_FRAME = {
     **view([project(1, [])]),
     "recent_projects": ["owner/p00", "owner/p01"],
     "sharing": guest.sharing_entry(
-        ACCESS, "serving", guest.reading(ACCESS, [TAILNET], [STRANGER], [], [])),
+        ACCESS, "serving", guest.reading(ACCESS, ["localhost"], [TAILNET], [STRANGER], [], [])),
 }
 OPEN = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
 SNAP = {"snapshot": True}
@@ -115,10 +115,11 @@ class SharingPanelTest(unittest.TestCase):
         self.assertEqual(people, [(COLLEAGUE, "owner/p01"), (SECOND, "owner/p00, owner/p01")])
         self.assertEqual(
             full(named(body, "share-line")[0]),
-            "Sharing is on: Tailscale Serve sends desk.invented-tailnet.ts.net to the guest port.")
+            "Sharing is on: Tailscale Serve sends desk.invented-tailnet.ts.net to the guest door.")
         self.assertEqual(
             full(named(body, "share-last")[0]),
-            "Last request on the guest port: Host desk.invented-tailnet.ts.net, a login header, "
+            "Last request on the guest door: Host localhost, forwarded Host "
+            "desk.invented-tailnet.ts.net, a login header, "
             "refused because that login is not on the list.")
         self.assertNotIn(STRANGER, full(body))
         self.assertEqual([full(n) for n in named(body, "share-project")],
@@ -134,11 +135,11 @@ class SharingPanelTest(unittest.TestCase):
             ("off", None, "Sharing is off: no tailnet name is set."),
             ("unchecked", TAILNET,
              f"Sharing is on at {TAILNET}, but the console cannot tell whether Tailscale Serve "
-             "is set up for the guest port."),
+             "is set up for the guest door."),
             ("not_proxying", TAILNET,
-             f"Sharing is on at {TAILNET}, but Tailscale Serve is not set up for the guest port."),
+             f"Sharing is on at {TAILNET}, but Tailscale Serve is not set up for the guest door."),
             ("serving", TAILNET,
-             f"Sharing is on: Tailscale Serve sends {TAILNET} to the guest port."),
+             f"Sharing is on: Tailscale Serve sends {TAILNET} to the guest door."),
         ]
         steps = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
         for state, tailnet, _ in lines:
@@ -146,21 +147,33 @@ class SharingPanelTest(unittest.TestCase):
         for snap, (state, _, text) in zip(harness(steps), lines):
             with self.subTest(state=state):
                 self.assertEqual(full(named(snap["sharing_body"], "share-line")[0]), text)
-        last = "Last request on the guest port: "
+        last = "Last request on the guest door: "
+        why_host = "refused because the Host is not localhost or the forwarded Host is not the tailnet name."
+        why_login = "refused because it had not exactly one login header."
+        local = ["localhost"]
         readings = [
-            (guest.reading(ACCESS, [], [], [], []),
-             last + "no Host, no login header, refused because the Host is not the tailnet name."),
-            (guest.reading(ACCESS, [TAILNET], [COLLEAGUE, SECOND], [], []),
-             last + f"Host {TAILNET}, 2 login headers, refused because it had not exactly one login header."),
-            (guest.reading(ACCESS, [TAILNET], [], [], []),
-             last + f"Host {TAILNET}, no login header, refused because it had not exactly one login header."),
-            (guest.reading(ACCESS, [TAILNET], [STRANGER], [], []),
-             last + f"Host {TAILNET}, a login header, refused because that login is not on the list."),
-            (guest.reading(ACCESS, [TAILNET], [COLLEAGUE], [], []),
-             last + f"Host {TAILNET}, a login header, admitted."),
-            (guest.reading(guest.NO_ACCESS, [TAILNET], [COLLEAGUE], [], []),
-             last + f"Host {TAILNET}, a login header, refused because sharing is off."),
-            (None, "No request has come to the guest port yet."),
+            (guest.reading(ACCESS, [], [], [], [], []),
+             last + "no Host, no forwarded Host, no login header, " + why_host),
+            (guest.reading(ACCESS, [TAILNET], [TAILNET], [COLLEAGUE], [], []),
+             last + f"Host {TAILNET}, forwarded Host {TAILNET}, a login header, " + why_host),
+            (guest.reading(ACCESS, local, [TAILNET, TAILNET], [COLLEAGUE], [], []),
+             last + "Host localhost, 2 forwarded Host headers, a login header, " + why_host),
+            (guest.reading(ACCESS, local, ["a" * 300], [COLLEAGUE], [], []),
+             last + "Host localhost, a forwarded Host the console does not keep, "
+                    "a login header, " + why_host),
+            (guest.reading(ACCESS, local, [TAILNET], [COLLEAGUE, SECOND], [], []),
+             last + f"Host localhost, forwarded Host {TAILNET}, 2 login headers, " + why_login),
+            (guest.reading(ACCESS, local, [TAILNET], [], [], []),
+             last + f"Host localhost, forwarded Host {TAILNET}, no login header, " + why_login),
+            (guest.reading(ACCESS, local, [TAILNET], [STRANGER], [], []),
+             last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
+                    "refused because that login is not on the list."),
+            (guest.reading(ACCESS, local, [TAILNET], [COLLEAGUE], [], []),
+             last + f"Host localhost, forwarded Host {TAILNET}, a login header, admitted."),
+            (guest.reading(guest.NO_ACCESS, local, [TAILNET], [COLLEAGUE], [], []),
+             last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
+                    "refused because sharing is off."),
+            (None, "No request has come to the guest door yet."),
         ]
         steps = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
         for reading, _ in readings:

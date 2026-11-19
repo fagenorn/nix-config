@@ -10,7 +10,7 @@ Console covers the local pages, the desk page that tells the owner whether they 
 ## Language
 
 **Console**:
-The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` from a process of the owner's own user reaches the owner's port (ADR-console-076), and a named colleague reaches it only through Tailscale Serve on a guest port (ADR-console-066).
+The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` from a process of the owner's own user reaches the owner's port (ADR-console-076), and a named colleague reaches it only through Tailscale Serve on a guest socket of its own (ADR-console-066, ADR-console-077).
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
@@ -34,7 +34,7 @@ A registered project with no open work, no live session and no open sprint. It r
 _Avoid_: dormant project, idle project
 
 **Guest**:
-A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest port of its own (on eleven-m5 a Unix socket only Serve and the owner can open, decided in ADR-console-077 and not yet built: until its slice lands the console still binds a loopback TCP port) and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); the guest page is the desk page read-only.
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077) and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); the guest page is the desk page read-only.
 _Avoid_: user, viewer
 
 **Goal**:

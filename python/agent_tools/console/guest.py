@@ -1,7 +1,7 @@
 """The guest door's policy (#1237): the access list, admission, scoping, the owner-port rule and the probe.
 
-A guest is a listed colleague who reaches the console through Tailscale Serve on the console's
-guest port (ADR-console-066). This module holds the pure rules only; `service.py` documents the
+A guest is a listed colleague who reaches the console through Tailscale Serve, which proxies to the
+console's guest socket (ADR-console-066, ADR-console-077). This module holds the pure rules only; `service.py` documents the
 routes and applies them. It uses the standard library alone.
 
 The access list is kept in the event log as three kinds (`event_log` records them and keeps the
@@ -13,19 +13,33 @@ payload that is not a valid name turns sharing off; a colleague row whose login 
 normal form (lowercase) or whose projects are not a non-empty list of non-empty strings removes
 that login (fail closed); a row whose login is not a string is ignored.
 
-`admit(access, hosts, logins)` returns `(login, None)` for an admitted request and `(None, text)`
-for a refused one. The checks run in this order: sharing is off (`SHARING_OFF_TEXT`); the request
-carries exactly one `Host` that, lowercased, is the configured tailnet name exactly, port
-included (`HOST_TEXT`); it carries exactly one login header (`LOGIN_HEADER`) whose normal form is
-a listed colleague (`NOT_SHARED_TEXT`). No text names a project or echoes a login or a host.
+`admit(access, hosts, forwarded_hosts, logins)` returns `(login, None)` for an admitted request and
+`(None, text)` for a refused one (ADR-console-077 D4). The checks run in this order: sharing is off
+(`SHARING_OFF_TEXT`); the request carries exactly one `Host` that, lowercased, is `LOCAL_HOST`
+(`localhost`, no port) and exactly one `X-Forwarded-Host` (`FORWARDED_HOST_HEADER`) that, lowercased,
+is the configured tailnet name exactly, with no port form (`HOST_TEXT`); it carries exactly one login
+header (`LOGIN_HEADER`) whose normal form is a listed colleague (`NOT_SHARED_TEXT`). No text names a
+project or echoes a login or a host.
 Each text is answered as `403 text/plain` with a trailing newline.
+
+The guest door is a Unix socket (ADR-console-077). `door_refusal(folder, sock, owner_uid)` takes the
+`os.lstat` of the socket's folder and of the socket (None when absent) and returns None only when the
+folder is a directory and the socket a socket, both the owner's, the folder with no mode bit outside
+`FOLDER_MODE` (0700) and the socket none outside `SOCKET_MODE` (0600); a narrower mode is not wider,
+and an execute bit on the socket, setuid, setgid or sticky is. Anything else is `DOOR_WIDER`. It
+reads the two stat results only. On macOS an ACL is kept beside the mode bits and can grant another
+account a folder whose mode is 0700, so `acl_grants(path)` (`acl_reader_for(sys.platform)`; None
+elsewhere, where the group bits already hold an ACL's mask) is True when the path itself, never what
+a symlink names, carries an allow entry; a deny-only ACL grants nothing. It raises `OSError` when the
+ACL cannot be read, which the service treats as a grant.
 
 The owner's port refuses a request that carries any header whose name, lowercased, starts with
 `tailscale-` or is `x-forwarded-for` (`owner_port_refusal`, `OWNER_PORT_TEXT`): a request through
 Serve must never reach the owner's port, and a forged header gains a local process nothing.
 
 `whoami` is the probe's answer (`PROBE_HEADER` carries a forged login the probe sends to learn
-whether Serve strips it): counts and flags only, never the login values.
+whether Serve strips it): the `Host` and the forwarded host it saw (each only when exactly one
+arrived), how many of each arrived, and counts and flags only for the logins, never their values.
 
 A guest sees a scoped copy of the owner's view (`scoped`, `scrub`). `scoped(inputs, projects)`
 takes the keyword inputs of `view.derive_view` and a guest's project ids and returns inputs that
@@ -42,27 +56,30 @@ registration members, the digest, the activation line, the spend view and the ca
 stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
 finds in that guest's scoped view.
 
-`reading(access, hosts, logins, forwarded, probes)` is what one guest-port request showed, for the
-owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if not, the
-`REASON_CODES` code (`sharing_off`, `host`, `not_shared`); how many `Host` and login headers arrived;
-the `Host` itself only when exactly one arrived and it is a hostname of letters, digits, dots and
-hyphens with an optional port (so an `@` or a long value is never kept), and its `host_form`
-(`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`, `other`, `none`); whether
+`reading(access, hosts, forwarded_hosts, logins, forwarded, probes)` is what one guest-door request
+showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if
+not, the `REASON_CODES` code (`sharing_off`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
+and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
+it is a hostname of letters, digits, dots and hyphens with an optional port (so an `@` or a long
+value is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
+`forwarded_host_form` (`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`,
+`other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
 `probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said); `login_valid`
 (at least one login header arrived and every one is a well-formed login, so a combined value such as
 two logins joined by a comma is false). No member is
 ever a login or a probe value. It does not change admission, and `whoami` is unchanged.
 
-`sharing_entry(access, state, last_request)` is the owner's `sharing` view member; `last_request` is
-the latest `reading` or None. `state` is one of
+`sharing_entry(access, state, last_request, socket)` is the owner's `sharing` view member; `last_request` is
+the latest `reading` or None and `socket` the bound guest socket path or None. `state` is one of
 `SERVE_STATES`: `off` (no tailnet is configured), `unchecked` (the Serve status was not read),
-`not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest port) and
-`serving`. `serve_state(status, tailnet, guest_port)` reads the parsed `tailscale serve status
+`not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest socket) and
+`serving`. `serve_state(status, tailnet, guest_socket)` reads the parsed `tailscale serve status
 --json` ServeConfig, `{"Web": {"<tailnet>:443": {"Handlers": {"/": {"Proxy":
-"http://127.0.0.1:<guest port>"}}}}}`, and treats any other shape as not proxying.
+"unix:<guest socket>"}}}}}`, and treats any other shape, or a proxy that is not exactly
+`unix:` plus the bound socket path, as not proxying.
 
-`serve_reader(path)` is the reader of that status: a callable that runs the Windows Tailscale client
+`serve_reader(path)` is the reader of that status: a callable that runs this host's Tailscale client
 at `path` as `serve status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns
 the parsed JSON, or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it
 never raises.
@@ -73,8 +90,12 @@ JSON (a duplicate key, a non-object or an extra or missing key is refused) and r
 the service, which raises `Refused` for a write refused on its merits.
 """
 
+import ctypes
+import errno
 import json
+import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -97,23 +118,30 @@ FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliver
                              "pending", "movement", "owner_notices"})
 SERVE_TIMEOUT_SECONDS = 15.0
 SERVE_STATES = ("off", "unchecked", "not_proxying", "serving")
+DOOR_WIDER = "door_wider"
+FOLDER_MODE = 0o700
+SOCKET_MODE = 0o600
 
 LOGIN_HEADER = "Tailscale-User-Login"
 PROBE_HEADER = "X-Console-Probe"
 PROBE_LOGIN = "forged-probe@example.invalid"
+
+LOCAL_HOST = "localhost"
+FORWARDED_HOST_HEADER = "X-Forwarded-Host"
 
 SHARING_OFF_TEXT = "Sharing is off on this console."
 HOST_TEXT = "This console is shared only at its tailnet name."
 NOT_SHARED_TEXT = "This console is not shared with you. Ask its owner to add your Tailscale login."
 OWNER_ONLY_TEXT = "Only the console's owner can do that."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
-                   "Point Tailscale Serve at the console's guest port.")
+                   "Point Tailscale Serve at the console's guest socket.")
 
 HOST_FORMS = ("exact", "with_port", "other", "none")
 REASON_CODES: Mapping[str, str] = MappingProxyType({
     SHARING_OFF_TEXT: "sharing_off", HOST_TEXT: "host", NOT_SHARED_TEXT: "not_shared"})
-READING_MEMBERS = ("admitted", "forwarded_for", "host", "host_form", "hosts", "login_headers",
-                   "login_valid", "probe", "probe_login_arrived", "reason")
+READING_MEMBERS = ("admitted", "forwarded_for", "forwarded_host", "forwarded_host_form",
+                   "forwarded_hosts", "host", "host_local", "hosts", "login_headers", "login_valid",
+                   "probe", "probe_login_arrived", "reason")
 
 TAILNET_MAX = 253
 LOGIN_MAX = 254
@@ -223,11 +251,13 @@ def parse_removal(body: bytes) -> str:
     return _login(_object(body, {"login"})["login"])
 
 
-def admit(access: Access, hosts: Sequence[str],
+def admit(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
           logins: Sequence[str]) -> tuple[str | None, str | None]:
     if access.tailnet is None:
         return None, SHARING_OFF_TEXT
-    if len(hosts) != 1 or hosts[0].lower() != access.tailnet:
+    if len(hosts) != 1 or hosts[0].lower() != LOCAL_HOST:
+        return None, HOST_TEXT
+    if len(forwarded_hosts) != 1 or forwarded_hosts[0].lower() != access.tailnet:
         return None, HOST_TEXT
     if len(logins) != 1:
         return None, NOT_SHARED_TEXT
@@ -237,11 +267,12 @@ def admit(access: Access, hosts: Sequence[str],
     return login, None
 
 
-def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
-            forwarded: Sequence[str], probes: Sequence[str]) -> dict:
-    """What one guest-port request showed, for the owner's `sharing.last_request`; never a login."""
-    _, text = admit(access, hosts, logins)
-    one = hosts[0] if len(hosts) == 1 else None
+def reading(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
+            logins: Sequence[str], forwarded: Sequence[str], probes: Sequence[str]) -> dict:
+    """What one guest-door request showed, for the owner's `sharing.last_request`; never a login."""
+    _, text = admit(access, hosts, forwarded_hosts, logins)
+    host = hosts[0] if len(hosts) == 1 else None
+    one = forwarded_hosts[0] if len(forwarded_hosts) == 1 else None
     if one is None:
         form = "none"
     elif access.tailnet is not None and one.lower() == access.tailnet:
@@ -252,8 +283,11 @@ def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
         form = "other"
     return {"admitted": text is None,
             "forwarded_for": bool(forwarded),
-            "host": one if one is not None and _HOST.fullmatch(one) else None,
-            "host_form": form,
+            "forwarded_host": one if one is not None and _HOST.fullmatch(one) else None,
+            "forwarded_host_form": form,
+            "forwarded_hosts": len(forwarded_hosts),
+            "host": host if host is not None and _HOST.fullmatch(host) else None,
+            "host_local": host is not None and host.lower() == LOCAL_HOST,
             "hosts": len(hosts),
             "login_headers": len(logins),
             "login_valid": bool(logins) and all(normal_login(value) is not None for value in logins),
@@ -270,10 +304,12 @@ def owner_port_refusal(names: Iterable[str]) -> str | None:
     return None
 
 
-def whoami(hosts: Sequence[str], logins: Sequence[str], forwarded: Sequence[str],
-           probes: Sequence[str]) -> dict:
+def whoami(hosts: Sequence[str], forwarded_hosts: Sequence[str], logins: Sequence[str],
+           forwarded: Sequence[str], probes: Sequence[str]) -> dict:
     return {"host": hosts[0] if len(hosts) == 1 else None,
             "hosts": len(hosts),
+            "forwarded_host": forwarded_hosts[0] if len(forwarded_hosts) == 1 else None,
+            "forwarded_hosts": len(forwarded_hosts),
             "login_headers": len(logins),
             "forwarded_for": bool(forwarded),
             "probe_login_arrived": len(probes) == 1 and probes[0] in logins}
@@ -341,7 +377,58 @@ def picture_ids(view: object) -> frozenset[str]:
     return frozenset(found)
 
 
-def serve_state(status: object, tailnet: str | None, guest_port: int | None) -> str:
+def door_refusal(folder: os.stat_result | None, sock: os.stat_result | None,
+                 owner_uid: int) -> str | None:
+    if (folder is not None and stat.S_ISDIR(folder.st_mode) and folder.st_uid == owner_uid
+            and stat.S_IMODE(folder.st_mode) & ~FOLDER_MODE == 0
+            and sock is not None and stat.S_ISSOCK(sock.st_mode) and sock.st_uid == owner_uid
+            and stat.S_IMODE(sock.st_mode) & ~SOCKET_MODE == 0):
+        return None
+    return DOOR_WIDER
+
+
+ACL_TYPE_EXTENDED = 0x100
+ACL_FIRST_ENTRY, ACL_NEXT_ENTRY = 0, -1
+ACL_EXTENDED_ALLOW = 1
+
+
+def acl_grants(path: str) -> bool:
+    """Whether the macOS ACL of `path` (not what a symlink names) has an allow entry."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.acl_get_link_np.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    libc.acl_get_link_np.restype = ctypes.c_void_p
+    libc.acl_get_entry.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+    libc.acl_get_entry.restype = ctypes.c_int
+    libc.acl_get_tag_type.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    libc.acl_get_tag_type.restype = ctypes.c_int
+    libc.acl_free.argtypes = [ctypes.c_void_p]
+    libc.acl_free.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = libc.acl_get_link_np(os.fsencode(path), ACL_TYPE_EXTENDED)
+    if not acl:
+        code = ctypes.get_errno()
+        if code in (0, errno.ENOENT):
+            return False
+        raise OSError(code, os.strerror(code), path)
+    try:
+        entry, which = ctypes.c_void_p(), ACL_FIRST_ENTRY
+        while libc.acl_get_entry(acl, which, ctypes.byref(entry)) == 0:
+            which = ACL_NEXT_ENTRY
+            tag = ctypes.c_int()
+            if libc.acl_get_tag_type(entry, ctypes.byref(tag)) != 0:
+                raise OSError(errno.EIO, "an ACL entry has no readable tag", path)
+            if tag.value == ACL_EXTENDED_ALLOW:
+                return True
+        return False
+    finally:
+        libc.acl_free(acl)
+
+
+def acl_reader_for(platform: str) -> Callable[[str], bool] | None:
+    return acl_grants if platform == "darwin" else None
+
+
+def serve_state(status: object, tailnet: str | None, guest_socket: str | None) -> str:
     if tailnet is None:
         return "off"
     if status is None:
@@ -349,8 +436,7 @@ def serve_state(status: object, tailnet: str | None, guest_port: int | None) -> 
     node: object = status
     for step in ("Web", f"{tailnet}:443", "Handlers", "/", "Proxy"):
         node = node.get(step) if isinstance(node, Mapping) else None
-    if (isinstance(guest_port, int) and not isinstance(guest_port, bool)
-            and node in (f"http://127.0.0.1:{guest_port}", f"http://localhost:{guest_port}")):
+    if isinstance(guest_socket, str) and guest_socket and node == "unix:" + guest_socket:
         return "serving"
     return "not_proxying"
 
@@ -370,9 +456,11 @@ def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = su
     return read
 
 
-def sharing_entry(access: Access, state: str, last_request: Mapping | None = None) -> dict:
+def sharing_entry(access: Access, state: str, last_request: Mapping | None = None,
+                  socket: str | None = None) -> dict:
     return {"tailnet": access.tailnet,
             "colleagues": [{"login": login, "projects": sorted(access.colleagues[login])}
                            for login in sorted(access.colleagues)],
             "state": state,
-            "last_request": last_request}
+            "last_request": last_request,
+            "socket": socket}

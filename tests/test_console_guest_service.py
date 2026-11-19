@@ -4,23 +4,30 @@ Run: just agent-workflow-tests
 """
 import ast
 import contextlib
+import errno
+import fcntl
 import http.client
 import inspect
 import io
 import json
 import os
 import queue
+import shutil
 import signal
 import socket
+import socketserver
+import stat
 import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, guest, serve_probe_check, service, write_guard
+from agent_tools.console import console, guest, peer, serve_probe_check, service, write_guard
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
     SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
@@ -126,6 +133,7 @@ class GuestCase(unittest.TestCase):
         self.root = Path(tmp.name)
         self.store = self.root / "state/console/events.sqlite3"
         self.registry = self.root / "state/fleet/registry.json"
+        self.guest_socket = support.guest_socket_path(self)
 
     def seed(self, tailnet=TAILNET, colleagues=None):
         colleagues = {COLLEAGUE: ["owner/p01"]} if colleagues is None else colleagues
@@ -141,14 +149,19 @@ class GuestCase(unittest.TestCase):
 
     def start(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
-        return support.service(self, self.store, self.registry, guest_port=0, **kwargs)
+        return support.service(
+            self, self.store, self.registry, guest_socket=self.guest_socket, **kwargs)
 
-    def request(self, address, method, path, host, logins, headers, length):
-        connection = http.client.HTTPConnection(*address, timeout=5)
+    def request(self, address, method, path, host, logins, headers, length, forwarded_host=None):
+        connection = (support.UnixHTTPConnection(address) if isinstance(address, str)
+                      else http.client.HTTPConnection(*address, timeout=5))
         try:
             connection.putrequest(method, path, skip_host=True)
             if host is not None:
                 connection.putheader("Host", host)
+            for name in ([] if forwarded_host is None else [forwarded_host]
+                         if isinstance(forwarded_host, str) else forwarded_host):
+                connection.putheader("X-Forwarded-Host", name)
             for login in logins:
                 connection.putheader("Tailscale-User-Login", login)
             for name, value in (headers or {}).items():
@@ -162,9 +175,10 @@ class GuestCase(unittest.TestCase):
         finally:
             connection.close()
 
-    def guest(self, svc, method, path, host=TAILNET, logins=(COLLEAGUE,), headers=None,
-              length=None):
-        return self.request(svc.guest_address, method, path, host, logins, headers, length)
+    def guest(self, svc, method, path, host="localhost", forwarded_host=TAILNET,
+              logins=(COLLEAGUE,), headers=None, length=None):
+        return self.request(svc.guest_socket, method, path, host, logins, headers, length,
+                            forwarded_host)
 
     def owner(self, svc, method, path, headers=None, length=None):
         return self.request(svc.address, method, path, f"{svc.address[0]}:{svc.address[1]}",
@@ -183,11 +197,22 @@ class GuestCase(unittest.TestCase):
         self.assertEqual(self.without_reading(svc.view_bytes), view)
         return result
 
+    def silent(self, svc):
+        """What a raw client that sends nothing reads from the guest door: b"" when it is refused."""
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(svc.guest_socket)
+            return sock.recv(1)
+
+    def last_request(self, svc):
+        return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["last_request"]
+
     def open_stream(self, svc):
-        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
+        connection = support.UnixHTTPConnection(svc.guest_socket)
         self.addCleanup(connection.close)
         connection.putrequest("GET", "/api/stream", skip_host=True)
-        connection.putheader("Host", TAILNET)
+        connection.putheader("Host", "localhost")
+        connection.putheader("X-Forwarded-Host", TAILNET)
         connection.putheader("Tailscale-User-Login", COLLEAGUE)
         connection.endheaders()
         response = connection.getresponse()
@@ -288,13 +313,7 @@ class RouteTableTest(GuestCase):
         status, headers, body = self.guest(svc, "GET", "/api/state")
         self.assertEqual((status, headers["Content-Type"]), (200, "application/json"))
         self.assertNotIn("sharing", json.loads(body))
-        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
-        self.addCleanup(connection.close)
-        connection.putrequest("GET", "/api/stream", skip_host=True)
-        connection.putheader("Host", TAILNET)
-        connection.putheader("Tailscale-User-Login", COLLEAGUE)
-        connection.endheaders()
-        response = connection.getresponse()
+        response = self.open_stream(svc)
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
         self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
@@ -329,20 +348,41 @@ class AdmissionTest(GuestCase):
                     svc = self.start()
                     for route in sorted(service.ROUTES - {service.WHOAMI_PATH}):
                         status, _, body = self.unchanged(
-                            svc, lambda: self.guest(svc, "GET", route, host=host, logins=logins))
+                            svc, lambda: self.guest(
+                                svc, "GET", route, forwarded_host=host, logins=logins))
                         self.assertEqual((route, status, body), (route, 403, text.encode() + b"\n"))
                         for marker in (b"owner/p0", b"/srv/p0", COLLEAGUE.encode(),
                                        STRANGER.encode()):
                             self.assertNotIn(marker, body)
                     svc.close()
 
+    def test_the_tailnet_name_is_read_from_one_forwarded_host(self):
+        self.seed()
+        svc = self.start()
+        self.assertEqual(self.guest(svc, "GET", "/api/state")[0], 200)
+        rows = (
+            {"host": TAILNET},
+            {"host": "localhost:80"},
+            {"forwarded_host": None},
+            {"forwarded_host": [TAILNET, TAILNET]},
+            {"forwarded_host": TAILNET + ":443"},
+            {"forwarded_host": OTHER_HOST},
+        )
+        for change in rows:
+            with self.subTest(change=change):
+                status, _, body = self.unchanged(
+                    svc, lambda: self.guest(svc, "GET", "/api/state", **change))
+                self.assertEqual((status, body), (403, guest.HOST_TEXT.encode() + b"\n"))
+        svc.close()
+
     def test_whoami_answers_any_request(self):
         svc = self.start()
-        status, _, body = self.guest(svc, "GET", "/api/whoami", host=OTHER_HOST, logins=())
+        status, _, body = self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST,
+                                     logins=())
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {
-            "forwarded_for": False, "host": OTHER_HOST, "hosts": 1, "login_headers": 0,
-            "probe_login_arrived": False})
+            "forwarded_for": False, "forwarded_host": OTHER_HOST, "forwarded_hosts": 1,
+            "host": "localhost", "hosts": 1, "login_headers": 0, "probe_login_arrived": False})
         svc.close()
         self.seed()
         svc = self.start()
@@ -425,13 +465,7 @@ class ScopedReadTest(GuestCase):
         self.assertNotEqual(p0, p1)
         status, _, state = self.guest(svc, "GET", "/api/state")
         self.assertEqual(status, 200)
-        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
-        self.addCleanup(connection.close)
-        connection.putrequest("GET", "/api/stream", skip_host=True)
-        connection.putheader("Host", TAILNET)
-        connection.putheader("Tailscale-User-Login", COLLEAGUE)
-        connection.endheaders()
-        frame = next_frame(connection.getresponse())
+        frame = next_frame(self.open_stream(svc))
         for name, text in (("state", state), ("frame", frame)):
             for marker in ("owner/p00", "/srv/p00", "other-goal-zq7", "other-notice-zq6", p0,
                            "work-zq5", COLLEAGUE, TAILNET, '"sharing"'):
@@ -455,36 +489,374 @@ class ScopedReadTest(GuestCase):
 
 
 class DoorTest(GuestCase):
-    def test_without_a_guest_port_there_is_no_door(self):
+    def test_the_guest_door_is_a_socket_in_a_private_folder(self):
+        self.seed()
+        binds = []
+        real = socketserver.TCPServer.server_bind
+
+        def spy(server):
+            binds.append(server.address_family)
+            return real(server)
+
+        with mock.patch.object(socketserver.TCPServer, "server_bind", spy):
+            svc = self.start()
+        self.assertEqual(binds, [socket.AF_INET, socket.AF_UNIX])
+        self.assertEqual(svc.guest_socket, str(self.guest_socket))
+        made = os.lstat(self.guest_socket)
+        self.assertTrue(stat.S_ISSOCK(made.st_mode))
+        self.assertEqual(made.st_uid, os.geteuid())
+        self.assertEqual(stat.S_IMODE(made.st_mode), 0o600)
+        folder = os.lstat(self.guest_socket.parent)
+        self.assertTrue(stat.S_ISDIR(folder.st_mode))
+        self.assertEqual(folder.st_uid, os.geteuid())
+        self.assertEqual(stat.S_IMODE(folder.st_mode), 0o700)
+        mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
+        self.assertEqual(mine["sharing"]["socket"], str(self.guest_socket))
+        self.assertNotIn("guest_port", inspect.signature(service.ConsoleService).parameters)
+        self.assertFalse(hasattr(service, "DEFAULT_GUEST_PORT"))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            console.build_parser().parse_args(["--guest-port", "0"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+        svc.close()
+        self.assertFalse(os.path.lexists(self.guest_socket))
+
+    def test_a_first_start_makes_the_console_state_folder_private(self):
+        root = Path(tempfile.mkdtemp(prefix="cg-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, root, True)
+        store = root / "state/console/events.sqlite3"
+        sock = store.with_name("guest") / "guest.sock"
+        support.write_registry(root / "state/fleet/registry.json", support.entries(2))
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        support.service(self, store, root / "state/fleet/registry.json", guest_socket=sock)
+        self.assertEqual(stat.S_IMODE(os.lstat(root / "state/console").st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.lstat(sock.parent).st_mode), 0o700)
+
+    def test_an_existing_folder_is_tightened_and_a_stale_socket_replaced(self):
+        folder = self.guest_socket.parent
+        folder.mkdir(mode=0o755)
+        os.chmod(folder, 0o755)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(str(self.guest_socket))
+        stale.close()
+        self.assertTrue(stat.S_ISSOCK(os.lstat(self.guest_socket).st_mode))
+        self.seed()
+        svc = self.start()
+        self.assertEqual(stat.S_IMODE(os.lstat(folder).st_mode), 0o700)
+        self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+
+    def test_a_folder_or_file_that_is_not_the_door_is_a_start_error(self):
+        support.write_registry(self.registry, support.entries(2))
+
+        def symlinked_folder(path):
+            real = path.parent.with_name("real")
+            real.mkdir(mode=0o700)
+            os.symlink(real, path.parent)
+
+        def file_folder(path):
+            path.parent.write_text("not a folder")
+
+        def file_socket(path):
+            path.parent.mkdir(mode=0o700)
+            path.write_text("not a socket")
+
+        for name, make in (("a symlinked folder", symlinked_folder),
+                           ("a file for a folder", file_folder),
+                           ("a file for the socket", file_socket)):
+            with self.subTest(row=name):
+                path = support.guest_socket_path(self)
+                make(path)
+                with self.assertRaises(service.GuestSocketError) as raised:
+                    service.ConsoleService(
+                        self.store, self.registry, port=0, guest_socket=path,
+                        peer_reader=support.OWNER_PEER)
+                self.assertEqual(raised.exception.path, str(path))
+                if name == "a file for the socket":
+                    self.assertEqual(raised.exception.errno, errno.EEXIST)
+                    self.assertTrue(path.is_file())
+
+    def test_a_second_console_leaves_the_running_door_alone(self):
+        self.seed()
+        svc = self.start()
+        ino = os.lstat(self.guest_socket).st_ino
+        with self.assertRaises(service.GuestSocketError) as raised:
+            service.ConsoleService(
+                self.root / "second/console/events.sqlite3", self.registry, port=0,
+                guest_socket=self.guest_socket, peer_reader=support.OWNER_PEER)
+        self.assertEqual(raised.exception.errno, errno.EADDRINUSE)
+        self.assertEqual(raised.exception.path, str(self.guest_socket))
+        made = os.lstat(self.guest_socket)
+        self.assertTrue(stat.S_ISSOCK(made.st_mode))
+        self.assertEqual(made.st_ino, ino)
+        self.assertIsNone(self.last_request(svc))
+        self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+
+    def test_a_failure_after_bind_leaves_no_socket_file(self):
+        self.seed()
+        real = os.chmod
+
+        def chmod(path, mode, *args, **kwargs):
+            if os.fspath(path) == str(self.guest_socket):
+                raise PermissionError(errno.EPERM, "chmod refused")
+            return real(path, mode, *args, **kwargs)
+
+        with mock.patch.object(os, "chmod", chmod), self.assertRaises(service.GuestSocketError):
+            self.start()
+        self.assertFalse(os.path.lexists(self.guest_socket))
+
+    def test_close_removes_only_the_socket_it_bound(self):
+        self.seed()
+        svc = self.start()
+        other = self.guest_socket.with_name("other.sock")
+        replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        replacement.bind(str(other))
+        replacement.close()
+        os.replace(other, self.guest_socket)
+        ino = os.lstat(self.guest_socket).st_ino
+        svc.close()
+        self.assertEqual(os.lstat(self.guest_socket).st_ino, ino)
+
+    def test_close_removes_its_socket_only_while_holding_the_path_lock(self):
+        self.seed()
+        svc = self.start()
+        lock = os.open(str(self.guest_socket) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        closer = threading.Thread(target=svc.close)
+        closer.start()
+        closer.join(0.5)
+        try:
+            self.assertTrue(closer.is_alive())
+            self.assertTrue(os.path.lexists(self.guest_socket))
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            closer.join(10)
+        self.assertFalse(closer.is_alive())
+        self.assertFalse(os.path.lexists(self.guest_socket))
+
+    def test_a_replaced_socket_path_refuses_the_listener_it_no_longer_names(self):
+        self.seed()
+        svc = self.start()
+        alias = self.guest_socket.with_name("alias.sock")
+        os.rename(self.guest_socket, alias)
+        decoy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(decoy.close)
+        decoy.bind(str(self.guest_socket))
+        os.chmod(self.guest_socket, 0o600)
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
+            with self.assertRaises((http.client.RemoteDisconnected, ConnectionError)):
+                self.request(str(alias), "GET", "/api/whoami", "localhost", (COLLEAGUE,), None,
+                             None, TAILNET)
+        self.assertEqual(captured.getvalue(), "console: guest_refused door_wider\n")
+        self.assertIsNone(self.last_request(svc))
+
+    def test_a_second_console_waits_for_the_first_to_listen_before_judging_the_file(self):
+        self.seed()
+        support.write_registry(self.registry, support.entries(2))
+        bound, release = threading.Event(), threading.Event()
+        real, calls = service.GuestServer.server_activate, []
+
+        def slow_activate(server):
+            calls.append(server)
+            if len(calls) == 1:
+                bound.set()
+                release.wait(10)
+            return real(server)
+
+        outcome = {}
+
+        def second():
+            try:
+                outcome["svc"] = service.ConsoleService(
+                    self.root / "second/console/events.sqlite3", self.registry, port=0,
+                    guest_socket=self.guest_socket, peer_reader=support.OWNER_PEER)
+            except OSError as error:
+                outcome["error"] = error
+
+        def first():
+            outcome["first"] = service.ConsoleService(
+                self.store, self.registry, port=0, guest_socket=self.guest_socket,
+                peer_reader=support.OWNER_PEER)
+
+        with mock.patch.object(service.GuestServer, "server_activate", slow_activate):
+            opener = threading.Thread(target=first)
+            opener.start()
+            self.assertTrue(bound.wait(10))
+            ino = os.lstat(self.guest_socket).st_ino
+            rival = threading.Thread(target=second)
+            rival.start()
+            rival.join(0.5)
+            release.set()
+            opener.join(10)
+            rival.join(10)
+        self.addCleanup(outcome["first"].close)
+        outcome["first"].start()
+        self.assertIsInstance(outcome.get("error"), service.GuestSocketError)
+        self.assertEqual(outcome["error"].errno, errno.EADDRINUSE)
+        self.assertEqual(os.lstat(self.guest_socket).st_ino, ino)
+        self.assertEqual(self.guest(outcome["first"], "GET", "/api/whoami")[0], 200)
+
+    def test_an_acl_grant_on_the_folder_or_the_socket_is_not_a_private_door(self):
+        self.seed()
+        granted, broken = set(), []
+
+        def reader(path):
+            if broken:
+                raise OSError(errno.EACCES, "unreadable")
+            return path in granted
+
+        svc = self.start(guest_acl_reader=reader)
+        self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            for target in (self.guest_socket.parent, self.guest_socket):
+                granted.add(str(target))
+                self.assertEqual(self.silent(svc), b"")
+                granted.clear()
+                self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+            broken.append(True)
+            self.assertEqual(self.silent(svc), b"")
+        self.assertEqual(captured.getvalue().splitlines(), ["console: guest_refused door_wider"] * 3)
+
+    def test_a_folder_that_grants_by_acl_is_a_start_error(self):
+        support.write_registry(self.registry, support.entries(2))
+        with self.assertRaises(service.GuestSocketError) as raised:
+            service.ConsoleService(
+                self.store, self.registry, port=0, guest_socket=self.guest_socket,
+                peer_reader=support.OWNER_PEER, guest_acl_reader=lambda path: True)
+        self.assertEqual(raised.exception.errno, errno.EPERM)
+        self.assertFalse(os.path.lexists(self.guest_socket))
+
+    def test_a_relative_socket_path_touches_nothing(self):
+        support.write_registry(self.registry, support.entries(2))
+        work = self.root / "cwd"
+        work.mkdir(mode=0o755)
+        os.chmod(work, 0o755)
+        before = os.getcwd()
+        os.chdir(work)
+        self.addCleanup(os.chdir, before)
+        for relative in (Path("guest.sock"), Path("sub/guest.sock")):
+            with self.subTest(path=str(relative)):
+                with self.assertRaises(service.GuestSocketError) as raised:
+                    service.ConsoleService(
+                        self.store, self.registry, port=0, guest_socket=relative,
+                        peer_reader=support.OWNER_PEER)
+                self.assertEqual(raised.exception.errno, errno.EINVAL)
+                self.assertEqual(raised.exception.path, str(relative))
+                self.assertEqual(stat.S_IMODE(os.lstat(work).st_mode), 0o755)
+                self.assertEqual(os.listdir(work), [])
+        self.assertFalse(self.store.parent.exists())
+
+    def test_without_a_guest_socket_there_is_no_door(self):
         support.write_registry(self.registry, support.entries(2))
         svc = support.service(self, self.store, self.registry)
-        self.assertIsNone(svc.guest_address)
+        self.assertIsNone(svc.guest_socket)
         self.assertIsNone(svc.guest_token)
         self.assertFalse((self.store.parent / "guest-token").exists())
+        self.assertIsNone(json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["socket"])
 
-    def test_the_console_takes_a_guest_port(self):
+    def test_the_console_takes_a_guest_socket(self):
         parser = console.build_parser()
-        self.assertEqual(parser.parse_args([]).guest_port, service.DEFAULT_GUEST_PORT)
-        self.assertEqual(service.DEFAULT_GUEST_PORT, 27185)
-        self.assertEqual(parser.parse_args(["--guest-port", "0"]).guest_port, 0)
+        self.assertIsNone(parser.parse_args([]).guest_socket)
+        self.assertEqual(parser.parse_args(["--guest-socket", "/tmp/x/g.sock"]).guest_socket,
+                         Path("/tmp/x/g.sock"))
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
-            parser.parse_args(["--guest-port", "70000"])
+            parser.parse_args(["--guest-socket", "g.sock"])
         self.assertEqual(raised.exception.code, 2)
-        held = socket.socket()
-        self.addCleanup(held.close)
-        held.bind(("127.0.0.1", 0))
-        held.listen()
-        number = held.getsockname()[1]
+        path = support.guest_socket_path(self)
+        path.parent.parent.mkdir(exist_ok=True)
+        path.parent.write_text("not a folder")
         captured = io.StringIO()
         with mock.patch.object(service, "default_store", return_value=self.store), \
                 mock.patch.object(service, "default_registry", return_value=self.registry), \
                 contextlib.redirect_stderr(captured):
-            code = console.main(["--port", "0", "--guest-port", str(number)])
+            code = console.main(["--port", "0", "--guest-socket", str(path)])
         self.assertEqual(code, 1)
         lines = captured.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
-        self.assertTrue(lines[0].startswith("console: cannot listen on 127.0.0.1:"))
-        self.assertIn(str(number), lines[0])
+        self.assertTrue(lines[0].startswith("console: cannot listen on unix:"))
+        self.assertIn(str(path), lines[0])
+
+
+class GuestPeerTest(GuestCase):
+    """Every guest connection is judged by its peer's uid before a byte is read (ADR-console-077 D2)."""
+
+    def refused(self, reader, code, counted=True):
+        self.seed()
+        calls = []
+
+        def recording(sock):
+            calls.append(sock)
+            return reader(sock)
+
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc = self.start(guest_peer_reader=None if reader is None else recording)
+            rows = support.log_rows(self.store)
+            self.assertIsNone(self.last_request(svc))
+            self.assertEqual(self.silent(svc), b"")
+        self.assertEqual(captured.getvalue().splitlines(), [f"console: guest_refused {code}"])
+        if counted:
+            self.assertEqual(len(calls), 1)
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertIsNone(self.last_request(svc))
+
+    def test_a_peer_neither_root_nor_the_owner_is_refused_before_a_byte_is_read(self):
+        self.refused(lambda sock: os.geteuid() + 1, "not_permitted")
+
+    def test_an_unreadable_peer_is_refused(self):
+        def boom(sock):
+            raise RuntimeError("boom")
+
+        rows = ((lambda sock: None, True), (boom, True), (None, False))
+        for index, (reader, counted) in enumerate(rows):
+            with self.subTest(row=index):
+                self.setUp()
+                self.refused(reader, "unreadable", counted)
+
+    def test_root_and_the_owner_are_admitted(self):
+        self.seed()
+        chosen = [lambda sock: 0]
+        svc = self.start(guest_peer_reader=lambda sock: chosen[0](sock))
+        for reader in (lambda sock: 0, lambda sock: os.geteuid()):
+            chosen[0] = reader
+            self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+
+    @unittest.skipUnless(sys.platform == "darwin" or sys.platform.startswith("linux"),
+                         "no Unix peer reader on this platform")
+    def test_the_real_reader_admits_this_process(self):
+        self.seed()
+        svc = self.start()
+        self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+        self.assertIs(
+            inspect.signature(service.ConsoleService).parameters["guest_peer_reader"].default,
+            peer.unix_reader_for(sys.platform))
+
+
+class GuestDoorModeTest(GuestCase):
+    def test_a_wider_folder_or_socket_refuses_every_guest_connection(self):
+        self.seed()
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc = self.start()
+            rows = support.log_rows(self.store)
+            folder = self.guest_socket.parent
+            self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+            refusals = 0
+            for target, wide in ((folder, 0o750), (self.guest_socket, 0o660),
+                                 (self.guest_socket, 0o700)):
+                os.chmod(target, wide)
+                self.assertEqual(self.silent(svc), b"")
+                refusals += 1
+                self.assertEqual(captured.getvalue().splitlines(),
+                                 ["console: guest_refused door_wider"] * refusals)
+                if target == folder:
+                    os.chmod(folder, 0o700)
+                    self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+            os.chmod(self.guest_socket, 0o600)
+            self.assertEqual(self.guest(svc, "GET", "/api/whoami")[0], 200)
+        self.assertEqual(support.log_rows(self.store), rows)
 
 
 class AccessWriteTest(GuestCase):
@@ -519,9 +891,10 @@ class AccessWriteTest(GuestCase):
         mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
         self.assertEqual(mine["sharing"], {
             "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
-            "state": "unchecked", "last_request": {
-                "admitted": True, "forwarded_for": False, "host": TAILNET,
-                "host_form": "exact", "hosts": 1, "login_headers": 1, "login_valid": True,
+            "state": "unchecked", "socket": str(self.guest_socket), "last_request": {
+                "admitted": True, "forwarded_for": False, "forwarded_host": TAILNET,
+                "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
+                "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True,
                 "probe": False, "probe_login_arrived": False, "reason": None}})
         status, _, body = self.write(
             svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]})
@@ -642,9 +1015,10 @@ class ReadingServiceTest(GuestCase):
                                      headers={"X-Forwarded-For": "100.64.0.1"})
         self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
         self.assertEqual(self.reading(svc), {
-            "admitted": False, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
-            "hosts": 1, "login_headers": 1, "login_valid": True, "probe": False,
-            "probe_login_arrived": False, "reason": "not_shared"})
+            "admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
+            "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
+            "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True,
+            "probe": False, "probe_login_arrived": False, "reason": "not_shared"})
         self.assertNotIn(STRANGER.encode(), svc.view_bytes.lower())
         status, _, _ = self.guest(svc, "GET", "/api/whoami", headers={"X-Console-Probe": FORGED})
         self.assertEqual(status, 200)
@@ -652,18 +1026,18 @@ class ReadingServiceTest(GuestCase):
         self.assertTrue(got["admitted"] and got["probe"])
         self.assertIsNone(got["reason"])
         self.assertFalse(got["probe_login_arrived"])
-        status, _, body = self.guest(svc, "GET", "/", host=TAILNET + ":443")
+        status, _, body = self.guest(svc, "GET", "/", forwarded_host=TAILNET + ":443")
         self.assertEqual((status, body), (403, guest.HOST_TEXT.encode() + b"\n"))
         got = self.reading(svc)
-        self.assertEqual((got["host_form"], got["reason"], got["host"]),
+        self.assertEqual((got["forwarded_host_form"], got["reason"], got["forwarded_host"]),
                          ("with_port", "host", TAILNET + ":443"))
         version = svc.version
-        self.guest(svc, "GET", "/", host=TAILNET + ":443")
+        self.guest(svc, "GET", "/", forwarded_host=TAILNET + ":443")
         self.assertEqual(svc.version, version)
         body = self.guest(svc, "GET", "/api/state")[2]
         frame = next_frame(self.open_stream(svc))
         for seen in (body, frame):
-            for member in (b"last_request", b"host_form", b'"sharing"'):
+            for member in (b"last_request", b"forwarded_host_form", b'"sharing"'):
                 self.assertNotIn(member, seen)
         self.assertEqual(support.log_rows(self.store), rows)
 
@@ -715,8 +1089,8 @@ class ReadingServiceTest(GuestCase):
         table = [
             (("TRACE", "/api/state", {"logins": [STRANGER, STRANGER]}), 403, guest.NOT_SHARED_TEXT,
              {"login_headers": 2, "reason": "not_shared", "admitted": False}),
-            (("POST", "/api/looked", {"host": OTHER_HOST}), 403, guest.HOST_TEXT,
-             {"host_form": "other", "host": OTHER_HOST}),
+            (("POST", "/api/looked", {"forwarded_host": OTHER_HOST}), 403, guest.HOST_TEXT,
+             {"forwarded_host_form": "other", "forwarded_host": OTHER_HOST}),
             (("GET", "/api/whoami", {"logins": []}), 200, None,
              {"login_headers": 0, "reason": "not_shared"}),
             (("DELETE", "/api/state", {}), 405, None, {"admitted": True, "reason": None}),
@@ -739,7 +1113,9 @@ class ReadingServiceTest(GuestCase):
 class ConnectionTest(GuestCase):
     def exchange(self, svc, data):
         received = b""
-        with socket.create_connection(svc.guest_address, timeout=5) as sock:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect(svc.guest_socket)
             sock.sendall(data)
             while True:
                 chunk = sock.recv(65536)
@@ -750,11 +1126,12 @@ class ConnectionTest(GuestCase):
     def test_a_second_request_on_one_connection_is_never_answered(self):
         self.seed()
         svc = self.start()
-        inner = (b"GET /api/state HTTP/1.1\r\nHost: " + TAILNET.encode()
-                 + b"\r\nTailscale-User-Login: " + COLLEAGUE.encode() + b"\r\n\r\n")
+        inner = (b"GET /api/state HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Host: "
+                 + TAILNET.encode() + b"\r\nTailscale-User-Login: " + COLLEAGUE.encode()
+                 + b"\r\n\r\n")
 
         def head(path, login=True, body=b""):
-            lines = [f"GET {path} HTTP/1.1", f"Host: {TAILNET}"]
+            lines = [f"GET {path} HTTP/1.1", "Host: localhost", f"X-Forwarded-Host: {TAILNET}"]
             if login:
                 lines.append(f"Tailscale-User-Login: {COLLEAGUE}")
             if body:
@@ -784,13 +1161,13 @@ class ServeStatusTest(GuestCase):
         self.reading = None
         svc = self.start(serve_reader=lambda: self.reading, serve_seconds=3600)
 
-        def proxy(port):
-            return {"Web": {f"{TAILNET}:443": {"Handlers": {
-                "/": {"Proxy": f"http://127.0.0.1:{port}"}}}}}
+        def proxy(target):
+            return {"Web": {f"{TAILNET}:443": {"Handlers": {"/": {"Proxy": target}}}}}
 
         rows = ((None, "unchecked"), ({}, "not_proxying"),
-                (proxy(svc.guest_address[1]), "serving"),
-                (proxy(svc.address[1]), "not_proxying"))
+                (proxy(f"unix:{svc.guest_socket}"), "serving"),
+                (proxy(f"http://127.0.0.1:{svc.address[1]}"), "not_proxying"),
+                (proxy("unix:/tmp/elsewhere.sock"), "not_proxying"))
         for reading, state in rows:
             with self.subTest(state=state, reading=reading):
                 self.reading = reading
@@ -799,7 +1176,7 @@ class ServeStatusTest(GuestCase):
                     json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["state"], state)
                 self.assertNotIn(
                     "sharing", json.loads(self.guest(svc, "GET", "/api/state")[2]))
-        self.reading = proxy(svc.guest_address[1])
+        self.reading = proxy(f"unix:{svc.guest_socket}")
         svc.poll_serve()
         svc.set_tailnet(None)
         self.assertEqual(
@@ -828,9 +1205,9 @@ class ServeStatusTest(GuestCase):
             calls.append((args, kwargs))
             return subprocess.CompletedProcess(args, 0, stdout='{"Web": {}}', stderr="")
 
-        self.assertEqual(guest.serve_reader("/x/tailscale.exe", run=run)(), {"Web": {}})
+        self.assertEqual(guest.serve_reader("/x/bin/tailscale", run=run)(), {"Web": {}})
         args, kwargs = calls[0]
-        self.assertEqual(args, ["/x/tailscale.exe", "serve", "status", "--json"])
+        self.assertEqual(args, ["/x/bin/tailscale", "serve", "status", "--json"])
         self.assertEqual(kwargs["timeout"], 15.0)
         self.assertEqual(guest.SERVE_TIMEOUT_SECONDS, 15.0)
         self.assertNotIn("shell", kwargs)
@@ -850,16 +1227,16 @@ class ServeStatusTest(GuestCase):
         )
         for name, row in rows:
             with self.subTest(row=name):
-                self.assertIsNone(guest.serve_reader("/x/tailscale.exe", run=row)())
+                self.assertIsNone(guest.serve_reader("/x/bin/tailscale", run=row)())
 
     def test_the_console_takes_a_tailscale_path(self):
         parser = console.build_parser()
         self.assertIsNone(parser.parse_args([]).tailscale)
         self.assertEqual(
-            parser.parse_args(["--tailscale", "/x/tailscale.exe"]).tailscale, "/x/tailscale.exe")
+            parser.parse_args(["--tailscale", "/x/bin/tailscale"]).tailscale, "/x/bin/tailscale")
         self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
         self.addCleanup(signal.signal, signal.SIGINT, signal.getsignal(signal.SIGINT))
-        for argv, wanted in ((["--tailscale", "/x/tailscale.exe"], True), ([], False)):
+        for argv, wanted in ((["--tailscale", "/x/bin/tailscale"], True), ([], False)):
             with self.subTest(argv=argv), \
                     mock.patch.object(service, "default_store", return_value=self.store), \
                     mock.patch.object(service, "default_registry", return_value=self.registry), \
@@ -868,7 +1245,7 @@ class ServeStatusTest(GuestCase):
                 made.return_value.start.side_effect = lambda: os.kill(os.getpid(), signal.SIGTERM)
                 self.assertEqual(console.main(argv), 0)
                 kwargs = made.call_args.kwargs
-                self.assertEqual(kwargs["guest_port"], 27185)
+                self.assertIsNone(kwargs["guest_socket"])
                 if wanted:
                     self.assertTrue(callable(kwargs["serve_reader"]))
                 else:
@@ -893,9 +1270,13 @@ class HeldCheckServiceTest(GuestCase):
         self.assertEqual(check(), (0, "met"))
         svc.set_tailnet(OTHER_HOST)
         self.assertEqual(check(), (75, "stale"))
-        self.guest(svc, "GET", "/api/whoami", host=OTHER_HOST, logins=[FORGED],
+        self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST, logins=[FORGED],
                    headers={"X-Forwarded-For": "100.64.0.1",
                             "X-Console-Probe": "other-probe@example.invalid"})
+        self.assertEqual(check(), (1, "not_met"))
+        svc.set_tailnet(TAILNET)
+        self.guest(svc, "GET", "/api/whoami", host=TAILNET,
+                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
         self.assertEqual(check(), (1, "not_met"))
 
 

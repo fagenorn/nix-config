@@ -2978,22 +2978,23 @@ let loginDraft = "";
 const sharePicks = new Set();
 const sharePosts = new Map();
 const SHARE_LINES = new Map([
-  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest port."],
-  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest port."],
-  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest port."],
+  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest door."],
+  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest door."],
+  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest door."],
 ]);
 const SHARE_WHY = new Map([
-  ["sharing_off", "sharing is off"], ["host", "the Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+  ["sharing_off", "sharing is off"], ["host", "the Host is not localhost or the forwarded Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
 function shareLine(sharing) {
   const words = SHARE_LINES.get(sharing.state);
   return sharing.tailnet === null || words === undefined ? "Sharing is off: no tailnet name is set." : words(sharing.tailnet);
 }
 function shareLast(r) {
-  if (r === null || typeof r !== "object") return "No request has come to the guest port yet.";
+  if (r === null || typeof r !== "object") return "No request has come to the guest door yet.";
   const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
+  const forwarded = r.forwarded_host !== null ? "forwarded Host " + r.forwarded_host : r.forwarded_hosts === 0 ? "no forwarded Host" : r.forwarded_hosts > 1 ? r.forwarded_hosts + " forwarded Host headers" : "a forwarded Host the console does not keep";
   const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
   const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
-  return "Last request on the guest port: " + host + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
+  return "Last request on the guest door: " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
 function shareTailnet(tailnet) {
   return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ tailnet }) });
