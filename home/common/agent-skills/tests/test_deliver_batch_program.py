@@ -12,8 +12,11 @@ import json
 from pathlib import Path
 import re
 import shutil
-import subprocess
+import sys
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from program_harness import server_for  # noqa: E402
 
 REPO_ROOT = Path(__file__).parents[4]
 PROGRAM = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/deliver-batch.js"
@@ -71,11 +74,7 @@ def run_full(args=None, replies=None, patch=None, children=None, turns=None, del
         raise AssertionError("node is not on PATH; the deliver-batch scenarios need it")
     scenario = {"args": ARGS if args is None else args, "replies": named(replies),
                 "patch": named(patch), "children": children or {}, "turns": turns or {}, "delays": delays or {}}
-    done = subprocess.run([node, str(HARNESS), str(PROGRAM)], input=json.dumps(scenario),
-                          capture_output=True, text=True, timeout=60, check=False)
-    if done.returncode != 0:
-        raise AssertionError(f"harness failed: {done.stderr}")
-    out = json.loads(done.stdout)
+    out = server_for(node).run(HARNESS, PROGRAM, scenario)
     bad = untyped(out["calls"])
     if bad:
         raise AssertionError(f"agent calls without a program agentType: {bad}")
@@ -1179,11 +1178,7 @@ def run_child(args, replies=None, patch=None):
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-standard scenarios need it")
     scenario = {"args": args, "replies": named(replies), "patch": named(patch)}
-    done = subprocess.run([node, str(CHILD_HARNESS), str(CHILD_PROGRAM)], input=json.dumps(scenario),
-                          capture_output=True, text=True, timeout=60, check=False)
-    if done.returncode != 0:
-        raise AssertionError(f"child harness failed: {done.stderr}")
-    out = json.loads(done.stdout)
+    out = server_for(node).run(CHILD_HARNESS, CHILD_PROGRAM, scenario, failure="child harness failed")
     return out["result"], out["calls"]
 
 
