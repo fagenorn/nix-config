@@ -19,13 +19,17 @@ The tailnet name the door admits is never configured and never stored: it is rea
 Tailscale client (ADR-console-078 D1). `self_name(status)` takes the parsed `tailscale status
 --json` and returns `Self.DNSName` with exactly one trailing dot removed and lowercased, only when
 the raw string is ASCII (checked before any case change, because `str.lower` maps U+212A to an
-ASCII `k`) and the result is a valid `<host>.<tailnet>.ts.net` name; every other shape is None.
+ASCII `k`) and the result is exactly `<host>.<tailnet>.ts.net`, two labels before `.ts.net` and no
+more (a name with an extra label admits nothing); every other shape is None.
 `status_reader(path)` is the reader of that status: a callable that runs the client at `path` as
 `status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns the parsed JSON,
 or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it never raises. The
 name is kept in memory only, never in the log and never printed. `Policy(access, name)` is one
 immutable snapshot of the switch, the list and the read name (`NO_POLICY` is off with no name); a
-request is judged by one policy.
+request is judged by one policy. `Snapshot(policy, views, pictures, revoked)` carries with that policy
+the colleagues' scoped views, their picture ids and `revoked`, a count the service raises each time
+the read name changes or sharing goes off, so a request is answered from the one snapshot that
+admitted it and an open stream can tell a revocation that came and went while it was blocked.
 
 `admit(access, name, hosts, forwarded_hosts, logins)` returns `(login, None)` for an admitted request
 and `(None, text)` for a refused one (ADR-console-077 D4, ADR-console-078). The checks run in this
@@ -167,6 +171,7 @@ PROJECTS_MAX = 50
 PROJECT_MAX = 200
 
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
+_SELF_NAME = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2}ts\.net")
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 _HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
@@ -194,6 +199,18 @@ class Policy:
 NO_POLICY = Policy(NO_ACCESS, None)
 
 
+@dataclass(frozen=True)
+class Snapshot:
+    """One policy with the views and picture ids derived under it, and the revocation count."""
+    policy: Policy
+    views: Mapping[str, bytes]
+    pictures: Mapping[str, frozenset[str]]
+    revoked: int
+
+
+NO_SNAPSHOT = Snapshot(NO_POLICY, MappingProxyType({}), MappingProxyType({}), 0)
+
+
 def valid_tailnet(text: object) -> bool:
     return (isinstance(text, str) and len(text) <= TAILNET_MAX
             and _TAILNET.fullmatch(text) is not None)
@@ -206,7 +223,7 @@ def self_name(status: object) -> str | None:
     if not isinstance(node, str) or not node.isascii():
         return None
     name = node.removesuffix(".").lower()
-    return name if valid_tailnet(name) else None
+    return name if valid_tailnet(name) and _SELF_NAME.fullmatch(name) is not None else None
 
 
 def _switch(payload: object) -> bool:

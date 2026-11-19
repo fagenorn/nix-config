@@ -104,9 +104,10 @@ guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitte
 nothing appended (the one thing a guest-door request may publish is the reading below): sharing
 off, then a tailnet name this console cannot read (`guest.NAME_UNREAD_TEXT`: the name is read from
 this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
-One request is judged by one `guest.Policy` (the switch, the list and the read name): the handler reads
-`ConsoleService.guest_policy` once, in `parse_request`, and the recorded reading and the decision both use that
-snapshot; the service replaces the snapshot as one assignment.
+One request is judged by one `guest.Snapshot` (the switch, the list and the read name, with the scoped views
+and picture ids derived under them): the handler reads `ConsoleService.guest_snapshot` once, in `parse_request`,
+and the recorded reading, the decision, the state read and the picture check all use that snapshot; the
+service replaces the snapshot as one assignment.
 `GET /api/whoami` is answered to any request before admission, except `403` `guest.NAME_UNREAD_TEXT` while
 sharing is on and no name is read: it reports the `Host` and the
 `X-Forwarded-Host` it saw, how many of each and of the login headers arrived, whether `X-Forwarded-For` did, and whether the login named
@@ -118,7 +119,8 @@ scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_P
 read-only layout) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
-read tailnet name moved or went, and a picture read needs the guest token, an `Origin` (when sent) of `https://<the read name>`
+read tailnet name moved or went, even when the change came and went while a frame was being written
+(`guest.Snapshot.revoked`), and a picture read needs the guest token, an `Origin` (when sent) of `https://<the read name>`
 and an id on the colleague's own view, else `404` `this picture is not known`. Every guest response closes
 its connection, so a body or a second request sent on it is never parsed. `ROUTES` registers every
 route: a handler compares `route` only with registered names, and a method other than GET on a guest
@@ -3276,7 +3278,7 @@ class GuestHandler(ConsoleHandler):
     """The guest port's one handler (#1237); it never calls the owner's route methods."""
 
     handle_expect_100 = http.server.BaseHTTPRequestHandler.handle_expect_100
-    policy = guest.NO_POLICY
+    snapshot = guest.NO_SNAPSHOT
 
     def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
               cache: str = "no-store"):
@@ -3287,7 +3289,8 @@ class GuestHandler(ConsoleHandler):
 
     def _guest_request(self):
         console = self.server.console
-        policy = self.policy
+        snapshot = self.snapshot
+        policy = snapshot.policy
         route = self.path.split("?", 1)[0]
         hosts = self.headers.get_all("Host") or []
         forwarded_hosts = self.headers.get_all(guest.FORWARDED_HOST_HEADER) or []
@@ -3314,19 +3317,19 @@ class GuestHandler(ConsoleHandler):
             self._send(200, "text/html; charset=utf-8", console.guest_page_bytes,
                        ("Content-Security-Policy", CSP))
         elif route == STATE_PATH:
-            view = console.guest_view_bytes(login)
+            view = snapshot.views.get(login)
             if view is None:
                 return self._refuse(403, guest.NOT_SHARED_TEXT)
             self._send(200, "application/json", view)
         elif route == STREAM_PATH:
-            self._stream(self._readmitting(login, hosts, forwarded_hosts, logins))
+            self._stream(self._readmitting(snapshot, login, hosts, forwarded_hosts, logins))
         elif route.startswith(PICTURE_PREFIX):
-            self._guest_picture(route, policy.name, login)
+            self._guest_picture(route, policy.name, snapshot.pictures.get(login, frozenset()))
         else:
             self._refuse(404, "not found")
 
-    def _readmitting(self, login: str, hosts: list[str], forwarded_hosts: list[str],
-                     logins: list[str]):
+    def _readmitting(self, admitted: "guest.Snapshot", login: str, hosts: list[str],
+                     forwarded_hosts: list[str], logins: list[str]):
         console = self.server.console
         last: list[bytes | None] = [None]
 
@@ -3335,11 +3338,13 @@ class GuestHandler(ConsoleHandler):
             while True:
                 remaining = deadline - time.monotonic()
                 change = None if remaining <= 0 else console.wait_for_guest_change(
-                    login, seen, remaining)
+                    seen, remaining)
                 if change is None:
                     return None
-                version, policy, view = change
-                if (guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
+                version, snapshot = change
+                policy, view = snapshot.policy, snapshot.views.get(login)
+                if (snapshot.revoked != admitted.revoked
+                        or guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
                         != (login, None)
                         or view is None):
                     return version, None
@@ -3351,7 +3356,7 @@ class GuestHandler(ConsoleHandler):
 
         return wait
 
-    def _guest_picture(self, route: str, name: str, login: str):
+    def _guest_picture(self, route: str, name: str, known: frozenset[str]):
         console = self.server.console
         refusal = write_guard.read_refusal(
             name, self.headers.get_all("Origin") or [],
@@ -3363,7 +3368,7 @@ class GuestHandler(ConsoleHandler):
         picture_id = route[len(PICTURE_PREFIX):]
         if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
             return self._refuse(400, "bad picture id")
-        if picture_id not in console.guest_pictures(login):
+        if picture_id not in known:
             return self._refuse(404, "this picture is not known")
         self._send_picture(picture_id)
 
@@ -3373,9 +3378,9 @@ class GuestHandler(ConsoleHandler):
         if ok:
             headers = self.headers
             console = self.server.console
-            self.policy = console.guest_policy
+            self.snapshot = console.guest_snapshot
             console.record_guest_request(guest.reading(
-                self.policy.access, self.policy.name, headers.get_all("Host") or [],
+                self.snapshot.policy.access, self.snapshot.policy.name, headers.get_all("Host") or [],
                 headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
@@ -3806,9 +3811,7 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._access = guest.NO_ACCESS
-        self._guest_policy = guest.NO_POLICY
-        self._guest_views: dict[str, bytes] = {}
-        self._guest_pictures: dict[str, frozenset[str]] = {}
+        self._guest = guest.NO_SNAPSHOT
         self._guest_token: str | None = None
         self._guest_page: bytes | None = None
         self._guest_server: GuestServer | None = None
@@ -3929,8 +3932,8 @@ class ConsoleService:
         return self._guest_token
 
     @property
-    def guest_policy(self) -> "guest.Policy":
-        return self._guest_policy
+    def guest_snapshot(self) -> "guest.Snapshot":
+        return self._guest
 
     @property
     def guest_page_bytes(self) -> bytes | None:
@@ -3939,12 +3942,7 @@ class ConsoleService:
     def guest_view_bytes(self, login: str) -> bytes | None:
         """The login's guest view; None when the login is not listed or sharing is off."""
         with self._published:
-            return self._guest_views.get(login)
-
-    def guest_pictures(self, login: str) -> frozenset[str]:
-        """The pictures on the login's guest view."""
-        with self._published:
-            return self._guest_pictures.get(login, frozenset())
+            return self._guest.views.get(login)
 
     @property
     def view_bytes(self) -> bytes:
@@ -3980,14 +3978,14 @@ class ConsoleService:
                 return None
             return self._version, self._view
 
-    def wait_for_guest_change(self, login: str, seen: int, timeout: float
-                              ) -> tuple[int, "guest.Policy", bytes | None] | None:
-        """Like `wait_for_change`, with the guest policy and the login's view of that publish."""
+    def wait_for_guest_change(self, seen: int, timeout: float
+                              ) -> tuple[int, "guest.Snapshot"] | None:
+        """Like `wait_for_change`, with the guest snapshot of that publish."""
         with self._published:
             self._published.wait_for(lambda: self._version > seen or self._closing, timeout)
             if self._closing or self._version <= seen:
                 return None
-            return self._version, self._guest_policy, self._guest_views.get(login)
+            return self._version, self._guest
 
     def delivered(self, version: int) -> None:
         """Record that the view of `version` was written to a page stream (ADR-console-071)."""
@@ -4099,12 +4097,14 @@ class ConsoleService:
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
         with self._published:
-            if view != self._view or views != self._guest_views:
+            before = self._guest
+            revoked = before.revoked + (
+                before.policy.name != name or (before.policy.access.shared and not access.shared))
+            if view != self._view or views != before.views or revoked != before.revoked:
                 self._version += 1
             self._view = view
-            self._guest_policy = guest.Policy(access, name)
-            self._guest_views = views
-            self._guest_pictures = seen_pictures
+            self._guest = guest.Snapshot(
+                guest.Policy(access, name), views, seen_pictures, revoked)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 

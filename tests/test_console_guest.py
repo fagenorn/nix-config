@@ -108,6 +108,8 @@ class SelfNameTest(unittest.TestCase):
                 ({"Self": {"DNSName": "desk.example.com."}}, None),
                 ({"Self": {"DNSName": "invented-tailnet.ts.net."}}, None),
                 ({"Self": {"DNSName": TAILNET + ".."}}, None),
+                ({"Self": {"DNSName": "a.b." + TAILNET + "."}}, None),
+                ({"Self": {"DNSName": "extra." + TAILNET}}, None),
                 ({"Self": {"DNSName": "DES\u212a.invented-tailnet.ts.net."}}, None),
                 ({"Peer": {"x": {"DNSName": TAILNET + "."}}}, None)]
         for status, expected in rows:

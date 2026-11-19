@@ -39,6 +39,7 @@ LAND_QUEUE_FENCE = re.compile(r"^```sh\n(.*?)^```$", re.S | re.M)
 
 
 TAILNET_PLACEHOLDER = "<host>.<tailnet>.ts.net"
+INVENTED_TAILNET = "invented-tailnet.ts.net"
 TAILNET_NAME = re.compile(r"[^\s/()\[\]`\"'<>]*(?:<[^<>\s]*>[^\s/()\[\]`\"'<>]*)*\.ts\.net")
 
 
@@ -931,6 +932,26 @@ class DocsTreeTest(unittest.TestCase):
         guest = context.split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
         self.assertIn("ADR-console-078", guest)
         self.assertIn("read from this host's Tailscale client", guest)
+
+    def test_sharing_sources_and_fixtures_name_only_placeholder_tailnets_and_logins(self):
+        sources = sorted({
+            *(REPO_ROOT / "tests").glob("test_console_guest*.py"),
+            REPO_ROOT / "tests/console_screenshots.py",
+            REPO_ROOT / "tests/test_console_screenshots.py",
+            REPO_ROOT / "tests/test_console_serve_probe_check.py",
+            REPO_ROOT / "python/agent_tools/console/guest.py",
+            REPO_ROOT / "python/agent_tools/console/serve_probe_check.py"})
+        self.assertGreaterEqual(len(sources), 6, sources)
+        for source in sources:
+            text = source.read_text()
+            with self.subTest(source=source.name):
+                self.assertEqual(
+                    [name for name in tailnet_names_other_than_placeholder(text)
+                     if name not in (INVENTED_TAILNET, ".ts.net")
+                     and not name.endswith("." + INVENTED_TAILNET)], [])
+                self.assertEqual(
+                    [login for login in logins_in(text) if not login.lower().endswith(".invalid")],
+                    [])
 
     def test_the_relay_sender_decision_is_recorded_as_adr_068_and_cited_by_number(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"

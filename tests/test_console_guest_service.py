@@ -1081,7 +1081,7 @@ class ReadingServiceTest(GuestCase):
         woke = returned.get(timeout=5)
         self.assertIsNotNone(woke)
         self.assertGreater(woke[0], version)
-        self.assertEqual(woke[2], kept)
+        self.assertEqual(woke[1].views.get(COLLEAGUE), kept)
         svc.set_colleague(COLLEAGUE, ("owner/p00",))
         frame = next_frame(response)
         self.assertIn(b"owner/p00", frame)
@@ -1301,6 +1301,77 @@ class ReadNameTest(GuestCase):
         self.assertIs(sharing["shared"], True)
         self.assertEqual(sharing["tailnet"], TAILNET)
         self.assertNotIn(TAILNET, json.dumps(support.log_rows(self.store)))
+
+    def in_flight(self, svc, change):
+        """Run `change` once, after the next guest request is parsed and before it is answered."""
+        original = svc.record_guest_request
+        done = []
+
+        def hook(reading):
+            if not done:
+                done.append(True)
+                change()
+            return original(reading)
+
+        svc.record_guest_request = hook
+
+    def move_and_widen(self, svc):
+        self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
+        svc.poll_serve()
+        svc.set_colleague(COLLEAGUE, ("owner/p01", "owner/p00"))
+
+    def test_an_in_flight_state_read_keeps_the_policy_that_admitted_it(self):
+        self.seed()
+        svc = self.start()
+        svc.state_goal("owner/p00", "other-goal-zq7")
+        svc.state_goal("owner/p01", "own-goal-zq8")
+        self.in_flight(svc, lambda: self.move_and_widen(svc))
+        status, _, body = self.guest(svc, "GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertIn(b"own-goal-zq8", body)
+        self.assertNotIn(b"other-goal-zq7", body)
+        self.assertIn(b"other-goal-zq7", svc.guest_view_bytes(COLLEAGUE))
+
+    def test_an_in_flight_picture_read_keeps_the_policy_that_admitted_it(self):
+        self.seed()
+        svc = self.start()
+        p0 = self.brief_with_picture(svc, "owner/p00", "other-goal-zq7", PIXEL)
+        headers = {"X-Console-Token": self.guest_token(), "Origin": "https://" + TAILNET}
+        self.in_flight(svc, lambda: self.move_and_widen(svc))
+        status, _, body = self.guest(svc, "GET", "/api/picture/" + p0, headers=headers)
+        self.assertEqual((status, body), (404, b"this picture is not known\n"))
+        self.assertIn(p0, svc.guest_snapshot.pictures[COLLEAGUE])
+
+    def test_a_stream_ends_when_the_name_goes_and_returns_while_it_is_blocked(self):
+        self.seed()
+        svc = self.start()
+        gate = threading.Event()
+        original = svc.wait_for_guest_change
+        calls = []
+
+        def spy(seen, timeout):
+            calls.append(seen)
+            if len(calls) == 2:
+                self.assertTrue(gate.wait(5))
+            return original(seen, timeout)
+
+        svc.wait_for_guest_change = spy
+        response = self.open_stream(svc)
+        self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
+        good = self.status
+        self.status = {"Self": {}}
+        svc.poll_serve()
+        self.status = good
+        svc.poll_serve()
+        gate.set()
+        svc.set_colleague(COLLEAGUE, ("owner/p00",))
+        frames = []
+        while True:
+            line = response.readline()
+            if line == b"":
+                break
+            frames.append(line)
+        self.assertEqual([line for line in frames if line.startswith(b"event: view")], [])
 
     def test_an_unreadable_name_refuses_every_guest_request(self):
         def raising():
