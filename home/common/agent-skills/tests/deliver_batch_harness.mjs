@@ -33,7 +33,7 @@ const sameHead = (a, b) => typeof a === 'string' && typeof b === 'string' && a !
 const RELEASED = (p, r) => (/return lock_released true/i.test(p) && !sameHead(r.commit, r.start_head) ? { lock_released: true } : {})
 // The JSON value that ends the prompt line starting with `lead`.
 const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length).split('\n')[0])
-// Ordered: the first matching pattern wins. A default gets the label and the prompt.
+// Ordered: the first matching pattern wins. A default gets the label, the prompt and the scenario's acceptance (one copy per scenario, shared with a ready child's).
 const DEFAULTS = [
   [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
   [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, native: { verdict: 'read', blocked_by: [] }, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x', look: { verdict: 'unmarked' } })],
@@ -45,7 +45,7 @@ const DEFAULTS = [
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   // #1019: the push of the clean merges a readopt found on top of the PR head lands at the head its prompt names.
   [/^readopt-push-/, (l, p) => ({ pushed: true, head: (p.match(/rev-parse HEAD prints ([0-9a-f]{40})/) || [])[1] })],
-  [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
+  [/^readopt-/, (l, p, ac) => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: ac })],
   [/^land-sync-review-|^land-sync-rereview-|^land-fix-review-/, () => PASS],
   // #907: a sync fix defaults to one commit, SYNC_FIXED, on top of the merge commit its prompt names.
   [/^land-sync-fix-/, (l, p) => ({ ...DONE, start_head: (p.match(/merge commit ([0-9a-f]{40})/) || [])[1], commit: SYNC_FIXED })],
@@ -96,6 +96,9 @@ export function makeRunner(programText) {
   const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
   return async function runScenario(scenario) {
     const calls = []
+    // One copy of the acceptance per scenario, behind both a ready child's default and the readopt default: a program that edits one sees it in the other,
+    // as in a fresh process, and never changes the next scenario's.
+    const ac = structuredClone(AC)
     let factsPending = 0 // facts agents started and not yet answered
     const seen = {}
     // Each agent call and each reply, in the order they happened (#1001: a step that must wait for another's reply).
@@ -129,7 +132,7 @@ export function makeRunner(programText) {
         if (/^land-fix-\d+$/.test(label) && out && typeof out === 'object' && !Object.prototype.hasOwnProperty.call(out, 'lock_released')) Object.assign(out, RELEASED(prompt, out))
         const row = NESTED.find(([re]) => re.test(label))
         if (row && out && typeof out === 'object' && !Array.isArray(out)) {
-          const base = DEFAULTS.find(([re]) => re.test(label))[1](label, prompt)
+          const base = DEFAULTS.find(([re]) => re.test(label))[1](label, prompt, ac)
           // A record's default lock is moved, and its default checks pass, at the head the reply itself reports.
           if (/^land-record-/.test(label) && typeof out.head === 'string') { base.lock = { verdict: 'moved', lock_sha: out.head }; base.checks.head = out.head }
           for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
@@ -138,11 +141,8 @@ export function makeRunner(programText) {
       }
       const hit = DEFAULTS.find(([re]) => re.test(label))
       if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-      return structuredClone({ ...hit[1](label, prompt), ...((scenario.patch || {})[label] || {}) })
+      return structuredClone({ ...hit[1](label, prompt, ac), ...((scenario.patch || {})[label] || {}) })
     }
-
-    // One copy of the acceptance per scenario: a program that edits a ready child default must not change the next scenario's.
-    const ac = structuredClone(AC)
 
     let active = 0
     let maxActive = 0

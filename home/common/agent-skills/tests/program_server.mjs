@@ -7,18 +7,37 @@
 //   failure  {"ok":false,"error":"<text>"[,"restart":true]}, the text being one of
 //            "the program never settled", "unhandled rejection: <stack>", "uncaught exception: <stack>",
 //            "program threw: <stack>" (a runner that rejects: the batch harness lets a program throw escape),
+//            "the program set process.exitCode to <code>",
 //            "bad request: <message>" (the line is not JSON, lacks a string harness, a string program or an object scenario,
 //            or the harness fails to import or the program to read or compile).
-// "restart": true means the scenario changed globalThis's own properties (a key added or removed, or any descriptor field changed). The server
-// writes that reply, reads no further request and ends on its own with exit 0, so the next scenario starts from a clean global object.
+// "restart": true means the scenario changed globalThis's own properties (a key added or removed, or any descriptor field changed), or left a timer
+// or immediate pending that no longer held the event loop open (an unref()ed one, which a fresh process would have exited without running). The
+// server writes that reply, reads no further request and ends on its own with exit 0, so the next scenario starts from a clean process.
+// A scenario that returns with process.exitCode set to a nonzero value fails, as a one-shot run exits with that code; the server clears it.
 //
 // A request is parsed and its runner loaded (one runner per harness + program, so each program is read and compiled once) while stdin is
 // still ref()ed; a failure there is answered at once. Then the scenario starts with stdin unref()ed, so a scenario that never settles lets
 // the event loop drain and `beforeExit` fires. That listener answers: the first recorded error (unhandled rejection, uncaught exception or
 // program throw) even when the program also returned, else "never settled" when it did not return, else success. An error never ends the
 // process. EOF with no scenario active lets the process exit 0; an EPIPE on stdout exits 0 quietly.
+import { createHook } from 'node:async_hooks'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+
+// The inspection helpers are captured before any scenario runs, so a scenario that deletes or replaces Reflect, Object or Map cannot break the
+// check that follows it.
+const ownKeys = Reflect.ownKeys
+const descriptorOf = Object.getOwnPropertyDescriptor
+const same = Object.is
+const MapOf = Map
+const SetOf = Set
+
+// Every timer and immediate not yet fired or cleared. At `beforeExit` a ref()ed one would still be holding the loop open, so any left is unref()ed.
+const timers = new SetOf()
+createHook({
+  init(id, type) { if (type === 'Timeout' || type === 'Immediate') timers.add(id) },
+  destroy(id) { timers.delete(id) },
+}).enable()
 
 const runners = new Map()
 const queue = []
@@ -29,18 +48,18 @@ let active = null
 const write = line => { process.stdout.write(line + '\n') }
 const fail = (error, restart) => write(JSON.stringify(restart ? { ok: false, error, restart: true } : { ok: false, error }))
 const stackOf = e => String((e && e.stack) || e)
-const snapshot = () => new Map(Reflect.ownKeys(globalThis).map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]))
+const snapshot = () => new MapOf(ownKeys(globalThis).map(k => [k, descriptorOf(globalThis, k)]))
 // Taking a snapshot is itself the first use of a lazily installed Node global (it adds one symbol key the first time), so one is taken now and the
 // symbol is in place before any scenario's `before` is.
 snapshot()
 const FIELDS = ['value', 'get', 'set', 'writable', 'enumerable', 'configurable']
 const changed = before => {
-  const keys = Reflect.ownKeys(globalThis)
+  const keys = ownKeys(globalThis)
   if (keys.length !== before.size || keys.some(k => !before.has(k))) return true
   return keys.some(k => {
-    const now = Object.getOwnPropertyDescriptor(globalThis, k)
+    const now = descriptorOf(globalThis, k)
     const was = before.get(k)
-    return FIELDS.some(f => !Object.is(now[f], was[f]))
+    return FIELDS.some(f => !same(now[f], was[f]))
   })
 }
 
@@ -94,7 +113,12 @@ process.on('beforeExit', () => {
   const run = active
   if (!run) return
   active = null
-  const restart = changed(run.before)
+  // An inspection that throws means the scenario broke something it relies on: restart rather than lose the reply.
+  let restart
+  try { restart = changed(run.before) || timers.size > 0 } catch { restart = true }
+  const code = process.exitCode
+  process.exitCode = undefined
+  if (run.error === undefined && code !== undefined && code !== 0 && code !== '0') run.error = `the program set process.exitCode to ${code}`
   if (run.error !== undefined) fail(run.error, restart)
   else if (run.text === undefined) fail('the program never settled', restart)
   else write('{"ok":true,"out":' + run.text + (restart ? ',"restart":true' : '') + '}')

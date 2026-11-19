@@ -6,6 +6,7 @@ Run: just agent-workflow-tests
 import os
 import shutil
 import signal
+import stat
 import sys
 import tempfile
 import unittest
@@ -45,6 +46,13 @@ if (args.noisy) { for (let i = 0; i < 2000; i++) console.error('x'.repeat(100)) 
 if (args.leak) { if (typeof leaked !== 'undefined') return { leaked: true }; leaked = 1; return { leaked: false } }
 if (args.pin) { const had = Object.getOwnPropertyDescriptor(globalThis, 'pinned') !== undefined; if (!had) Object.defineProperty(globalThis, 'pinned', { value: 1 }); return { leaked: had } }
 if (args.late) { setImmediate(() => log('late')); Promise.resolve().then(() => log('micro')); log('now'); return { ok: true } }
+if (args.timer) { setTimeout(() => { globalThis.lateTimer = 1 }, 30).unref(); return { ok: true } }
+if (args.wait) { await new Promise(r => setTimeout(r, 150)); return { late: typeof lateTimer !== 'undefined' } }
+if (args.chatty) { console.log('debug'); return { ok: true } }
+if (args.echo) return { echo: args.echo }
+if (args.exit) { process.exitCode = 1; return { ok: true } }
+if (args.noreflect) { delete globalThis.Reflect; return { ok: true } }
+if (args.readopt) { const c = await workflow({ scriptPath: '/s/c.js' }, { issue: 1, mode: 'ready', batch_id: 'b1' }); c.acceptance[0].text = 'edited'; const r = await agent('p', { label: 'readopt-1' }); return { text: r.acceptance[0].text } }
 if (args.child) { const c = await workflow({ scriptPath: '/s/c.js' }, { issue: 1, mode: 'ready', batch_id: 'b1' }); const before = c.acceptance ? c.acceptance[0].text : null; if (c.acceptance) c.acceptance[0].text = 'edited'; return { stage: c.stage, before } }
 return { ok: true }
 """
@@ -185,6 +193,39 @@ class ReuseMatchesAFreshProcessTest(NodeCase):
         self.assertEqual(second, fresh)
         self.assertEqual(s.pid, pid)
 
+    def test_a_program_that_edits_a_ready_child_changes_the_readopt_default_as_in_a_fresh_process(self):
+        sc = {"args": {"readopt": True}}
+        fresh = run_fresh(NODE, BATCH[0], self.fixture, sc)
+        s = self.server()
+        first = s.run(BATCH[0], self.fixture, sc)
+        second = s.run(BATCH[0], self.fixture, sc)
+        self.assertEqual(fresh["result"], {"text": "edited"})
+        self.assertEqual(first, fresh)
+        self.assertEqual(second, fresh)
+
+    def test_a_timer_left_unref_ed_by_one_scenario_never_fires_in_the_next(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                fresh = run_fresh(NODE, harness, self.fixture, {"args": {"wait": True}})
+                s = self.server()
+                s.run(harness, self.fixture, {"args": {"timer": True}})
+                after_timer = s.pid
+                out = s.run(harness, self.fixture, {"args": {"wait": True}})
+                self.assertEqual(fresh["result"], {"late": False})
+                self.assertIsNone(after_timer)
+                self.assertEqual(out, fresh)
+
+    def test_a_scenario_that_deletes_a_global_the_restart_check_uses_still_returns_its_result(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                sc = {"args": {"noreflect": True}}
+                fresh = run_fresh(NODE, harness, self.fixture, sc)
+                s = self.server()
+                out = s.run(harness, self.fixture, sc)
+                self.assertEqual(out, fresh)
+                self.assertIsNone(s.pid)
+                self.assertEqual(s.run(harness, self.fixture, {"args": {}})["result"], {"ok": True})
+
     def test_a_reused_harness_answers_a_throw_as_a_fresh_process_does(self):
         boom = {"args": {"boom": True}}
         s = self.server()
@@ -228,6 +269,56 @@ class FailureShapesTest(NodeCase):
                 self.assertIn("harness failed: the program never settled", str(raised.exception))
                 self.assertEqual(s.run(harness, self.fixture, {"args": {}})["result"], {"ok": True})
                 self.assertEqual(s.pid, pid)
+
+    def test_a_program_that_sets_a_failing_exit_code_fails_its_scenario_and_the_process_answers_the_next(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                with self.assertRaises(AssertionError):
+                    run_fresh(NODE, harness, self.fixture, {"args": {"exit": True}})
+                s = self.server()
+                s.run(harness, self.fixture, {"args": {}})
+                pid = s.pid
+                with self.assertRaises(AssertionError) as raised:
+                    s.run(harness, self.fixture, {"args": {"exit": True}})
+                self.assertIn("harness failed: the program set process.exitCode to 1", str(raised.exception))
+                self.assertEqual(s.run(harness, self.fixture, {"args": {}})["result"], {"ok": True})
+                self.assertEqual(s.pid, pid)
+                self.assertEqual(s.close(), 0)
+
+    def test_a_program_that_writes_to_stdout_fails_its_scenario_and_is_never_answered_by_a_stale_reply(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                with self.assertRaises(ValueError):
+                    run_fresh(NODE, harness, self.fixture, {"args": {"chatty": True}})
+                s = self.server()
+                s.run(harness, self.fixture, {"args": {}})
+                pid = s.pid
+                with self.assertRaises(AssertionError) as raised:
+                    s.run(harness, self.fixture, {"args": {"chatty": True}})
+                self.assertIn("harness failed: the harness wrote a line that is not a reply", str(raised.exception))
+                self.assertIsNone(s.pid)
+                self.assertEqual(s.run(harness, self.fixture, {"args": {"echo": "next"}})["result"], {"echo": "next"})
+                self.assertNotIn(s.pid, (None, pid))
+
+    def test_a_request_larger_than_the_pipe_sent_to_a_process_that_reads_nothing_times_out(self):
+        mute = self.tmp / "mute-node"
+        mute.write_text("#!/bin/sh\nexec sleep 30\n")
+        mute.chmod(mute.stat().st_mode | stat.S_IXUSR)
+        s = ProgramServer(str(mute))
+        self.addCleanup(s.close)
+
+        def hung(signum, frame):
+            s._proc.kill()
+            raise AssertionError("run() blocked past its timeout")
+
+        old = signal.signal(signal.SIGALRM, hung)
+        self.addCleanup(signal.signal, signal.SIGALRM, old)
+        signal.alarm(20)
+        self.addCleanup(signal.alarm, 0)
+        with self.assertRaises(AssertionError) as raised:
+            s.run(STANDARD[0], self.fixture, {"args": {"pad": "x" * 2_000_000}}, timeout=2)
+        self.assertIn("harness failed: no reply within 2", str(raised.exception))
+        self.assertIsNone(s.pid)
 
     def test_a_stray_rejection_fails_its_scenario_even_when_the_program_returns(self):
         for name, harness in HARNESSES.items():

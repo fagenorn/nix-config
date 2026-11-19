@@ -14,11 +14,15 @@ per request, `{"ok": true, "out": <what one-shot mode prints>[, "restart": true]
 `{"ok": false, "error": <text>[, "restart": true]}`. `"restart": true` means the scenario changed the global
 object: the server answers, then ends on its own, and the next run starts a new process.
 
+The request is written by a helper thread so the timeout covers a write the process is not reading.
+
 The process: started on the first run (and on the first run after any failure or close) with stdin and stdout
 pipes and a temporary file as stderr, so a program that logs a lot never blocks on an unread pipe. A daemon
 thread reads stdout lines into a queue (a `None` at EOF) and `run` waits for one line with the timeout.
 On a timeout `run` kills and reaps the process and raises `AssertionError("<failure>: no reply within <t> s")`;
 on EOF or a broken pipe it raises `AssertionError("<failure>: the harness exited with <code>: <stderr>")`;
+on a line that is not a reply object (a program that wrote to stdout) it kills and reaps the process and raises
+`AssertionError("<failure>: the harness wrote a line that is not a reply: <line>")`;
 on an `ok: false` reply it raises `AssertionError("<failure>: <error>")` followed by the stderr text written
 since the run began, when any. A restart reply closes the process before `run` returns or raises, so `pid` is
 `None` afterwards. `close()` closes stdin, waits up to 10 s, kills if still alive, joins the reader thread,
@@ -32,6 +36,7 @@ import queue
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 SERVER = Path(__file__).with_name("program_server.mjs")
@@ -88,22 +93,41 @@ class ProgramServer:
             self._start()
         offset = os.fstat(self._err.fileno()).st_size
         request = json.dumps({"harness": str(harness), "program": str(program), "scenario": scenario}) + "\n"
-        line = None
+        # The write runs in its own thread: a request larger than the pipe, sent to a node that has stopped reading, blocks, and the timeout must cover it.
+        deadline = time.monotonic() + timeout
+        stdin = self._proc.stdin
+
+        def send() -> None:
+            try:
+                stdin.write(request)
+                stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass  # the reader thread then reports EOF
+
+        writer = threading.Thread(target=send, daemon=True)
+        writer.start()
         try:
-            self._proc.stdin.write(request)
-            self._proc.stdin.flush()
-            line = self._lines.get(timeout=timeout)
+            line = self._lines.get(timeout=max(0.0, deadline - time.monotonic()))
         except queue.Empty:
             self._proc.kill()
+            writer.join()
             self.close()
             raise AssertionError(f"{failure}: no reply within {timeout} s") from None
-        except (BrokenPipeError, OSError):
-            pass
+        writer.join()
         if line is None:
             stderr = self._stderr_since(offset)
             code = self.close()
             raise AssertionError(f"{failure}: the harness exited with {code}: {stderr}")
-        reply = json.loads(line)
+        try:
+            reply = json.loads(line)
+            if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
+                raise ValueError("not a reply")
+        except ValueError:
+            # A program that wrote to stdout put a line ahead of its reply: the stream is out of step, so the process is discarded, never reused.
+            stderr = self._stderr_since(offset)
+            self._proc.kill()
+            self.close()
+            raise AssertionError(f"{failure}: the harness wrote a line that is not a reply: {line[:200]!r} {stderr}".rstrip()) from None
         stderr = self._stderr_since(offset)
         if reply.get("restart"):
             self.close()
