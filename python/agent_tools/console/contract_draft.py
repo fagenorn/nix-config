@@ -42,7 +42,9 @@ parenthesis or backtick, or is wholly one balanced `$( )` or backtick substituti
 runner candidate, so a line holding several commands is never of this shape); `if [ ... ]; then`, `else` and `fi` lines, the test holding no `;`,
 `&`, `|`, `<`, `>`, backtick, parenthesis or brace; and exactly one line-leading `exec` of a word or of
 `"$NAME"` (`$NAME`, `${NAME}`), outside any `if`, followed by any arguments. A runner variable's
-candidates are only its literal assigned values. A line of any other shape (a `PATH` assignment, an
+candidates are only its literal assigned values, and it is judged only when a line outside any `if`
+assigns it (an assignment only inside an `if` may leave an inherited value) and, when written without
+quotes, only when no assigned value holds a blank or one of `*?[`. A line of any other shape (a `PATH` assignment, an
 `export`, `+=`, an array or nameref, a default expansion, `read`, `for`, `eval`, `source`, a second
 `exec`, or a command run on any line but the `exec`) leaves the hook unjudged. A runner is found when it
 is absolute and an executable file, or has no `/` and is on `search_path`; a `search_path` with an entry
@@ -536,15 +538,16 @@ def _closing(text: str, index: int, quote: bool) -> int | None:
     """The index after the `)` (or, when `quote`, the `"`) that ends what `text[index:]` opens, else `None`.
 
     Reads one balanced `$( )` quote-aware, so a quoted or nested parenthesis never ends it; a backtick
-    inside, a lone `'`, a `#` that starts a word outside quotes (a shell comment, which would hide the real
-    end) or an unclosed form is `None`.
+    inside, a lone `'`, a `#` that starts a word outside quotes (after a blank or one of `;&|<>()`: a shell
+    comment, which would hide the real end) or an unclosed form is `None`.
     """
     start = index
     while index < len(text):
         char = text[index]
         if char == "\\":
             index += 2
-        elif char == "#" and not quote and (index == start or text[index - 1].isspace()):
+        elif char == "#" and not quote and (
+                index == start or text[index - 1].isspace() or text[index - 1] in ";&|<>()"):
             return None
         elif char == "'" and not quote:
             index = text.find("'", index + 1) + 1 or len(text) + 1
@@ -627,14 +630,18 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
 
     A hook is judged only when every non-comment line has one of the allowlisted shapes (blank; a shell
     shebang; `NAME=value` as above, `PATH` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
-    of a word or `"$NAME"` outside any `if`) and each candidate runner is a literal; the module docstring
-    states the allowlist. Every other hook is unjudged and never stranded, and so is one read under a set
-    `cancel` or with a `search_path` entry that is not absolute.
+    of a word or `"$NAME"` outside any `if`) and each candidate runner is a literal; a runner variable is
+    judged only when some line outside any `if` assigns it, and an unquoted one only when no value holds a
+    blank or a glob character (the shell would split or expand it). The module docstring states the allowlist.
+    Every other hook is unjudged and never stranded, and so is one read under a set `cancel` or with a
+    `search_path` entry that is not absolute.
     """
     if any(not os.path.isabs(entry) for entry in search_path.split(os.pathsep)):
         return False
     assigned: dict[str, dict[str | None, None]] = {}
+    fixed: set[str] = set()
     runner = None
+    quoted = False
     depth = 0
     for number, raw in enumerate(text.splitlines()):
         if cancel is not None and cancel.is_set():
@@ -657,6 +664,8 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
             if name == "PATH" or not known:
                 return False
             assigned.setdefault(name, {})[word] = None
+            if depth == 0:
+                fixed.add(name)
         elif _EXEC.match(line) and runner is None and depth == 0:
             try:
                 words = shlex.split(_EXEC.match(line).group(1), comments=True)
@@ -665,6 +674,7 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
             if not words or words[0].startswith("-"):
                 return False
             runner = words[0]
+            quoted = _EXEC.match(line).group(1).startswith('"')
         else:
             return False
     if runner is None or depth:
@@ -672,9 +682,11 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
     variable = _VARIABLE.match(runner)
     if variable:
         values = assigned.get(variable.group(1))
-        if not values or None in values:
+        if not values or None in values or variable.group(1) not in fixed:
             return False
         candidates = list(values)
+        if not quoted and any(char.isspace() or char in "*?[" for value in candidates for char in value):
+            return False
     else:
         candidates = [runner]
     for candidate in candidates:

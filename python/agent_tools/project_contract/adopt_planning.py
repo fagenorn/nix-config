@@ -551,7 +551,7 @@ def commit_environment_amendment(contract_source: dict | None,
     if argv is None or not isinstance(contract_source, dict):
         return None
     version = contract_source.get("schema_version")
-    if isinstance(version, bool) or version != current_schema:
+    if type(version) is not int or version != current_schema:
         return None
     bindings = contract_source.get("bindings")
     if not isinstance(bindings, dict):

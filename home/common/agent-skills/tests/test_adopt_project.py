@@ -1690,6 +1690,44 @@ class CommitEnvironmentPlanTest(AdoptTestCase):
         error = self.tampered_apply(["other", "shell"])
         self.assertEqual(error["repair_id"], "adopt.plan.inputs_changed")
 
+    def test_apply_refuses_an_added_commit_environment_on_a_plan_whose_contract_binds_one(
+            self):
+        def own(contract):
+            contract["bindings"]["commands"]["dev-shell"] = {
+                "argv": ["true"], "cwd": ".", "env": []}
+            contract["bindings"]["vcs"]["commit"]["environment"] = "dev-shell"
+
+        root = self.authored(own)
+        # a drifted projection gives the plan work to do
+        write(root, "AGENTS.md", "hand-edited\n")
+        commit(root, "drift a projection")
+        _, doc, _ = self.plan(root)
+        self.assertEqual(doc["plan"]["state"], "ready")
+        plan_id = doc["plan"]["plan_id"]
+        path = (self.home / ".agents/state/adopt/plans"
+                / (plan_id.split(":", 1)[1] + ".json"))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["plan"]["commit_environment"] = ["other", "shell"]
+        path.write_text(json.dumps(document), encoding="utf-8")
+        code, out, err = run("apply", "--plan-id", plan_id,
+                             "--acknowledge-deletions", home=self.home)
+        self.assertEqual(code, 2, out + err)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.plan.inputs_changed")
+
+    def test_only_an_integer_schema_version_of_the_current_schema_is_amended(self):
+        def contract(version):
+            return {"schema_version": version,
+                    "bindings": {"commands": {}, "vcs": {"commit": {}}}}
+
+        argv = ["devenv", "shell", "--"]
+        self.assertEqual(adopt_planning.commit_environment_amendment(
+            contract(2), argv, 2), ("commit-environment", argv))
+        for version in (2.0, True, "2", None):
+            with self.subTest(version=version):
+                self.assertIsNone(adopt_planning.commit_environment_amendment(
+                    contract(version), argv, 2 if version is not True else 1))
+
     def test_apply_refuses_a_malformed_stored_commit_environment(self):
         for value in ("devenv shell --", [], ["devenv", ""]):
             with self.subTest(value):

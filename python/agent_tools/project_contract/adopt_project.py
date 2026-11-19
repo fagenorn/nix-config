@@ -815,6 +815,15 @@ def command_apply(args: argparse.Namespace) -> int:
         raise adopt_inspection.refuse(
             "plan_stale", "adopt.plan.inputs_changed", "/plan/input_digest",
             "the repository no longer hashes to the plan's input digest")
+    # The stored member sits outside the digest when the re-derivation made
+    # none (a contract that already names an environment ignores the argv).
+    if (composed.document["plan"].get("commit_environment")
+            != stored_plan.get("commit_environment")):
+        raise adopt_inspection.refuse(
+            "plan_stale", "adopt.plan.inputs_changed",
+            "/plan/commit_environment",
+            "the stored plan's commit environment is not the one this "
+            "repository derives")
     # The operations sit outside the digest in a mutable stored document, so
     # the identifier alone cannot vouch for them (D33).
     if (adopt_inspection.canonical_json(composed.document["changes"])
