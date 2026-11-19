@@ -14,7 +14,7 @@ from email.utils import format_datetime
 from agent_tools.claims import forge_claim
 from agent_tools.claims import forge_land_lock as land_lock
 from agent_tools.claims import forge_markers as fm
-from .forge_world import ForgeWorld, host_clock
+from .forge_world import NETWORK_DOWN, ForgeWorld, host_clock
 
 SLUG, BRANCH = "octo/widgets", "main"
 OWNER, NAME = SLUG.split("/")
@@ -2260,6 +2260,73 @@ class QueueTest(Base):
                        "adds `position` and `ahead` (D12)"):
             self.assertIn(phrase, doc)
         self.assertEqual((land_lock.FAST_POLL, land_lock.FREE_GRACE, land_lock.QUEUE_REFRESH), (20, 60, 60))
+
+
+class InProcessForgeTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def outcome(self, arrange, argv, token=False, in_process=False):
+        self.world.reset()
+        arrange()
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+        if token:
+            env["GITHUB_TOKEN"] = "harness-token"
+        if in_process:
+            done = self.world.answer(["gh", *argv], env=env)
+        else:
+            done = subprocess.run([str(self.world.bin / "gh"), *argv], capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, env=env)
+        state = self.world.state
+        refs = self.world.refs() if (state / "refs.json").exists() else None
+        stored = self.world.stored() if (state / "store.json").exists() else None
+        return done.returncode, done.stdout, done.stderr, self.world.calls(), refs, stored
+
+    def test_the_in_process_gh_answers_as_the_child_does(self):
+        world = self.world
+        create = ["api", "-X", "POST", f"repos/{SLUG}/git/refs", "-f", f"ref={REF}"]
+        cas = ["api", "graphql", "-f", f"query={fm.UPDATE_REFS}", "-f", "repositoryId=R_kgDOtest",
+               "-f", f"name={REF}", "-f", f"before={A}", "-f", f"after={B}"]
+        stored_comment = {"id": 5, "updated_at": T0, "created_at": T0, "body": "held by the parity row"}
+
+        def outage():
+            world.respond("gh", ["api", "x"], stdout="out")
+            world.outage(1)
+
+        rows = [
+            ("registered", lambda: world.respond("gh", ["api", "x"], stdout="out\r\nmore\r\n",
+                                                 stderr="err\r\n", exit=0), ["api", "x"], False, 0),
+            ("unregistered", lambda: None, ["api", "nope"], False, 64),
+            ("ref read", lambda: world.ref_store(SLUG, {REF: A}), LOCK_READ, False, 0),
+            ("ref absent", lambda: world.ref_store(SLUG, {}), LOCK_READ, False, 1),
+            ("create exists", lambda: world.ref_store(SLUG, {REF: A}), [*create, "-f", f"sha={B}"], False, 1),
+            ("cas applied", lambda: world.ref_store(SLUG, {REF: A}), cas, False, 0),
+            ("outage", outage, ["api", "x"], False, 1),
+            ("lost reply", lambda: world.ref_store(SLUG, {}, lose_reply=["create"]),
+             [*create, "-f", f"sha={A}"], False, 1),
+            ("token", lambda: world.respond("gh", ["api", "x"], stdout="out"), ["api", "x"], True, 65),
+            ("comment list", lambda: world.comment_store(SLUG, 7, [stored_comment]),
+             ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/7/comments?per_page=100"], False, 0),
+        ]
+        for name, arrange, argv, token, expected in rows:
+            with self.subTest(name):
+                child = self.outcome(arrange, argv, token=token)
+                answered = self.outcome(arrange, argv, token=token, in_process=True)
+                self.assertEqual(answered, child)
+                self.assertEqual(child[0], expected)
+                if name == "registered":
+                    self.assertEqual(child[1:3], ("out\nmore\n", "err\n"))
+                if name == "outage":
+                    self.assertEqual(child[2], NETWORK_DOWN + "\n")
+                if name == "cas applied":
+                    self.assertEqual(child[4], {REF: B})
+                if name == "lost reply":
+                    self.assertEqual(child[4], {REF: A})
+                if name == "token":
+                    self.assertIs(child[3][-1]["token_visible"], True)
+                if name == "comment list":
+                    self.assertIn("held by the parity row", child[1])
+                    self.assertEqual(child[5], [stored_comment])
 
 
 class IdleRaceTest(Base):
