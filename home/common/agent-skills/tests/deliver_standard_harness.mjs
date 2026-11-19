@@ -1,5 +1,5 @@
 // Runs a Workflow-tool program's control flow against stub agents (issue 618).
-// Usage: node deliver_standard_harness.mjs <program.js>  with a scenario JSON on stdin:
+// Usage: node deliver_standard_harness.mjs <program.js>  with a scenario JSON on stdin (one-shot), or import { makeRunner } and call makeRunner(programText)(scenario), which resolves to the exact text one-shot mode prints (program_server.mjs does, once per program):
 //   { "args": {...}, "replies": { "<label>": reply | [reply per call] }, "patch": { "<label>": {...} } }
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
 // is merged over that default; a reply "throw" throws, and a program throw prints { result: null, error, calls }. A folded label (NESTED) given an explicit object reply with no own key for a nested step
@@ -7,10 +7,9 @@
 // A scenario's "after": { "<label>": "<other label>" } holds the reply of <label> until <other label> has been called (a run where it never is does not end).
 // #1139: every setup reply carries the look marker read (SETUP.look, unmarked): an explicit ok setup reply with no own look key gets it too, fresh and resume alike.
 // also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}], logs: [each log() line], events: ["call <label>" and "reply <label>" in order] }.
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
-const program = readFileSync(process.argv[2], 'utf8')
-const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
 const TASK_COMMIT = n => (n === 1 ? 'c0ffee' : `c0ffee${n}`)
@@ -104,75 +103,86 @@ const defaultOf = (label, prompt, over = {}) => {
   return label === 'setup' && HOLDER_ID(prompt) && 'host' in over ? { ...base, ...holderOf(over.host, prompt) } : base
 }
 
-const calls = []
-const seen = {}
-// The "after" gates: one promise per awaited label, resolved when that label is called.
-const called = {}
-// Each agent call and each reply, in the order they happened.
-const events = []
-const gate = label => (called[label] = called[label] || (() => { let open; const p = new Promise(r => { open = r }); return { p, open } })())
-async function agent(prompt, opts = {}) {
-  events.push(`call ${opts.label}`)
-  gate(opts.label).open()
-  try {
-    const reply = replyOf(prompt, opts)
-    const wait = (scenario.after || {})[opts.label]
-    if (wait) await gate(wait).p
-    return reply
-  } finally {
-    events.push(`reply ${opts.label}`)
-  }
-}
 // #1001: a CI fix asked to release the land lock before it edits reports the release when it made a commit, unless a scenario says otherwise.
 const released = (label, prompt, r) => {
   if (label === 'fix-ci' && r && typeof r === 'object' && /return lock_released true/i.test(prompt) && !Object.prototype.hasOwnProperty.call(r, 'lock_released') && !(typeof r.commit === 'string' && typeof r.start_head === 'string' && r.commit && r.start_head && (r.commit.startsWith(r.start_head) || r.start_head.startsWith(r.commit)))) r.lock_released = true
   return r
 }
-function replyOf(prompt, opts) {
-  const label = opts.label
-  calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, schema: opts.schema || null, prompt })
-  const n = seen[label] = (seen[label] || 0) + 1
-  const replies = scenario.replies || {}
-  if (Object.prototype.hasOwnProperty.call(replies, label)) {
-    const r = replies[label]
-    const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
-    // A reply equal to "throw" makes the stub agent throw after the call was recorded.
-    if (out === 'throw') throw new Error(`stub agent ${label} threw`)
-    const row = NESTED.find(([re]) => re.test(label))
-    if (row && out && typeof out === 'object' && !Array.isArray(out) && (label !== 'setup' || (out.ok === true && HOLDER_ID(prompt)))) {
-      const base = defaultOf(label, prompt, out)
-      for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
-    }
-    if (label === 'setup' && out && typeof out === 'object' && !Array.isArray(out) && out.ok === true && !Object.prototype.hasOwnProperty.call(out, 'look')) out.look = structuredClone(SETUP.look)
-    return released(label, prompt, out)
-  }
-  const base = defaultOf(label, prompt)
-  const patch = (scenario.patch || {})[label] || {}
-  const merged = { ...base, ...patch }
-  // A fresh setup's holder is computed after the patch is merged, from the merged host.
-  if (label === 'setup' && HOLDER_ID(prompt) && !('holder' in patch)) {
-    delete merged.holder
-    Object.assign(merged, holderOf(merged.host, prompt))
-  }
-  return released(label, prompt, structuredClone(merged))
-}
-const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))
-const pipeline = () => { throw new Error('pipeline is not stubbed') }
-const workflow = () => { throw new Error('workflow is not stubbed') }
-const budget = { total: null, spent: () => 0, remaining: () => Infinity }
-const noop = () => {}
-const logs = []
-const log = line => { logs.push(String(line)) }
 
-const body = program.replace(/^export const meta\b/m, 'const meta')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
-const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
-// A program throw is printed with the calls that ran, the finally release among them.
-let result = null
-let error = null
-try {
-  result = await run(agent, parallel, pipeline, noop, log, scenario.args, budget, workflow)
-} catch (e) {
-  error = String((e && e.message) || e)
+// Rewrites meta and compiles the program once; each scenario then runs against state made anew, so one process can answer many scenarios.
+export function makeRunner(programText) {
+  const body = programText.replace(/^export const meta\b/m, 'const meta')
+  const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
+  return async function runScenario(scenario) {
+    const calls = []
+    const seen = {}
+    // The "after" gates: one promise per awaited label, resolved when that label is called.
+    const called = {}
+    // Each agent call and each reply, in the order they happened.
+    const events = []
+    const gate = label => (called[label] = called[label] || (() => { let open; const p = new Promise(r => { open = r }); return { p, open } })())
+    async function agent(prompt, opts = {}) {
+      events.push(`call ${opts.label}`)
+      gate(opts.label).open()
+      try {
+        const reply = replyOf(prompt, opts)
+        const wait = (scenario.after || {})[opts.label]
+        if (wait) await gate(wait).p
+        return reply
+      } finally {
+        events.push(`reply ${opts.label}`)
+      }
+    }
+    function replyOf(prompt, opts) {
+      const label = opts.label
+      calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, schema: opts.schema || null, prompt })
+      const n = seen[label] = (seen[label] || 0) + 1
+      const replies = scenario.replies || {}
+      if (Object.prototype.hasOwnProperty.call(replies, label)) {
+        const r = replies[label]
+        const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
+        // A reply equal to "throw" makes the stub agent throw after the call was recorded.
+        if (out === 'throw') throw new Error(`stub agent ${label} threw`)
+        const row = NESTED.find(([re]) => re.test(label))
+        if (row && out && typeof out === 'object' && !Array.isArray(out) && (label !== 'setup' || (out.ok === true && HOLDER_ID(prompt)))) {
+          const base = defaultOf(label, prompt, out)
+          for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
+        }
+        if (label === 'setup' && out && typeof out === 'object' && !Array.isArray(out) && out.ok === true && !Object.prototype.hasOwnProperty.call(out, 'look')) out.look = structuredClone(SETUP.look)
+        return released(label, prompt, out)
+      }
+      const base = defaultOf(label, prompt)
+      const patch = (scenario.patch || {})[label] || {}
+      const merged = { ...base, ...patch }
+      // A fresh setup's holder is computed after the patch is merged, from the merged host.
+      if (label === 'setup' && HOLDER_ID(prompt) && !('holder' in patch)) {
+        delete merged.holder
+        Object.assign(merged, holderOf(merged.host, prompt))
+      }
+      return released(label, prompt, structuredClone(merged))
+    }
+    const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))
+    const pipeline = () => { throw new Error('pipeline is not stubbed') }
+    const workflow = () => { throw new Error('workflow is not stubbed') }
+    const budget = { total: null, spent: () => 0, remaining: () => Infinity }
+    const noop = () => {}
+    const logs = []
+    const log = line => { logs.push(String(line)) }
+
+    // A program throw is printed with the calls that ran, the finally release among them.
+    let result = null
+    let error = null
+    try {
+      result = await run(agent, parallel, pipeline, noop, log, scenario.args, budget, workflow)
+    } catch (e) {
+      error = String((e && e.message) || e)
+    }
+    return JSON.stringify(error === null ? { result, calls, logs, events } : { result: null, error, calls, logs, events })
+  }
 }
-process.stdout.write(JSON.stringify(error === null ? { result, calls, logs, events } : { result: null, error, calls, logs, events }))
+
+// One-shot mode (node <harness> <program.js>, scenario on stdin) runs only when this file is the entry module; Node resolves an ESM entry's symlinks, so import.meta.url is its real path.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.stdout.write(await makeRunner(readFileSync(process.argv[2], 'utf8'))(JSON.parse(readFileSync(0, 'utf8'))))
+}
