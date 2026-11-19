@@ -14,15 +14,15 @@ from . import test_verify_pending_units as units
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
-GUEST_PORT = 27185
 LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-tools-console$")
 
 
-def check_command(case, command, tailscale=None):
-    """The command's words; `tailscale` is the Windows client path a host reads Serve status from (#1237)."""
+def check_command(case, command, home, tailscale=None):
+    """The command's words; `tailscale` is the client path a host reads Serve status from (#1237, #1299)."""
     words = shlex.split(command)
     case.assertRegex(words[0], LAUNCHER)
-    case.assertEqual(words[1:5], ["--port", str(PORT), "--guest-port", str(GUEST_PORT)])
+    case.assertEqual(words[1:5], ["--port", str(PORT), "--guest-socket",
+                                  f"{home}/.agents/state/console/guest/guest.sock"])
     rest = words[5:]
     if tailscale is not None:
         case.assertEqual(rest[:2], ["--tailscale", tailscale], command)
@@ -37,6 +37,7 @@ class LinuxUnit(unittest.TestCase):
     HOST = "anis-desktop"
     APPLY = """c: u: {
       command = u.agentConsole.command;
+      home = u.home.homeDirectory;
       path = u.agentConsole.path;
       gh = "${u.programs.gh.package}";
       profile = u.home.profileDirectory;
@@ -53,7 +54,8 @@ class LinuxUnit(unittest.TestCase):
 
     def test_the_port_is_the_consoles_fixed_port(self):
         self.assertEqual(PORT, service.DEFAULT_PORT)
-        check_command(self, self.got["command"], "/mnt/c/Program Files/Tailscale/tailscale.exe")
+        check_command(self, self.got["command"], self.got["home"],
+                      "/mnt/c/Program Files/Tailscale/tailscale.exe")
 
     def test_the_service_runs_the_console_command_and_restarts_it_on_exit(self):
         # home-manager 25.11 normalizes ExecStart and Environment to lists.
@@ -107,6 +109,7 @@ class DarwinAgent(unittest.TestCase):
       command = u.agentConsole.command;
       path = u.agentConsole.path;
       home = u.home.homeDirectory;
+      tailscaleClient = if c.services.tailscale.enable then "${c.services.tailscale.package}/bin/tailscale" else null;
       profile = u.home.profileDirectory;
       user = u.home.username;
       atBoot = c.ownerServices.atBoot;
@@ -132,11 +135,22 @@ class DarwinAgent(unittest.TestCase):
     def test_the_agent_runs_the_console_command_after_the_nix_volume_is_mounted(self):
         for got, plist in self.hosts():
             command = got["command"]
-            check_command(self, command)
+            check_command(self, command, got["home"], got["tailscaleClient"])
             self.assertEqual(got["daemonCommand" if got["atBoot"] else "agentCommand"], command)
             self.assertEqual(plist["ProgramArguments"],
                              ["/bin/sh", "-c", f"/bin/wait4path /nix/store && exec {command}"])
             self.assertNotIn("Program", plist)
+
+    def test_only_a_mac_with_the_tailscale_daemon_reads_its_client(self):
+        daemon = self.got["eleven-m5"]
+        self.assertRegex(daemon["tailscaleClient"],
+                         r"^/nix/store/[0-9a-z]{32}-tailscale-[^/]+/bin/tailscale$")
+        words = shlex.split(daemon["command"])
+        pairs = [words[i:i + 2] for i in range(len(words) - 1)]
+        self.assertIn(["--tailscale", daemon["tailscaleClient"]], pairs)
+        menu_bar = self.got["mbp"]
+        self.assertIsNone(menu_bar["tailscaleClient"])
+        self.assertNotIn("--tailscale", shlex.split(menu_bar["command"]))
 
     def test_a_boot_host_runs_the_console_as_a_daemon_of_the_owner(self):
         for got, plist in self.hosts():
