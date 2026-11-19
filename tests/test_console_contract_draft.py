@@ -1190,6 +1190,24 @@ class StrandedHookTest(unittest.TestCase):
         self.assertTrue(cd.hook_stranded(quoted, str(self.bin)))
         self.assertTrue(cd.hook_stranded("#!/bin/sh\nRUNNER=prek\nexec $RUNNER\n", str(self.bin)))
 
+    def test_an_assignment_after_the_exec_leaves_the_runner_unjudged(self):
+        text = "#!/bin/sh\nexec \"$RUNNER\" hook-impl\nRUNNER=/gone/prek\n"
+        self.tool("git")
+        self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+        (self.bin / "git").unlink()
+        self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+        before = "#!/bin/sh\nRUNNER=/gone/prek\nexec \"$RUNNER\" hook-impl\n"
+        self.assertTrue(cd.hook_stranded(before, str(self.bin)))
+
+    def test_an_ifs_assignment_leaves_the_hook_unjudged(self):
+        for letter, split in (("unquoted", "exec $RUNNER"), ("quoted", "exec \"$RUNNER\"")):
+            text = f"#!/bin/sh\nIFS=-\nRUNNER=git-diff\n{split}\n"
+            with self.subTest(case=letter):
+                self.tool("git")
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+                (self.bin / "git").unlink()
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+
     def test_a_runner_assigned_only_inside_an_if_is_unjudged(self):
         text = ("#!/bin/sh\nif [ -z \"$RUNNER\" ]; then\n  RUNNER=prek\nfi\nexec \"$RUNNER\" hook-impl\n")
         self.assertFalse(cd.hook_stranded(text, str(self.bin)))

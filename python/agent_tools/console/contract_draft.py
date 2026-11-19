@@ -36,15 +36,15 @@ a hook above `TEXT_LIMIT` bytes is never read past that bound and reads as `""`,
 unreadable one. `hook_stranded` judges a hook only when every non-comment line is one of a fixed
 allowlist of shapes, and every other hook is unjudged and never stranded, so its plan stays as it is
 today (#1333). The shapes are: a blank line; a first-line shebang whose interpreter is `sh`, `bash`,
-`dash` or `zsh` (directly or through `env`); `NAME=value` or `NAME="value"` for any `NAME` but `PATH`
+`dash` or `zsh` (directly or through `env`); `NAME=value` or `NAME="value"` for any `NAME` but `PATH` and `IFS`
 (a trailing `#` comment aside; the value is one literal word with no unquoted `;`, `&`, `|`, `<`, `>`,
 parenthesis or backtick, or is wholly one balanced `$( )` or backtick substitution, which is never a
 runner candidate, so a line holding several commands is never of this shape); `if [ ... ]; then`, `else` and `fi` lines, the test holding no `;`,
 `&`, `|`, `<`, `>`, backtick, parenthesis or brace; and exactly one line-leading `exec` of a word or of
 `"$NAME"` (`$NAME`, `${NAME}`), outside any `if`, followed by any arguments. A runner variable's
 candidates are only its literal assigned values, and it is judged only when a line outside any `if`
-assigns it (an assignment only inside an `if` may leave an inherited value) and, when written without
-quotes, only when no assigned value holds a blank or one of `*?[`. A line of any other shape (a `PATH` assignment, an
+assigns it before the `exec` (an assignment only inside an `if`, or only after the `exec`, may leave an inherited value) and, when written without
+quotes, only when no assigned value holds a blank or one of `*?[`. A line of any other shape (a `PATH` or `IFS` assignment, an
 `export`, `+=`, an array or nameref, a default expansion, `read`, `for`, `eval`, `source`, a second
 `exec`, or a command run on any line but the `exec`) leaves the hook unjudged. A runner is found when it
 is absolute and an executable file, or has no `/` and is on `search_path`; a `search_path` with an entry
@@ -629,10 +629,11 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
     """Whether a hook execs a runner that is found neither at its recorded path nor on `search_path`.
 
     A hook is judged only when every non-comment line has one of the allowlisted shapes (blank; a shell
-    shebang; `NAME=value` as above, `PATH` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
+    shebang; `NAME=value` as above, `PATH` and `IFS` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
     of a word or `"$NAME"` outside any `if`) and each candidate runner is a literal; a runner variable is
     judged only when some line outside any `if` assigns it, and an unquoted one only when no value holds a
-    blank or a glob character (the shell would split or expand it). The module docstring states the allowlist.
+    blank or a glob character (the shell would split or expand it). An assignment after the `exec` line
+    never runs and is not counted. The module docstring states the allowlist.
     Every other hook is unjudged and never stranded, and so is one read under a set `cancel` or with a
     `search_path` entry that is not absolute.
     """
@@ -661,11 +662,12 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
         elif _ASSIGNMENT.match(line):
             name, value = _ASSIGNMENT.match(line).groups()
             known, word = _assigned_word(value)
-            if name == "PATH" or not known:
+            if name in ("PATH", "IFS") or not known:
                 return False
-            assigned.setdefault(name, {})[word] = None
-            if depth == 0:
-                fixed.add(name)
+            if runner is None:  # a line after the `exec` never runs, so it sets no value
+                assigned.setdefault(name, {})[word] = None
+                if depth == 0:
+                    fixed.add(name)
         elif _EXEC.match(line) and runner is None and depth == 0:
             try:
                 words = shlex.split(_EXEC.match(line).group(1), comments=True)
