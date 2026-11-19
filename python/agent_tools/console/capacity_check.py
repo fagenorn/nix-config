@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion | --account-names] [--after-seq N] [--log PATH]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --code-signin | --pin | --page-remove | --exclusion | --account-names] [--after-seq N | --after-commit SHA] [--log PATH]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -90,6 +90,22 @@ exits 1: a row that is not there yet may still be recorded.
 For `--page-add`, `--after-seq N` reads only log rows whose `seq` is above N (a log carried over
 from another host keeps its rows below N), and the add and the start must both be above N.
 
+`--code-signin` (#1323, exclusive with the other modes, `--max-age` and `--after-seq` not allowed) meets
+when the console's own event log shows a sign-in finished by a code pasted into the page. It never
+asks the console, so the `--url` is not used; the log is `--log PATH` or the console's own, opened
+read-only as for `--page-add`. A profile P is in the set when, for one attempt A (the `seq` of the
+start row), the log holds a `signin.acted` row at `seq` A whose payload has `by` `owner`, `action`
+`start`, `outcome` `started` and `profile` P; a `signin.acted` row whose payload has `by` `owner`,
+`action` `code`, `outcome` `sent` and `profile` P with `seq` above A; and a `signin.ended` row for P
+with `attempt` A and `outcome` `signed_in` at a higher `seq` than that code.
+A code counts only for the latest start of its profile. `--after-commit SHA` (40 lowercase hex)
+keeps only rows whose `at` is strictly after the commit's committer time, read with `git show -s
+--format=%cI SHA` in the current directory; all three rows must be later, the start included. A
+non-empty set is `{"status": "met", "profiles": [<set, sorted>]}`, exit 0; an empty one `{"status":
+"pending"}`, exit 75; an unreadable log `{"status": "no_log"}`, exit 75; a commit time Git cannot
+give (a failure, a timeout or an unparsable time) `{"status": "no_commit"}`, exit 75. It never exits
+1, and it only reads: no request, no write.
+
 `--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
 manager has started under a profile while the owner's page pin of that profile was in force. It
 reads only the view's top-level `pin_launches` (the sorted profiles of such launches, which the
@@ -152,7 +168,9 @@ import argparse
 import http.client
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from collections.abc import Callable
@@ -166,6 +184,7 @@ DEFAULT_MAX_AGE = 600
 LOOPBACK = ("127.0.0.1", "localhost")
 TIMEOUT = 5.0
 NOT_YET = 75
+GIT_TIMEOUT = 10
 # The entries the launcher links into a profile: the `SHARED=(...)` array of claude-account
 # (kept for the accounts sandbox's snapshot, which lists a profile's shared entries).
 SHARED = ("settings.json", "CLAUDE.md", "keybindings.json", "skills", "agents", "commands",
@@ -492,6 +511,77 @@ def page_add_verdict(log: Path, after_seq: int | None = None) -> tuple[int, dict
     return NOT_YET, {"status": "pending"}
 
 
+def commit_time(sha: str) -> datetime | None:
+    """The committer time of `sha` in the current directory; None when Git cannot give it."""
+    try:
+        done = subprocess.run(["git", "show", "-s", "--format=%cI", sha], capture_output=True,
+                              text=True, timeout=GIT_TIMEOUT)
+        if done.returncode != 0:
+            return None
+        return datetime.fromisoformat(done.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _later(text: object, after: datetime | None) -> bool:
+    """Whether the row time `text` parses and is strictly after `after` (always, when None)."""
+    if after is None:
+        return True
+    try:
+        at = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return False
+    if at.tzinfo is None or after.tzinfo is None:
+        return False
+    return at > after
+
+
+def code_signin_verdict(log: Path, after: datetime | None = None) -> tuple[int, dict]:
+    """Met when the log shows an owner start, a pasted code inside it and its signed-in end."""
+    try:
+        connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return NOT_YET, {"status": "no_log"}
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT seq, at, kind, payload FROM events "
+            "WHERE kind IN ('signin.acted', 'signin.ended') ORDER BY seq").fetchall()
+    except sqlite3.Error:
+        return NOT_YET, {"status": "no_log"}
+    finally:
+        connection.close()
+    starts: dict[int, str] = {}
+    latest: dict[str, int] = {}
+    coded: dict[int, int] = {}
+    met: set[str] = set()
+    for seq, at, kind, text in rows:
+        if not _later(at, after):
+            continue
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            continue
+        profile = payload.get("profile") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict) or not isinstance(profile, str) or not profile:
+            continue
+        if kind == "signin.acted" and _owner(payload):
+            if payload.get("action") == "start" and payload.get("outcome") == "started":
+                starts[seq] = profile
+                latest[profile] = seq
+            elif (payload.get("action") == "code" and payload.get("outcome") == "sent"
+                  and profile in latest):
+                coded.setdefault(latest[profile], seq)
+        elif kind == "signin.ended" and payload.get("outcome") == "signed_in":
+            attempt = payload.get("attempt")
+            if (isinstance(attempt, int) and not isinstance(attempt, bool)
+                    and starts.get(attempt) == profile and attempt in coded):
+                met.add(profile)
+    if met:
+        return 0, {"status": "met", "profiles": sorted(met)}
+    return NOT_YET, {"status": "pending"}
+
+
 REMOVED_OUTCOMES = ("removed", "removed_signed_out_already")
 
 
@@ -557,6 +647,12 @@ def pin_verdict(body: bytes) -> tuple[int, dict]:
     return 0, {"status": "met", "profiles": sorted(set(launches))}
 
 
+def _sha(text: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", text):
+        raise argparse.ArgumentTypeError("must be 40 lowercase hex digits")
+    return text
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
@@ -582,6 +678,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--page-add", action="store_true",
                       help="require the console's log to show an account added from the page "
                            "and that profile's sign-in started from the page")
+    mode.add_argument("--code-signin", action="store_true",
+                      help="require the console's log to show a sign-in finished by a code "
+                           "pasted into the page")
     mode.add_argument("--pin", action="store_true",
                       help="require a new session or manager started under a profile while the "
                            "owner's pin of it was in force, read from the console's log")
@@ -598,6 +697,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--after-seq", type=_positive, default=None,
                         help="read only log rows whose seq is above this, for --page-signin, "
                              "--page-add and --page-remove")
+    parser.add_argument("--after-commit", type=_sha, default=None,
+                        help="read only log rows stamped after this commit's time, for "
+                             "--code-signin")
     return parser
 
 
@@ -620,6 +722,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.after_seq is not None and not (args.page_signin or args.page_add or args.page_remove):
         parser.error("--after-seq applies to --page-signin, --page-add and --page-remove only")
+    if args.after_commit is not None and not args.code_signin:
+        parser.error("--after-commit applies to --code-signin only")
+    if args.code_signin:
+        after = None
+        if args.after_commit is not None:
+            after = commit_time(args.after_commit)
+            if after is None:
+                print(json.dumps({"status": "no_commit"}, sort_keys=True))
+                return NOT_YET
+        code, result = code_signin_verdict(args.log or default_log(), after)
+        print(json.dumps(result, sort_keys=True))
+        return code
     if args.page_add:
         code, result = page_add_verdict(args.log or default_log(), args.after_seq)
         print(json.dumps(result, sort_keys=True))
