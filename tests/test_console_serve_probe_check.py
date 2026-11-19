@@ -129,7 +129,7 @@ class HeldCheckTest(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
 
     def test_the_reading_feeds_the_check(self):
-        access = guest.Access(TAILNET, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        access = guest.Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
         local = ["localhost"]
         rows = [(local, [TAILNET], [COLLEAGUE], [FORGED], 0, "met"),
                 (local, [TAILNET], [FORGED], [OTHER_PROBE], 1, "not_met"),
@@ -139,7 +139,7 @@ class HeldCheckTest(unittest.TestCase):
                 ([TAILNET], [TAILNET], [COLLEAGUE], [FORGED], 1, "not_met")]
         for hosts, forwarded, logins, probes, want_code, want_status in rows:
             with self.subTest(hosts=hosts, forwarded=forwarded, logins=logins, probes=probes):
-                reading = guest.reading(access, hosts, forwarded, logins, ["100.64.0.1"], probes)
+                reading = guest.reading(access, TAILNET, hosts, forwarded, logins, ["100.64.0.1"], probes)
                 code, printed, _ = run_check(state_of(reading))
                 self.assertEqual((code, printed["status"]), (want_code, want_status))
 

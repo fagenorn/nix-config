@@ -102,8 +102,13 @@ the connection with no answer, appends nothing, records no reading and prints on
 guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitted by
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
 nothing appended (the one thing a guest-door request may publish is the reading below): sharing
-off (no tailnet name), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the configured tailnet name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
-`GET /api/whoami` is answered to any request before admission: it reports the `Host` and the
+off, then a tailnet name this console cannot read (`guest.NAME_UNREAD_TEXT`: the name is read from
+this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
+One request is judged by one `guest.Policy` (the switch, the list and the read name): the handler reads
+`ConsoleService.guest_policy` once, in `parse_request`, and the recorded reading and the decision both use that
+snapshot; the service replaces the snapshot as one assignment.
+`GET /api/whoami` is answered to any request before admission, except `403` `guest.NAME_UNREAD_TEXT` while
+sharing is on and no name is read: it reports the `Host` and the
 `X-Forwarded-Host` it saw, how many of each and of the login headers arrived, whether `X-Forwarded-For` did, and whether the login named
 by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
@@ -112,20 +117,24 @@ its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`)
 scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
 read-only layout) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
-stream of it, which re-admits on every publish and ends when the colleague, the tailnet name or the
-sharing is gone, and a picture read needs the guest token, an `Origin` (when sent) of `https://<tailnet>`
+stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
+read tailnet name moved or went, and a picture read needs the guest token, an `Origin` (when sent) of `https://<the read name>`
 and an id on the colleague's own view, else `404` `this picture is not known`. Every guest response closes
 its connection, so a body or a second request sent on it is never parsed. `ROUTES` registers every
 route: a handler compares `route` only with registered names, and a method other than GET on a guest
 read is `405` `Allow: GET`. The owner's port refuses, on every route, a request carrying a
 `Tailscale-*` header or `X-Forwarded-For` with `403` `guest.OWNER_PORT_TEXT`, after the `Host` check.
-With `serve_reader` (`console --tailscale PATH`, `guest.serve_reader`) a daemon thread `SERVE_THREAD`
-calls `poll_serve` at once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads this host's
-Tailscale client's `serve status --json` outside the ingest lock, keeps the reading in memory only (never
-in the log) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve proxies
-the tailnet name to `unix:<the bound guest socket>`. A reader that raises is one stderr line `console:
-serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); without a reader no
-thread starts and the state stays `unchecked`.
+With `serve_reader` and `status_reader` (`console --tailscale PATH`, `guest.serve_reader`,
+`guest.status_reader`) a daemon thread `SERVE_THREAD` (started for either reader) calls `poll_serve` at
+once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads this host's Tailscale client's `serve
+status --json` and `status --json` outside the ingest lock, each in its own `try`, keeps the readings
+(the Serve status and the name `guest.self_name` derives) in memory only (never in the log, the name
+never printed) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve
+proxies the read name to `unix:<the bound guest socket>`, and a name that moved or went is a publish
+that ends an open guest stream. A Serve reader that raises is one stderr line `console:
+serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); a status reader that raises
+is one stderr line `console: tailnet_status_failed <Type>` (the type only, as the message could carry the
+name) and reads None (the name is unread, `unreadable`); without a reader no thread starts.
 The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
 a different token, refused on every owner route, as the page token is on the guest picture read.
 The service keeps the last guest-door request's `guest.reading` (every request the door parses,
@@ -136,18 +145,18 @@ The owner's access-list writes (#1237) are three page writes, `POST /api/share-t
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
 `SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
 (4096; 411, 415, 411, 413 as every JSON page write). Their bodies are the exactly-keyed objects
-`guest.parse_tailnet` (`{"tailnet": "<host>.<tailnet>.ts.net" or null}`), `guest.parse_colleague`
+`guest.parse_sharing` (`{"shared": true|false}`), `guest.parse_colleague`
 (`{"login", "projects"}`) and `guest.parse_removal` (`{"login"}`) read; a body they refuse is `400`
-`bad tailnet`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
+`bad sharing`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
 a project that is not registered, a login that is not listed) is one stderr line `console:
 share_refused <reason>` and `409` with the reason; any other failure is `console: share_failed
 <Type>: <message>` and `500` `share failed`; no stderr line carries a login or a tailnet name.
 Success appends one row under the console's ingest lock, applies it and answers an empty `204`:
-`ConsoleService.set_tailnet` a `sharing.tailnet` row, `set_colleague` a `sharing.colleague` row
+`ConsoleService.set_sharing` a `sharing.tailnet` row (`{"shared"}`), `set_colleague` a `sharing.colleague` row
 that replaces the login's whole project list, `remove_colleague` a `sharing.removed` row. A
 refusal appends nothing and publishes nothing. Each write publishes, and the guest stream
-re-admits on every publish, so a removed colleague's open stream, a cleared tailnet's and a
-moved tailnet's end before any further frame, and the next guest request is `403`.
+re-admits on every publish, so a removed colleague's open stream and a switched-off one's end before any further frame
+(a moved or gone name ends one on the Serve thread's publish), and the next guest request is `403`.
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -2774,7 +2783,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         if route == SHARE_TAILNET_PATH:
-            bad, parse, write = "bad tailnet", guest.parse_tailnet, console.set_tailnet
+            bad, parse, write = "bad sharing", guest.parse_sharing, console.set_sharing
         elif route == SHARE_COLLEAGUE_PATH:
             bad, parse = "bad colleague", guest.parse_colleague
             write = lambda parsed: console.set_colleague(*parsed)
@@ -3267,6 +3276,7 @@ class GuestHandler(ConsoleHandler):
     """The guest port's one handler (#1237); it never calls the owner's route methods."""
 
     handle_expect_100 = http.server.BaseHTTPRequestHandler.handle_expect_100
+    policy = guest.NO_POLICY
 
     def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
               cache: str = "no-store"):
@@ -3277,19 +3287,21 @@ class GuestHandler(ConsoleHandler):
 
     def _guest_request(self):
         console = self.server.console
+        policy = self.policy
         route = self.path.split("?", 1)[0]
         hosts = self.headers.get_all("Host") or []
         forwarded_hosts = self.headers.get_all(guest.FORWARDED_HOST_HEADER) or []
         logins = self.headers.get_all(guest.LOGIN_HEADER) or []
         if self.command == "GET" and route == WHOAMI_PATH:
+            if policy.access.shared and policy.name is None:
+                return self._refuse(403, guest.NAME_UNREAD_TEXT)
             body = json.dumps(
                 guest.whoami(hosts, forwarded_hosts, logins,
                              self.headers.get_all("X-Forwarded-For") or [],
                              self.headers.get_all(guest.PROBE_HEADER) or []),
                 sort_keys=True, separators=(",", ":"))
             return self._send(200, "application/json", body.encode())
-        access = console.access
-        login, text = guest.admit(access, hosts, forwarded_hosts, logins)
+        login, text = guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
         if text is not None:
             return self._refuse(403, text)
         if route in OWNER_ONLY:
@@ -3309,7 +3321,7 @@ class GuestHandler(ConsoleHandler):
         elif route == STREAM_PATH:
             self._stream(self._readmitting(login, hosts, forwarded_hosts, logins))
         elif route.startswith(PICTURE_PREFIX):
-            self._guest_picture(route, access, login)
+            self._guest_picture(route, policy.name, login)
         else:
             self._refuse(404, "not found")
 
@@ -3326,8 +3338,9 @@ class GuestHandler(ConsoleHandler):
                     login, seen, remaining)
                 if change is None:
                     return None
-                version, access, view = change
-                if (guest.admit(access, hosts, forwarded_hosts, logins) != (login, None)
+                version, policy, view = change
+                if (guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
+                        != (login, None)
                         or view is None):
                     return version, None
                 if view == last[0]:
@@ -3338,10 +3351,10 @@ class GuestHandler(ConsoleHandler):
 
         return wait
 
-    def _guest_picture(self, route: str, access: "guest.Access", login: str):
+    def _guest_picture(self, route: str, name: str, login: str):
         console = self.server.console
         refusal = write_guard.read_refusal(
-            access.tailnet, self.headers.get_all("Origin") or [],
+            name, self.headers.get_all("Origin") or [],
             self.headers.get_all(write_guard.FETCH_SITE_HEADER) or [],
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
             scheme="https")
@@ -3360,8 +3373,9 @@ class GuestHandler(ConsoleHandler):
         if ok:
             headers = self.headers
             console = self.server.console
+            self.policy = console.guest_policy
             console.record_guest_request(guest.reading(
-                console.access, headers.get_all("Host") or [],
+                self.policy.access, self.policy.name, headers.get_all("Host") or [],
                 headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
@@ -3594,6 +3608,7 @@ class ConsoleService:
                  guest_socket: Path | None = None,
                  guest_token_path: Path | None = None,
                  serve_reader: Callable[[], object | None] | None = None,
+                 status_reader: Callable[[], object | None] | None = None,
                  serve_seconds: float = SERVE_SECONDS,
                  peer_reader: peer.PeerReader | None = peer.reader_for(sys.platform),
                  owner_uid: int | None = None,
@@ -3751,6 +3766,8 @@ class ConsoleService:
         self._digest_seconds = digest_seconds
         self._spend_seconds = spend_seconds
         self._serve_reader = serve_reader
+        self._status_reader = status_reader
+        self._tailnet_name: str | None = None
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
         self._guest_reading: dict | None = None
@@ -3789,7 +3806,7 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._access = guest.NO_ACCESS
-        self._published_access = guest.NO_ACCESS
+        self._guest_policy = guest.NO_POLICY
         self._guest_views: dict[str, bytes] = {}
         self._guest_pictures: dict[str, frozenset[str]] = {}
         self._guest_token: str | None = None
@@ -3912,8 +3929,8 @@ class ConsoleService:
         return self._guest_token
 
     @property
-    def access(self) -> "guest.Access":
-        return self._access
+    def guest_policy(self) -> "guest.Policy":
+        return self._guest_policy
 
     @property
     def guest_page_bytes(self) -> bytes | None:
@@ -3964,13 +3981,13 @@ class ConsoleService:
             return self._version, self._view
 
     def wait_for_guest_change(self, login: str, seen: int, timeout: float
-                              ) -> tuple[int, "guest.Access", bytes | None] | None:
-        """Like `wait_for_change`, with the access list and the login's view of that publish."""
+                              ) -> tuple[int, "guest.Policy", bytes | None] | None:
+        """Like `wait_for_change`, with the guest policy and the login's view of that publish."""
         with self._published:
             self._published.wait_for(lambda: self._version > seen or self._closing, timeout)
             if self._closing or self._version <= seen:
                 return None
-            return self._version, self._published_access, self._guest_views.get(login)
+            return self._version, self._guest_policy, self._guest_views.get(login)
 
     def delivered(self, version: int) -> None:
         """Record that the view of `version` was written to a page stream (ADR-console-071)."""
@@ -4057,8 +4074,10 @@ class ConsoleService:
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
         access = self._access
+        name = self._tailnet_name
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
-            access, guest.serve_state(self._serve_status, access.tailnet, self.guest_socket),
+            access, name,
+            guest.serve_state(access.shared, name, self._serve_status, self.guest_socket),
             self._guest_reading, self.guest_socket)))
         found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
         evidence_key = None
@@ -4074,7 +4093,7 @@ class ConsoleService:
             return
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
-        if self._guest_server is not None and access.tailnet is not None:
+        if self._guest_server is not None and access.shared and name is not None:
             for login, projects in access.colleagues.items():
                 derived = guest.scrub(derive_view(**guest.scoped(inputs, projects)))
                 views[login] = encode_view(derived)
@@ -4083,7 +4102,7 @@ class ConsoleService:
             if view != self._view or views != self._guest_views:
                 self._version += 1
             self._view = view
-            self._published_access = access
+            self._guest_policy = guest.Policy(access, name)
             self._guest_views = views
             self._guest_pictures = seen_pictures
             self._track_evidence_card(evidence_key)
@@ -6908,10 +6927,10 @@ class ConsoleService:
             self._dispatch_notice_nudge(sprint_id)
         return seq
 
-    def set_tailnet(self, tailnet: str | None) -> None:
-        """Append one `sharing.tailnet` row: the guest door's tailnet name, or None for off."""
+    def set_sharing(self, shared: bool) -> None:
+        """Append one `sharing.tailnet` row: the guest door's switch, on or off."""
         with self._ingest:
-            self._apply(self.log.append([(SHARING_TAILNET, None, {"tailnet": tailnet})]))
+            self._apply(self.log.append([(SHARING_TAILNET, None, {"shared": shared})]))
 
     def set_colleague(self, login: str, projects: tuple[str, ...]) -> None:
         """Append one `sharing.colleague` row: the login's whole project list (it replaces)."""
@@ -7667,16 +7686,26 @@ class ConsoleService:
         return None if self._activation_after is not None else self._activation
 
     def poll_serve(self) -> None:
-        """One reading of Tailscale Serve's status; see the module docstring (guest door)."""
-        if self._serve_reader is None:
+        """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door)."""
+        if self._serve_reader is None and self._status_reader is None:
             return
-        try:
-            found = self._serve_reader()
-        except Exception as error:
-            print(f"console: serve_status_failed {type(error).__name__}: {error}", file=sys.stderr)
-            found = None
+        found = None
+        if self._serve_reader is not None:
+            try:
+                found = self._serve_reader()
+            except Exception as error:
+                print(f"console: serve_status_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+        status = None
+        if self._status_reader is not None:
+            try:
+                status = self._status_reader()
+            except Exception as error:
+                print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
+        name = guest.self_name(status)
         with self._ingest:
             self._serve_status = found
+            self._tailnet_name = name
             self._publish()
 
     def activate(self, commit: str) -> None:
@@ -8173,7 +8202,7 @@ class ConsoleService:
             self._guest_thread = threading.Thread(
                 target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
             self._guest_thread.start()
-        if self._serve_reader is not None:
+        if self._serve_reader is not None or self._status_reader is not None:
             self._serve_thread = threading.Thread(
                 target=self._serve_loop, name=SERVE_THREAD, daemon=True)
             self._serve_thread.start()

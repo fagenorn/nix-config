@@ -130,7 +130,7 @@ window opens), so retained hooks keep their profile; once no hook of the session
 that row is removed like any other.
 
 Three kinds record the access list the owner keeps for the guest door (#1237): `SHARING_TAILNET`
-(`sharing.tailnet`, `{"tailnet"}`), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
+(`sharing.tailnet`, `{"shared"}`; a legacy `{"tailnet"}` row still folds to on), `SHARING_COLLEAGUE` (`sharing.colleague`, `{"login", "projects"}`)
 and `SHARING_REMOVED` (`sharing.removed`, `{"login"}`). None is in `KEPT_KINDS`, but the retention
 pass leaves, whatever its age, the newest tailnet row and, for each login, the newest colleague or
 removed row when it is a colleague row, the rows `guest.access_list` folds by, so the folded list is

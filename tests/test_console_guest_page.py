@@ -54,13 +54,14 @@ def harness(steps: list, page_bytes: bytes | None = None) -> list:
     return json.loads(done.stdout)
 
 
-ACCESS = guest.Access(TAILNET, MappingProxyType({
+ACCESS = guest.Access(True, MappingProxyType({
     COLLEAGUE: frozenset({"owner/p01"}), SECOND: frozenset({"owner/p00", "owner/p01"})}))
 SHARED_FRAME = {
     **view([project(1, [])]),
     "recent_projects": ["owner/p00", "owner/p01"],
     "sharing": guest.sharing_entry(
-        ACCESS, "serving", guest.reading(ACCESS, ["localhost"], [TAILNET], [STRANGER], [], [])),
+        ACCESS, TAILNET, "serving",
+        guest.reading(ACCESS, TAILNET, ["localhost"], [TAILNET], [STRANGER], [], [])),
 }
 OPEN = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
 SNAP = {"snapshot": True}
@@ -75,8 +76,7 @@ def writes(snap: dict) -> list:
 
 
 def sharing_frame(state: str, tailnet: str | None, last_request: dict | None) -> dict:
-    entry = guest.sharing_entry(ACCESS, state, last_request)
-    return {**SHARED_FRAME, "sharing": {**entry, "tailnet": tailnet}}
+    return {**SHARED_FRAME, "sharing": guest.sharing_entry(ACCESS, tailnet, state, last_request)}
 
 
 class SharingPanelTest(unittest.TestCase):
@@ -152,25 +152,25 @@ class SharingPanelTest(unittest.TestCase):
         why_login = "refused because it had not exactly one login header."
         local = ["localhost"]
         readings = [
-            (guest.reading(ACCESS, [], [], [], [], []),
+            (guest.reading(ACCESS, TAILNET, [], [], [], [], []),
              last + "no Host, no forwarded Host, no login header, " + why_host),
-            (guest.reading(ACCESS, [TAILNET], [TAILNET], [COLLEAGUE], [], []),
+            (guest.reading(ACCESS, TAILNET, [TAILNET], [TAILNET], [COLLEAGUE], [], []),
              last + f"Host {TAILNET}, forwarded Host {TAILNET}, a login header, " + why_host),
-            (guest.reading(ACCESS, local, [TAILNET, TAILNET], [COLLEAGUE], [], []),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET, TAILNET], [COLLEAGUE], [], []),
              last + "Host localhost, 2 forwarded Host headers, a login header, " + why_host),
-            (guest.reading(ACCESS, local, ["a" * 300], [COLLEAGUE], [], []),
+            (guest.reading(ACCESS, TAILNET, local, ["a" * 300], [COLLEAGUE], [], []),
              last + "Host localhost, a forwarded Host the console does not keep, "
                     "a login header, " + why_host),
-            (guest.reading(ACCESS, local, [TAILNET], [COLLEAGUE, SECOND], [], []),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE, SECOND], [], []),
              last + f"Host localhost, forwarded Host {TAILNET}, 2 login headers, " + why_login),
-            (guest.reading(ACCESS, local, [TAILNET], [], [], []),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [], [], []),
              last + f"Host localhost, forwarded Host {TAILNET}, no login header, " + why_login),
-            (guest.reading(ACCESS, local, [TAILNET], [STRANGER], [], []),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [STRANGER], [], []),
              last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
                     "refused because that login is not on the list."),
-            (guest.reading(ACCESS, local, [TAILNET], [COLLEAGUE], [], []),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [], []),
              last + f"Host localhost, forwarded Host {TAILNET}, a login header, admitted."),
-            (guest.reading(guest.NO_ACCESS, local, [TAILNET], [COLLEAGUE], [], []),
+            (guest.reading(guest.NO_ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [], []),
              last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
                     "refused because sharing is off."),
             (None, "No request has come to the guest door yet."),

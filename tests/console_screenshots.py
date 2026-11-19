@@ -886,8 +886,16 @@ def _door_connection(door: str | tuple[str, int], timeout: float) -> http.client
     return http.client.HTTPConnection(*door, timeout=timeout)
 
 
+def _tailnet_kwargs(guest_dir: Path | None, readable: bool) -> dict:
+    """The reader of this host's tailnet name for a guest door; a base constructor takes none (#1305)."""
+    if guest_dir is None or "status_reader" not in inspect.signature(ConsoleService).parameters:
+        return {}
+    return {"status_reader": (lambda: {"Self": {"DNSName": TAILNET + "."}}) if readable
+            else (lambda: None), "serve_seconds": 3600}
+
+
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
-                  guest_dir: Path | None = None) -> ConsoleService:
+                  guest_dir: Path | None = None, tailnet_readable: bool = True) -> ConsoleService:
     def launcher(launch: manager.Launch) -> None:
         if launches is not None:
             launches.append(launch)
@@ -909,8 +917,11 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         branch_pattern_of=lambda repo: "issue-<num>-<slug>" if fixture.holding else None,
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
-        **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)), **forge)
+        **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
+        **_tailnet_kwargs(guest_dir, tailnet_readable), **forge)
     service.start()
+    if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
+        service.poll_serve()
     service.poll_spend()
     if fixture.activating:
         service.poll_activation()
