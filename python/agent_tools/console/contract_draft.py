@@ -10,8 +10,8 @@ judges only what it must to stay total (the project id's shape, the registry, a 
 
 Reading. `read(root)` returns `{"remotes": [(name, url)], "default_branch", "branches", "files",
 "texts", "hooks", "environments"}` and never raises and never writes. Every git child has no shell, `stdin` and `stderr` to
-`DEVNULL`, `GIT_TIMEOUT` (10 seconds) and `GIT_TERMINAL_PROMPT=0`; an `OSError`, a timeout or a
-non-zero exit reads as empty or None. Remotes are the authored URLs (`config --get-regexp`, before
+`DEVNULL`, `GIT_TIMEOUT` (10 seconds), `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`; an `OSError`,
+a timeout or a non-zero exit reads as empty or None. Remotes are the authored URLs (`config --get-regexp`, before
 `insteadOf`), sorted by name, one URL per name. The default branch is asked of the remote only when
 there is exactly one (`ls-remote --symref`). Branches are the local heads, files the tracked paths,
 texts the tracked build files (`justfile`, `Makefile`, `package.json` and their spellings), at most
@@ -33,18 +33,23 @@ plain `PATH` (`search_path`, else the console's own), so it fails in the commit 
 development shell (#1333). A hook's text is its file's bytes in the hooks directory, or the `HEAD`
 blob a relative `core.hooksPath` resolves to after following links, decoded as UTF-8 with `replace`;
 a hook above `TEXT_LIMIT` bytes is never read past that bound and reads as `""`, and so does an
-unreadable one. `hook_stranded` reads each line with leading whitespace stripped, ignoring comments:
-an `exec` line names a runner (its first word under `shlex`), a `NAME=value` line records one word
-for `NAME` (a trailing `#` comment aside), and a runner that is a `$NAME` or `${NAME}` stands for every
-value assigned to that name; a `NAME=` that appears on any other line (`[ -x "$P" ] || P=x`) leaves
-`NAME` unjudged. A runner is found when it is absolute and an executable file, or has no `/` and is on
-`search_path`; a `search_path` with an entry that is not absolute (relative to a working directory the
-commit does not share) leaves every hook unjudged. Each distinct runner and value is looked up once, and
-a set `cancel` leaves the hook unjudged.
-A hook is stranded exactly when it has an `exec` line, every runner can be judged and none is found.
-A hook with no `exec` line, an unreadable line, an option as runner, a runner that is unassigned,
-unreadable, relative, or carries `$`, a backtick or a shell operator, is never stranded, so its plan
-stays as it is today.
+unreadable one. `hook_stranded` judges a hook only when every non-comment line is one of a fixed
+allowlist of shapes, and every other hook is unjudged and never stranded, so its plan stays as it is
+today (#1333). The shapes are: a blank line; a first-line shebang whose interpreter is `sh`, `bash`,
+`dash` or `zsh` (directly or through `env`); `NAME=value` or `NAME="value"` for any `NAME` but `PATH`
+(a trailing `#` comment aside; a value that is wholly one `$( )` or backtick substitution is allowed,
+and is never a runner candidate); `if [ ... ]; then`, `else` and `fi` lines, the test holding no `;`,
+`&`, `|`, `<`, `>`, backtick, parenthesis or brace; and exactly one line-leading `exec` of a word or of
+`"$NAME"` (`$NAME`, `${NAME}`), outside any `if`, followed by any arguments. A runner variable's
+candidates are only its literal assigned values. A line of any other shape (a `PATH` assignment, an
+`export`, `+=`, an array or nameref, a default expansion, `read`, `for`, `eval`, `source`, a second
+`exec`, or a command run on any line but the `exec`) leaves the hook unjudged. A runner is found when it
+is absolute and an executable file, or has no `/` and is on `search_path`; a `search_path` with an entry
+that is not absolute (relative to a working directory the commit does not share) leaves every hook
+unjudged, and so does a set `cancel`. A judged hook is stranded exactly when none of its candidates is found.
+A runner that is unassigned, empty, relative, an option, or carries `$`, a backtick or a shell operator is
+unjudged too. Reading a hook never fetches a missing blob (`GIT_NO_LAZY_FETCH=1`), and reads a tracked hook by the
+blob id it first resolved, so the size bound and the content are one blob.
 
 Fields. `FIELDS` lists the 29 field ids in order; each is a record with exactly the keys
 `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
@@ -341,7 +346,7 @@ def _git(root: str, *arguments: str, extra_env: Mapping[str, str] | None = None,
         done = manager.run_in_own_group(
             ["git", "-C", root, *arguments], timeout=GIT_TIMEOUT, cancel=cancel,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(extra_env or {})},
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1", **(extra_env or {})},
             start_new_session=True)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -506,16 +511,12 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
 
 
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-_ASSIGNED_ANYWHERE = re.compile(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\+?=")
 _EXEC = re.compile(r"^exec\s+(.*)$")
-# What can run or rebind a runner without a `NAME=` or a line-leading `exec`: an exec reached after `&&`,
-# `||`, `;` or `then`, a default expansion `${NAME:=x}`, and the builtins that assign or run other text.
-_UNREADABLE_BINDING = re.compile(
-    r"(?<![\w$/.-])(?:exec|read|getopts|for|select|eval|source|unset|mapfile|readarray|printf)(?![\w-])"
-    r"|\$\{[A-Za-z_][A-Za-z0-9_]*:?[=]"
-    r"|(?:^|[;&|(]|\bthen|\bdo|\belse)\s*\.\s")
+_IF = re.compile(r"^if \[ [^;&|<>`(){}]* \]; then$")
+_SUBSTITUTION = re.compile(r"\"\$\(.*\)\"|\$\(.*\)|`[^`]*`")
 _VARIABLE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 _SHELL_SYNTAX = set("$`;&|<>()")
+_SHELLS = ("sh", "bash", "dash", "zsh")
 
 
 def _runner_found(candidate: str, search_path: str) -> bool:
@@ -524,12 +525,22 @@ def _runner_found(candidate: str, search_path: str) -> bool:
     return shutil.which(candidate, path=search_path) is not None
 
 
-def _assigned_word(value: str) -> str | None:
-    """The one word an assignment's value is, a trailing comment aside; None when it is not exactly one.
+def _shell_shebang(line: str) -> bool:
+    words = line[2:].split()
+    if words and posixpath.basename(words[0]) == "env":
+        words = words[1:]
+    return bool(words) and posixpath.basename(words[0]) in _SHELLS
 
-    A `#` that starts a word (after blanks) begins a comment, which is dropped unread, so an apostrophe
-    in it cannot spoil the split; a `#` inside a word is not a comment, and the value is not judged.
+
+def _assigned_word(value: str) -> tuple[bool, str | None]:
+    """`(True, word)` for an assignment of exactly one literal word, `(True, None)` for a substitution.
+
+    `(False, None)` when the value is anything else. A `#` that starts a word (after blanks) begins a
+    comment, which is dropped unread, so an apostrophe in it cannot spoil the split; a `#` inside a word
+    is not a comment, and the value is not judged.
     """
+    if _SUBSTITUTION.fullmatch(value.rstrip()):
+        return True, None
     quote = None
     escaped = False
     for index, char in enumerate(value):
@@ -543,78 +554,75 @@ def _assigned_word(value: str) -> str | None:
             quote = char
         elif char == "#":
             if index == 0 or not value[index - 1].isspace():
-                return None
+                return False, None
             value = value[:index]
             break
     try:
         words = shlex.split(value)
     except ValueError:
-        return None
-    return words[0] if len(words) == 1 else None
+        return False, None
+    return (True, words[0]) if len(words) == 1 and words[0] else (False, None)
 
 
 def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = None) -> bool:
-    """Whether a hook execs only runners that are found neither at their recorded path nor on `search_path`.
+    """Whether a hook execs a runner that is found neither at its recorded path nor on `search_path`.
 
-    Total and conservative: a hook the rule cannot judge (no `exec` line, an unreadable line or runner,
-    shell syntax, an option, a relative path, a `search_path` entry that is not absolute, a runner variable
-    assigned anywhere but on a line of its own, an `exec` reached after another command, a default
-    expansion or a `read`/`for`/`eval`-style binding) is never stranded, and neither is one read under a set
-    `cancel`. Each distinct variable value and runner is looked up once.
+    A hook is judged only when every non-comment line has one of the allowlisted shapes (blank; a shell
+    shebang; `NAME=value`, `PATH` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
+    of a word or `"$NAME"` outside any `if`) and each candidate runner is a literal; the module docstring
+    states the allowlist. Every other hook is unjudged and never stranded, and so is one read under a set
+    `cancel` or with a `search_path` entry that is not absolute.
     """
     if any(not os.path.isabs(entry) for entry in search_path.split(os.pathsep)):
         return False
     assigned: dict[str, dict[str | None, None]] = {}
-    runners: dict[str, None] = {}
-    for line in text.splitlines():
+    runner = None
+    depth = 0
+    for number, raw in enumerate(text.splitlines()):
         if cancel is not None and cancel.is_set():
             return False
-        line = line.lstrip()
-        if line.startswith("#"):
-            continue
-        assignment = _ASSIGNMENT.match(line)
-        if assignment:
-            if _UNREADABLE_BINDING.search(assignment.group(2)):
+        line = raw.strip()
+        if number == 0 and raw.startswith("#!"):
+            if not _shell_shebang(raw):
                 return False
-            assigned.setdefault(assignment.group(1), {})[_assigned_word(assignment.group(2))] = None
-            for name in _ASSIGNED_ANYWHERE.findall(assignment.group(2)):
-                assigned.setdefault(name, {})[None] = None
-            continue
-        execution = _EXEC.match(line)
-        if execution:
+        elif not line or line.startswith("#"):
+            pass
+        elif _IF.match(line):
+            depth += 1
+        elif line == "else" and depth:
+            pass
+        elif line == "fi" and depth:
+            depth -= 1
+        elif _ASSIGNMENT.match(line):
+            name, value = _ASSIGNMENT.match(line).groups()
+            known, word = _assigned_word(value)
+            if name == "PATH" or not known:
+                return False
+            assigned.setdefault(name, {})[word] = None
+        elif _EXEC.match(line) and runner is None and depth == 0:
             try:
-                words = shlex.split(execution.group(1), comments=True)
+                words = shlex.split(_EXEC.match(line).group(1), comments=True)
             except ValueError:
                 return False
             if not words or words[0].startswith("-"):
                 return False
-            runners[words[0]] = None
-            continue
-        if _UNREADABLE_BINDING.search(line):
-            return False
-        for name in _ASSIGNED_ANYWHERE.findall(line):
-            assigned.setdefault(name, {})[None] = None
-    if not runners:
-        return False
-    candidates: dict[str, None] = {}
-    for runner in runners:
-        variable = _VARIABLE.match(runner)
-        if variable:
-            values = assigned.get(variable.group(1))
-            if not values or None in values:
-                return False
-            candidates.update(dict.fromkeys(value for value in values if value is not None))
+            runner = words[0]
         else:
-            candidates[runner] = None
+            return False
+    if runner is None or depth:
+        return False
+    variable = _VARIABLE.match(runner)
+    if variable:
+        values = assigned.get(variable.group(1))
+        if not values or None in values:
+            return False
+        candidates = list(values)
+    else:
+        candidates = [runner]
     for candidate in candidates:
         if _SHELL_SYNTAX & set(candidate) or ("/" in candidate and not candidate.startswith("/")):
             return False
-    for candidate in candidates:
-        if cancel is not None and cancel.is_set():
-            return False
-        if _runner_found(candidate, search_path):
-            return False
-    return True
+    return not any(_runner_found(candidate, search_path) for candidate in candidates)
 
 
 def _hook_text(root: str, source: Path | str, cancel: threading.Event | None = None) -> str:
@@ -626,11 +634,15 @@ def _hook_text(root: str, source: Path | str, cancel: threading.Event | None = N
         except OSError:
             return ""
     else:
-        size = _git(root, "cat-file", "-s", f"HEAD:{source}", cancel=cancel)
+        printed = _git(root, "rev-parse", "--verify", f"HEAD:{source}", cancel=cancel)
+        blob_id = printed.decode("ascii", "replace").strip() if printed else ""
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob_id):
+            return ""
+        size = _git(root, "cat-file", "-s", blob_id, cancel=cancel)
         if size is None or not re.fullmatch(r"[0-9]+", size.decode("ascii", "replace").strip()) \
                 or int(size.decode("ascii").strip()) > TEXT_LIMIT:
             return ""
-        blob = _git(root, "cat-file", "blob", f"HEAD:{source}", cancel=cancel)
+        blob = _git(root, "cat-file", "blob", blob_id, cancel=cancel)
         body = blob if blob is not None else b""
     return "" if len(body) > TEXT_LIMIT else body.decode("utf-8", "replace")
 
