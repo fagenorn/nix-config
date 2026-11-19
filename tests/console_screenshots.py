@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty-four screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-six screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -107,13 +107,20 @@ Contract:
   plan's own lines (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
-  the proposal as a main line beside its Change control. `REGISTER_READING` reads the card's first
+  the proposal as a main line beside its Change control. `register-reconcile-apply` and
+  `register-reconcile-draft` are the same two screens for a repository that already has a contract
+  and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
+  of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
+  proposes the same command, and the first is the Apply card, the second the plan after Not now.
+  `REGISTER_READING` reads the card's first
   line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
-  holds what each state must read on a page that proposes it (`proposes_environment()`); on a
-  page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails.
+  holds what each state must read on a page that proposes it (`proposes(state)`, which is
+  `proposes_environment()` for the first two and `proposes_reconcile()` for the reconcile pair); on
+  a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
+  picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
+  card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 88 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -204,7 +211,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
-          "register-draft", "sharing-panel",
+          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -223,15 +230,20 @@ OTHER_DEVICE_ADDRESS = "100.64.0.20"
 SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
                   "guest-page", "guest-steer")
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
-REGISTER_STATES = ("register-apply", "register-draft")
+REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply",
+                   "register-reconcile-draft")
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
 PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
 REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
-                  "register-draft": (None, PROPOSAL_LINE, True)}
+                  "register-draft": (None, PROPOSAL_LINE, True),
+                  "register-reconcile-apply": (PROPOSAL_LINE, None, False),
+                  "register-reconcile-draft": (None, PROPOSAL_LINE, True)}
 REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),
-                 "register-draft": (None, None, False)}
+                 "register-draft": (None, None, False),
+                 "register-reconcile-apply": (REGISTER_PLAN_LINES[0], None, False),
+                 "register-reconcile-draft": (None, None, False)}
 # The first line of the Apply card's list, the proposal's draft row and whether that row carries a
 # visible Change button; None for what the page does not show.
 REGISTER_READING = """(() => {
@@ -676,6 +688,18 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
     environment file are what a checkout with a devenv and installed commit hooks reads. The base
     commit's draft ignores both and proposes nothing (the before picture).
     """
+    if state.startswith("register-reconcile"):
+        fields = (contract_draft.reconcile_fields(root, {
+            "hooks": ["pre-commit"], "stranded": ["pre-commit"], "environments": ["devenv.nix"]})
+            if proposes_reconcile() else None)
+        seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
+            "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
+            "outcome": "reconcile", "headline": f"What adopting {REGISTER_NAME} would change.",
+            "lines": list(REGISTER_PLAN_LINES), "note": None, "plan_id": REGISTER_PLAN_ID,
+            "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
+        if state == "register-reconcile-draft":
+            seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
+        return
     reading = {**contract_draft.read(root),
                "remotes": [("origin", f"https://github.com/owner/{REGISTER_NAME}.git")],
                "default_branch": "main", "branches": ["main"],
@@ -1012,6 +1036,16 @@ class _Inert:
 def proposes_environment() -> bool:
     """Whether this page's drafted contract can propose the command the adoption commit runs through."""
     return hasattr(contract_draft, "proposed_lines")
+
+
+def proposes_reconcile() -> bool:
+    """Whether this page's reconcile plan can propose that command for a hook its PATH cannot find."""
+    return hasattr(contract_draft, "reconcile_fields")
+
+
+def proposes(state: str) -> bool:
+    """Whether this page proposes the commit environment in the register state `state`."""
+    return proposes_reconcile() if state.startswith("register-reconcile") else proposes_environment()
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -1555,7 +1589,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
               "Activate button")
     proposals = [shot for shot in taken if shot.state in REGISTER_SHOWN and shot.register != (
-        REGISTER_SHOWN[shot.state] if proposes_environment() else REGISTER_BASE[shot.state])]
+        REGISTER_SHOWN[shot.state] if proposes(shot.state) else REGISTER_BASE[shot.state])]
     for shot in proposals:
         print(f"console-screenshots: {shot.path.name} does not show the proposed commit "
               "environment on the Apply card or as a changeable draft line")

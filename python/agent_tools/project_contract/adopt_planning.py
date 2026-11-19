@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -514,17 +515,84 @@ def derived_interval(platform_version: str) -> dict:
             "max_exclusive": f"{parsed[0] + 1}.0.0"}
 
 
-def amended_contract(source: dict, interval: dict,
-                     found: Candidates) -> dict:
+COMMIT_ENVIRONMENT_ID = "commit-environment"
+
+
+def parse_commit_environment(text: str) -> list[str]:
+    """The argv a `--commit-environment` value names: its shell words.
+
+    A value `shlex` cannot read, one with no word and one with an empty word
+    are refused `adopt.environment.unreadable`.
+    """
+    try:
+        argv = shlex.split(text)
+    except ValueError:
+        argv = []
+    if not argv or any(not word for word in argv):
+        raise refuse("adopt_failure", "adopt.environment.unreadable", "",
+                     "the commit environment command could not be read as a "
+                     "command")
+    return argv
+
+
+def commit_environment_amendment(contract_source: dict | None,
+                                 argv: list[str] | None, current_schema: int
+                                 ) -> tuple[str, list[str]] | None:
+    """`(command id, argv)` when the amendment adds the commit environment.
+
+    It applies to a contract of the current schema whose binding
+    `bindings.vcs.commit.environment` is absent: the binding alone decides
+    that the contract names none, never a command id. The id is the first of
+    `commit-environment`, `commit-environment-2`, ... that is absent from
+    `bindings.commands` or whose entry equals the proposed entry, so an
+    authored command that differs is kept. Any other contract, schema or
+    shape gives None, and the plan is then the one made without the flag.
+    """
+    if argv is None or not isinstance(contract_source, dict):
+        return None
+    version = contract_source.get("schema_version")
+    if type(version) is not int or version != current_schema:
+        return None
+    bindings = contract_source.get("bindings")
+    if not isinstance(bindings, dict):
+        return None
+    commands = bindings.get("commands")
+    vcs = bindings.get("vcs")
+    commit = vcs.get("commit") if isinstance(vcs, dict) else None
+    if (not isinstance(commands, dict) or not isinstance(commit, dict)
+            or "environment" in commit):
+        return None
+    proposed = {"argv": argv, "cwd": ".", "env": []}
+    command_id = COMMIT_ENVIRONMENT_ID
+    number = 1
+    while command_id in commands and commands[command_id] != proposed:
+        number += 1
+        command_id = f"{COMMIT_ENVIRONMENT_ID}-{number}"
+    return command_id, list(argv)
+
+
+def amended_contract(source: dict, interval: dict, found: Candidates,
+                     environment: tuple[str, list[str]] | None = None
+                     ) -> dict:
     """The contract this adoption would write: `platform` plus moved bindings.
 
     Nothing else is touched. The amendment is confined to the one member the
-    platform requires and the path bindings whose authored values name a tree
-    this plan relocates, so a contract cannot acquire policy it did not author.
+    platform requires, the path bindings whose authored values name a tree
+    this plan relocates and, when `environment` is given, the commit
+    environment binding with the command it names (an authored command of that
+    id is kept as it is), so a contract cannot acquire policy it did not
+    author.
     """
     amended = json.loads(json.dumps(source))
     if "platform" not in amended:
         amended["platform"] = interval
+    if environment is not None:
+        command_id, argv = environment
+        amended["bindings"]["vcs"]["commit"]["environment"] = command_id
+        commands = amended["bindings"]["commands"]
+        if command_id not in commands:
+            commands[command_id] = {"argv": list(argv), "cwd": ".",
+                                    "env": []}
     relocations = {group: info["target"] for group, info in found.groups.items()
                    if info["action"] == "move-canonical" and info["target"]
                    and info["target"] != group}
@@ -653,7 +721,8 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
                      contract_source: dict | None,
                      plan_id: str, links: LinkRewrites,
                      reference_files: dict[str, tuple[str, str]],
-                     drafted: bool = False
+                     drafted: bool = False,
+                     environment: tuple[str, list[str]] | None = None
                      ) -> tuple[list[dict], list[dict], dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
@@ -676,13 +745,15 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     the operation publishes as `after`. The plan document carries the hash and
     `apply` carries out the write, so the bytes are generated here once and
     handed to both — a second generator would be a second answer to "what does
-    adoption write", which is the duplication the bar forbids.
+    adoption write", which is the duplication the bar forbids. `environment` is
+    the `(command id, argv)` of a commit environment the contract amendment
+    adds (`commit_environment_amendment`); a drafted contract takes none.
     """
     operations: list[dict] = []
     contents: dict[str, bytes] = {}
 
     interval = derived_interval(manifest["platform_version"])
-    amended = (amended_contract(contract_source, interval, found)
+    amended = (amended_contract(contract_source, interval, found, environment)
                if contract_source is not None else None)
     # Compared as values, never as bytes: `contract_source` is the file this
     # parsed, so a contract the amendment leaves unchanged is no work however
@@ -1040,14 +1111,17 @@ def compute_plan_id(project_id: str | None, base_revision: str,
                     path_references: list[dict],
                     reference_policies: list[dict],
                     reference_formatting: list[dict],
-                    contract_draft: dict | None = None) -> str:
+                    contract_draft: dict | None = None,
+                    commit_environment: list[str] | None = None) -> str:
     """D15's content address over exactly ten inputs, eleven with a drafted
-    contract (#1067): the project id, the
+    contract (#1067), twelve with a commit environment (#1333): the project
+    id, the
     base revision, the platform block, the evidence, the answered decisions,
     the schema version, the `link_rewrites` summary (#345), the
     `path_references` rows (#350), the `reference_policies` rows (#372) and
     the `reference_formatting` rows (#376), then the drafted contract exactly
-    as given, which only a plan made with one has.
+    as given, which only a plan made with one has, then the commit
+    environment's argv, which only a plan that adds one has.
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -1070,6 +1144,8 @@ def compute_plan_id(project_id: str | None, base_revision: str,
     }
     if contract_draft is not None:
         source["contract_draft"] = contract_draft
+    if commit_environment is not None:
+        source["commit_environment"] = commit_environment
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 
 
