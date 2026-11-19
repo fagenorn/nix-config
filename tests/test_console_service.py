@@ -25,7 +25,7 @@ from unittest import mock
 
 from agent_tools.console import console as console_module
 from agent_tools.console import capacity, deliveries, digest, movement, probe, service, sessions, signin, sprints
-from agent_tools.console import signin_run, spend, view
+from agent_tools.console import peer, signin_run, spend, view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.write_guard import TokenError
 from agent_tools.console.view import derive_view, encode_view, project_states
@@ -80,7 +80,7 @@ class Tripwire:
         raise AssertionError(f"the log was used: {name}")
 
 
-def state_under_tripwires(svc):
+def state_under_tripwires(svc, connection=None):
     log = svc.log
     tripwire = Tripwire()
     svc.log = tripwire
@@ -93,7 +93,12 @@ def state_under_tripwires(svc):
             stack.enter_context(metadata_tripwires())
             ARMED.set()
             try:
-                status, _, body = support.request(svc.address, "GET", "/api/state")
+                if connection is None:
+                    status, _, body = support.request(svc.address, "GET", "/api/state")
+                else:
+                    connection.request("GET", "/api/state")
+                    response = connection.getresponse()
+                    status, body = response.status, response.read()
             finally:
                 ARMED.clear()
     finally:
@@ -288,6 +293,25 @@ class NoIoTest(Case):
         self.assertNotEqual(
             [thread for name, thread in HITS if name == "os.stat"][0],
             threading.current_thread().name)
+
+
+    @unittest.skipUnless(sys.platform == "darwin" or sys.platform.startswith("linux"),
+                         "no platform peer reader")
+    def test_an_admitted_connection_serves_state_with_no_io(self):
+        svc = support.service(self, self.store, self.registry,
+                              peer_reader=peer.reader_for(sys.platform))
+        conn = http.client.HTTPConnection(*svc.address, timeout=5)
+        self.addCleanup(conn.close)
+        conn.request("GET", "/api/state")
+        conn.getresponse().read()
+        HITS.clear()
+        status, body, touched, mocks = state_under_tripwires(svc, conn)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, svc.view_bytes)
+        self.assertEqual(HITS, [])
+        self.assertEqual(touched, [])
+        for replacement in mocks.values():
+            replacement.assert_not_called()
 
 
 class LoopbackTest(Case):
