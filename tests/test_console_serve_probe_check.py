@@ -27,10 +27,17 @@ OTHER_PROBE = "other-probe@example.invalid"
 GOOD = {"admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
         "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
         "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True, "probe": True,
-        "probe_login_arrived": False, "reason": "not_shared"}
+        "probe_login_arrived": False, "reason": "not_shared",
+        "client": "other_device"}
 
 
 def state_of(reading):
+    return {"sharing": {"shared": True, "tailnet": TAILNET, "last_request": reading,
+                        "other_device_seen": True}}
+
+
+def legacy_state_of(reading):
+    """The previous console's `sharing`: it has no `other_device_seen`."""
     return {"sharing": {"shared": True, "tailnet": TAILNET, "last_request": reading}}
 
 
@@ -51,7 +58,8 @@ class HeldCheckTest(unittest.TestCase):
                                    "forwarded_host_form": "exact", "host_local": True,
                                    "login_headers": 1, "login_valid": True,
                                    "probe": True, "probe_login_arrived": False,
-                                   "reason": "not_shared", "status": "met"})
+                                   "reason": "not_shared", "status": "met",
+                                   "client": "other_device"})
         self.assertNotIn(TAILNET, text.lower())
 
     def test_the_rules_in_order(self):
@@ -124,6 +132,28 @@ class HeldCheckTest(unittest.TestCase):
              0, "met"),
             (state_of(reading(reason="sharing_off")), 75, "stale"),
             (state_of(reading(reason="name_unread")), 75, "stale"),
+            (state_of(reading(client="this_host")), 75, "from_this_host"),
+            (state_of(reading(client="unknown")), 75, "client_unknown"),
+            (state_of(reading(client="elsewhere")), 1, "bad_reading"),
+            (state_of(reading(client=None)), 1, "bad_reading"),
+            (legacy_state_of({k: v for k, v in GOOD.items() if k != "client"}), 75, "client_unknown"),
+            (legacy_state_of({k: v for k, v in GOOD.items() if k not in ("client", "probe")}),
+             1, "bad_reading"),
+            (legacy_state_of({**{k: v for k, v in GOOD.items() if k != "client"}, "extra": 1}),
+             1, "bad_reading"),
+            (legacy_state_of({k: v for k, v in GOOD.items() if k not in ("client", "forwarded_for")}
+                             | {"forwarded_for": False}), 75, "not_through_serve"),
+            (state_of({k: v for k, v in GOOD.items() if k != "client"}), 1, "bad_reading"),
+            (state_of({k: v for k, v in GOOD.items() if k not in ("client", "forwarded_for")}
+                      | {"forwarded_for": False}), 1, "bad_reading"),
+            (state_of(reading(forwarded_for=False, client="this_host")), 75, "not_through_serve"),
+            (state_of(reading(client="this_host", forwarded_host_form="with_port",
+                              forwarded_host=TAILNET + ":443", reason="host")),
+             75, "from_this_host"),
+            (state_of(reading(client="this_host", probe_login_arrived=True)),
+             75, "from_this_host"),
+            ({"sharing": {"shared": True, "tailnet": OTHER_HOST,
+                          "last_request": reading(client="this_host")}}, 75, "from_this_host"),
         ]
         for state, want_code, want_status in rows:
             with self.subTest(state=state):
@@ -144,15 +174,20 @@ class HeldCheckTest(unittest.TestCase):
     def test_the_reading_feeds_the_check(self):
         access = guest.Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
         local = ["localhost"]
-        rows = [(local, [TAILNET], [COLLEAGUE], [FORGED], 0, "met"),
-                (local, [TAILNET], [FORGED], [OTHER_PROBE], 1, "not_met"),
-                (local, [TAILNET], [FORGED], [FORGED], 1, "not_met"),
-                (local, [TAILNET], [COLLEAGUE], [OTHER_PROBE], 75, "no_probe"),
-                (local, [TAILNET + ":443"], [COLLEAGUE], [FORGED], 1, "not_met"),
-                ([TAILNET], [TAILNET], [COLLEAGUE], [FORGED], 1, "not_met")]
-        for hosts, forwarded, logins, probes, want_code, want_status in rows:
-            with self.subTest(hosts=hosts, forwarded=forwarded, logins=logins, probes=probes):
-                reading = guest.reading(access, TAILNET, hosts, forwarded, logins, ["100.64.0.1"], probes)
+        own = guest.own_addresses({"Self": {"TailscaleIPs": ["100.64.0.10"]}})
+        other, itself = ["100.64.0.1"], ["100.64.0.10"]
+        rows = [(local, [TAILNET], [COLLEAGUE], other, [FORGED], 0, "met"),
+                (local, [TAILNET], [FORGED], other, [OTHER_PROBE], 1, "not_met"),
+                (local, [TAILNET], [FORGED], other, [FORGED], 1, "not_met"),
+                (local, [TAILNET], [COLLEAGUE], other, [OTHER_PROBE], 75, "no_probe"),
+                (local, [TAILNET + ":443"], [COLLEAGUE], other, [FORGED], 1, "not_met"),
+                ([TAILNET], [TAILNET], [COLLEAGUE], other, [FORGED], 1, "not_met"),
+                (local, [TAILNET], [COLLEAGUE], itself, [FORGED], 75, "from_this_host")]
+        for hosts, forwarded_hosts, logins, forwarded, probes, want_code, want_status in rows:
+            with self.subTest(hosts=hosts, forwarded_hosts=forwarded_hosts, logins=logins,
+                              forwarded=forwarded, probes=probes):
+                reading = guest.reading(access, TAILNET, hosts, forwarded_hosts, logins, forwarded,
+                                        probes, own=own)
                 code, printed, _ = run_check(state_of(reading))
                 self.assertEqual((code, printed["status"]), (want_code, want_status))
 

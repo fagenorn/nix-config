@@ -34,7 +34,7 @@ A registered project with no open work, no live session and no open sprint. It r
 _Avoid_: dormant project, idle project
 
 **Guest**:
-A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); the guest page is the desk page read-only.
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), reachable from another device only while the tailnet's access rules allow TCP 443 to this host (ADR-console-079), and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); the guest page is the desk page read-only.
 _Avoid_: user, viewer
 
 **Goal**:

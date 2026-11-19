@@ -24,9 +24,15 @@ more (a name with an extra label admits nothing); every other shape is None.
 `status_reader(path)` is the reader of that status: a callable that runs the client at `path` as
 `status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns the parsed JSON,
 or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it never raises. The
-name is kept in memory only, never in the log and never printed. `Policy(access, name)` is one
-immutable snapshot of the switch, the list and the read name (`NO_POLICY` is off with no name); a
-request is judged by one policy. `Snapshot(policy, views, pictures, revoked)` carries with that policy
+name is kept in memory only, never in the log and never printed. The same status gives this host's own
+addresses (ADR-console-079): `own_addresses(status)` is the set of `Self.TailscaleIPs` addresses, an
+IPv4-mapped IPv6 address as its IPv4 address, and is empty unless that member is a non-empty list of
+strings that all parse as addresses without a zone; they are kept in memory only, never in the log, the
+reading, a view or stderr. `Policy(access, name, addresses)` is one immutable snapshot of the switch,
+the list, the read name and the own addresses (`NO_POLICY` is off with no name and no address; a change
+of addresses alone revokes nothing and changes no admission, but the service drops the reading and the
+`other_device_seen` flag judged under the old ones); a request is judged by one policy.
+`Snapshot(policy, views, pictures, revoked)` carries with that policy
 the colleagues' scoped views, their picture ids and `revoked`, a count the service raises each time
 the read name changes or sharing goes off, so a request is answered from the one snapshot that
 admitted it and an open stream can tell a revocation that came and went while it was blocked.
@@ -78,20 +84,29 @@ finds in that guest's scoped view.
 showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if
 not, the `REASON_CODES` code (`sharing_off`, `name_unread`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
 and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
-it is a hostname of letters, digits, dots and hyphens with an optional port (so an `@` or a long
-value is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
+it is one of the names the door knows (`localhost`, the read name, or the read name with `:443`, case
+aside); any other value is recorded by its `forwarded_host_form` or `host_local` alone and never by its
+text, so no address in any spelling, and no name built on one, is ever kept (no check of a client-sent
+name can tell every spelling of an address from a name);
+`host_local` (exactly one `Host`, `localhost` lowercased); and the
 `forwarded_host_form` (`HOST_FORMS`: `exact` the read name, `with_port` the name with `:443`,
 `other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
 `probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said); `login_valid`
 (at least one login header arrived and every one is a well-formed login, so a combined value such as
-two logins joined by a comma is false). No member is
-ever a login or a probe value. It does not change admission. `whoami` is unchanged; the service
+two logins joined by a comma is false); and `client` (`CLIENT_FORMS`, `client_of(forwarded, own)`,
+ADR-console-079; a value is trimmed of spaces and tabs only): `this_host` when exactly one `X-Forwarded-For` value is one of this host's own
+addresses, `other_device` when it is one address and not one of them, and `unknown` otherwise (none,
+more than one header, a list, a value that is no address, one carrying an IPv6 zone, or no own address
+read); an IPv4-mapped IPv6 value compares as its IPv4 address. Only that comparison is kept, never an
+address. No member is ever a login, a probe value or an address. It does not change admission. `whoami` is unchanged; the service
 refuses the probe `NAME_UNREAD_TEXT` when sharing is on and no name is read.
 
-`sharing_entry(access, name, state, last_request, socket)` is the owner's `sharing` view member
-(`shared`, `tailnet` the read name or None, `colleagues`, `state`, `last_request`, `socket`);
-`last_request` is the latest `reading` or None and `socket` the bound guest socket path or None.
+`sharing_entry(access, name, state, last_request, socket, other_device_seen)` is the owner's `sharing`
+view member (`shared`, `tailnet` the read name or None, `colleagues`, `state`, `last_request`,
+`socket`, `other_device_seen`); `last_request` is the latest `reading` or None, `socket` the bound
+guest socket path or None and `other_device_seen` whether any reading since this service began had
+`client` `other_device` (memory only, false after a restart; ADR-console-079).
 `state` is one of `SERVE_STATES`: `off` (sharing is off), `unreadable` (sharing is on and no name is
 read), `unchecked` (the Serve status was not read), `not_proxying` (it was read and does not proxy
 the read name on 443 to the guest socket) and `serving`. `serve_state(shared, name, status,
@@ -112,6 +127,7 @@ the service, which raises `Refused` for a write refused on its merits.
 
 import ctypes
 import errno
+import ipaddress
 import json
 import os
 import re
@@ -158,10 +174,14 @@ OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest socket.")
 
 HOST_FORMS = ("exact", "with_port", "other", "none")
+THIS_HOST = "this_host"
+OTHER_DEVICE = "other_device"
+UNKNOWN_CLIENT = "unknown"
+CLIENT_FORMS = (THIS_HOST, OTHER_DEVICE, UNKNOWN_CLIENT)
 REASON_CODES: Mapping[str, str] = MappingProxyType({
     SHARING_OFF_TEXT: "sharing_off", NAME_UNREAD_TEXT: "name_unread", HOST_TEXT: "host",
     NOT_SHARED_TEXT: "not_shared"})
-READING_MEMBERS = ("admitted", "forwarded_for", "forwarded_host", "forwarded_host_form",
+READING_MEMBERS = ("admitted", "client", "forwarded_for", "forwarded_host", "forwarded_host_form",
                    "forwarded_hosts", "host", "host_local", "hosts", "login_headers", "login_valid",
                    "probe", "probe_login_arrived", "reason")
 
@@ -173,7 +193,6 @@ PROJECT_MAX = 200
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
 _SELF_NAME = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2}ts\.net")
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
-_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
 
 class Refused(Exception):
@@ -194,6 +213,7 @@ class Policy:
     """One immutable snapshot of the switch, the list and the name read from Tailscale."""
     access: Access
     name: str | None
+    addresses: frozenset = frozenset()
 
 
 NO_POLICY = Policy(NO_ACCESS, None)
@@ -224,6 +244,55 @@ def self_name(status: object) -> str | None:
         return None
     name = node.removesuffix(".").lower()
     return name if valid_tailnet(name) and _SELF_NAME.fullmatch(name) is not None else None
+
+
+_OWS = " \t"  # HTTP optional whitespace; no other character pads a field value
+
+
+def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """One address from `text`, an IPv4-mapped one as its IPv4 address; `ValueError` for a zone or no address."""
+    if not isinstance(text, str):
+        raise ValueError("not a string")
+    found = ipaddress.ip_address(text.strip(_OWS))
+    if isinstance(found, ipaddress.IPv6Address):
+        if found.scope_id is not None:
+            raise ValueError("zoned address")
+        if found.ipv4_mapped is not None:
+            return found.ipv4_mapped
+    return found
+
+
+def _kept_host(value: str, allowed: Sequence[str]) -> bool:
+    """Whether a host value is one of the `allowed` names, ignoring case: the only forms the reading keeps (ADR-console-079).
+
+    Anything else is recorded by its form alone, never by its text, because no check of a client-sent
+    name can tell every spelling of an address from a name (hex, octal, integer, padded or unpadded dash forms).
+    """
+    return value.lower() in allowed
+
+
+def own_addresses(status: object) -> frozenset:
+    """This host's own tailnet addresses from the parsed `status --json`; empty unless all of them read."""
+    node: object = status
+    for step in ("Self", "TailscaleIPs"):
+        node = node.get(step) if isinstance(node, Mapping) else None
+    if not isinstance(node, list) or not node:
+        return frozenset()
+    try:
+        return frozenset(_address(member) for member in node)
+    except ValueError:
+        return frozenset()
+
+
+def client_of(forwarded: Sequence[str], own: frozenset) -> str:
+    """Whether the one forwarded address is this host's, another device's or unknown; never the address."""
+    if len(forwarded) != 1 or not own:
+        return UNKNOWN_CLIENT
+    try:
+        found = _address(forwarded[0])
+    except ValueError:
+        return UNKNOWN_CLIENT
+    return THIS_HOST if found in own else OTHER_DEVICE
 
 
 def _switch(payload: object) -> bool:
@@ -330,9 +399,11 @@ def admit(access: Access, name: str | None, hosts: Sequence[str], forwarded_host
 
 
 def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_hosts: Sequence[str],
-            logins: Sequence[str], forwarded: Sequence[str], probes: Sequence[str]) -> dict:
-    """What one guest-door request showed, for the owner's `sharing.last_request`; never a login."""
+            logins: Sequence[str], forwarded: Sequence[str], probes: Sequence[str],
+            *, own: frozenset = frozenset()) -> dict:
+    """What one guest-door request showed, for the owner's `sharing.last_request`; never a login or an address."""
     _, text = admit(access, name, hosts, forwarded_hosts, logins)
+    known = (LOCAL_HOST,) if name is None else (LOCAL_HOST, name, name + ":443")
     host = hosts[0] if len(hosts) == 1 else None
     one = forwarded_hosts[0] if len(forwarded_hosts) == 1 else None
     if one is None:
@@ -344,11 +415,12 @@ def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_ho
     else:
         form = "other"
     return {"admitted": text is None,
+            "client": client_of(forwarded, own),
             "forwarded_for": bool(forwarded),
-            "forwarded_host": one if one is not None and _HOST.fullmatch(one) else None,
+            "forwarded_host": one if one is not None and _kept_host(one, known) else None,
             "forwarded_host_form": form,
             "forwarded_hosts": len(forwarded_hosts),
-            "host": host if host is not None and _HOST.fullmatch(host) else None,
+            "host": host if host is not None and _kept_host(host, known) else None,
             "host_local": host is not None and host.lower() == LOCAL_HOST,
             "hosts": len(hosts),
             "login_headers": len(logins),
@@ -531,11 +603,12 @@ def status_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = s
 
 
 def sharing_entry(access: Access, name: str | None, state: str, last_request: Mapping | None = None,
-                  socket: str | None = None) -> dict:
+                  socket: str | None = None, other_device_seen: bool = False) -> dict:
     return {"shared": access.shared,
             "tailnet": name,
             "colleagues": [{"login": login, "projects": sorted(access.colleagues[login])}
                            for login in sorted(access.colleagues)],
             "state": state,
             "last_request": last_request,
-            "socket": socket}
+            "socket": socket,
+            "other_device_seen": other_device_seen}

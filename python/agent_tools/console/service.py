@@ -130,7 +130,8 @@ With `serve_reader` and `status_reader` (`console --tailscale PATH`, `guest.serv
 `guest.status_reader`) a daemon thread `SERVE_THREAD` (started for either reader) calls `poll_serve` at
 once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads this host's Tailscale client's `serve
 status --json` and `status --json` outside the ingest lock, each in its own `try`, keeps the readings
-(the Serve status and the name `guest.self_name` derives) in memory only (never in the log, the name
+(the Serve status, the name `guest.self_name` derives and the own addresses `guest.own_addresses`
+derives, ADR-console-079) in memory only (never in the log, the name and the addresses
 never printed) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve
 proxies the read name to `unix:<the bound guest socket>`, and a name that moved or went is a publish
 that ends an open guest stream. A Serve reader that raises is one stderr line `console:
@@ -141,7 +142,18 @@ The guest token is `guest-token` beside `page-token`, made and checked as the pa
 a different token, refused on every owner route, as the page token is on the guest picture read.
 The service keeps the last guest-door request's `guest.reading` (every request the door parses,
 whatever its method) in memory only (never logged, null after a restart) as the owner's
-`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it.
+`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it. Its
+`client` tells this host's own requests from another device's (ADR-console-079), and `sharing.other_device_seen`
+becomes true on the first reading whose `client` is `other_device` and stays true until the service
+stops or a poll reads own addresses that differ from the ones before, which drops the reading and the
+flag taken under the old ones (memory only, false after a restart); a status read that gives no address
+changes none of this. A reading of another device that would change what is shown is confirmed by one fresh
+`status --json` read before it is kept (kept as `unknown` when that read gives no address, dropped when it
+gives addresses other than the ones it was judged under, the poll then taking the new ones), and a poll that
+reads a tailnet name other than the one a reading was judged under drops that reading, so a request sent just
+before a change of address or name is never kept as one judged under the old. That read runs on one worker
+thread, never on the request's thread (a guest request never waits on Tailscale), the latest waiting
+reading alone kept; `settle_guest_readings` waits for it and `close` does.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -1769,6 +1781,7 @@ SPEND_SECONDS = 60.0
 SPEND_THREAD = "console-spend"
 SERVE_SECONDS = 60.0
 SERVE_THREAD = "console-serve-poll"
+CONFIRM_THREAD = "console-guest-confirm"
 MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
@@ -3388,7 +3401,8 @@ class GuestHandler(ConsoleHandler):
                 headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
-                headers.get_all(guest.PROBE_HEADER) or []))
+                headers.get_all(guest.PROBE_HEADER) or [], own=self.snapshot.policy.addresses),
+                self.snapshot.policy)
         return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
@@ -3777,6 +3791,11 @@ class ConsoleService:
         self._serve_reader = serve_reader
         self._status_reader = status_reader
         self._tailnet_name: str | None = None
+        self._tailnet_addresses: frozenset = frozenset()
+        self._other_device_seen = False
+        self._confirm_pending: tuple[Mapping, guest.Policy] | None = None
+        self._confirm_worker: threading.Thread | None = None
+        self._guest_reading_name: str | None = None
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
         self._guest_reading: dict | None = None
@@ -4027,13 +4046,65 @@ class ConsoleService:
         return entry, action, approve.apply_items(
             latest, found, entry, action, deferred=self._deferred)
 
-    def record_guest_request(self, reading: Mapping) -> None:
-        """Keep the latest guest-port request's reading for the owner; see the module docstring."""
+    def record_guest_request(self, reading: Mapping, judged: guest.Policy = guest.NO_POLICY) -> None:
+        """Keep the latest guest-port request's reading for the owner; see the module docstring.
+
+        Never reads Tailscale on the caller's thread. A reading of another device that would change what
+        the owner is shown is handed to the confirming worker; a reading that would change nothing is
+        not confirmed. A reading judged under addresses or a name other than the current ones is dropped.
+        """
+        if reading.get("client") == guest.OTHER_DEVICE:
+            with self._ingest:
+                if (reading == self._guest_reading and self._other_device_seen
+                        and judged.addresses == self._tailnet_addresses):
+                    return
+                self._confirm_pending = (reading, judged)
+                if self._confirm_worker is None:
+                    self._confirm_worker = threading.Thread(
+                        target=self._confirm_guest_readings, name=CONFIRM_THREAD, daemon=True)
+                    self._confirm_worker.start()
+            return
+        self._keep_guest_reading(reading, judged)
+
+    def _keep_guest_reading(self, reading: Mapping, judged: guest.Policy) -> None:
         with self._ingest:
-            if reading == self._guest_reading:
+            if judged.addresses != self._tailnet_addresses or (
+                    judged.name is not None and self._tailnet_name is not None
+                    and judged.name != self._tailnet_name):
+                return
+            seen = self._other_device_seen or reading.get("client") == guest.OTHER_DEVICE
+            if reading == self._guest_reading and seen == self._other_device_seen:
                 return
             self._guest_reading = dict(reading)
+            self._guest_reading_name = judged.name
+            self._other_device_seen = seen
             self._publish(guests=False)
+
+    def _confirm_guest_readings(self) -> None:
+        """Confirm each waiting reading of another device by a fresh status read, outside every lock."""
+        while True:
+            with self._ingest:
+                pending, self._confirm_pending = self._confirm_pending, None
+                if pending is None:
+                    self._confirm_worker = None
+                    return
+            reading, judged = pending
+            addresses = guest.own_addresses(self._tailnet_status())
+            if not addresses:
+                self._keep_guest_reading({**reading, "client": guest.UNKNOWN_CLIENT}, judged)
+            elif addresses == judged.addresses:
+                self._keep_guest_reading(reading, judged)
+            else:
+                self.poll_serve()  # the reading was judged under addresses that have moved: drop it
+
+    def settle_guest_readings(self) -> None:
+        """Wait until no guest reading waits to be confirmed."""
+        while True:
+            with self._ingest:
+                worker = self._confirm_worker
+            if worker is None:
+                return
+            worker.join()
 
     def _publish(self, *, guests: bool = True) -> None:
         """Derive and publish the views; `guests=False` publishes the owner's view alone.
@@ -4080,7 +4151,8 @@ class ConsoleService:
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
             access, name,
             guest.serve_state(access.shared, name, self._serve_status, self.guest_socket),
-            self._guest_reading, self.guest_socket)))
+            self._guest_reading, self.guest_socket,
+            other_device_seen=self._other_device_seen)))
         found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
         evidence_key = None
         if found is not None and found["step"] == "apply_failed" and found.get("evidence") is not None:
@@ -4108,7 +4180,7 @@ class ConsoleService:
                 self._version += 1
             self._view = view
             self._guest = guest.Snapshot(
-                guest.Policy(access, name), views, seen_pictures, revoked)
+                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 
@@ -7689,8 +7761,21 @@ class ConsoleService:
         """The reading the page and Activate go by: none while a successful run awaits a reading begun after it."""
         return None if self._activation_after is not None else self._activation
 
+    def _tailnet_status(self) -> object:
+        """One `status --json` reading, None when there is no reader or it raised."""
+        if self._status_reader is None:
+            return None
+        try:
+            return self._status_reader()
+        except Exception as error:
+            print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
+            return None
+
     def poll_serve(self) -> None:
-        """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door)."""
+        """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door).
+
+        A read that gives no address keeps the addresses before it, so a failed read moves nothing.
+        """
         if self._serve_reader is None and self._status_reader is None:
             return
         found = None
@@ -7700,16 +7785,21 @@ class ConsoleService:
             except Exception as error:
                 print(f"console: serve_status_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
-        status = None
-        if self._status_reader is not None:
-            try:
-                status = self._status_reader()
-            except Exception as error:
-                print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
+        status = self._tailnet_status()
         name = guest.self_name(status)
+        addresses = guest.own_addresses(status)
         with self._ingest:
             self._serve_status = found
             self._tailnet_name = name
+            if addresses and addresses != self._tailnet_addresses:
+                # a reading and the other-device flag were judged against the old addresses: a
+                # self-probe from a moved address read as another device (ADR-console-079)
+                self._guest_reading = None
+                self._other_device_seen = False
+                self._tailnet_addresses = addresses
+            if (name is not None and self._guest_reading_name is not None
+                    and name != self._guest_reading_name):
+                self._guest_reading = None  # judged under a name that has gone (ADR-console-079 D3)
             self._publish()
 
     def activate(self, commit: str) -> None:
@@ -8257,6 +8347,7 @@ class ConsoleService:
             workers = list(self._approval_workers)
         for worker in workers:
             worker.join()
+        self.settle_guest_readings()
         with self._ingest:
             while self._project_questions_open:
                 self._project_questions_done.wait()
