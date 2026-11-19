@@ -202,13 +202,16 @@ class CancelUntilShownTest(CancelChecks, CommitFailureCase):
         self.branch = approve.branch_of(self.shown["plan_id"])
 
     def start(self, fake, **kwargs):
-        return super().start(fake, **{"guest_socket": support.guest_socket_path(self), **kwargs})
+        kwargs.setdefault("guest_socket", support.guest_socket_path(self))
+        kwargs.setdefault("status_reader", lambda: {"Self": {"DNSName": GUEST_HOST + "."}})
+        return super().start(fake, **kwargs)
 
     def open_guest_stream(self, login):
         """A listed colleague's open guest stream; its response."""
         support.write_registry(self.registry, support.entries(1))
         self.svc.refresh()
-        self.svc.set_tailnet(GUEST_HOST)
+        self.svc.set_sharing(True)
+        self.svc.poll_serve()
         self.svc.set_colleague(login, ("owner/p00",))
         connection = support.UnixHTTPConnection(self.svc.guest_socket)
         self.addCleanup(connection.close)

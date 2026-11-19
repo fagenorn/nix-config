@@ -76,7 +76,7 @@ in
     tailscale = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      description = "Path of this host's Tailscale client the console reads `serve status --json` from (#1237, #1299); null reads nothing.";
+      description = "Path of this host's Tailscale client the console reads `serve status --json` and `status --json` from, the second for this host's own tailnet name (#1237, #1299, #1305, ADR-console-078); null reads nothing, so the guest door lets no guest in.";
     };
     command = lib.mkOption {
       type = lib.types.str;

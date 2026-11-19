@@ -134,13 +134,15 @@ class GuestCase(unittest.TestCase):
         self.store = self.root / "state/console/events.sqlite3"
         self.registry = self.root / "state/fleet/registry.json"
         self.guest_socket = support.guest_socket_path(self)
+        self.status = {"Self": {"DNSName": TAILNET + "."}}
 
-    def seed(self, tailnet=TAILNET, colleagues=None):
+    def seed(self, shared=True, row=None, colleagues=None):
         colleagues = {COLLEAGUE: ["owner/p01"]} if colleagues is None else colleagues
         self.store.parent.mkdir(parents=True, exist_ok=True)
         log = EventLog(self.store)
         try:
-            rows = [] if tailnet is None else [(SHARING_TAILNET, None, {"tailnet": tailnet})]
+            rows = [row] if row is not None else (
+                [(SHARING_TAILNET, None, {"shared": True})] if shared else [])
             rows += [(SHARING_COLLEAGUE, None, {"login": login, "projects": projects})
                      for login, projects in colleagues.items()]
             log.append(rows)
@@ -149,8 +151,12 @@ class GuestCase(unittest.TestCase):
 
     def start(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
-        return support.service(
+        kwargs.setdefault("status_reader", lambda: self.status)
+        kwargs.setdefault("serve_seconds", 3600)
+        svc = support.service(
             self, self.store, self.registry, guest_socket=self.guest_socket, **kwargs)
+        svc.poll_serve()
+        return svc
 
     def request(self, address, method, path, host, logins, headers, length, forwarded_host=None):
         connection = (support.UnixHTTPConnection(address) if isinstance(address, str)
@@ -677,7 +683,7 @@ class DoorTest(GuestCase):
         def first():
             outcome["first"] = service.ConsoleService(
                 self.store, self.registry, port=0, guest_socket=self.guest_socket,
-                peer_reader=support.OWNER_PEER)
+                peer_reader=support.OWNER_PEER, status_reader=lambda: self.status)
 
         with mock.patch.object(service.GuestServer, "server_activate", slow_activate):
             opener = threading.Thread(target=first)
@@ -692,6 +698,7 @@ class DoorTest(GuestCase):
             rival.join(10)
         self.addCleanup(outcome["first"].close)
         outcome["first"].start()
+        outcome["first"].poll_serve()
         self.assertIsInstance(outcome.get("error"), service.GuestSocketError)
         self.assertEqual(outcome["error"].errno, errno.EADDRINUSE)
         self.assertEqual(os.lstat(self.guest_socket).st_ino, ino)
@@ -877,7 +884,7 @@ class AccessWriteTest(GuestCase):
 
     def test_add_replace_and_remove_a_colleague_then_their_next_request(self):
         svc = self.start()
-        status, _, body = self.write(svc, "/api/share-tailnet", {"tailnet": TAILNET})
+        status, _, body = self.write(svc, "/api/share-tailnet", {"shared": True})
         self.assertEqual((status, body), (204, b""))
         status, _, body = self.guest_state(svc)
         self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
@@ -890,7 +897,7 @@ class AccessWriteTest(GuestCase):
         self.assertNotIn(b"owner/p00", state)
         mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
         self.assertEqual(mine["sharing"], {
-            "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
+            "shared": True, "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
             "state": "unchecked", "socket": str(self.guest_socket), "last_request": {
                 "admitted": True, "forwarded_for": False, "forwarded_host": TAILNET,
                 "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
@@ -908,15 +915,14 @@ class AccessWriteTest(GuestCase):
         status, _, body = self.guest_state(svc)
         self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
         self.assertEqual(self.kinds(), [
-            ("sharing.tailnet", {"tailnet": TAILNET}),
+            ("sharing.tailnet", {"shared": True}),
             ("sharing.colleague", {"login": COLLEAGUE, "projects": ["owner/p01"]}),
             ("sharing.colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]}),
             ("sharing.removed", {"login": COLLEAGUE})])
 
     def test_an_open_guest_stream_is_readmitted_on_every_change(self):
         rows = (("removed", lambda svc: svc.remove_colleague(COLLEAGUE)),
-                ("sharing off", lambda svc: svc.set_tailnet(None)),
-                ("tailnet moved", lambda svc: svc.set_tailnet(OTHER_HOST)))
+                ("sharing off", lambda svc: svc.set_sharing(False)))
         for name, action in rows:
             with self.subTest(change=name), tempfile.TemporaryDirectory() as tmp:
                 self.store = Path(tmp) / "state/console/events.sqlite3"
@@ -953,7 +959,10 @@ class AccessWriteTest(GuestCase):
         self.seed()
         svc = self.start()
         rows = (
-            ("/api/share-tailnet", {"tailnet": "desk.example.com"}, 400, "bad tailnet"),
+            ("/api/share-tailnet", {"tailnet": TAILNET}, 400, "bad sharing"),
+            ("/api/share-tailnet", {"tailnet": None}, 400, "bad sharing"),
+            ("/api/share-tailnet", {"shared": True, "tailnet": TAILNET}, 400, "bad sharing"),
+            ("/api/share-tailnet", {"shared": "on"}, 400, "bad sharing"),
             ("/api/share-colleague", {"login": "no-at-sign", "projects": ["owner/p01"]},
              400, "bad colleague"),
             ("/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p99"]},
@@ -964,7 +973,7 @@ class AccessWriteTest(GuestCase):
             with self.subTest(route=route, body=body):
                 got = self.unchanged(svc, lambda: self.write(svc, route, body))
                 self.assertEqual((got[0], got[2]), (status, text.encode() + b"\n"))
-        valid = {"/api/share-tailnet": {"tailnet": TAILNET},
+        valid = {"/api/share-tailnet": {"shared": True},
                  "/api/share-colleague": {"login": COLLEAGUE, "projects": ["owner/p01"]},
                  "/api/share-remove": {"login": COLLEAGUE}}
         origin = {"Origin": f"http://127.0.0.1:{svc.address[1]}", **JSON}
@@ -976,28 +985,38 @@ class AccessWriteTest(GuestCase):
                     got = self.unchanged(svc, lambda: self.write(svc, route, body, headers))
                     self.assertEqual((got[0], got[2]), (403, b"token refused\n"))
 
-    def test_clearing_the_tailnet_turns_sharing_off(self):
+    def test_the_switch_turns_sharing_on_and_off_without_a_name(self):
         self.seed()
         svc = self.start()
         self.assertEqual(self.guest_state(svc)[0], 200)
-        status, _, body = self.write(svc, "/api/share-tailnet", {"tailnet": None})
+        status, _, body = self.write(svc, "/api/share-tailnet", {"shared": False})
         self.assertEqual((status, body), (204, b""))
         status, _, body = self.guest_state(svc)
         self.assertEqual((status, body), (403, guest.SHARING_OFF_TEXT.encode() + b"\n"))
         sharing = json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+        self.assertIs(sharing["shared"], False)
         self.assertEqual(sharing["state"], "off")
+        self.assertEqual(sharing["tailnet"], TAILNET)
         self.assertEqual(sharing["colleagues"], [{"login": COLLEAGUE, "projects": ["owner/p01"]}])
+        status, _, body = self.write(svc, "/api/share-tailnet", {"shared": True})
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(self.guest_state(svc)[0], 200)
+        self.assertEqual([payload for kind, payload in self.kinds() if kind == "sharing.tailnet"],
+                         [{"shared": True}, {"shared": False}, {"shared": True}])
 
     def test_adr_008_lists_the_access_list_writes(self):
         adr = (ROOT / "docs/areas/console/adr/"
                "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
         text = " ".join(adr.split())
         for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
-                       "POST /api/share-remove", "#1237", "bad colleague"):
+                       "POST /api/share-remove", "#1237", "bad colleague", "bad sharing",
+                       "turn sharing on or off", "ADR-console-078"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237, #1294"))
+        self.assertTrue(decided.endswith("#1193, #1237, #1294, #1305"))
+        status = next(row for row in adr.splitlines() if row.startswith("- **Status:**"))
+        self.assertTrue(status.endswith("ADR-console-076, ADR-console-078"))
 
 
 class ReadingServiceTest(GuestCase):
@@ -1062,7 +1081,7 @@ class ReadingServiceTest(GuestCase):
         woke = returned.get(timeout=5)
         self.assertIsNotNone(woke)
         self.assertGreater(woke[0], version)
-        self.assertEqual(woke[2], kept)
+        self.assertEqual(woke[1].views.get(COLLEAGUE), kept)
         svc.set_colleague(COLLEAGUE, ("owner/p00",))
         frame = next_frame(response)
         self.assertIn(b"owner/p00", frame)
@@ -1178,9 +1197,14 @@ class ServeStatusTest(GuestCase):
                     "sharing", json.loads(self.guest(svc, "GET", "/api/state")[2]))
         self.reading = proxy(f"unix:{svc.guest_socket}")
         svc.poll_serve()
-        svc.set_tailnet(None)
+        svc.set_sharing(False)
         self.assertEqual(
             json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["state"], "off")
+        svc.set_sharing(True)
+        self.status = None
+        svc.poll_serve()
+        self.assertEqual(
+            json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]["state"], "unreadable")
 
     def test_a_failing_reader_reads_unchecked(self):
         self.seed()
@@ -1229,6 +1253,12 @@ class ServeStatusTest(GuestCase):
             with self.subTest(row=name):
                 self.assertIsNone(guest.serve_reader("/x/bin/tailscale", run=row)())
 
+    def test_the_serve_thread_starts_for_either_reader(self):
+        self.seed()
+        self.start(serve_reader=None, status_reader=lambda: self.status, serve_seconds=3600)
+        self.assertTrue(
+            any(thread.name == service.SERVE_THREAD for thread in threading.enumerate()))
+
     def test_the_console_takes_a_tailscale_path(self):
         parser = console.build_parser()
         self.assertIsNone(parser.parse_args([]).tailscale)
@@ -1246,38 +1276,259 @@ class ServeStatusTest(GuestCase):
                 self.assertEqual(console.main(argv), 0)
                 kwargs = made.call_args.kwargs
                 self.assertIsNone(kwargs["guest_socket"])
-                if wanted:
-                    self.assertTrue(callable(kwargs["serve_reader"]))
+                for reader in ("serve_reader", "status_reader"):
+                    if wanted:
+                        self.assertTrue(callable(kwargs[reader]))
+                    else:
+                        self.assertIsNone(kwargs[reader])
+
+
+class ReadNameTest(GuestCase):
+    """The door admits the name read from this host's Tailscale, never a stored one (#1305)."""
+
+    def probe(self, svc):
+        return self.guest(svc, "GET", "/api/whoami",
+                          headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+
+    def test_the_door_admits_the_read_name_not_the_stored_one(self):
+        self.seed(row=(SHARING_TAILNET, None, {"tailnet": OTHER_HOST}))
+        self.status = {"Self": {"DNSName": TAILNET.upper() + "."}}
+        svc = self.start()
+        self.assertEqual(self.guest(svc, "GET", "/api/state")[0], 200)
+        got = self.guest(svc, "GET", "/api/state", forwarded_host=OTHER_HOST)
+        self.assertEqual((got[0], got[2]), (403, guest.HOST_TEXT.encode() + b"\n"))
+        sharing = json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+        self.assertIs(sharing["shared"], True)
+        self.assertEqual(sharing["tailnet"], TAILNET)
+        self.assertNotIn(TAILNET, json.dumps(support.log_rows(self.store)))
+
+    def in_flight(self, svc, change):
+        """Run `change` once, after the next guest request is parsed and before it is answered."""
+        original = svc.record_guest_request
+        done = []
+
+        def hook(reading):
+            if not done:
+                done.append(True)
+                change()
+            return original(reading)
+
+        svc.record_guest_request = hook
+
+    def move_and_widen(self, svc):
+        self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
+        svc.poll_serve()
+        svc.set_colleague(COLLEAGUE, ("owner/p01", "owner/p00"))
+
+    def test_an_in_flight_state_read_keeps_the_policy_that_admitted_it(self):
+        self.seed()
+        svc = self.start()
+        svc.state_goal("owner/p00", "other-goal-zq7")
+        svc.state_goal("owner/p01", "own-goal-zq8")
+        self.in_flight(svc, lambda: self.move_and_widen(svc))
+        status, _, body = self.guest(svc, "GET", "/api/state")
+        self.assertEqual(status, 200)
+        self.assertIn(b"own-goal-zq8", body)
+        self.assertNotIn(b"other-goal-zq7", body)
+        self.assertIn(b"other-goal-zq7", svc.guest_view_bytes(COLLEAGUE))
+
+    def test_an_in_flight_picture_read_keeps_the_policy_that_admitted_it(self):
+        self.seed()
+        svc = self.start()
+        p0 = self.brief_with_picture(svc, "owner/p00", "other-goal-zq7", PIXEL)
+        headers = {"X-Console-Token": self.guest_token(), "Origin": "https://" + TAILNET}
+        self.in_flight(svc, lambda: self.move_and_widen(svc))
+        status, _, body = self.guest(svc, "GET", "/api/picture/" + p0, headers=headers)
+        self.assertEqual((status, body), (404, b"this picture is not known\n"))
+        self.assertIn(p0, svc.guest_snapshot.pictures[COLLEAGUE])
+
+    def test_a_stream_ends_when_the_name_goes_and_returns_while_it_is_blocked(self):
+        self.seed()
+        svc = self.start()
+        gate = threading.Event()
+        original = svc.wait_for_guest_change
+        calls = []
+
+        def spy(seen, timeout):
+            calls.append(seen)
+            if len(calls) == 2:
+                self.assertTrue(gate.wait(5))
+            return original(seen, timeout)
+
+        svc.wait_for_guest_change = spy
+        response = self.open_stream(svc)
+        self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
+        good = self.status
+        self.status = {"Self": {}}
+        svc.poll_serve()
+        self.status = good
+        svc.poll_serve()
+        gate.set()
+        svc.set_colleague(COLLEAGUE, ("owner/p00",))
+        frames = []
+        while True:
+            line = response.readline()
+            if line == b"":
+                break
+            frames.append(line)
+        self.assertEqual([line for line in frames if line.startswith(b"event: view")], [])
+
+    def test_an_unreadable_name_refuses_every_guest_request(self):
+        def raising():
+            raise RuntimeError(TAILNET)
+
+        readers = (("none", lambda: None), ("raising", raising),
+                   ("no self", lambda: {"Self": {}}), ("peers only", lambda: {"Peer": {}}),
+                   ("not ts.net", lambda: {"Self": {"DNSName": "desk.example.com."}}))
+        for label, reader in readers:
+            with self.subTest(reader=label), tempfile.TemporaryDirectory() as tmp:
+                self.store = Path(tmp) / "state/console/events.sqlite3"
+                self.registry = Path(tmp) / "state/fleet/registry.json"
+                self.seed()
+                captured = io.StringIO()
+                with contextlib.redirect_stderr(captured):
+                    svc = self.start(status_reader=reader)
+                    for method, path in (("GET", "/"), ("GET", "/api/state"),
+                                         ("GET", "/api/stream")):
+                        got = self.guest(svc, method, path)
+                        self.assertEqual(
+                            (got[0], got[2]), (403, guest.NAME_UNREAD_TEXT.encode() + b"\n"), path)
+                    got = self.probe(svc)
+                    self.assertEqual(
+                        (got[0], got[2]), (403, guest.NAME_UNREAD_TEXT.encode() + b"\n"), "whoami")
+                sharing = json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+                self.assertEqual(sharing["state"], "unreadable")
+                self.assertIsNone(sharing["tailnet"])
+                self.assertEqual(sharing["last_request"]["reason"], "name_unread")
+                lines = captured.getvalue().splitlines()
+                if label == "raising":
+                    # the serve thread's first poll and the start helper's each print one
+                    self.assertTrue(lines)
+                    self.assertEqual(set(lines), {"console: tailnet_status_failed RuntimeError"})
                 else:
-                    self.assertIsNone(kwargs["serve_reader"])
+                    self.assertEqual([line for line in lines if "tailnet_status_failed" in line], [])
+                self.assertNotIn(TAILNET, captured.getvalue())
+                svc.close()
+
+    def test_the_probe_is_answered_while_sharing_is_off(self):
+        self.seed(shared=False)
+        svc = self.start(status_reader=lambda: None)
+        status, _, body = self.probe(svc)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["hosts"], 1)
+        svc.set_sharing(True)
+        got = self.probe(svc)
+        self.assertEqual((got[0], got[2]), (403, guest.NAME_UNREAD_TEXT.encode() + b"\n"))
+
+    def test_one_policy_judges_a_request(self):
+        def switch(svc):
+            svc.set_sharing(False)
+
+        def name(svc):
+            self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
+            svc.poll_serve()
+
+        for label, change, text in (("switch", switch, guest.SHARING_OFF_TEXT),
+                                    ("name", name, guest.HOST_TEXT)):
+            with self.subTest(change=label), tempfile.TemporaryDirectory() as tmp:
+                self.store = Path(tmp) / "state/console/events.sqlite3"
+                self.registry = Path(tmp) / "state/fleet/registry.json"
+                self.status = {"Self": {"DNSName": TAILNET + "."}}
+                self.seed()
+                svc = self.start()
+                original = svc.record_guest_request
+                first = []
+
+                def spy(reading):
+                    if not first:
+                        first.append(reading)
+                        change(svc)
+                    return original(reading)
+
+                svc.record_guest_request = spy
+                got = self.guest(svc, "GET", "/")
+                self.assertEqual(got[0], 200)
+                self.assertIs(self.last_request(svc)["admitted"], True)
+                got = self.guest(svc, "GET", "/")
+                self.assertEqual((got[0], got[2]), (403, text.encode() + b"\n"))
+                self.assertIs(self.last_request(svc)["admitted"], False)
+                svc.close()
+
+    def test_a_name_that_moves_or_goes_ends_an_open_stream(self):
+        rows = (("moved", {"Self": {"DNSName": OTHER_HOST + "."}}, guest.HOST_TEXT),
+                ("gone", None, guest.NAME_UNREAD_TEXT))
+        for label, status, text in rows:
+            with self.subTest(change=label), tempfile.TemporaryDirectory() as tmp:
+                self.store = Path(tmp) / "state/console/events.sqlite3"
+                self.registry = Path(tmp) / "state/fleet/registry.json"
+                self.status = {"Self": {"DNSName": TAILNET + "."}}
+                self.seed()
+                svc = self.start()
+                response = self.open_stream(svc)
+                self.assertTrue(next_frame(response).startswith(b"event: view\ndata: "))
+                self.status = status
+                svc.poll_serve()
+                lines = []
+                while True:
+                    line = response.readline()
+                    if line == b"":
+                        break
+                    lines.append(line)
+                self.assertEqual([line for line in lines if line.startswith(b"event: view")], [])
+                got = self.guest(svc, "GET", "/api/state")
+                self.assertEqual((got[0], got[2]), (403, text.encode() + b"\n"))
+                svc.close()
 
 
 class HeldCheckServiceTest(GuestCase):
+    def check(self, svc):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = serve_probe_check.main(["--port", str(svc.address[1])])
+        self.assertNotIn("@", out.getvalue())
+        return code, json.loads(out.getvalue())["status"]
+
+    def probe(self, svc):
+        self.guest(svc, "GET", "/api/whoami",
+                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+
     def test_the_held_check_reads_the_running_service(self):
         self.seed()
         svc = self.start()
-
-        def check():
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = serve_probe_check.main(["--port", str(svc.address[1])])
-            self.assertNotIn("@", out.getvalue())
-            return code, json.loads(out.getvalue())["status"]
+        check = lambda: self.check(svc)  # noqa: E731
 
         self.assertEqual(check(), (75, "no_request"))
-        self.guest(svc, "GET", "/api/whoami",
-                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+        self.probe(svc)
         self.assertEqual(check(), (0, "met"))
-        svc.set_tailnet(OTHER_HOST)
+        self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
+        svc.poll_serve()
         self.assertEqual(check(), (75, "stale"))
         self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST, logins=[FORGED],
                    headers={"X-Forwarded-For": "100.64.0.1",
                             "X-Console-Probe": "other-probe@example.invalid"})
         self.assertEqual(check(), (1, "not_met"))
-        svc.set_tailnet(TAILNET)
+        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        svc.poll_serve()
         self.guest(svc, "GET", "/api/whoami", host=TAILNET,
                    headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
         self.assertEqual(check(), (1, "not_met"))
+        self.status = None
+        svc.poll_serve()
+        self.assertEqual(check(), (75, "name_unread"))
+        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        svc.poll_serve()
+        svc.set_sharing(False)
+        self.assertEqual(check(), (75, "sharing_off"))
+
+    def test_a_probe_taken_while_sharing_was_off_is_stale(self):
+        self.seed()
+        svc = self.start()
+        svc.set_sharing(False)
+        self.probe(svc)
+        svc.set_sharing(True)
+        self.assertEqual(self.check(svc), (75, "stale"))
+        self.probe(svc)
+        self.assertEqual(self.check(svc), (0, "met"))
 
 
 if __name__ == "__main__":

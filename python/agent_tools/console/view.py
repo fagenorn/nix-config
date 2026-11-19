@@ -64,8 +64,9 @@ Wire format, one object:
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
      "activation": <activation line> | null,
      "spend": <spend view> | null,
-     "sharing": {"tailnet": <name> | null, "colleagues": [{"login", "projects"}, ...],
-                 "state": "off" | "unchecked" | "not_proxying" | "serving",
+     "sharing": {"shared": <bool>, "tailnet": <this host's read name> | null,
+                 "colleagues": [{"login", "projects"}, ...],
+                 "state": "off" | "unreadable" | "unchecked" | "not_proxying" | "serving",
                  "last_request": <guest-door reading> | null, "socket": <guest socket path> | null}}
 
 `sharing` is the owner's access list for the guest door and its Serve state (#1237,
@@ -962,7 +963,8 @@ ACTIVATION_FAILED_TEXT = "Activating this host at {commit} failed: {reason}. {ne
 ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
 SHARING_OFF = MappingProxyType({
-    "tailnet": None, "colleagues": [], "state": "off", "last_request": None, "socket": None})
+    "shared": False, "tailnet": None, "colleagues": [], "state": "off", "last_request": None,
+    "socket": None})
 
 
 @dataclass(frozen=True)

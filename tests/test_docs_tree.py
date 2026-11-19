@@ -39,6 +39,7 @@ LAND_QUEUE_FENCE = re.compile(r"^```sh\n(.*?)^```$", re.S | re.M)
 
 
 TAILNET_PLACEHOLDER = "<host>.<tailnet>.ts.net"
+INVENTED_TAILNET = "invented-tailnet.ts.net"
 TAILNET_NAME = re.compile(r"[^\s/()\[\]`\"'<>]*(?:<[^<>\s]*>[^\s/()\[\]`\"'<>]*)*\.ts\.net")
 
 
@@ -583,9 +584,9 @@ class DocsTreeTest(unittest.TestCase):
             status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                     "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                    "ADR-console-076")
+                    "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1237, #1294"))
+        self.assertTrue(decided.endswith("#1237, #1294, #1305"))
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)
@@ -899,6 +900,59 @@ class DocsTreeTest(unittest.TestCase):
                                       ).read_text().splitlines() if row.startswith("- **Status:**"))
         self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
 
+    def test_the_tailnet_name_source_is_recorded_as_adr_078(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("078-*.md"))
+        self.assertEqual(len(found), 1, found)
+        raw = found[0].read_text()
+        text = re.sub(r"\s+", " ", raw)
+        self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-078 \u2014 "))
+        for needle in (
+            "- **Status:** accepted", "- **Decided in:** #1305", "ADR-console-066",
+            "ADR-console-077", "D4", "tailscale status --json", "Self", "DNSName",
+            "trailing dot", "lowercased", "one-minute", "in memory", "never in the log",
+            "fail closed", "name_unread", '{"shared": true}', "bad sharing", "sharing.tailnet",
+            "never used for admission", "<host>.<tailnet>.ts.net", "19 Nov",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        self.assertEqual(logins_in(text), [])
+        d3 = text.split("**D3.", 1)[1].split("**D4.", 1)[0]
+        for needle in ("refuses every request", "fail closed"):
+            with self.subTest(d3=needle):
+                self.assertIn(needle, d3)
+        d2 = text.split("**D2.", 1)[1].split("**D3.", 1)[0]
+        self.assertIn("amends ADR-console-077 D4", d2)
+        row = next(r for r in (adr_dir / "077-the-guest-door-on-eleven-m5-is-a-unix-socket-only-"
+                               "serve-and-the-owner-can-open.md").read_text().splitlines()
+                   if r.startswith("- **Status:**"))
+        self.assertEqual(row, "- **Status:** accepted; amended by ADR-console-078")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        guest = context.split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("ADR-console-078", guest)
+        self.assertIn("read from this host's Tailscale client", guest)
+
+    def test_sharing_sources_and_fixtures_name_only_placeholder_tailnets_and_logins(self):
+        sources = sorted({
+            *(REPO_ROOT / "tests").glob("test_console_guest*.py"),
+            REPO_ROOT / "tests/console_screenshots.py",
+            REPO_ROOT / "tests/test_console_screenshots.py",
+            REPO_ROOT / "tests/test_console_serve_probe_check.py",
+            REPO_ROOT / "python/agent_tools/console/guest.py",
+            REPO_ROOT / "python/agent_tools/console/serve_probe_check.py"})
+        self.assertGreaterEqual(len(sources), 6, sources)
+        for source in sources:
+            text = source.read_text()
+            with self.subTest(source=source.name):
+                self.assertEqual(
+                    [name for name in tailnet_names_other_than_placeholder(text)
+                     if name not in (INVENTED_TAILNET, ".ts.net")
+                     and not name.endswith("." + INVENTED_TAILNET)], [])
+                self.assertEqual(
+                    [login for login in logins_in(text) if not login.lower().endswith(".invalid")],
+                    [])
+
     def test_the_relay_sender_decision_is_recorded_as_adr_068_and_cited_by_number(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         found = sorted(adr_dir.glob("068-*.md"))
@@ -1190,7 +1244,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
                          "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                         "ADR-console-076"),
+                         "ADR-console-076, ADR-console-078"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064"),
@@ -1225,7 +1279,7 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037, ADR-console-053, "
-                                          "ADR-console-058, ADR-system-004, ADR-console-076"),
+                                          "ADR-console-058, ADR-system-004, ADR-console-076, ADR-console-078"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064")):
@@ -1408,7 +1462,7 @@ class DocsTreeTest(unittest.TestCase):
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
                          "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
-                         "ADR-console-076"),
+                         "ADR-console-076, ADR-console-078"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035, "
                          "ADR-console-070; extended by #1055 (D10, D11)")):

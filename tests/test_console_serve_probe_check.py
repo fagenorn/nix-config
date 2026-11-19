@@ -32,7 +32,7 @@ GOOD = {"admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
 
 
 def state_of(reading):
-    return {"sharing": {"tailnet": TAILNET, "last_request": reading}}
+    return {"sharing": {"shared": True, "tailnet": TAILNET, "last_request": reading}}
 
 
 def run_check(state):
@@ -65,8 +65,17 @@ class HeldCheckTest(unittest.TestCase):
             ([], 75, "not_running"),
             ({"sharing": {"tailnet": None, "last_request": GOOD}}, 75, "sharing_off"),
             ({}, 75, "sharing_off"),
+            ({"sharing": {"shared": False, "tailnet": TAILNET, "last_request": GOOD}},
+             75, "sharing_off"),
+            ({"sharing": {"tailnet": TAILNET, "last_request": GOOD}}, 75, "sharing_off"),
+            ({"sharing": {"shared": "true", "tailnet": TAILNET, "last_request": GOOD}},
+             75, "sharing_off"),
+            ({"sharing": {"shared": True, "tailnet": None, "last_request": GOOD}},
+             75, "name_unread"),
+            ({"sharing": {"shared": True, "tailnet": None, "last_request": None}},
+             75, "name_unread"),
             (state_of(None), 75, "no_request"),
-            ({"sharing": {"tailnet": TAILNET}}, 75, "no_request"),
+            ({"sharing": {"shared": True, "tailnet": TAILNET}}, 75, "no_request"),
             (state_of("x"), 1, "bad_reading"),
             (state_of(without_probe), 1, "bad_reading"),
             (state_of(reading(login="x")), 1, "bad_reading"),
@@ -83,7 +92,7 @@ class HeldCheckTest(unittest.TestCase):
              1, "not_met"),
             (state_of(reading(forwarded_host_form="other", forwarded_host=OTHER_HOST)),
              1, "not_met"),
-            ({"sharing": {"tailnet": TAILNET,
+            ({"sharing": {"shared": True, "tailnet": TAILNET,
                           "last_request": reading(forwarded_host_form="other",
                                                   reason="sharing_off", admitted=False)}},
              75, "stale"),
@@ -107,12 +116,15 @@ class HeldCheckTest(unittest.TestCase):
             (state_of(reading(login_headers=2, probe=False)), 1, "not_met"),
             (state_of(reading(forwarded_host=None)), 1, "bad_reading"),
             (state_of(reading(forwarded_host_form="other", forwarded_host=None)), 1, "not_met"),
-            ({"sharing": {"tailnet": OTHER_HOST, "last_request": GOOD}}, 75, "stale"),
-            ({"sharing": {"tailnet": OTHER_HOST,
+            ({"sharing": {"shared": True, "tailnet": OTHER_HOST, "last_request": GOOD}}, 75, "stale"),
+            ({"sharing": {"shared": True, "tailnet": OTHER_HOST,
                           "last_request": reading(forwarded_host_form="with_port",
                                                   forwarded_host=TAILNET + ":443")}},
              75, "stale"),
-            ({"sharing": {"tailnet": TAILNET.upper(), "last_request": GOOD}}, 0, "met"),
+            ({"sharing": {"shared": True, "tailnet": TAILNET.upper(), "last_request": GOOD}},
+             0, "met"),
+            (state_of(reading(reason="sharing_off")), 75, "stale"),
+            (state_of(reading(reason="name_unread")), 75, "stale"),
         ]
         for state, want_code, want_status in rows:
             with self.subTest(state=state):
@@ -120,6 +132,8 @@ class HeldCheckTest(unittest.TestCase):
                 self.assertEqual((code, printed["status"]), (want_code, want_status))
                 self.assertNotIn(TAILNET, text.lower())
                 self.assertNotIn("@", text)
+                if want_status in ("sharing_off", "name_unread"):
+                    self.assertEqual(printed, {"status": want_status})
 
     def test_a_bad_argument_is_2(self):
         for argv in (["--port", "x"], ["--other"]):
@@ -129,7 +143,7 @@ class HeldCheckTest(unittest.TestCase):
                 self.assertEqual(raised.exception.code, 2)
 
     def test_the_reading_feeds_the_check(self):
-        access = guest.Access(TAILNET, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        access = guest.Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
         local = ["localhost"]
         rows = [(local, [TAILNET], [COLLEAGUE], [FORGED], 0, "met"),
                 (local, [TAILNET], [FORGED], [OTHER_PROBE], 1, "not_met"),
@@ -139,7 +153,7 @@ class HeldCheckTest(unittest.TestCase):
                 ([TAILNET], [TAILNET], [COLLEAGUE], [FORGED], 1, "not_met")]
         for hosts, forwarded, logins, probes, want_code, want_status in rows:
             with self.subTest(hosts=hosts, forwarded=forwarded, logins=logins, probes=probes):
-                reading = guest.reading(access, hosts, forwarded, logins, ["100.64.0.1"], probes)
+                reading = guest.reading(access, TAILNET, hosts, forwarded, logins, ["100.64.0.1"], probes)
                 code, printed, _ = run_check(state_of(reading))
                 self.assertEqual((code, printed["status"]), (want_code, want_status))
 

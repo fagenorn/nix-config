@@ -5,22 +5,40 @@ console's guest socket (ADR-console-066, ADR-console-077). This module holds the
 routes and applies them. It uses the standard library alone.
 
 The access list is kept in the event log as three kinds (`event_log` records them and keeps the
-newest rows in force through the retention pass): `sharing.tailnet` (`{"tailnet"}`: the one
-tailnet name the console is shared at, or null for off), `sharing.colleague` (`{"login",
-"projects"}`: the login's whole project list) and `sharing.removed` (`{"login"}`). `access_list`
-folds rows in sequence order on top of a previous `Access` and never mutates it. A tailnet
-payload that is not a valid name turns sharing off; a colleague row whose login is not already in
+newest rows in force through the retention pass): `sharing.tailnet` (`{"shared"}`: the switch, true
+for on and false for off; a legacy `{"tailnet": <valid name>}` row still folds to on and the name it
+carries is never used), `sharing.colleague` (`{"login", "projects"}`: the login's whole project
+list) and `sharing.removed` (`{"login"}`). `access_list` folds rows in sequence order on top of a
+previous `Access(shared, colleagues)` and never mutates it. A switch row with a `shared` member is
+on only when that member is exactly `True`; a row without one is on only when its `tailnet` is a
+valid name; a payload that is not an object is off. A colleague row whose login is not already in
 normal form (lowercase) or whose projects are not a non-empty list of non-empty strings removes
 that login (fail closed); a row whose login is not a string is ignored.
 
-`admit(access, hosts, forwarded_hosts, logins)` returns `(login, None)` for an admitted request and
-`(None, text)` for a refused one (ADR-console-077 D4). The checks run in this order: sharing is off
-(`SHARING_OFF_TEXT`); the request carries exactly one `Host` that, lowercased, is `LOCAL_HOST`
-(`localhost`, no port) and exactly one `X-Forwarded-Host` (`FORWARDED_HOST_HEADER`) that, lowercased,
-is the configured tailnet name exactly, with no port form (`HOST_TEXT`); it carries exactly one login
-header (`LOGIN_HEADER`) whose normal form is a listed colleague (`NOT_SHARED_TEXT`). No text names a
-project or echoes a login or a host.
-Each text is answered as `403 text/plain` with a trailing newline.
+The tailnet name the door admits is never configured and never stored: it is read from this host's
+Tailscale client (ADR-console-078 D1). `self_name(status)` takes the parsed `tailscale status
+--json` and returns `Self.DNSName` with exactly one trailing dot removed and lowercased, only when
+the raw string is ASCII (checked before any case change, because `str.lower` maps U+212A to an
+ASCII `k`) and the result is exactly `<host>.<tailnet>.ts.net`, two labels before `.ts.net` and no
+more (a name with an extra label admits nothing); every other shape is None.
+`status_reader(path)` is the reader of that status: a callable that runs the client at `path` as
+`status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns the parsed JSON,
+or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it never raises. The
+name is kept in memory only, never in the log and never printed. `Policy(access, name)` is one
+immutable snapshot of the switch, the list and the read name (`NO_POLICY` is off with no name); a
+request is judged by one policy. `Snapshot(policy, views, pictures, revoked)` carries with that policy
+the colleagues' scoped views, their picture ids and `revoked`, a count the service raises each time
+the read name changes or sharing goes off, so a request is answered from the one snapshot that
+admitted it and an open stream can tell a revocation that came and went while it was blocked.
+
+`admit(access, name, hosts, forwarded_hosts, logins)` returns `(login, None)` for an admitted request
+and `(None, text)` for a refused one (ADR-console-077 D4, ADR-console-078). The checks run in this
+order: sharing is off (`SHARING_OFF_TEXT`); the name is unread (`NAME_UNREAD_TEXT`); the request
+carries exactly one `Host` that, lowercased, is `LOCAL_HOST` (`localhost`, no port) and exactly one
+`X-Forwarded-Host` (`FORWARDED_HOST_HEADER`) that, lowercased, is the read name exactly, with no port
+form (`HOST_TEXT`); it carries exactly one login header (`LOGIN_HEADER`) whose normal form is a
+listed colleague (`NOT_SHARED_TEXT`). No text names a project or echoes a login or a host. Each text
+is answered as `403 text/plain` with a trailing newline.
 
 The guest door is a Unix socket (ADR-console-077). `door_refusal(folder, sock, owner_uid)` takes the
 `os.lstat` of the socket's folder and of the socket (None when absent) and returns None only when the
@@ -56,35 +74,37 @@ registration members, the digest, the activation line, the spend view and the ca
 stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
 finds in that guest's scoped view.
 
-`reading(access, hosts, forwarded_hosts, logins, forwarded, probes)` is what one guest-door request
+`reading(access, name, hosts, forwarded_hosts, logins, forwarded, probes)` is what one guest-door request
 showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if
-not, the `REASON_CODES` code (`sharing_off`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
+not, the `REASON_CODES` code (`sharing_off`, `name_unread`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
 and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
 it is a hostname of letters, digits, dots and hyphens with an optional port (so an `@` or a long
 value is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
-`forwarded_host_form` (`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`,
+`forwarded_host_form` (`HOST_FORMS`: `exact` the read name, `with_port` the name with `:443`,
 `other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
 `probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said); `login_valid`
 (at least one login header arrived and every one is a well-formed login, so a combined value such as
 two logins joined by a comma is false). No member is
-ever a login or a probe value. It does not change admission, and `whoami` is unchanged.
+ever a login or a probe value. It does not change admission. `whoami` is unchanged; the service
+refuses the probe `NAME_UNREAD_TEXT` when sharing is on and no name is read.
 
-`sharing_entry(access, state, last_request, socket)` is the owner's `sharing` view member; `last_request` is
-the latest `reading` or None and `socket` the bound guest socket path or None. `state` is one of
-`SERVE_STATES`: `off` (no tailnet is configured), `unchecked` (the Serve status was not read),
-`not_proxying` (it was read and does not proxy the tailnet name on 443 to the guest socket) and
-`serving`. `serve_state(status, tailnet, guest_socket)` reads the parsed `tailscale serve status
---json` ServeConfig, `{"Web": {"<tailnet>:443": {"Handlers": {"/": {"Proxy":
-"unix:<guest socket>"}}}}}`, and treats any other shape, or a proxy that is not exactly
-`unix:` plus the bound socket path, as not proxying.
+`sharing_entry(access, name, state, last_request, socket)` is the owner's `sharing` view member
+(`shared`, `tailnet` the read name or None, `colleagues`, `state`, `last_request`, `socket`);
+`last_request` is the latest `reading` or None and `socket` the bound guest socket path or None.
+`state` is one of `SERVE_STATES`: `off` (sharing is off), `unreadable` (sharing is on and no name is
+read), `unchecked` (the Serve status was not read), `not_proxying` (it was read and does not proxy
+the read name on 443 to the guest socket) and `serving`. `serve_state(shared, name, status,
+guest_socket)` reads the parsed `tailscale serve status --json` ServeConfig, `{"Web":
+{"<name>:443": {"Handlers": {"/": {"Proxy": "unix:<guest socket>"}}}}}`, and treats any other shape,
+or a proxy that is not exactly `unix:` plus the bound socket path, as not proxying.
 
 `serve_reader(path)` is the reader of that status: a callable that runs this host's Tailscale client
 at `path` as `serve status --json` (no shell, no other argument, `SERVE_TIMEOUT_SECONDS`) and returns
 the parsed JSON, or None on a nonzero exit, output that is not JSON, an `OSError` or a timeout; it
 never raises.
 
-`parse_tailnet`, `parse_colleague` and `parse_removal` read the owner's write bodies as strict
+`parse_sharing` (`{"shared": true|false}`, nothing else), `parse_colleague` and `parse_removal` read the owner's write bodies as strict
 JSON (a duplicate key, a non-object or an extra or missing key is refused) and raise
 `ValueError` on a malformed body. Whether each project of a colleague is registered is checked by
 the service, which raises `Refused` for a write refused on its merits.
@@ -117,7 +137,7 @@ PASSED_INPUTS = frozenset({"now_ms", "managers", "nudges", "looked"})
 FILTERED_INPUTS = frozenset({"states", "records", "health", "sessions", "deliveries", "sprints",
                              "pending", "movement", "owner_notices"})
 SERVE_TIMEOUT_SECONDS = 15.0
-SERVE_STATES = ("off", "unchecked", "not_proxying", "serving")
+SERVE_STATES = ("off", "unreadable", "unchecked", "not_proxying", "serving")
 DOOR_WIDER = "door_wider"
 FOLDER_MODE = 0o700
 SOCKET_MODE = 0o600
@@ -130,6 +150,7 @@ LOCAL_HOST = "localhost"
 FORWARDED_HOST_HEADER = "X-Forwarded-Host"
 
 SHARING_OFF_TEXT = "Sharing is off on this console."
+NAME_UNREAD_TEXT = "This console cannot read its tailnet name, so it lets nobody in."
 HOST_TEXT = "This console is shared only at its tailnet name."
 NOT_SHARED_TEXT = "This console is not shared with you. Ask its owner to add your Tailscale login."
 OWNER_ONLY_TEXT = "Only the console's owner can do that."
@@ -138,7 +159,8 @@ OWNER_PORT_TEXT = ("This is the console owner's port. "
 
 HOST_FORMS = ("exact", "with_port", "other", "none")
 REASON_CODES: Mapping[str, str] = MappingProxyType({
-    SHARING_OFF_TEXT: "sharing_off", HOST_TEXT: "host", NOT_SHARED_TEXT: "not_shared"})
+    SHARING_OFF_TEXT: "sharing_off", NAME_UNREAD_TEXT: "name_unread", HOST_TEXT: "host",
+    NOT_SHARED_TEXT: "not_shared"})
 READING_MEMBERS = ("admitted", "forwarded_for", "forwarded_host", "forwarded_host_form",
                    "forwarded_hosts", "host", "host_local", "hosts", "login_headers", "login_valid",
                    "probe", "probe_login_arrived", "reason")
@@ -149,6 +171,7 @@ PROJECTS_MAX = 50
 PROJECT_MAX = 200
 
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
+_SELF_NAME = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2}ts\.net")
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
 _HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
@@ -159,16 +182,56 @@ class Refused(Exception):
 
 @dataclass(frozen=True)
 class Access:
-    tailnet: str | None
+    shared: bool
     colleagues: Mapping[str, frozenset[str]]
 
 
-NO_ACCESS = Access(None, MappingProxyType({}))
+NO_ACCESS = Access(False, MappingProxyType({}))
+
+
+@dataclass(frozen=True)
+class Policy:
+    """One immutable snapshot of the switch, the list and the name read from Tailscale."""
+    access: Access
+    name: str | None
+
+
+NO_POLICY = Policy(NO_ACCESS, None)
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """One policy with the views and picture ids derived under it, and the revocation count."""
+    policy: Policy
+    views: Mapping[str, bytes]
+    pictures: Mapping[str, frozenset[str]]
+    revoked: int
+
+
+NO_SNAPSHOT = Snapshot(NO_POLICY, MappingProxyType({}), MappingProxyType({}), 0)
 
 
 def valid_tailnet(text: object) -> bool:
     return (isinstance(text, str) and len(text) <= TAILNET_MAX
             and _TAILNET.fullmatch(text) is not None)
+
+
+def self_name(status: object) -> str | None:
+    node: object = status
+    for step in ("Self", "DNSName"):
+        node = node.get(step) if isinstance(node, Mapping) else None
+    if not isinstance(node, str) or not node.isascii():
+        return None
+    name = node.removesuffix(".").lower()
+    return name if valid_tailnet(name) and _SELF_NAME.fullmatch(name) is not None else None
+
+
+def _switch(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if "shared" in payload:
+        return payload["shared"] is True
+    return valid_tailnet(payload.get("tailnet"))
 
 
 def normal_login(text: object) -> str | None:
@@ -184,13 +247,12 @@ def _projects_in_force(projects: object) -> bool:
 
 
 def access_list(events: Iterable[Event], previous: Access = NO_ACCESS) -> Access:
-    tailnet = previous.tailnet
+    shared = previous.shared
     colleagues = dict(previous.colleagues)
     for event in events:
         payload = event.payload
         if event.kind == SHARING_TAILNET:
-            name = payload.get("tailnet") if isinstance(payload, dict) else None
-            tailnet = name if valid_tailnet(name) else None
+            shared = _switch(payload)
         elif event.kind == SHARING_COLLEAGUE:
             login = payload.get("login") if isinstance(payload, dict) else None
             if not isinstance(login, str):
@@ -204,7 +266,7 @@ def access_list(events: Iterable[Event], previous: Access = NO_ACCESS) -> Access
             login = payload.get("login") if isinstance(payload, dict) else None
             if isinstance(login, str):
                 colleagues.pop(login, None)
-    return Access(tailnet, MappingProxyType(colleagues))
+    return Access(shared, MappingProxyType(colleagues))
 
 
 def _object(body: bytes, members: set[str]) -> dict:
@@ -218,13 +280,11 @@ def _object(body: bytes, members: set[str]) -> dict:
     return value
 
 
-def parse_tailnet(body: bytes) -> str | None:
-    name = _object(body, {"tailnet"})["tailnet"]
-    if name is None:
-        return None
-    if not isinstance(name, str) or not valid_tailnet(name.lower()):
-        raise ValueError("tailnet must be null or a <host>.<tailnet>.ts.net name")
-    return name.lower()
+def parse_sharing(body: bytes) -> bool:
+    shared = _object(body, {"shared"})["shared"]
+    if type(shared) is not bool:
+        raise ValueError("shared must be true or false")
+    return shared
 
 
 def _login(value: object) -> str:
@@ -251,13 +311,15 @@ def parse_removal(body: bytes) -> str:
     return _login(_object(body, {"login"})["login"])
 
 
-def admit(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
+def admit(access: Access, name: str | None, hosts: Sequence[str], forwarded_hosts: Sequence[str],
           logins: Sequence[str]) -> tuple[str | None, str | None]:
-    if access.tailnet is None:
+    if not access.shared:
         return None, SHARING_OFF_TEXT
+    if name is None:
+        return None, NAME_UNREAD_TEXT
     if len(hosts) != 1 or hosts[0].lower() != LOCAL_HOST:
         return None, HOST_TEXT
-    if len(forwarded_hosts) != 1 or forwarded_hosts[0].lower() != access.tailnet:
+    if len(forwarded_hosts) != 1 or forwarded_hosts[0].lower() != name:
         return None, HOST_TEXT
     if len(logins) != 1:
         return None, NOT_SHARED_TEXT
@@ -267,17 +329,17 @@ def admit(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
     return login, None
 
 
-def reading(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
+def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_hosts: Sequence[str],
             logins: Sequence[str], forwarded: Sequence[str], probes: Sequence[str]) -> dict:
     """What one guest-door request showed, for the owner's `sharing.last_request`; never a login."""
-    _, text = admit(access, hosts, forwarded_hosts, logins)
+    _, text = admit(access, name, hosts, forwarded_hosts, logins)
     host = hosts[0] if len(hosts) == 1 else None
     one = forwarded_hosts[0] if len(forwarded_hosts) == 1 else None
     if one is None:
         form = "none"
-    elif access.tailnet is not None and one.lower() == access.tailnet:
+    elif name is not None and one.lower() == name:
         form = "exact"
-    elif access.tailnet is not None and one.lower() == access.tailnet + ":443":
+    elif name is not None and one.lower() == name + ":443":
         form = "with_port"
     else:
         form = "other"
@@ -428,24 +490,26 @@ def acl_reader_for(platform: str) -> Callable[[str], bool] | None:
     return acl_grants if platform == "darwin" else None
 
 
-def serve_state(status: object, tailnet: str | None, guest_socket: str | None) -> str:
-    if tailnet is None:
+def serve_state(shared: bool, name: str | None, status: object, guest_socket: str | None) -> str:
+    if not shared:
         return "off"
+    if name is None:
+        return "unreadable"
     if status is None:
         return "unchecked"
     node: object = status
-    for step in ("Web", f"{tailnet}:443", "Handlers", "/", "Proxy"):
+    for step in ("Web", f"{name}:443", "Handlers", "/", "Proxy"):
         node = node.get(step) if isinstance(node, Mapping) else None
     if isinstance(guest_socket, str) and guest_socket and node == "unix:" + guest_socket:
         return "serving"
     return "not_proxying"
 
 
-def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
-                 ) -> Callable[[], object | None]:
+def _json_reader(path: str, args: Sequence[str],
+                 run: Callable[..., subprocess.CompletedProcess]) -> Callable[[], object | None]:
     def read() -> object | None:
         try:
-            done = run([path, "serve", "status", "--json"], capture_output=True, text=True,
+            done = run([path, *args], capture_output=True, text=True,
                        timeout=SERVE_TIMEOUT_SECONDS, check=False)
             if done.returncode != 0:
                 return None
@@ -456,9 +520,20 @@ def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = su
     return read
 
 
-def sharing_entry(access: Access, state: str, last_request: Mapping | None = None,
+def serve_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
+                 ) -> Callable[[], object | None]:
+    return _json_reader(path, ("serve", "status", "--json"), run)
+
+
+def status_reader(path: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
+                  ) -> Callable[[], object | None]:
+    return _json_reader(path, ("status", "--json"), run)
+
+
+def sharing_entry(access: Access, name: str | None, state: str, last_request: Mapping | None = None,
                   socket: str | None = None) -> dict:
-    return {"tailnet": access.tailnet,
+    return {"shared": access.shared,
+            "tailnet": name,
             "colleagues": [{"login": login, "projects": sorted(access.colleagues[login])}
                            for login in sorted(access.colleagues)],
             "state": state,
