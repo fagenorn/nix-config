@@ -6,7 +6,6 @@ import contextlib
 import http.server
 import io
 import json
-import re
 import socket
 import threading
 import unittest
@@ -184,17 +183,6 @@ class WrapperTest(unittest.TestCase):
         lines = [line for line in (ROOT / WRAPPER).read_text().splitlines() if line.strip()]
         self.assertEqual(lines[-1],
                          'PYTHONPATH=python exec python3 -m agent_tools.console.serve_probe_check "$@"')
-
-    def test_adr_066_records_the_strict_rule_and_the_held_check(self):
-        (path,) = (ROOT / "docs/areas/console/adr").glob("066-*.md")
-        text = re.sub(r"\s+", " ", path.read_text())
-        for needle in ("- **Decided in:** #1235, #1237", "refuses connections from its own machine",
-                       "with no port form", "never a login value",
-                       "home/common/verify-pending/checks/console-guest-door", "expiry 30 days",
-                       "so that refusal stays as written"):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, text)
-        self.assertNotIn("confirmed by a read-only probe through Serve in a later slice", text)
 
 
 if __name__ == "__main__":

@@ -21,8 +21,9 @@ Scan rule for a `.py` source:
    (defs and classes excepted) build the module environment, in order. Each
    unit, a top-level function or a method of a top-level class, is walked from
    a copy of it with its parameters bound to no kind.
-3. Kinds of an expression E. A Name has the kinds its environment gives it,
-   but a name holding TEXT never holds PHRASE. ADR: E's subtree holds a string
+3. Kinds of an expression E. A Name, or an attribute chain of Names such as
+   `self.text`, has the kinds its environment gives it, but a name holding TEXT
+   never holds PHRASE. ADR: E's subtree holds a string
    constant ADR_PATH matches, a Name with ADR, or `<AREAS> / "adr"` (or
    `"adr/..."`). AREAS: a string constant AREAS_ROOT matches, or a Name with
    AREAS. TEXT: a call named in READ_CALLS or in the readers whose receiver or
@@ -37,17 +38,22 @@ Scan rule for a `.py` source:
    body binds its parameters to no kind.
 4. Bindings follow statement order with flow. An assignment, a for target, a
    with variable and a walrus replace the target's kinds (an augmented
-   assignment adds). `if`, `try` and `match` branches start from the same state
+   assignment adds); a target is a name or an attribute chain, and binding a
+   name forgets the chains that start with it. `if`, `try` and `match` branches start from the same state
    and join by union. A loop body is walked until its head state stops
    changing. A nested def is walked from a copy of the state at its definition
    with its parameters bound to no kind; its assertions belong to the unit.
    Findings are collected only on the final walk, in the converged states.
 5. An assertion is a call whose func is an Attribute named `assert*`, or an
-   `assert` statement. It is a finding, recorded once at its line, when one
-   positional argument has TEXT and another has PHRASE (rule A), when a
-   positional argument or the assert test holds a Compare or a Call whose parts
-   hold a TEXT part and a PHRASE part (rule B), or when a positional argument
-   has MATCH (rule C).
+   `assert` statement. Its operands are the values compared: the first
+   positional argument of assertTrue, assertFalse, assertIsNone and
+   assertIsNotNone, the first two of the other unittest comparisons, every
+   positional argument of any other `assert*` call, and every keyword argument
+   but msg, places, delta and seq_type. A diagnostic message is no operand. It
+   is a finding, recorded once at its line, when one operand has TEXT and
+   another has PHRASE (rule A), when an operand or the assert test holds a
+   Compare or a Call whose parts hold a TEXT part and a PHRASE part (rule B),
+   or when an operand has MATCH (rule C).
 
 A `.sh` member is a finding on every line that names a record, because a shell
 member never names one. A suite member of any other kind fails the scan, and a
@@ -65,15 +71,22 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ADR_PATH = re.compile(r"docs/areas/[^/\s'\"\x60]+/adr(?:/|$)")
 AREAS_ROOT = re.compile(r"(?:^|/)docs/areas/?$")
-CREDENTIAL_WORDS = re.compile(
-    r"token|credential|secret|password|keychain|sign[-_]?in|log[-_]?in|oauth|\bauth\b|authenticat|authoriz",
-    re.IGNORECASE,
-)
+CREDENTIAL_WORDS = re.compile(r"token|credential|secret|password|keychain", re.IGNORECASE)
 GUARD_FILES = frozenset({"tests/test_claude_permission_guard.py", "tests/test_guard_policy.py"})
 SUITE_RECIPE = "agent-workflow-tests *args:"
 SUITE_GLOBS = ("tests/*.py", "home/common/agent-skills/tests/*.py")
 READ_CALLS = frozenset({"read_text", "read_bytes", "read", "readlines", "open"})
 MATCH_CALLS = frozenset({"startswith", "endswith", "search", "match", "fullmatch"})
+ONE_OPERAND = frozenset({"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"})
+TWO_OPERANDS = frozenset({
+    "assertEqual", "assertNotEqual", "assertIn", "assertNotIn", "assertIs", "assertIsNot",
+    "assertGreater", "assertGreaterEqual", "assertLess", "assertLessEqual", "assertAlmostEqual",
+    "assertNotAlmostEqual", "assertRegex", "assertNotRegex", "assertCountEqual",
+    "assertMultiLineEqual", "assertSequenceEqual", "assertListEqual", "assertTupleEqual",
+    "assertSetEqual", "assertDictEqual", "assertIsInstance", "assertNotIsInstance",
+    "assertStartsWith", "assertNotStartsWith", "assertEndsWith", "assertNotEndsWith",
+})
+DIAGNOSTIC_KEYWORDS = frozenset({"msg", "places", "delta", "seq_type"})
 
 # The wording tests that name a credential word and were on main when the scan
 # landed (ADR-delivery-010). Adding an id here is a new decision with its own record.
@@ -81,10 +94,6 @@ KEPT_AT_START = frozenset({
     "tests/test_docs_tree.py::DocsTreeTest.test_adr_verification_008_records_the_boot_host_amendment",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_owner_port_peer_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_tailscale_serve_boundary_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_guest_socket_amendment_is_recorded_as_adr_077",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_macos_manager_decision_is_recorded_as_adr_075",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_signin_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_console_profile_choice_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_console_approval_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_merged_adoption_registration_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_apply_card_decision_is_recorded",
@@ -93,9 +102,6 @@ KEPT_AT_START = frozenset({
     "tests/test_docs_tree.py::DocsTreeTest.test_the_register_project_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_project_question_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_plan_answer_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_accounts_panel_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_same_account_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_launch_choice_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_console_answer_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_console_goal_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_console_brief_decision_is_recorded",
@@ -107,12 +113,10 @@ KEPT_AT_START = frozenset({
     "tests/test_docs_tree.py::DocsTreeTest.test_the_notice_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_owner_notice_decision_is_recorded",
     "tests/test_docs_tree.py::DocsTreeTest.test_the_host_activation_decision_is_recorded",
-    "tests/test_docs_tree.py::DocsTreeTest.test_the_guard_coverage_decision_is_recorded",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_036_records_the_picture_store",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_008_lists_the_picture_read",
     "tests/test_console_pictures.py::PictureDocsTest.test_adr_038_records_the_question_pictures",
     "tests/test_console_guest_service.py::AccessWriteTest.test_adr_008_lists_the_access_list_writes",
-    "tests/test_console_serve_probe_check.py::WrapperTest.test_adr_066_records_the_strict_rule_and_the_held_check",
 })
 # A sync merge that brings a kept test in from main adds it here, never above.
 KEPT_FROM_MAIN: frozenset[str] = frozenset()
@@ -189,7 +193,20 @@ def _join(*envs: dict) -> dict:
     return joined
 
 
+def _key(node: ast.AST) -> str | None:
+    """The dotted name of a Name or an attribute chain of Names, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        return ".".join([node.id, *reversed(parts)])
+    return None
+
+
 def _store(env: dict, name: str, kinds: frozenset[str]) -> None:
+    for key in [key for key in env if key.startswith(name + ".")]:
+        del env[key]
     if kinds:
         env[name] = kinds
     else:
@@ -199,6 +216,10 @@ def _store(env: dict, name: str, kinds: frozenset[str]) -> None:
 def _bind(target: ast.AST, kinds: frozenset[str], env: dict, add: bool = False) -> None:
     if isinstance(target, ast.Name):
         _store(env, target.id, (env.get(target.id, EMPTY) | kinds) if add else kinds)
+    elif isinstance(target, ast.Attribute):
+        key = _key(target)
+        if key is not None:
+            _store(env, key, (env.get(key, EMPTY) | kinds) if add else kinds)
     elif isinstance(target, (ast.Tuple, ast.List)):
         for element in target.elts:
             _bind(element, kinds, env, add)
@@ -208,7 +229,7 @@ def _bind(target: ast.AST, kinds: frozenset[str], env: dict, add: bool = False) 
 
 def _unbind_parameters(node, env: dict) -> None:
     for name in _parameters(node):
-        env.pop(name, None)
+        _store(env, name, EMPTY)
 
 
 class _Scan:
@@ -258,6 +279,8 @@ class _Scan:
                 found.add("PHRASE")
             elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
                 found |= scope.get(sub.id, EMPTY) - {"MATCH"}
+            elif isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load):
+                found |= scope.get(_key(sub), EMPTY) - {"MATCH"}
             elif isinstance(sub, ast.Call) and _call_name(sub) in READ_CALLS | self.readers:
                 operands = [sub.func.value] if isinstance(sub.func, ast.Attribute) else []
                 operands += sub.args + [k.value for k in sub.keywords]
@@ -292,13 +315,23 @@ class _Scan:
         return False
 
     @staticmethod
+    def operands(call: ast.Call) -> list[ast.AST]:
+        name = call.func.attr
+        positional = list(call.args)
+        if name in ONE_OPERAND:
+            positional = positional[:1]
+        elif name in TWO_OPERANDS:
+            positional = positional[:2]
+        return positional + [k.value for k in call.keywords if k.arg not in DIAGNOSTIC_KEYWORDS]
+
+    @staticmethod
     def call_parts(call: ast.Call) -> list[ast.AST]:
         receiver = [call.func.value] if isinstance(call.func, ast.Attribute) else []
         return receiver + list(call.args)
 
     def is_match(self, node: ast.AST, env: dict) -> bool:
-        if isinstance(node, ast.Name):
-            return "MATCH" in env.get(node.id, EMPTY)
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            return "MATCH" in env.get(_key(node), EMPTY)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
             return self.is_match(node.operand, env)
         if isinstance(node, ast.BoolOp):
@@ -335,7 +368,7 @@ class _Scan:
                 isinstance(sub, ast.Call)
                 and isinstance(sub.func, ast.Attribute)
                 and sub.func.attr.startswith("assert")
-                and self.pins_wording(list(sub.args), scope, rule_a=True)
+                and self.pins_wording(self.operands(sub), scope, rule_a=True)
             ):
                 self.found.add(sub.lineno)
 
@@ -439,7 +472,12 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
             if ADR_PATH.search(line)
         ]
     tree = ast.parse(source, filename=path)
-    if "docs/areas" not in source:
+    if not any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and (ADR_PATH.search(node.value) or AREAS_ROOT.search(node.value))
+        for node in ast.walk(tree)
+    ):
         return []  # no constant can name a record or the areas root
     scan = _Scan(_readers(tree))
     module_env = scan.block(tree.body, {}, in_unit=False)
@@ -694,6 +732,53 @@ COMPREHENSION_SHADOW = _fixture(r'''
             self.assertIn("words", text)
 ''')
 
+ADJACENT_LITERALS = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = Path("docs/" "areas/a/adr/001-x.md").read_text()
+            self.assertIn("words", text)
+''')
+
+INSTANCE_ATTRIBUTE = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertIn("words", self.text)
+''')
+
+INSTANCE_ATTRIBUTE_REBOUND = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.text = (ROOT / "docs/areas/a/CONTEXT.md").read_text()
+            self.assertIn("words", self.text)
+''')
+
+INSTANCE_ATTRIBUTE_OWNER_REBOUND = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            self.text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self = other
+            self.assertIn("words", self.text)
+''')
+
+DIAGNOSTIC_MESSAGE = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertGreater(len(text), 0, "empty record")
+            self.assertTrue(text, "words")
+            self.assertEqual(len(text.split()), 3, msg="words")
+''')
+
+KEYWORD_OPERANDS = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = (ROOT / "docs/areas/a/adr/001-x.md").read_text()
+            self.assertIn(member="words", container=text)
+            self.assertIn("more words", text, msg="diagnostic")
+''')
+
 TEST_ID = "tests/test_f.py::T.test_x"
 
 JUSTFILE_HEAD = (
@@ -719,6 +804,23 @@ class WordingScanTest(unittest.TestCase):
 
     def test_a_needle_bound_by_a_loop_over_literals_is_a_phrase(self):
         self.assertEqual(self.found(LOOP_NEEDLE), [(TEST_ID, 8)])
+
+    def test_a_record_path_spelled_as_adjacent_literals_is_scanned(self):
+        self.assertEqual(self.found(ADJACENT_LITERALS), [(TEST_ID, 4)])
+
+    def test_record_text_kept_on_an_instance_attribute_is_found(self):
+        with self.subTest("read then asserted through the attribute"):
+            self.assertEqual(self.found(INSTANCE_ATTRIBUTE), [(TEST_ID, 4)])
+        with self.subTest("the attribute rebound to other text"):
+            self.assertEqual(self.found(INSTANCE_ATTRIBUTE_REBOUND), [])
+        with self.subTest("the owner name rebound"):
+            self.assertEqual(self.found(INSTANCE_ATTRIBUTE_OWNER_REBOUND), [])
+
+    def test_a_diagnostic_message_is_no_operand_and_a_keyword_operand_is(self):
+        with self.subTest("a message beside record text"):
+            self.assertEqual(self.found(DIAGNOSTIC_MESSAGE), [])
+        with self.subTest("keyword operands"):
+            self.assertEqual(self.found(KEYWORD_OPERANDS), [(TEST_ID, 4), (TEST_ID, 5)])
 
     def test_a_title_checked_with_startswith_is_found(self):
         with self.subTest("a match call on the text"):

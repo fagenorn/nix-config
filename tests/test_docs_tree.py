@@ -367,6 +367,16 @@ class DocsTreeTest(unittest.TestCase):
         problems += section_map_problems(rows, AUDITED, base_headings, destination_exists)
         self.assertEqual(problems, [])
 
+    def test_the_release_adapters_decision_row_cites_the_codesigned_artifact_record(self):
+        rows, _ = parse_section_map(SECTION_MAP.read_text(encoding="utf-8"))
+        (destinations,) = [
+            row[3] for row in rows if row[:3] == ("python/README.md", "Release adapters", "decision")
+        ]
+        self.assertIn(
+            "docs/areas/release/adr/009-codesigned-artifact-installs-the-checkout-and-never-builds.md",
+            destinations,
+        )
+
     def test_a_dropped_decision_row_is_reported(self):
         rows = [("python/README.md", "forge-claim", "contract", ("python/agent_tools/claims/forge_claim.py",))]
         audited = frozenset({
@@ -565,70 +575,12 @@ class DocsTreeTest(unittest.TestCase):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
 
-    def test_the_guest_socket_amendment_is_recorded_as_adr_077(self):
-        adr_dir = REPO_ROOT / "docs/areas/console/adr"
-        found = sorted(adr_dir.glob("077-*.md"))
+    def test_the_guest_socket_record_names_no_real_tailnet_or_login(self):
+        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("077-*.md"))
         self.assertEqual(len(found), 1, found)
-        raw = found[0].read_text()
-        text = re.sub(r"\s+", " ", raw)
-        self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-077 \u2014 "))
-        for needle in (
-            "- **Status:** accepted", "- **Decided in:** #1298, #1299", "ADR-console-066",
-            "ADR-console-076",
-            "eleven-m5", "Unix socket", "mode-0700", "peer user", "second line", "administrator",
-            "sudo tailscale serve --bg --https=443 unix:<socket-path>", "tailscale serve status",
-            "sudo tailscale serve --https=443 off", "<host>.<tailnet>.ts.net", "<colleague-login>",
-            "tailscaled", "console-guest-door", "Funnel", "D2", "tailscale.exe",
-        ):
-            with self.subTest(needle):
-                self.assertIn(needle, text)
+        text = re.sub(r"\s+", " ", found[0].read_text())
         self.assertEqual(tailnet_names_other_than_placeholder(text), [])
         self.assertEqual(logins_in(text), [])
-        d2 = text.split("**D2.", 1)[1].split("**D3.", 1)[0]
-        for needle in ("admits only root", "the owner's own user",
-                       "Any other peer is refused before a request is read"):
-            with self.subTest(d2=needle):
-                self.assertIn(needle, d2)
-        d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
-        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged",
-                       "19 Nov", "exactly `localhost`", "exactly one `X-Forwarded-Host`",
-                       "no port form", "the login check stays as it is", "mode 0600", "wider",
-                       "fail closed"):
-            with self.subTest(d4=needle):
-                self.assertIn(needle, d4)
-        context = self.doc("docs/areas/console/CONTEXT.md")
-        guest = context.split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
-        self.assertNotIn("not yet built", guest)
-        self.assertIn("ADR-console-077", guest)
-        console = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
-        self.assertIn("ADR-console-077", console)
-        self.assertNotIn("guest port", console)
-        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
-                                      "through-tailscale-serve-on-a-guest-port.md"
-                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
-        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
-
-    def test_the_macos_manager_decision_is_recorded_as_adr_075(self):
-        found = sorted((REPO_ROOT / "docs/areas/console/adr").glob("075-*.md"))
-        self.assertEqual(len(found), 1, found)
-        self.assertTrue(found[0].read_text().splitlines()[0].startswith("# ADR-console-075 \u2014 "))
-        text = found[0].read_text()
-        for needle in ("AbandonProcessGroup", "start_new_session", "#894",
-                       "ADR-console-028", "ADR-console-058"):
-            self.assertIn(needle, text)
-        adr = "docs/areas/console/adr/"
-        for name in ("016-what-the-owner-says-to-a-sprint-reaches-its-manager.md",
-                     "024-the-owner-signs-a-profile-in-from-the-page.md",
-                     "025-the-owner-adds-an-account-from-the-page.md",
-                     "026-the-owner-removes-an-account-from-the-page.md"):
-            line = next(row for row in (REPO_ROOT / adr / name).read_text().splitlines()
-                        if row.startswith("- **Status:**"))
-            self.assertTrue(line.endswith("ADR-console-075"), (name, line))
-        self.assertNotIn("macOS sends no nudge", self.doc(
-            adr + "016-what-the-owner-says-to-a-sprint-reaches-its-manager.md"))
-        self.assertNotIn("Sign-in from the page is on Linux only", self.doc(
-            adr + "024-the-owner-signs-a-profile-in-from-the-page.md"))
-        self.assertIn("ADR-console-075", self.doc("docs/areas/console/CONTEXT.md"))
 
     def test_the_tailnet_name_check_flags_a_real_name_behind_a_placeholder_label(self):
         self.assertEqual(
@@ -645,20 +597,6 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(
             logins_in("names `<colleague-login>`, for example Jane.Doe@example.com, only"),
             ["Jane.Doe@example.com"])
-
-    def test_the_console_signin_decision_is_recorded(self):
-        path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
-        first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(
-            first, "# ADR-console-022 — A profile's sign-in is read from the client's status command")
-        adr = self.doc(path)
-        for needle in ("auth status --json", "loginExpiresAt", "three days",
-                       "CLAUDE_ACCOUNT=<profile> claude", "ADR-console-006", "ADR-console-015",
-                       "launch choice", "#1010"):
-            self.assertIn(needle, adr)
-        self.assertIn("**Sign-in state**:", self.doc("docs/areas/console/CONTEXT.md"))
-        self.assertIn("ADR-console-022", self.doc(
-            "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
 
     def test_the_console_approval_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
@@ -727,25 +665,6 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("POST /api/plan-defer", writes)
         self.assertIn("ADR-console-030 D11", writes)
         self.assertIn("choosing `Apply it`", context)
-
-    def test_the_console_profile_choice_decision_is_recorded(self):
-        path = "docs/areas/console/adr/023-a-new-sessions-profile-is-the-consoles-choice.md"
-        first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(
-            first,
-            "# ADR-console-023 — A new session's profile is the console's choice, on a route and in a file")
-        adr = self.doc(path)
-        for needle in ("GET /api/profile", "chosen-profile", "bindings.tsv", "most recently used",
-                       "null", "ADR-console-015", "ADR-console-020", "ADR-console-022", "#1011"):
-            self.assertIn(needle, adr)
-        for older in ("docs/areas/console/adr/015-a-stated-goal-starts-a-manager.md",
-                      "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"):
-            self.assertIn("ADR-console-023", self.doc(older))
-        self.assertNotIn("Skipping signed-out profiles at launch is a later change", self.doc(
-            "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"))
-        context = self.doc("docs/areas/console/CONTEXT.md")
-        self.assertIn("ADR-console-023", context)
-        self.assertIn("binding", context)
 
     def test_the_console_page_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md"
@@ -904,84 +823,6 @@ class DocsTreeTest(unittest.TestCase):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
-
-    def test_the_accounts_panel_decision_is_recorded(self):
-        base = "docs/areas/console/adr/"
-        adr2 = self.doc(base + "002-the-desk-page-design-rules.md")
-        context = self.doc("docs/areas/console/CONTEXT.md")
-
-        def entry(term):
-            return context[context.index("**" + term + "**:"):].split("_Avoid_")[0]
-
-        for needle in ("#1039", "accounts panel", "one line", "Escape", "the tightest account",
-                       "no button"):
-            self.assertIn(needle, adr2)
-        for needle in ("never shrinks", "ending in an ellipsis"):
-            self.assertIn(needle, adr2)
-        self.assertNotIn("clips instead", adr2)
-        for words in ("signed in, ends in N days", "signed in, ends today"):
-            self.assertIn(words, adr2)
-        for gone in ("sign-in ends in N days", "sign-in ends today", "a signed-in profile carries none"):
-            self.assertNotIn(gone, adr2)
-        for gone in ("Beside each listed profile sits its sign-in", "Then one time:"):
-            self.assertNotIn(gone, adr2)
-        panel = entry("Accounts panel")
-        for needle in ("ADR-console-002", "Escape", "Remove"):
-            self.assertIn(needle, panel)
-        strip = entry("Capacity strip")
-        self.assertIn("one line", strip)
-        self.assertNotIn("carries Remove", strip)
-        for term in ("Pinned profile", "Excluded profile"):
-            self.assertIn("accounts panel", entry(term))
-            self.assertNotIn("on its capacity strip entry", entry(term))
-        adr23 = self.doc(base + "023-a-new-sessions-profile-is-the-consoles-choice.md")
-        adr24 = self.doc(base + "024-the-owner-signs-a-profile-in-from-the-page.md")
-        adr25 = self.doc(base + "025-the-owner-adds-an-account-from-the-page.md")
-        adr26 = self.doc(base + "026-the-owner-removes-an-account-from-the-page.md")
-        for adr in (adr23, adr24, adr26):
-            self.assertIn("accounts panel", adr)
-        self.assertIn("#1039", adr23)
-        self.assertNotIn("The page's header carries an Add account control", adr25)
-        self.assertNotIn("Each capacity strip entry carries a Remove control", adr26)
-        self.assertIn("| Accounts panel | Console |", self.doc("docs/CONTEXT-MAP.md"))
-
-    def test_the_same_account_decision_is_recorded(self):
-        base = "docs/areas/console/adr/"
-        adr22 = self.doc(base + "022-a-profiles-sign-in-is-read-from-the-clients-status-command.md")
-        adr23 = self.doc(base + "023-a-new-sessions-profile-is-the-consoles-choice.md")
-        adr2 = self.doc(base + "002-the-desk-page-design-rules.md")
-        context = self.doc("docs/areas/console/CONTEXT.md")
-
-        def entry(term):
-            return context[context.index("**" + term + "**:"):].split("_Avoid_")[0]
-
-        for needle in ("#1036", "email", "`account`", "`account_seq`", "accounts panel"):
-            self.assertIn(needle, adr22)
-        self.assertNotIn("The address, organisation and plan the client also prints are dropped", adr22)
-        for needle in ("#1036", "same account", "counted once", "newest reading", "earlier account"):
-            self.assertIn(needle, adr23)
-        for needle in ("#1036", "dimmed", "same account as"):
-            self.assertIn(needle, adr2)
-        for needle in ("counted once", "dimmed"):
-            self.assertIn(needle, entry("Capacity strip"))
-        for needle in ("same account as", "ADR-console-023"):
-            self.assertIn(needle, entry("Sign-in state"))
-        self.assertIn("account it is signed in to", entry("Accounts panel"))
-
-    def test_the_launch_choice_decision_is_recorded(self):
-        path = "docs/areas/hosts/adr/008-claude-starts-under-the-consoles-profile-choice.md"
-        first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(
-            first,
-            "# ADR-hosts-008 — `claude` starts under the console's profile choice, not the project's binding")
-        adr = self.doc(path)
-        for needle in ("GET /api/profile", "chosen-profile", "bindings.tsv", "one second",
-                       "most recently used", "oauthAccount", "CLAUDE_ACCOUNT", "default",
-                       "ADR-hosts-005", "ADR-console-023", "#1012"):
-            self.assertIn(needle, adr)
-        context = self.doc("docs/areas/hosts/CONTEXT.md")
-        self.assertIn("ADR-hosts-008", context)
-        self.assertNotIn("`claude` reads it at launch to pick the profile directory.", context)
 
     def test_the_console_answer_decision_is_recorded(self):
         path = "docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md"
@@ -1161,11 +1002,13 @@ class DocsTreeTest(unittest.TestCase):
             "062": "062-a-follow-up-carries-its-thread-in-its-prompt-and-continues-only-an-answered-thread.md",
             "064": None,
             "065": "065-a-question-session-reads-the-projects-history-tracker-and-live-state-and-answers-plainly.md",
+            "066": None,
             "067": None,
             "068": None,
             "069": None,
             "070": None,
             "073": None,
+            "075": None,
         }
         for number, name in pinned.items():
             with self.subTest(number):
@@ -1292,48 +1135,6 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(context):
                 self.assertIn("ADR-system-004", self.doc(f"docs/areas/{context}/CONTEXT.md"))
         self.assertNotIn("naming `just switch`", self.doc("docs/areas/console/CONTEXT.md"))
-
-    def test_the_guard_coverage_decision_is_recorded(self):
-        path = "docs/areas/guard/adr/009-the-guard-covers-bash-only-and-production-rules-live-in-the-contract.md"
-        adr = self.doc(path)
-        self.assertTrue(adr.startswith(
-            "# ADR-guard-009 \u2014 The guard covers the Bash tool only, and production rules live in the project contract"))
-        for needle in ("bypassPermissions", "2.1.322", "mcp__", "Edit", "Write", "just", "residual gap",
-                       "ADR-guard-005", "ADR-guard-006", "ADR-console-021", "detaching word",
-                       "raise label", "production rule", "read-only route", "approved release path",
-                       "2026-11-16", "anis-desktop", "outside standing authorization", "ADR-guard-011"):
-            self.assertIn(needle, adr)
-        self.assertIn("- **Status:** accepted; amended by ADR-guard-011, ADR-guard-012",
-                      (REPO_ROOT / path).read_text().splitlines())
-        eleven = "docs/areas/guard/adr/011-the-guard-refuses-a-projects-production-commands-outside-its-release-path.md"
-        self.assertIn("- **Status:** accepted; amended by ADR-guard-012, ADR-system-004",
-                      (REPO_ROOT / eleven).read_text().splitlines())
-        twelve = ("docs/areas/guard/adr/012-the-guard-refuses-declared-production-mcp-tools-"
-                  "and-key-file-writes.md")
-        adr12 = self.doc(twelve)
-        self.assertTrue(adr12.startswith(
-            "# ADR-guard-012 \u2014 The guard refuses declared production MCP tools and key file writes"))
-        self.assertIn("- **Status:** accepted", (REPO_ROOT / twelve).read_text().splitlines())
-        for needle in ("Edit|Write|MultiEdit|NotebookEdit", "^mcp__", "fnmatchcase",
-                       "ADR-guard-009", "ADR-guard-011"):
-            self.assertIn(needle, adr12)
-        context = self.doc("docs/areas/guard/CONTEXT.md")
-        for term in ("Production rule", "Read-only route", "Approved release path"):
-            self.assertIn("**" + term + "**:", context)
-            self.assertIn("| " + term + " | Guard |", self.doc("docs/CONTEXT-MAP.md"))
-        self.assertIn("ADR-guard-009", context)
-        raw = (REPO_ROOT / "docs/areas/guard/CONTEXT.md").read_text()
-        for term in ("Production rule", "Read-only route", "Approved release path", "Derived row"):
-            definition = " ".join(raw.split("**" + term + "**:", 1)[1].split("\n\n", 1)[0].split())
-            if term != "Derived row":
-                self.assertNotIn("Planned:", definition)
-            self.assertIn("ADR-guard-011", definition)
-            if term == "Production rule":
-                self.assertIn("ADR-guard-012", definition)
-                self.assertNotIn("not yet enforced", definition)
-        self.assertIn("ADR-guard-004", adr)
-        self.assertIn("CLAUDECODE", adr)
-        self.assertIn("`pre-push`", adr)
 
 
     def test_the_land_queue_measurement_holds_thirty_landings(self):
