@@ -50,6 +50,8 @@ members it does not name starting first in list order, ties in list order, and a
 malformed file meaning list order. Serial mode keeps list order, and the report stays in
 list order for ties. Refresh the file from a run's `suite-runner: <wall>s wall ... <member>`
 rows when the suite's shape changes; a stale file only costs wall time.
+`tests/test_suite_runner.py` names the run the file was last refreshed from and its members
+slower than 30 s, and a refresh from a newer run replaces both.
 
 Output. In parallel mode each member's stdout and stderr are captured together and printed
 as one block when it exits, from `suite-runner: begin <member>` to
