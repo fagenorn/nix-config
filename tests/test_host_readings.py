@@ -33,15 +33,28 @@ VALUE = {"value": host_readings.Part("c: u: c.value", ("anis-desktop", "mbp", "e
 ALL = ("anis-desktop", "mbp", "eleven-m5")
 
 
-def scratch_repo(tmp, files):
-    repo = Path(tmp) / "repo"
+def repository_selection():
+    """The variables with which a caller points git at a repository (git's own list of them)."""
+    done = subprocess.run(["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True)
+    return done.stdout.split()
+
+
+def without_repository_selection():
+    selected = set(repository_selection())
+    return {name: value for name, value in os.environ.items() if name not in selected}
+
+
+def scratch_repo(tmp, files, name="repo"):
+    """A committed scratch repository that no inherited GIT_DIR or GIT_WORK_TREE can redirect."""
+    repo = Path(tmp) / name
     repo.mkdir()
-    subprocess.run([*GIT, "init", "-q"], cwd=repo, check=True)
+    env = without_repository_selection()
+    subprocess.run([*GIT, "init", "-q"], cwd=repo, check=True, env=env)
     for name, text in files.items():
         (repo / name).parent.mkdir(parents=True, exist_ok=True)
         (repo / name).write_text(text, encoding="utf-8")
-    subprocess.run([*GIT, "add", "-A"], cwd=repo, check=True)
-    subprocess.run([*GIT, "commit", "-q", "-m", "init"], cwd=repo, check=True)
+    subprocess.run([*GIT, "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run([*GIT, "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env)
     return repo
 
 
@@ -91,11 +104,47 @@ SNIPPET = (
 
 class Scratch(unittest.TestCase):
     def setUp(self):
+        # Every git a scratch test runs, and every child it starts, sees no inherited repository.
+        patch = mock.patch.dict(os.environ)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name in repository_selection():
+            os.environ.pop(name, None)
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.cache = Path(self.tmp) / "cache"
         self.bin = Path(self.tmp) / "bin"
         self.log = Path(self.tmp) / "evaluations.log"
+
+
+class ScratchIsolationTest(unittest.TestCase):
+    def test_a_callers_repository_selection_does_not_reach_a_scratch_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caller = scratch_repo(tmp, {"a.txt": "1\n"}, name="caller")
+            (caller / "a.txt").write_text("2\n", encoding="utf-8")
+
+            def state():
+                head = subprocess.run(["git", "-C", str(caller), "rev-parse", "HEAD"],
+                                      capture_output=True, text=True, check=True).stdout
+                status = subprocess.run(["git", "-C", str(caller), "status", "--porcelain"],
+                                        capture_output=True, text=True, check=True).stdout
+                return head, status
+
+            before = state()
+            selection = {"GIT_DIR": str(caller / ".git"), "GIT_WORK_TREE": str(caller)}
+            with mock.patch.dict(os.environ, selection):
+                scratch = scratch_repo(tmp, {"s.txt": "s\n"}, name="scratch")
+                case = Scratch()
+                case.setUp()
+                try:
+                    for name in selection:
+                        self.assertNotIn(name, os.environ)
+                finally:
+                    case.doCleanups()
+            self.assertEqual(state(), before)
+            listed = subprocess.run(["git", "-C", str(scratch), "ls-files"],
+                                    capture_output=True, text=True, check=True).stdout
+            self.assertEqual(listed.split(), ["s.txt"])
 
 
 class FreshnessTest(Scratch):
@@ -336,7 +385,18 @@ class CacheStoreTest(Counted):
 
     def test_two_processes_sharing_an_unwritable_cache_evaluate_nothing(self):
         (Path(self.tmp) / "file").write_text("x", encoding="utf-8")
-        cache = Path(self.tmp) / "file" / "cache"
+        self.assert_processes_evaluate_nothing(Path(self.tmp) / "file" / "cache")
+
+    def test_two_processes_sharing_a_read_only_cache_with_its_lock_evaluate_nothing(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes to a read-only directory")
+        self.cache.mkdir()
+        (self.cache / "mbp.lock").touch()
+        self.cache.chmod(0o500)
+        self.addCleanup(self.cache.chmod, 0o700)
+        self.assert_processes_evaluate_nothing(self.cache)
+
+    def assert_processes_evaluate_nothing(self, cache):
         gate = Path(self.tmp) / "gate"
         gate.mkdir()
         (gate / "release").touch()
@@ -349,6 +409,35 @@ class CacheStoreTest(Counted):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn(str(cache), err)
         self.assertTrue(not self.log.exists() or self.log.read_text() == "")
+
+    def test_publishing_replaces_only_the_hosts_generated_entries(self):
+        self.cache.mkdir()
+        digest = "a" * 64
+        stale = self.cache / f"mbp-{digest}.json"
+        kept = [self.cache / name for name in (
+            "mbp-report.json", f"mbp-{digest[:-1]}.json", f"mbp-{digest}.json.bak", f"eleven-m5-{digest}.json",
+            f"mbp-{'g' * 64}.json")]
+        for path in (stale, *kept):
+            path.write_text("x", encoding="utf-8")
+        self.read()
+        self.assertFalse(stale.exists())
+        for path in kept:
+            self.assertTrue(path.exists(), path)
+        self.assertEqual(len(self.entries()), 1 + 3)
+
+    def test_an_edit_while_a_reader_waits_for_the_lock_gives_a_fresh_answer(self):
+        value = self.repo / "value.nix"
+        self.evaluate.side_effect = lambda host, selected, pure, root: {"value": value.read_text().strip()}
+        self.assertEqual(self.read(), {"value": '"one"'})
+        real = fcntl.flock
+
+        def edited_while_waiting(descriptor, operation):
+            value.write_text('"two"\n', encoding="utf-8")
+            return real(descriptor, operation)
+
+        with mock.patch.object(host_readings.fcntl, "flock", side_effect=edited_while_waiting):
+            self.assertEqual(self.read(), {"value": '"two"'})
+        self.assertEqual(self.evaluate.call_count, 2)
 
     def test_a_corrupt_entry_is_evaluated_again(self):
         self.read()
@@ -463,8 +552,117 @@ class EvaluationEnvironmentTest(unittest.TestCase):
                 self.assertEqual(env["HOME"], "/nonexistent-1286/later-home")
 
 
+def measure(suite):
+    """Run `suite`; return its result and output, and the `(host, part)` reads made from a
+    `setUpClass` or `setUpModule` frame (set-up reads) and those made anywhere else (a test body,
+    its per-test set-up or a helper it calls)."""
+    setup, elsewhere = [], []
+    real = host_readings.read
+
+    def recording(*args, **kwargs):
+        frame, from_setup = sys._getframe(1), False
+        while frame is not None and not from_setup:
+            from_setup = frame.f_code.co_name in ("setUpClass", "setUpModule")
+            frame = frame.f_back
+        (setup if from_setup else elsewhere).append(tuple(args[:2]))
+        return real(*args, **kwargs)
+
+    stream = io.StringIO()
+    with mock.patch.object(host_readings, "read", recording):
+        result = unittest.TextTestRunner(stream=stream, verbosity=2).run(suite)
+    return result, stream.getvalue(), set(setup), set(elsewhere)
+
+
+def refusing_nix(directory, real_nix, refused):
+    """A `nix` that refuses an `eval` naming a host output in any argument, and runs `real_nix` otherwise."""
+    wrapper = Path(directory) / "nix"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'evaluating=no; host=no\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        "    eval) evaluating=yes;;\n"
+        "    *nixosConfigurations*|*darwinConfigurations*) host=yes;;\n"
+        "  esac\n"
+        "done\n"
+        'if [ "$evaluating" = yes ] && [ "$host" = yes ]; then\n'
+        f'  echo "$*" >> "{refused}"; exit 1\n'
+        "fi\n"
+        f'exec "{real_nix}" "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+class MeasureTest(unittest.TestCase):
+    """The sweep's measurement tells a set-up read from a read made anywhere else."""
+
+    def run_case(self, case):
+        with mock.patch.object(host_readings, "reading", return_value={"sudo": 1}):
+            return measure(unittest.defaultTestLoader.loadTestsFromTestCase(case))
+
+    def test_a_read_in_set_up_class_is_a_set_up_read(self):
+        class InSetUp(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                host_readings.read("mbp", "sudo")
+
+            def test_it(self):
+                pass
+
+        result, _, setup, elsewhere = self.run_case(InSetUp)
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual((setup, elsewhere), ({("mbp", "sudo")}, set()))
+
+    def test_a_read_in_a_test_body_or_its_set_up_is_not_a_set_up_read(self):
+        class InBody(unittest.TestCase):
+            def test_it(self):
+                host_readings.read("mbp", "sudo")
+
+        class InPerTestSetUp(unittest.TestCase):
+            def setUp(self):
+                host_readings.read("eleven-m5", "sudo")
+
+            def test_it(self):
+                pass
+
+        for case, host in ((InBody, "mbp"), (InPerTestSetUp, "eleven-m5")):
+            _, _, setup, elsewhere = self.run_case(case)
+            self.assertEqual((setup, elsewhere), (set(), {(host, "sudo")}))
+
+
+class RefusingNixTest(unittest.TestCase):
+    def run_wrapper(self, *argv):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real" / "nix"
+            real.parent.mkdir()
+            real.write_text("#!/bin/sh\necho passed\n", encoding="utf-8")
+            real.chmod(0o755)
+            refused = Path(tmp) / "refused"
+            wrapper = refusing_nix(tmp, real, refused)
+            done = subprocess.run([str(wrapper), *argv], capture_output=True, text=True)
+            return done, refused.exists()
+
+    def test_a_host_evaluation_is_refused_in_every_form(self):
+        forms = (
+            ["eval", "--json", ".#nixosConfigurations.anis-desktop.config"],
+            ["eval", ".#darwinConfigurations", "--apply", "hs: hs.mbp.config"],
+            ["eval", "--apply", "hs: hs.mbp.config", ".#darwinConfigurations"],
+            ["eval", "--expr", "(builtins.getFlake (toString ./.)).darwinConfigurations.mbp.config"],
+        )
+        for argv in forms:
+            with self.subTest(argv=argv):
+                done, was_refused = self.run_wrapper(*argv)
+                self.assertEqual((done.returncode, was_refused), (1, True))
+
+    def test_other_nix_invocations_run(self):
+        for argv in (["--version"], ["config", "show", "--json"], ["eval", "--raw", "--file", "vars/default.nix", "username"]):
+            with self.subTest(argv=argv):
+                done, was_refused = self.run_wrapper(*argv)
+                self.assertEqual((done.returncode, done.stdout.strip(), was_refused), (0, "passed", False))
+
+
 class RunReadsEachHostOnce(unittest.TestCase):
-    """Every host-reading test reads the cached answer, so a run evaluates each host once (AC1)."""
+    """Every host-reading test reads the cached answer in setUpClass, so a run evaluates each host once (AC1)."""
 
     # reader module -> the parts it reads
     READERS = {
@@ -509,7 +707,7 @@ class RunReadsEachHostOnce(unittest.TestCase):
         paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("*.py")}
         naming = {
             path for path in paths
-            if re.search(r"(nixos|darwin)Configurations\.", (ROOT / path).read_text(encoding="utf-8"))
+            if re.search(r"(nixos|darwin)Configurations", (ROOT / path).read_text(encoding="utf-8"))
         }
         self.assertLessEqual(naming, set(self.MENTIONS_ALLOWED), sorted(naming - set(self.MENTIONS_ALLOWED)))
 
@@ -526,39 +724,24 @@ class RunReadsEachHostOnce(unittest.TestCase):
         linux_builder = host_readings.can_build("x86_64-linux")
         with tempfile.TemporaryDirectory() as tmp:
             refused = Path(tmp) / "refused"
-            wrapper = Path(tmp) / "nix"
-            wrapper.write_text(
-                "#!/bin/sh\n"
-                'evaluating=no; host=no\n'
-                'for a in "$@"; do\n'
-                '  case "$a" in\n'
-                "    eval) evaluating=yes;;\n"
-                "    *Configurations.*) host=yes;;\n"
-                "  esac\n"
-                "done\n"
-                'if [ "$evaluating" = yes ] && [ "$host" = yes ]; then\n'
-                f'  echo "$*" >> "{refused}"; exit 1\n'
-                "fi\n"
-                f'exec "{real_nix}" "$@"\n', encoding="utf-8")
-            wrapper.chmod(0o755)
+            refusing_nix(tmp, real_nix, refused)
             recorded = {}
+            body_reads = {}
             results = {}
-            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ['PATH']}"}), \
-                    mock.patch.object(host_readings, "read", wraps=host_readings.read) as read:
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ['PATH']}"}):
                 for name in self.READERS:
                     module = importlib.import_module(name)
                     cases = [case for case in self.cases(unittest.defaultTestLoader.loadTestsFromModule(module))
                              if case.id() not in self.REAL_EVALUATIONS]
-                    before = len(read.call_args_list)
-                    stream = io.StringIO()
-                    results[name] = (
-                        unittest.TextTestRunner(stream=stream, verbosity=2).run(unittest.TestSuite(cases)),
-                        stream)
-                    recorded[name] = {call.args[:2] for call in read.call_args_list[before:]}
+                    result, output, setup, body = measure(unittest.TestSuite(cases))
+                    results[name] = (result, output)
+                    recorded[name] = setup
+                    body_reads[name] = body
             for name, parts in self.READERS.items():
                 with self.subTest(name):
                     result, stream = results[name]
-                    self.assertTrue(result.wasSuccessful(), stream.getvalue())
+                    self.assertTrue(result.wasSuccessful(), stream)
+                    self.assertEqual(body_reads[name], set(), "a test reads a host outside setUpClass")
                     allowed = {(h, p) for p in parts for h in host_readings.PARTS[p].hosts}
                     expected = {
                         (h, p) for p in parts for h in host_readings.PARTS[p].hosts

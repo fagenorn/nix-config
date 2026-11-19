@@ -32,12 +32,15 @@ self.dirtyRev`: an answer may carry store paths built for an earlier commit with
 A part must not read a commit id or an exact store hash; match store paths by pattern.
 
 A failed evaluation is never stored, and fails every reader of the host with the evaluation's
-stderr tail. A cache whose directory or lock cannot be made fails the read with an AssertionError
-naming the cache before anything is evaluated, and a publish that fails after an evaluation fails
-it the same way without evaluating again, so an unusable cache never becomes one evaluation per
-process. An unreadable or mismatched entry is a miss. The tree is computed again after the
-evaluation, and when it changed the read fails and nothing is published: the key names the tree
-that was evaluated. An edit made and undone within one evaluation is not detected.
+stderr tail. A cache whose directory or lock cannot be made, or in which the miss's temporary
+output cannot be reserved (made under the lock, before the evaluation), fails the read with an
+AssertionError naming the cache before anything is evaluated, and a publish that fails after an
+evaluation fails it the same way without evaluating again, so an unusable cache never becomes one
+evaluation per process. Only `<host>-<sha256>.json` entries are replaced; any other file in the
+cache stays. An unreadable or mismatched entry is a miss. The tree is read under the lock, so an
+edit made while a reader waited gives a fresh key, and again after the evaluation, and when it
+changed the read fails and nothing is published: the key names the tree that was evaluated. An
+edit made and undone within one evaluation is not detected.
 
 Every nix child runs with the environment from before the accounts sandbox (#1286).
 """
@@ -351,22 +354,28 @@ def _stored(path: Path, key: str) -> dict | None:
     return None
 
 
-def _publish(cache: Path, host: str, key: str, answer: dict) -> dict:
-    text = json.dumps({"key": key, "host": host, "reading": answer})
-    target = cache / f"{host}-{key}.json"
-    temporary = None
+def _reserve(cache: Path, host: str) -> Path:
+    """The temporary output of a miss, made under the host lock before anything is evaluated."""
     try:
         descriptor, name = tempfile.mkstemp(dir=cache, prefix=f".{host}-", suffix=".tmp")
-        temporary = Path(name)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(temporary, target)
     except OSError as error:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
         raise _unusable(cache, error) from error
-    for older in cache.glob(f"{host}-*.json"):
-        if older != target:
+    os.close(descriptor)
+    return Path(name)
+
+
+def _publish(cache: Path, host: str, key: str, answer: dict, reserved: Path) -> dict:
+    text = json.dumps({"key": key, "host": host, "reading": answer})
+    target = cache / f"{host}-{key}.json"
+    try:
+        reserved.write_text(text, encoding="utf-8")
+        os.replace(reserved, target)
+    except OSError as error:
+        raise _unusable(cache, error) from error
+    # Only this host's generated entries are replaced: another file of the directory is not ours.
+    generated = re.compile(rf"{re.escape(host)}-[0-9a-f]{{64}}\.json")
+    for older in cache.iterdir():
+        if older != target and generated.fullmatch(older.name):
             older.unlink(missing_ok=True)
     return json.loads(text)["reading"]
 
@@ -380,15 +389,7 @@ def reading(host, *, root: Path = ROOT, cache: Path | None = None, parts: dict[s
         host, parts,
         darwin_machine=platform.system() == "Darwin",
         linux_builder=wants_builder and can_build("x86_64-linux"))
-    checkout = fingerprint(root)
-    key = hashlib.sha256(json.dumps({
-        "host": host,
-        "output": output(host),
-        "pure": pure,
-        "parts": {name: applied(part, root) for name, part in selected.items()},
-        "nix": nix_version(),
-        "checkout": checkout,
-    }, sort_keys=True).encode()).hexdigest()
+    nix = nix_version()
     cache = cache_dir(root) if cache is None else cache
     try:
         cache.mkdir(parents=True, exist_ok=True)
@@ -400,14 +401,29 @@ def reading(host, *, root: Path = ROOT, cache: Path | None = None, parts: dict[s
             fcntl.flock(lock, fcntl.LOCK_EX)
         except OSError as error:
             raise _unusable(cache, error) from error
+        # The tree is read under the lock: an edit made while this reader waited must not leave
+        # the key of an earlier tree usable.
+        checkout = fingerprint(root)
+        key = hashlib.sha256(json.dumps({
+            "host": host,
+            "output": output(host),
+            "pure": pure,
+            "parts": {name: applied(part, root) for name, part in selected.items()},
+            "nix": nix,
+            "checkout": checkout,
+        }, sort_keys=True).encode()).hexdigest()
         stored = _stored(cache / f"{host}-{key}.json", key)
         if stored is not None:
             return stored
-        answer = _evaluate(host, selected, pure, root)
-        if fingerprint(root) != checkout:
-            raise AssertionError(
-                f"the checkout changed during the evaluation of {output(host)}; nothing was stored")
-        return _publish(cache, host, key, answer)
+        reserved = _reserve(cache, host)
+        try:
+            answer = _evaluate(host, selected, pure, root)
+            if fingerprint(root) != checkout:
+                raise AssertionError(
+                    f"the checkout changed during the evaluation of {output(host)}; nothing was stored")
+            return _publish(cache, host, key, answer, reserved)
+        finally:
+            reserved.unlink(missing_ok=True)
     finally:
         os.close(lock)
 

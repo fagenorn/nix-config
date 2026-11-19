@@ -256,6 +256,10 @@ def expected_triples(host):
 
 
 class RegisterRunnersTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.triples = {host: host_readings.read(host, "runner-triples") for host in HOSTS}
+
     def run_recipe(self, host, local, real=False):
         """Run the recipe body for `host` as if on `local`, with stub gh, sudo and ssh. nix is a
         stub that prints the cached triples of `host`, or with `real` the real one in pure mode.
@@ -274,7 +278,7 @@ class RegisterRunnersTest(unittest.TestCase):
                                          f'exec "{real_nix}" {" ".join(repr(a) for a in NIX_FEATURES)} '
                                          '--option allow-import-from-derivation false "$@"\n')
             else:
-                (tmp / "triples").write_text(host_readings.read(host, "runner-triples"), encoding="utf-8")
+                (tmp / "triples").write_text(self.triples[host], encoding="utf-8")
                 write_exe(stubs / "nix", f'#!/bin/sh\nprintf \'%s\\n\' "$@" > "{seen}/nix-argv-$$"\n'
                                          f'cat "{tmp}/triples"\n')
             write_exe(stubs / "gh", f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{seen}/gh"\nprintf "tok:%s\\n" "$4"\n')
@@ -347,7 +351,7 @@ class RegisterRunnersTest(unittest.TestCase):
     def test_the_expression_prints_one_triple_per_runner(self):
         for host in HOSTS:
             with self.subTest(host=host):
-                out = host_readings.read(host, "runner-triples")
+                out = self.triples[host]
                 self.assertEqual(sorted(tuple(t.split("=")) for t in out.split()), expected_triples(host))
 
     def test_one_recipe_run_evaluates_the_real_configuration(self):
