@@ -702,6 +702,51 @@ class ContractDraftTest(unittest.TestCase):
                 alive = False
         self.assertFalse(alive)
 
+    def test_a_set_cancel_starts_no_git_child_for_the_hooks_or_the_environments(self):
+        root = self.environment_checkout()
+        shims = self.parent / "shims"
+        shims.mkdir()
+        marker = self.parent / "git-started"
+        shim = shims / "git"
+        shim.write_text(f'#!/bin/sh\ntouch {marker}\nexec {shutil.which("git")} "$@"\n')
+        shim.chmod(0o755)
+        with unittest.mock.patch.dict(os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"}):
+            before = cd.read(str(root))
+            self.assertEqual((before["hooks"], before["environments"]), (["pre-commit"], ["devenv.nix"]))
+            self.assertTrue(marker.exists())
+            marker.unlink()
+            cancel = threading.Event()
+            cancel.set()
+            reading = cd.read(str(root), cancel)
+        self.assertFalse(marker.exists(), "a git child started under a set cancel")
+        self.assertEqual((reading["hooks"], reading["environments"]), ([], []))
+
+    def test_a_cancel_during_the_hooks_directory_probe_reads_no_hooks(self):
+        root = sample(self.parent, remote=True)
+        commit(root, {"devenv.nix": "{ }\n"})
+        git(root, "config", "core.hooksPath", "local-hooks")
+        (root / "local-hooks").mkdir()
+        (root / "local-hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        (root / "local-hooks" / "pre-commit").chmod(0o755)
+        real = cd._git
+        cancel = threading.Event()
+
+        def without_toplevel(path, *arguments, **kwargs):
+            return None if "--show-toplevel" in arguments else real(path, *arguments, **kwargs)
+
+        def probe(path, *arguments, **kwargs):
+            if "--show-toplevel" in arguments:
+                cancel.set()
+                return None
+            return real(path, *arguments, **kwargs)
+
+        with unittest.mock.patch.object(cd, "_git", without_toplevel):
+            self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        with unittest.mock.patch.object(cd, "_git", probe):
+            reading = cd.read(str(root), cancel)
+        self.assertTrue(cancel.is_set())
+        self.assertEqual(reading["hooks"], [])
+
     def test_the_draft_id_is_the_canonical_digest(self):
         root, fields = self.remote_fields()
         self.assertEqual(cd.draft_id(root, fields),

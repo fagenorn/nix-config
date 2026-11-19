@@ -22,7 +22,8 @@ repository's own hooks directory (the `core.hooksPath` its own configuration set
 `COMMIT_HOOKS` order. A relative `core.hooksPath` is resolved in each checkout, so such a hook counts
 only when `HEAD` tracks it as an executable file. `environments` are the `ENVIRONMENTS`
 file names present in the `HEAD` commit as a regular file (the revision Apply's worktree starts from,
-so an untracked, staged-only or directory entry never counts), in `ENVIRONMENTS` order.
+so an untracked, staged-only or directory entry never counts), in `ENVIRONMENTS` order. A set cancel
+reads both as empty, as it reads the rest.
 
 Fields. `FIELDS` lists the 29 field ids in order; each is a record with exactly the keys
 `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
@@ -336,10 +337,10 @@ def _default_branch(root: str, remotes: list[tuple[str, str]],
     return match.group(1) if match else None
 
 
-def _entry(root: str, path: str) -> tuple[str, str] | None:
+def _entry(root: str, path: str, cancel: threading.Event | None = None) -> tuple[str, str] | None:
     """The (mode, type) of `path` in the `HEAD` commit, None when it is not there."""
     listed = _git(root, "ls-tree", "--full-tree", "-z", "HEAD", "--", path,
-                  extra_env={"GIT_LITERAL_PATHSPECS": "1"})
+                  extra_env={"GIT_LITERAL_PATHSPECS": "1"}, cancel=cancel)
     if not listed:
         return None
     meta, _, name = listed.split(b"\0")[0].partition(b"\t")
@@ -349,48 +350,51 @@ def _entry(root: str, path: str) -> tuple[str, str] | None:
     return fields[0], fields[1]
 
 
-def _repository_hooks_path(root: str) -> str | None:
+def _repository_hooks_path(root: str, cancel: threading.Event | None = None) -> str | None:
     """The `core.hooksPath` the repository itself sets (the last one wins), never a global or system one."""
     value = None
-    for line in _lines(_git(root, "config", "--show-scope", "--get-all", "core.hooksPath")):
+    for line in _lines(_git(root, "config", "--show-scope", "--get-all", "core.hooksPath",
+                            cancel=cancel)):
         scope, _, setting = line.partition("\t")
         if scope in ("local", "worktree", "command"):
             value = setting
     return value
 
 
-def _hooks(root: str) -> list[str]:
+def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
     """The `COMMIT_HOOKS` that will run when Apply commits in its fresh worktree of `HEAD`.
 
     The hooks directory is the repository's own: a global or system `core.hooksPath` never counts,
     while Git's checkout trust (`safe.directory`) is kept. A relative `core.hooksPath` is resolved
     in each checkout, so its hook counts only when `HEAD` tracks it as an executable file.
     """
-    setting = _repository_hooks_path(root)
+    setting = _repository_hooks_path(root, cancel)
     probe = ("--git-common-dir",) if setting is None else ("--git-path", "hooks")
-    printed = _git(root, "rev-parse", "--path-format=absolute", *probe)
+    printed = _git(root, "rev-parse", "--path-format=absolute", *probe, cancel=cancel)
     if not printed:
         return []
     directory = Path(printed.decode("utf-8", "replace").rstrip("\n"))
     if setting is None:
         directory = directory / "hooks"
     elif not os.path.isabs(setting) and not setting.startswith("~"):
-        top = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        top = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", cancel=cancel)
         try:
             relative = directory.relative_to(top.decode("utf-8", "replace").rstrip("\n")) if top else None
         except ValueError:
             relative = None
         if relative is not None:
             return [name for name in COMMIT_HOOKS
-                    if _entry(root, (relative / name).as_posix()) == ("100755", "blob")]
+                    if _entry(root, (relative / name).as_posix(), cancel) == ("100755", "blob")]
+    if cancel is not None and cancel.is_set():
+        return []
     return [name for name in COMMIT_HOOKS
             if (directory / name).is_file() and os.access(directory / name, os.X_OK)]
 
 
-def _environments(root: str) -> list[str]:
+def _environments(root: str, cancel: threading.Event | None = None) -> list[str]:
     """The `ENVIRONMENTS` files in the `HEAD` commit, the revision Apply's worktree starts from."""
     return [name for name, _ in ENVIRONMENTS
-            if _entry(root, name) in (("100644", "blob"), ("100755", "blob"))]
+            if _entry(root, name, cancel) in (("100644", "blob"), ("100755", "blob"))]
 
 
 def read(root: str, cancel: threading.Event | None = None) -> dict:
@@ -412,7 +416,7 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
                     texts[name] = body[:TEXT_LIMIT].decode("utf-8", "replace")
         return {"remotes": remotes, "default_branch": _default_branch(root, remotes, cancel),
                 "branches": branches, "files": files, "texts": texts,
-                "hooks": _hooks(root), "environments": _environments(root)}
+                "hooks": _hooks(root, cancel), "environments": _environments(root, cancel)}
     except Exception:  # read never raises: an unreadable repository reads as empty
         return {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {},
                 "hooks": [], "environments": []}
