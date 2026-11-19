@@ -188,6 +188,16 @@ whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` i
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
 
+`console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
+issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
+JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
+at the top level or inside the `projects` of an entry of `"type": "quiet_group"`. A project is covered when one of
+its notices with `owner` true names every wanted issue as `#N` not followed by a digit (`#611` does not cover 61 or
+6110); a manager's notice never covers. The report is `{"verdict": "covered" | "missing", "projects": {ID:
+{"notice": ID | null}}}`: `covered` (0) when every wanted project is covered, else `missing` (75), since the owner
+may not have posted yet. A `--notice` that is not `PROJECT=` and comma-separated positive integers, or a project
+given twice, is a usage error (2).
+
 `console-first-screen --port N [--browser PATH]` (`verify_checks.console_first_screen`, issue 1031) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object is
 `unreachable`, exit 1), applies `first_screen_state` to it (any code other than 0 is returned as it is and no
@@ -213,6 +223,25 @@ when `closed` with any other reason (its comments unread), or as `completed` unv
 read. A payload that is not an object, or whose state is neither `open` nor `closed`, or a malformed
 comment page, is a `payload_invalid` forge error (exit 2), as is any other forge error; a bad `--repo`
 or `--issue` (a positive integer) is a usage error (2).
+
+`host-mentions --repo R --phrase P [--phrase P ...] --gone G [--exempt N ...]`
+(`verify_checks.host_mentions`, issue 1291) reads every page of `repos/R/issues?state=open&per_page=100`
+(pull requests skipped) and reports `{"mentioning", "offenders"}`, both ascending issue numbers. An issue
+mentions when any P occurs, ignoring case, in its title or body; it is an offender when it mentions, is
+not named by `--exempt` and either its body does not contain G, ignoring case, or an open criterion of
+its body (an unchecked task-list item, `- [ ]`, that does not itself contain G) contains a P: a criterion
+still naming the host is not answered by a separate paragraph saying it is gone. Exit 0 when there is no offender,
+1 otherwise. A page that is not a list, an element that is not an object or a `number` that is not an
+integer is a `payload_invalid` forge error (exit 2), as is any other forge error.
+
+`host-prompts --repo R [--repo R ...] --host H` (`verify_checks.host_prompts`, issue 1291) lists the open
+issues of each R as `host-mentions` does, pull requests included (the console inbox shows a marker on one), reads one comment listing per open issue (whatever its labels),
+and reports `{"host", "live": [{"repo", "issue", "comment", "reason"}]}` sorted by repo, issue and comment.
+A live `owner-action` marker counts when its `host` field, or one `+`-separated member of it, is H: a
+runner prompt (`verify_answer.is_runner_prompt`) only from an OWNER or MEMBER comment and live over the
+markers of those comments, any other owner-action marker only from an OWNER, MEMBER or COLLABORATOR comment
+and live over the markers of those, as the console inbox reads each. Exit 0 when nothing is live, 1
+otherwise, 2 on a forge error.
 
 `suite-regressions --repo R --workflow W --job J --branch B --merge SHA --n N`
 (`verify_checks.suite_regressions`, issue 1215) is met when no member of the agent workflow suite failed in
@@ -269,10 +298,11 @@ from urllib.parse import quote
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote, siblings
 from agent_tools.system.semver import parse_semver
-from agent_tools.verification import verify_exec, verify_issues
+from agent_tools.verification import verify_answer, verify_exec, verify_issues
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -430,6 +460,75 @@ def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
                if held is not None else None)
     report["verified"] = closing is not None and closing.fields.get("outcome") == "verified"
     return (0 if report["verified"] else 1), report
+
+
+def _open_issues(repo: str, pulls: bool = False) -> list[dict]:
+    """Every open issue of `repo` in listing order, pull requests skipped unless `pulls`, the shape checked."""
+    found = []
+    for page in forge_api.api_pages(f"repos/{repo}/issues?state=open&per_page=100"):
+        if not isinstance(page, list):
+            raise _invalid("issue page is not a list")
+        for issue in page:
+            if not isinstance(issue, dict):
+                raise _invalid("issue is not an object")
+            if "pull_request" in issue and not pulls:
+                continue
+            number = issue.get("number")
+            if isinstance(number, bool) or not isinstance(number, int):
+                raise _invalid("issue number is not an integer")
+            found.append(issue)
+    return found
+
+
+OPEN_CRITERION = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\[ \]")
+
+
+def host_mentions(repo: str, phrases: Sequence[str], gone: str, exempt: Sequence[int]) -> tuple[int, dict]:
+    """Met when every open issue naming a phrase is exempt or carries the `gone` line in its body and has
+    no open criterion (an unchecked task-list item other than the `gone` line) naming a phrase."""
+    needles = [p.lower() for p in phrases]
+    mentioning, offenders = [], []
+    for issue in _open_issues(repo):
+        title, body = issue.get("title") or "", issue.get("body") or ""
+        text = f"{title}\n{body}".lower()
+        if not any(needle in text for needle in needles):
+            continue
+        mentioning.append(issue["number"])
+        criteria = [line.lower() for line in body.splitlines()
+                    if OPEN_CRITERION.match(line) and gone.lower() not in line.lower()]
+        if issue["number"] not in exempt and (
+                gone.lower() not in body.lower() or any(n in line for line in criteria for n in needles)):
+            offenders.append(issue["number"])
+    return (0 if not offenders else 1), {"mentioning": sorted(mentioning), "offenders": sorted(offenders)}
+
+
+def _names_host(marker: forge_markers.Marker, host: str) -> bool:
+    named = marker.fields.get("host", "")
+    return named == host or host in named.split("+")
+
+
+def host_prompts(repos: Sequence[str], host: str) -> tuple[int, dict]:
+    """Met when no open issue holds a live owner-action prompt that names `host`."""
+    live = []
+    for repo in repos:
+        for issue in _open_issues(repo, pulls=True):
+            comments = forge_markers.list_comments(repo, issue["number"])
+
+            def read(trusted):
+                parsed = (forge_markers.parse(c) for c in comments if c.get("author_association") in trusted)
+                return [m for m in parsed if m is not None]
+            runner = read(verify_issues.TRUSTED)
+            forge = read(forge_owner_action.TRUSTED)
+            for markers, wanted in ((runner, True), (forge, False)):
+                for marker in markers:
+                    if (marker.kind == forge_owner_action.KIND
+                            and verify_answer.is_runner_prompt(marker) == wanted
+                            and _names_host(marker, host)
+                            and forge_markers.is_live(marker, markers)):
+                        live.append({"repo": repo, "issue": issue["number"], "comment": marker.comment_id,
+                                     "reason": marker.fields.get("reason", "")})
+    live.sort(key=lambda row: (row["repo"], row["issue"], row["comment"]))
+    return (0 if not live else 1), {"host": host, "live": live}
 
 
 SUITE_ROW = re.compile(r"^suite-runner:\s+[0-9.]+s wall\s+[0-9.]+s cpu (passed|failed) (\S+)$")
@@ -1874,6 +1973,62 @@ def console_failed_start(port: int, *, timeout: float = 5.0) -> tuple[int, dict]
     return failed_start_state(view) if isinstance(view, dict) else unreachable
 
 
+def _notice_names_all(text: object, numbers: Sequence[int]) -> bool:
+    """Issue 1291: the text names every number as `#N` not followed by a digit."""
+    return isinstance(text, str) and all(re.search(rf"#{number}(?!\d)", text) for number in numbers)
+
+
+def _view_projects(view: dict) -> Iterator[dict]:
+    """Issue 1291: the project entries of the view, at the top level or inside a quiet group."""
+    entries = view.get("entries")
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "project":
+            yield entry
+        elif entry.get("type") == "quiet_group":
+            members = entry.get("projects")
+            for member in members if isinstance(members, list) else ():
+                if isinstance(member, dict) and member.get("type") == "project":
+                    yield member
+
+
+def console_notice_lists(port: int, wanted: Mapping[str, Sequence[int]], *,
+                         timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1291: each wanted project has one owner notice naming all its issues, 0 covered, 75 missing or unreachable."""
+    unreachable = 75, {"verdict": "unreachable"}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status, body = response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return unreachable
+    finally:
+        connection.close()
+    if status != 200:
+        return unreachable
+    try:
+        view = json.loads(body)
+    except ValueError:
+        return unreachable
+    if not isinstance(view, dict):
+        return unreachable
+    notices: dict[object, list[dict]] = {}
+    for entry in _view_projects(view):
+        listed = entry.get("notices")
+        if isinstance(listed, list):
+            notices.setdefault(entry.get("project_id"), []).extend(
+                item for item in listed if isinstance(item, dict))
+    projects: dict[str, dict] = {}
+    for project, numbers in wanted.items():
+        covering = next((item.get("id") for item in notices.get(project, ())
+                         if item.get("owner") is True and _notice_names_all(item.get("text"), numbers)), None)
+        projects[project] = {"notice": covering}
+    covered = all(report["notice"] is not None for report in projects.values())
+    return (0 if covered else 75), {"verdict": "covered" if covered else "missing", "projects": projects}
+
+
 class BrowserError(Exception):
     """Issue 1031: the headless browser failed, closed its pipe or did not answer in time."""
 
@@ -2120,6 +2275,14 @@ def _issue_number(value: str) -> int:
     return number
 
 
+def _notice_spec(value: str) -> tuple[str, tuple[int, ...]]:
+    project, separator, numbers = value.partition("=")
+    parts = numbers.split(",")
+    if not (project and separator and all(part.isascii() and part.isdigit() and int(part) >= 1 for part in parts)):
+        raise argparse.ArgumentTypeError("must be PROJECT=N1,N2,... with positive integers")
+    return project, tuple(int(part) for part in parts)
+
+
 def _merge_sha(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
@@ -2195,6 +2358,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-failed-start",
         help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
     failed.add_argument("--port", type=_port, required=True)
+    notices = checks.add_parser(
+        "console-notice-lists",
+        help="issue 1291: the owner's notice for each project names every one of its issues")
+    notices.add_argument("--port", type=_port, required=True)
+    notices.add_argument("--notice", type=_notice_spec, action="append", required=True,
+                         metavar="PROJECT=N1,N2,...")
     first = checks.add_parser(
         "console-first-screen",
         help="issue 1031: the live console's first screen shows a long-goal question whole above the fold")
@@ -2205,6 +2374,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="issue 1010: an issue was closed as completed, by its own verify run")
     closed.add_argument("--repo", type=_repo, required=True)
     closed.add_argument("--issue", type=_issue_number, required=True)
+    mentions = checks.add_parser(
+        "host-mentions",
+        help="issue 1291: every open issue naming a retired host is exempt or carries its gone line")
+    mentions.add_argument("--repo", type=_repo, required=True)
+    mentions.add_argument("--phrase", type=_nonempty, action="append", required=True)
+    mentions.add_argument("--gone", type=_nonempty, required=True)
+    mentions.add_argument("--exempt", type=_issue_number, action="append", default=[])
+    prompts = checks.add_parser(
+        "host-prompts",
+        help="issue 1291: no open issue holds a live owner prompt that names a retired host")
+    prompts.add_argument("--repo", type=_repo, action="append", required=True)
+    prompts.add_argument("--host", type=_nonempty, required=True)
     regress = checks.add_parser(
         "suite-regressions",
         help="issue 1215: no suite member that passed before the merge failed in the runs from it on")
@@ -2228,6 +2409,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.check == "console-failed-start":
         code, report = console_failed_start(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-notice-lists":
+        wanted = [project for project, _ in args.notice]
+        if len(set(wanted)) != len(wanted):
+            parser.error("--notice names a project twice")
+        code, report = console_notice_lists(args.port, dict(args.notice))
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-first-screen":
@@ -2308,6 +2496,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
         elif args.check == "issue-closed":
             code, report = issue_closed(args.repo, args.issue)
+        elif args.check == "host-mentions":
+            code, report = host_mentions(args.repo, args.phrase, args.gone, args.exempt)
+        elif args.check == "host-prompts":
+            code, report = host_prompts(args.repo, args.host)
         elif args.check == "suite-regressions":
             code, report = suite_regressions(args.repo, args.workflow, args.job, args.branch,
                                              args.merge, args.n)
