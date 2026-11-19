@@ -206,6 +206,18 @@ class RestartTest(Case):
         self.assertEqual(listed(second), {})
 
 
+class UnregisteredRowTest(Case):
+    def test_an_unregistered_row_names_the_root_it_removed(self):
+        items = support.entries(2)
+        svc = self.start(items)
+        support.write_registry(self.registry, items[:1])
+        svc.refresh()
+        rows = [row for row in support.log_rows(self.store) if row[2] == "project.unregistered"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], items[1]["project_id"])
+        self.assertEqual(json.loads(rows[0][4]), {"root": items[1]["root"]})
+
+
 class AppendOnlyTest(Case):
     def test_every_operation_keeps_earlier_rows(self):
         previous = []
