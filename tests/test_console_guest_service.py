@@ -1157,6 +1157,29 @@ class ReadingServiceTest(GuestCase):
         self.assertEqual({str(a) for a in svc.guest_snapshot.policy.addresses},
                          {OTHER_DEVICE_ADDRESS})
 
+    def test_a_change_of_own_addresses_drops_the_readings_taken_under_the_old_ones(self):
+        self.seed()
+        svc = self.start()
+
+        def sharing():
+            return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertIs(sharing()["other_device_seen"], True)
+        svc.poll_serve()  # the same addresses keep the reading
+        self.assertIs(sharing()["other_device_seen"], True)
+        self.assertEqual(sharing()["last_request"]["client"], "other_device")
+        # the host moves to OTHER_DEVICE_ADDRESS and probes itself before the next poll
+        self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [OTHER_DEVICE_ADDRESS]}}
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertEqual(sharing()["last_request"]["client"], "other_device")
+        svc.poll_serve()
+        self.assertIsNone(sharing()["last_request"])
+        self.assertIs(sharing()["other_device_seen"], False)
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertEqual(sharing()["last_request"]["client"], "this_host")
+        self.assertIs(sharing()["other_device_seen"], False)
+
     def test_a_new_reading_sends_no_guest_stream_frame(self):
         self.seed()
         svc = self.start()

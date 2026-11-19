@@ -367,6 +367,27 @@ class ClientTest(unittest.TestCase):
                 r = guest.reading(access, TAILNET, [value], [value], [COLLEAGUE], [], [])
                 self.assertEqual((r["host"], r["forwarded_host"]), (value, value))
 
+    def test_a_host_carrying_the_clients_address_is_not_kept(self):
+        access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        own = guest.own_addresses(OWN)
+        for address, forwarded in ((OTHER_DEVICE_ADDRESS, [OTHER_DEVICE_ADDRESS]),
+                                   (OTHER_DEVICE_ADDRESS, [" " + OTHER_DEVICE_ADDRESS + "\t"]),
+                                   (OTHER_DEVICE_ADDRESS, ["::ffff:" + OTHER_DEVICE_ADDRESS]),
+                                   (OTHER_DEVICE_ADDRESS, [SELF_V4 + ", " + OTHER_DEVICE_ADDRESS]),
+                                   (SELF_V4, [SELF_V4])):
+            for value in (address + ".example.invalid", "A." + address + ".example",
+                          address + ".example.invalid:443"):
+                with self.subTest(forwarded=forwarded, value=value):
+                    r = guest.reading(access, TAILNET, [value], [value], [COLLEAGUE], forwarded, [],
+                                      own=own)
+                    self.assertEqual((r["host"], r["forwarded_host"]), (None, None))
+                    text = json.dumps(r)
+                    for part in ("100.64", "example.invalid"):
+                        self.assertNotIn(part, text)
+        r = guest.reading(access, TAILNET, [OTHER_HOST], [OTHER_HOST], [COLLEAGUE],
+                          [OTHER_DEVICE_ADDRESS], [], own=own)
+        self.assertEqual((r["host"], r["forwarded_host"]), (OTHER_HOST, OTHER_HOST))
+
     def test_the_reading_keeps_only_the_comparison(self):
         access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
         own = guest.own_addresses(OWN)

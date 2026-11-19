@@ -145,7 +145,8 @@ whatever its method) in memory only (never logged, null after a restart) as the 
 `sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it. Its
 `client` tells this host's own requests from another device's (ADR-console-079), and `sharing.other_device_seen`
 becomes true on the first reading whose `client` is `other_device` and stays true until the service
-stops (memory only, false after a restart).
+stops or a poll reads own addresses that differ from the ones before, which drops the reading and the
+flag taken under the old ones (memory only, false after a restart).
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -7716,6 +7717,11 @@ class ConsoleService:
         with self._ingest:
             self._serve_status = found
             self._tailnet_name = name
+            if addresses != self._tailnet_addresses:
+                # a reading and the other-device flag were judged against the old addresses: a
+                # self-probe from a moved address read as another device (ADR-console-079)
+                self._guest_reading = None
+                self._other_device_seen = False
             self._tailnet_addresses = addresses
             self._publish()
 

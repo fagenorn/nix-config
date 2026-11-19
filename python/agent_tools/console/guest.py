@@ -30,7 +30,8 @@ IPv4-mapped IPv6 address as its IPv4 address, and is empty unless that member is
 strings that all parse as addresses without a zone; they are kept in memory only, never in the log, the
 reading, a view or stderr. `Policy(access, name, addresses)` is one immutable snapshot of the switch,
 the list, the read name and the own addresses (`NO_POLICY` is off with no name and no address; a change
-of addresses alone revokes nothing and changes no admission); a request is judged by one policy.
+of addresses alone revokes nothing and changes no admission, but the service drops the reading and the
+`other_device_seen` flag judged under the old ones); a request is judged by one policy.
 `Snapshot(policy, views, pictures, revoked)` carries with that policy
 the colleagues' scoped views, their picture ids and `revoked`, a count the service raises each time
 the read name changes or sharing goes off, so a request is answered from the one snapshot that
@@ -84,7 +85,8 @@ showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it w
 not, the `REASON_CODES` code (`sharing_off`, `name_unread`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
 and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
 it is a hostname of letters, digits, dots and hyphens with an optional port whose last label is not
-numeric (so an `@`, a long value or an address in any numeric spelling is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
+numeric and that carries no address of the request's `X-Forwarded-For` or of this host's own (so an `@`, a
+long value, an address in any numeric spelling or a name built on one is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
 `forwarded_host_form` (`HOST_FORMS`: `exact` the read name, `with_port` the name with `:443`,
 `other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
@@ -266,9 +268,22 @@ def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     return found
 
 
-def _kept_host(value: str) -> bool:
-    """Whether a host value may be kept in the reading: host-shaped and no address (ADR-console-079)."""
-    return _HOST.fullmatch(value) is not None and not _names_address(value)
+def _literals(forwarded: Sequence[str], own: frozenset) -> frozenset:
+    """The address spellings a kept host must not carry: each forwarded address (a list taken apart) and this host's."""
+    found = {str(address) for address in own}
+    for value in forwarded:
+        for part in value.split(","):
+            try:
+                found.update({part.strip(_OWS), str(_address(part))})
+            except ValueError:
+                continue
+    return frozenset(found)
+
+
+def _kept_host(value: str, literals: frozenset = frozenset()) -> bool:
+    """Whether a host value may be kept in the reading: host-shaped, no address and none of `literals` in it (ADR-console-079)."""
+    return (_HOST.fullmatch(value) is not None and not _names_address(value)
+            and not any(literal in value.lower() for literal in literals))
 
 
 def own_addresses(status: object) -> frozenset:
@@ -403,6 +418,7 @@ def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_ho
             *, own: frozenset = frozenset()) -> dict:
     """What one guest-door request showed, for the owner's `sharing.last_request`; never a login or an address."""
     _, text = admit(access, name, hosts, forwarded_hosts, logins)
+    literals = _literals(forwarded, own)
     host = hosts[0] if len(hosts) == 1 else None
     one = forwarded_hosts[0] if len(forwarded_hosts) == 1 else None
     if one is None:
@@ -416,10 +432,10 @@ def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_ho
     return {"admitted": text is None,
             "client": client_of(forwarded, own),
             "forwarded_for": bool(forwarded),
-            "forwarded_host": one if one is not None and _kept_host(one) else None,
+            "forwarded_host": one if one is not None and _kept_host(one, literals) else None,
             "forwarded_host_form": form,
             "forwarded_hosts": len(forwarded_hosts),
-            "host": host if host is not None and _kept_host(host) else None,
+            "host": host if host is not None and _kept_host(host, literals) else None,
             "host_local": host is not None and host.lower() == LOCAL_HOST,
             "hosts": len(hosts),
             "login_headers": len(logins),
