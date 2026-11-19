@@ -13,6 +13,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -328,9 +329,18 @@ class ReconciledEnvironmentTest(CommitFailureCase):
             "shift 2\n"
             f"PATH=\"{envbin}:$PATH\" exec \"$@\"\n")
         stub.chmod(0o755)
+        tools = self.parent / "tools"
+        tools.mkdir()
+        for name in ("sh", "env", "git", "dirname", "true"):
+            (tools / name).symlink_to(shutil.which(name))
+        needed = [entry["argv"][0] for entry in contract["bindings"]["commands"].values()]
+        for name in [contract["bindings"]["tracker"]["cli"], *needed]:
+            if not (tools / name).exists():
+                (tools / name).write_text("#!/bin/sh\nexit 0\n")
+                (tools / name).chmod(0o755)
         saved = os.environ["PATH"]
         added = [str(self.parent / "bin")] + ([str(envbin)] if on_plain_path else [])
-        os.environ["PATH"] = os.pathsep.join([*added, saved])
+        os.environ["PATH"] = os.pathsep.join([*added, str(tools)])
         self.addCleanup(os.environ.__setitem__, "PATH", saved)
         self.start(register.Adopter(), pusher=approve.push, slug_of=lambda root: SLUG)
         self.shown = self.become_ready()
@@ -372,6 +382,35 @@ class ReconciledEnvironmentTest(CommitFailureCase):
                         card["lines"])
         self.assertFalse((self.parent / "devenv-calls").exists())
         self.assertFalse((self.parent / "hook-passed").exists())
+
+    def host_prek(self) -> Path:
+        """A `prek` on the PATH the test process starts with, as a developer's machine can have."""
+        host = self.parent / "host"
+        host.mkdir()
+        marker = self.parent / "host-prek-ran"
+        (host / "prek").write_text(f"#!/bin/sh\nprintf 'host\\n' > '{marker}'\nexit 0\n")
+        (host / "prek").chmod(0o755)
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = os.pathsep.join([str(host), saved])
+        self.addCleanup(os.environ.__setitem__, "PATH", saved)
+        return marker
+
+    def test_a_prek_on_the_host_path_does_not_hide_the_proposal(self):
+        marker = self.host_prek()
+        self.arrange(devenv=True)
+        (card,) = self.apply_cards()
+        self.assertEqual(card["lines"][0], self.LINE)
+        self.assertFalse(marker.exists())
+
+    def test_a_prek_on_the_host_path_is_not_run_by_the_negative_control(self):
+        marker = self.host_prek()
+        self.arrange(devenv=False)
+        (card,) = self.apply_cards()
+        self.assertEqual(self.proposal_lines(card), [])
+        card = self.failed()
+        self.assertTrue(any(line.endswith("exec: prek: not found") for line in card["lines"]),
+                        card["lines"])
+        self.assertFalse(marker.exists())
 
     def test_a_contract_that_names_its_own_commit_environment_keeps_it(self):
         self.arrange(devenv=True, own_environment=True)

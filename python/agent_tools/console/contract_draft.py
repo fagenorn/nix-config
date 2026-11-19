@@ -35,8 +35,12 @@ blob a relative `core.hooksPath` resolves to after following links, decoded as U
 a hook above `TEXT_LIMIT` bytes is never read past that bound and reads as `""`, and so does an
 unreadable one. `hook_stranded` reads each line with leading whitespace stripped, ignoring comments:
 an `exec` line names a runner (its first word under `shlex`), a `NAME=value` line records one word
-for `NAME`, and a runner that is a `$NAME` or `${NAME}` stands for every value assigned to that name.
-A runner is found when it is absolute and an executable file, or has no `/` and is on `search_path`.
+for `NAME` (a trailing `#` comment aside), and a runner that is a `$NAME` or `${NAME}` stands for every
+value assigned to that name; a `NAME=` that appears on any other line (`[ -x "$P" ] || P=x`) leaves
+`NAME` unjudged. A runner is found when it is absolute and an executable file, or has no `/` and is on
+`search_path`; a `search_path` with an entry that is not absolute (relative to a working directory the
+commit does not share) leaves every hook unjudged. Each distinct runner and value is looked up once, and
+a set `cancel` leaves the hook unjudged.
 A hook is stranded exactly when it has an `exec` line, every runner can be judged and none is found.
 A hook with no `exec` line, an unreadable line, an option as runner, a runner that is unassigned,
 unreadable, relative, or carries `$`, a backtick or a shell operator, is never stranded, so its plan
@@ -502,6 +506,7 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
 
 
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_ASSIGNED_ANYWHERE = re.compile(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\+?=")
 _EXEC = re.compile(r"^exec\s+(.*)$")
 _VARIABLE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 _SHELL_SYNTAX = set("$`;&|<>()")
@@ -513,25 +518,39 @@ def _runner_found(candidate: str, search_path: str) -> bool:
     return shutil.which(candidate, path=search_path) is not None
 
 
-def hook_stranded(text: str, search_path: str) -> bool:
+def _assigned_word(value: str) -> str | None:
+    """The one word an assignment's value is, a trailing comment aside; None when it is not exactly one."""
+    try:
+        words = shlex.split(value, comments=True)
+        raw = shlex.split(value)
+    except ValueError:
+        return None
+    if any("#" in word[1:] for word in raw):
+        return None
+    return words[0] if len(words) == 1 else None
+
+
+def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = None) -> bool:
     """Whether a hook execs only runners that are found neither at their recorded path nor on `search_path`.
 
     Total and conservative: a hook the rule cannot judge (no `exec` line, an unreadable line or runner,
-    shell syntax, an option, a relative path) is never stranded.
+    shell syntax, an option, a relative path, a `search_path` entry that is not absolute, a runner variable
+    assigned anywhere but on a line of its own) is never stranded, and neither is one read under a set
+    `cancel`. Each distinct variable value and runner is looked up once.
     """
-    assigned: dict[str, list[str | None]] = {}
-    runners: list[str] = []
+    if any(not os.path.isabs(entry) for entry in search_path.split(os.pathsep)):
+        return False
+    assigned: dict[str, dict[str | None, None]] = {}
+    runners: dict[str, None] = {}
     for line in text.splitlines():
+        if cancel is not None and cancel.is_set():
+            return False
         line = line.lstrip()
         if line.startswith("#"):
             continue
         assignment = _ASSIGNMENT.match(line)
         if assignment:
-            try:
-                words = shlex.split(assignment.group(2))
-            except ValueError:
-                words = []
-            assigned.setdefault(assignment.group(1), []).append(words[0] if len(words) == 1 else None)
+            assigned.setdefault(assignment.group(1), {})[_assigned_word(assignment.group(2))] = None
             continue
         execution = _EXEC.match(line)
         if execution:
@@ -541,23 +560,31 @@ def hook_stranded(text: str, search_path: str) -> bool:
                 return False
             if not words or words[0].startswith("-"):
                 return False
-            runners.append(words[0])
+            runners[words[0]] = None
+            continue
+        for name in _ASSIGNED_ANYWHERE.findall(line):
+            assigned.setdefault(name, {})[None] = None
     if not runners:
         return False
-    candidates: list[str] = []
+    candidates: dict[str, None] = {}
     for runner in runners:
         variable = _VARIABLE.match(runner)
         if variable:
             values = assigned.get(variable.group(1))
-            if not values or any(value is None for value in values):
+            if not values or None in values:
                 return False
-            candidates.extend(value for value in values if value is not None)
+            candidates.update(dict.fromkeys(value for value in values if value is not None))
         else:
-            candidates.append(runner)
+            candidates[runner] = None
     for candidate in candidates:
         if _SHELL_SYNTAX & set(candidate) or ("/" in candidate and not candidate.startswith("/")):
             return False
-    return not any(_runner_found(candidate, search_path) for candidate in candidates)
+    for candidate in candidates:
+        if cancel is not None and cancel.is_set():
+            return False
+        if _runner_found(candidate, search_path):
+            return False
+    return True
 
 
 def _hook_text(root: str, source: Path | str, cancel: threading.Event | None = None) -> str:
@@ -588,7 +615,7 @@ def read_hooks(root: str, cancel: threading.Event | None = None, *,
     try:
         sources = _hook_sources(root, cancel)
         stranded = [name for name, source in sources
-                    if hook_stranded(_hook_text(root, source, cancel), path)]
+                    if hook_stranded(_hook_text(root, source, cancel), path, cancel)]
         return {"hooks": [name for name, _ in sources], "stranded": stranded,
                 "environments": _environments(root, cancel)}
     except Exception:  # read_hooks never raises: an unreadable repository reads as empty

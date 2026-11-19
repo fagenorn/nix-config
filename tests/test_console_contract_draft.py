@@ -1037,6 +1037,37 @@ class StrandedHookTest(unittest.TestCase):
             with self.subTest(case=letter):
                 self.assertFalse(cd.hook_stranded(text, str(self.bin)))
 
+    def test_a_runner_reassigned_on_a_conditional_line_is_not_judged_from_its_first_assignment(self):
+        self.tool("prek")
+        text = ("#!/bin/sh\nPREK=/gone/prek\n[ -x \"$PREK\" ] || PREK=prek\nexec \"$PREK\" hook-impl\n")
+        self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+
+    def test_a_trailing_comment_does_not_hide_an_assigned_runner(self):
+        text = "#!/bin/sh\nRUNNER=prek # fallback\nexec \"$RUNNER\" hook-impl\n"
+        self.assertTrue(cd.hook_stranded(text, str(self.bin)))
+        self.tool("prek")
+        self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+
+    def test_a_path_with_an_entry_that_is_not_absolute_judges_nothing(self):
+        text = "#!/bin/sh\nexec hooktool \"$@\"\n"
+        self.assertTrue(cd.hook_stranded(text, str(self.bin)))
+        for letter, entry in (("relative", "node_modules/.bin"), ("dot", "."), ("empty", "")):
+            with self.subTest(case=letter):
+                self.assertFalse(cd.hook_stranded(text, os.pathsep.join([entry, str(self.bin)])))
+
+    def test_repeated_assignments_and_execs_are_looked_up_once_and_cancel_stops_the_read(self):
+        text = "#!/bin/sh\n" + "RUNNER=prek\nexec \"$RUNNER\"\n" * 500
+        looked = []
+        with unittest.mock.patch.object(cd, "_runner_found",
+                                        lambda candidate, path: looked.append(candidate) and False):
+            self.assertTrue(cd.hook_stranded(text, str(self.bin)))
+            self.assertEqual(looked, ["prek"])
+            cancel = threading.Event()
+            cancel.set()
+            looked.clear()
+            self.assertFalse(cd.hook_stranded(text, str(self.bin), cancel))
+            self.assertEqual(looked, [])
+
 
 if __name__ == "__main__":
     unittest.main()
