@@ -24,9 +24,11 @@ Scan rule for a `.py` source:
 3. Kinds of an expression E. A Name, or an attribute chain of Names such as
    `self.text`, has the kinds its environment gives it, but a name holding TEXT
    never holds PHRASE. ADR: E's subtree holds a string
-   constant ADR_PATH matches, a Name with ADR, or `<AREAS> / "adr"` (or
-   `"adr/..."`). AREAS: a string constant AREAS_ROOT matches, or a Name with
-   AREAS. TEXT: a call named in READ_CALLS or in the readers whose receiver or
+   constant ADR_PATH matches, an f-string or a `/` chain of path segments
+   whose literal text, with `_` for each formatted value or other segment and
+   `/` between chain segments, ADR_PATH matches, a Name with ADR, or
+   `<AREAS> / "adr"` (or `"adr/..."`). AREAS: a string constant, f-string or
+   `/` chain whose text AREAS_ROOT matches, or a Name with AREAS. TEXT: a call named in READ_CALLS or in the readers whose receiver or
    any argument has ADR, or a Name with TEXT. PHRASE: E is not TEXT and its
    subtree holds a string constant, an f-string or a Name with PHRASE. MATCH:
    E itself (through `not` and each operand of `and`/`or`) is a wording
@@ -161,6 +163,20 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
+def _static_text(node: ast.AST) -> str | None:
+    """The literal text of a string, f-string or `/` chain; `_` stands for the rest."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else "_"
+            for v in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        return f"{_static_text(node.left) or '_'}/{_static_text(node.right) or '_'}"
+    return None
+
+
 def _parameters(node) -> list[str]:
     args = node.args
     names = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
@@ -269,15 +285,15 @@ class _Scan:
         """The ADR, AREAS, TEXT and PHRASE kinds of the expression."""
         found: set[str] = set()
         for sub, scope in self.walk(node, env):
-            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                found.add("PHRASE")
-                if ADR_PATH.search(sub.value):
+            static = _static_text(sub)
+            if static is not None:
+                if not isinstance(sub, ast.BinOp):
+                    found.add("PHRASE")
+                if ADR_PATH.search(static):
                     found.add("ADR")
-                if AREAS_ROOT.search(sub.value):
+                if AREAS_ROOT.search(static):
                     found.add("AREAS")
-            elif isinstance(sub, ast.JoinedStr):
-                found.add("PHRASE")
-            elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
                 found |= scope.get(sub.id, EMPTY) - {"MATCH"}
             elif isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load):
                 found |= scope.get(_key(sub), EMPTY) - {"MATCH"}
@@ -473,12 +489,10 @@ def wording_findings(path: str, source: str) -> list[tuple[str, int]]:
         ]
     tree = ast.parse(source, filename=path)
     if not any(
-        isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and (ADR_PATH.search(node.value) or AREAS_ROOT.search(node.value))
+        (text := _static_text(node)) is not None and (ADR_PATH.search(text) or AREAS_ROOT.search(text))
         for node in ast.walk(tree)
     ):
-        return []  # no constant can name a record or the areas root
+        return []  # no literal text can name a record or the areas root
     scan = _Scan(_readers(tree))
     module_env = scan.block(tree.body, {}, in_unit=False)
     findings: list[tuple[str, int]] = []
@@ -739,6 +753,36 @@ ADJACENT_LITERALS = _fixture(r'''
             self.assertIn("words", text)
 ''')
 
+FSTRING_PATH = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            a = "a"
+            text = Path(f"docs/areas/{a}/adr/001-x.md").read_text()
+            self.assertIn("words", text)
+''')
+
+SEGMENTED_PATH = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = (ROOT / "docs" / "areas" / "a" / "adr" / "001-x.md").read_text()
+            self.assertIn("words", text)
+''')
+
+SEGMENTED_PATH_WITH_VARIABLE = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            area = "a"
+            text = (ROOT / "docs" / "areas" / area / "adr" / "001-x.md").read_text()
+            self.assertIn("words", text)
+''')
+
+SEGMENTED_CONTEXT = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            text = (ROOT / "docs" / "areas" / "a" / "CONTEXT.md").read_text()
+            self.assertIn("words", text)
+''')
+
 INSTANCE_ATTRIBUTE = _fixture(r'''
     class T(unittest.TestCase):
         def test_x(self):
@@ -807,6 +851,16 @@ class WordingScanTest(unittest.TestCase):
 
     def test_a_record_path_spelled_as_adjacent_literals_is_scanned(self):
         self.assertEqual(self.found(ADJACENT_LITERALS), [(TEST_ID, 4)])
+
+    def test_a_record_path_spelled_as_an_f_string_or_segments_is_scanned(self):
+        with self.subTest("an f-string"):
+            self.assertEqual(self.found(FSTRING_PATH), [(TEST_ID, 5)])
+        with self.subTest("segments of one chain"):
+            self.assertEqual(self.found(SEGMENTED_PATH), [(TEST_ID, 4)])
+        with self.subTest("segments with a variable among them"):
+            self.assertEqual(self.found(SEGMENTED_PATH_WITH_VARIABLE), [(TEST_ID, 5)])
+        with self.subTest("segments naming a CONTEXT.md, not a record"):
+            self.assertEqual(self.found(SEGMENTED_CONTEXT), [])
 
     def test_record_text_kept_on_an_instance_attribute_is_found(self):
         with self.subTest("read then asserted through the attribute"):
