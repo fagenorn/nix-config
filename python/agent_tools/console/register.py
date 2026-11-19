@@ -39,8 +39,8 @@ or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `s
 `kind` one of `RUN_KINDS`: `cancelled` (the `cancel` event is set), `failed` (any other exit),
 `unreadable` (stdout is not a JSON object), `timed_out` (`subprocess.TimeoutExpired`), `not_installed`
 (`FileNotFoundError`, or `PermissionError` on the executable) and `unavailable` (any other
-`OSError`). `adopter_for(platform)` is `Adopter()` on Linux only, else None (ADR-console-028 D9: registration
-and the adoption it opens stay Linux only, though managers run on macOS too).
+`OSError`). `adopter_for(platform)` is `Adopter()` on Linux and macOS (what `manager.supported` admits), else None
+(ADR-console-081: registration and the adoption it opens run wherever a manager does).
 
 Plain lines. `plan_lines(document)` is the D4 list of ADR-console-028, each line only when its count
 is above zero, in this order: `moves N agent file(s)` (followed by ` under .agents/` when every move
@@ -854,4 +854,4 @@ class Adopter:
 
 
 def adopter_for(platform: str) -> Adopter | None:
-    return Adopter() if platform.startswith("linux") else None
+    return Adopter() if manager.supported(platform) else None

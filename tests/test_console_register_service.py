@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agent_tools.console import checkout_remote, event_log, folder_trust, register, register_check
@@ -551,6 +552,36 @@ class RegisterRunTest(Case):
                           True)
         self.assertEqual(json.loads((work / ".claude.json").read_text("utf-8"))["oauthAccount"],
                          {"a": 1})
+        self.assertEqual(real_home_state(), before)
+
+
+class DarwinRegistrationTest(Case):
+    def test_a_darwin_registration_reaches_its_register_card_and_registers_without_a_linux_tool(self):
+        shims = self.parent / "shims"
+        shims.mkdir()
+        marker = self.parent / "linux-tool-ran"
+        for name in ("systemd-run", "systemctl"):
+            shim = shims / name
+            shim.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$0\" >> {marker}\nexit 1\n")
+            shim.chmod(0o755)
+        patched = unittest.mock.patch.dict(
+            os.environ, {"PATH": f"{shims}{os.pathsep}{os.environ['PATH']}"})
+        patched.start()
+        self.addCleanup(patched.stop)
+        before = real_home_state()
+        root = register_check.adopted_repository(
+            self.parent, "fixture/console-darwin", ROOT / register_check.CONTRACT_SOURCE)
+        self.begin(register.adopter_for("darwin"), dispatch=None, trust_home=self.home)
+        status, _, body = self.post({"path": str(root)})
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(self.settled_row(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.confirm_cards()), 1)
+        plans = self.home / ".agents/state/adopt/plans"
+        self.assertTrue(plans.is_dir() and any(plans.iterdir()))
+        status, _, body = self.confirm({"root": str(root), "choice": "register"})
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(self.settled_row(root)["result"], "registered")
+        self.assertFalse(marker.exists())
         self.assertEqual(real_home_state(), before)
 
 
