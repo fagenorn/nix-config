@@ -248,8 +248,8 @@ _NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*")
 
 
 def _names_address(host: str) -> bool:
-    """Whether a Host-shaped value (no port needed) is an IP address in any numeric spelling."""
-    last = host.rsplit(":", 1)[0].rsplit(".", 1)[-1]
+    """Whether a Host-shaped value (no port needed) is an IP address in any numeric spelling, trailing dot included."""
+    last = host.rsplit(":", 1)[0].rstrip(".").rsplit(".", 1)[-1]  # a trailing dot names the same address
     return _NUMERIC_LABEL.fullmatch(last) is not None
 
 

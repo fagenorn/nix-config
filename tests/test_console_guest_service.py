@@ -1092,7 +1092,8 @@ class ReadingServiceTest(GuestCase):
     def test_the_owner_view_never_shows_an_address_sent_as_a_host(self):
         self.seed()
         svc = self.start()
-        for value in (OTHER_DEVICE_ADDRESS + ":443", OTHER_DEVICE_ADDRESS, SELF_V4 + ":443"):
+        for value in (OTHER_DEVICE_ADDRESS + ":443", OTHER_DEVICE_ADDRESS, SELF_V4 + ":443",
+                      OTHER_DEVICE_ADDRESS + ".", OTHER_DEVICE_ADDRESS + ".:443", "1684300805."):
             with self.subTest(value=value):
                 self.guest(svc, "GET", "/api/whoami", host=value, forwarded_host=value,
                            headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})

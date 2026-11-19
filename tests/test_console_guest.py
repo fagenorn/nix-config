@@ -353,7 +353,8 @@ class ClientTest(unittest.TestCase):
     def test_the_reading_never_keeps_an_address_as_a_host(self):
         access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
         for value in (OTHER_DEVICE_ADDRESS, OTHER_DEVICE_ADDRESS + ":443", SELF_V4 + ":8", "0100.064.0.5",
-                      "1684300805", "0x64000005", "0x64.0.0.5:443"):
+                      "1684300805", "0x64000005", "0x64.0.0.5:443", OTHER_DEVICE_ADDRESS + ".",
+                      OTHER_DEVICE_ADDRESS + ".:443", "1684300805.", "0x64000005.:8", "100.64.0.5.."):
             with self.subTest(value=value):
                 r = guest.reading(access, TAILNET, [value], [value], [COLLEAGUE], [], [])
                 self.assertEqual((r["host"], r["forwarded_host"]), (None, None))
