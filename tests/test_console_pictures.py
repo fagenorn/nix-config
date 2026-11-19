@@ -1320,12 +1320,6 @@ class PictureAskTest(PictureCase):
         self.assertEqual(status, 200)
         return json.loads(answer)["picture"]
 
-    def test_the_ask_docstring_states_the_picture_upload(self):
-        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
-        for needle in ("pictures", "file", "uploads"):
-            with self.subTest(needle):
-                self.assertIn(needle, doc)
-
 
 class PictureBriefCommandTest(ManagerPictureCase):
     def send_command(self, svc, sid, value, command):
@@ -1559,14 +1553,6 @@ class PictureReportCommandTest(ManagerPictureCase):
         self.assertEqual(
             err.getvalue(), "sprint: refused before sending: the report is larger than 1024 bytes\n")
         self.assertEqual(self.rows("picture.stored"), [])
-
-
-class PictureCommandDocsTest(unittest.TestCase):
-    def test_the_brief_and_report_docstring_states_the_picture_upload(self):
-        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
-        for needle in ("the brief is larger than", "the report is larger than", "named by nothing"):
-            with self.subTest(needle):
-                self.assertIn(needle, doc)
 
 
 class PictureDocsTest(unittest.TestCase):

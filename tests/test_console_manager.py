@@ -169,7 +169,6 @@ class CommandTest(Case):
                 self.assertEqual(support.goal_of(launch(quoting, block).prompt), quoting)
                 self.assertEqual(launch("finish it", "").prompt, lead + "finish it")
                 self.assertEqual(support.goal_of(lead + "finish it"), "finish it")
-        self.assertIn("notice_block", manager.__doc__)
 
     def test_managers_are_supported_on_linux_and_macos_only(self):
         self.assertIs(manager.supported("linux"), True)

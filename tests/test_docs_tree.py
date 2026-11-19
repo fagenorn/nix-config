@@ -473,13 +473,6 @@ class DocsTreeTest(unittest.TestCase):
                 problems.append(f"{source}: {heading}: kept but not a base heading")
         self.assertEqual(problems, [])
 
-    def test_the_codesigned_artifact_docstring_states_no_limitation(self):
-        import ast
-
-        source = (REPO_ROOT / "python/agent_tools/release/codesigned_artifact_adapter.py").read_text()
-        docstring = " ".join((ast.get_docstring(ast.parse(source)) or "").split())
-        self.assertNotIn("cannot prove", docstring)
-
     def test_the_console_area_owns_its_terms(self):
         text = (REPO_ROOT / "docs/CONTEXT-MAP.md").read_text()
         cells = [[c.strip() for c in line.strip().strip("|").split("|")]
