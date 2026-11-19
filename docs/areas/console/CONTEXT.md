@@ -10,7 +10,7 @@ Console covers the local pages, the desk page that tells the owner whether they 
 ## Language
 
 **Console**:
-The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` reaches it, and a named colleague reaches it only through Tailscale Serve on a guest port (ADR-console-066).
+The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` from a process of the owner's own user reaches the owner's port (ADR-console-076), and a named colleague reaches it only through Tailscale Serve on a guest port (ADR-console-066).
 _Avoid_: dashboard, lead console
 
 **Inbox item**:

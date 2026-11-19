@@ -1,7 +1,7 @@
 # ADR-console-008 — Only the page writes, with a per-install token and the console's own origin
 
-- **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004
-- **Decided in:** #837, #838, #861, #862, #886, #887, #889, #891, #1026, #1027, #1035, #1053, #1054, #1089, #1120, #1176, #1193, #1237
+- **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, ADR-console-076
+- **Decided in:** #837, #838, #861, #862, #886, #887, #889, #891, #1026, #1027, #1035, #1053, #1054, #1089, #1120, #1176, #1193, #1237, #1294
 
 ## Context
 
@@ -19,7 +19,7 @@ The token is 43 URL-safe characters, created once in `page-token` beside the eve
 
 ## Consequences
 
-- A local process can read the token from the page or from the file: loopback trust is the boundary (#826), and the token only stops a foreign page and a request that did not come from the page.
+- A local process can read the token from the page or from the file: loopback trust is the boundary (#826), and the token only stops a foreign page and a request that did not come from the page; on a shared host only the owner's own processes reach the owner's port (ADR-console-076).
 - A page served before a restart keeps working, because the token belongs to the install and not to the run.
 - The hook route stays tokenless, as ADR-console-004 decided.
 - Deleting `page-token` makes the next start mint a new token; a page still open from before shows a `403` on its next write until reloaded.

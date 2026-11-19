@@ -624,7 +624,7 @@ class AccessWriteTest(GuestCase):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237"))
+        self.assertTrue(decided.endswith("#1193, #1237, #1294"))
 
 
 class ReadingServiceTest(GuestCase):
