@@ -31,7 +31,7 @@ LEAD = ("You are the manager of one sprint, started by the console. "
 PROMPT = LEAD + "make it resumable"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
-           "`sprint ask`.")
+           "`sprint ask`, marking the question `owner_only`.")
 
 
 def alive(pid):

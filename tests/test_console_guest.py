@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 
+import copy
 import json
 import os
 import shutil
@@ -19,7 +20,7 @@ from agent_tools.console import capacity as capacity_module
 from agent_tools.console.event_log import (
     GOAL_STATED, INBOX_SEEN, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     Event, EventLog)
-from agent_tools.console.guest import Access
+from agent_tools.console.guest import Access, GuestActor
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import Notice
 from agent_tools.console.view import REGISTERED, derive_view, encode_view
@@ -686,6 +687,106 @@ class SharingTest(unittest.TestCase):
         self.assertIsNone(view.SHARING_OFF["last_request"])
         derive_view([])["sharing"]["colleagues"].append("x")
         self.assertEqual(view.SHARING_OFF["colleagues"], [])
+
+
+class GuestWriteRuleTest(unittest.TestCase):
+    def test_the_write_refusal_checks_sharing_then_the_name_then_the_login_then_the_project(self):
+        colleagues = MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})})
+        on = guest.Policy(Access(True, colleagues), TAILNET)
+        off = guest.Policy(Access(False, colleagues), TAILNET)
+        unread = guest.Policy(Access(True, colleagues), None)
+        renamed = guest.Policy(Access(True, colleagues), OTHER_HOST)
+        c = GuestActor(COLLEAGUE, TAILNET)
+        s = GuestActor(STRANGER, TAILNET)
+        rows = [
+            (off, c, "owner/p01", guest.SHARING_OFF_TEXT),
+            (unread, c, "owner/p01", guest.NAME_UNREAD_TEXT),
+            (renamed, c, "owner/p01", guest.HOST_TEXT),
+            (on, s, "owner/p01", guest.NOT_SHARED_TEXT),
+            (on, c, "owner/p00", guest.NOT_YOUR_PROJECT_TEXT),
+            (on, c, "owner/p01", None),
+            (off, s, "owner/p00", guest.SHARING_OFF_TEXT),
+            (unread, s, "owner/p00", guest.NAME_UNREAD_TEXT),
+            (renamed, s, "owner/p00", guest.HOST_TEXT),
+        ]
+        for policy, actor, project, expected in rows:
+            with self.subTest(shared=policy.access.shared, name=policy.name, login=actor.login,
+                              project=project):
+                self.assertEqual(guest.write_refusal(policy, actor, project), expected)
+        for text in (guest.NOT_YOUR_PROJECT_TEXT, guest.NOT_YOUR_SPRINT_TEXT,
+                     guest.OWNER_LOOK_TEXT, guest.SHARING_OFF_TEXT, guest.NAME_UNREAD_TEXT,
+                     guest.HOST_TEXT, guest.NOT_SHARED_TEXT, guest.OWNER_ONLY_TEXT):
+            with self.subTest(text=text):
+                self.assertNotIn("@", text)
+                self.assertNotIn("owner/", text)
+
+    def test_only_the_sprint_s_starter_steers_it(self):
+        self.assertIsNone(guest.steer_refusal(COLLEAGUE, COLLEAGUE))
+        self.assertEqual(guest.steer_refusal(COLLEAGUE, None), guest.NOT_YOUR_SPRINT_TEXT)
+        self.assertEqual(guest.steer_refusal(COLLEAGUE, SECOND), guest.NOT_YOUR_SPRINT_TEXT)
+
+    def test_mark_steer_marks_only_the_login_s_sprints_and_cards(self):
+        c = COLLEAGUE
+        sprint = lambda sid, by: {"type": "sprint", "sprint_id": sid, "started_by": by}  # noqa: E731
+        question = lambda **more: {"reason": "question", **more}  # noqa: E731
+        view_in = {
+            "projects": [
+                {"type": "project", "sprints": [sprint("a", c), sprint("b", None)]},
+                {"type": "quiet", "projects": [{"type": "project", "sprints": [sprint("q", c)]}]}],
+            "inbox": {"open": [
+                {"reason": "brief", "started_by": c},
+                question(started_by=SECOND),
+                question(started_by=c, pictures=[{"id": "p1", "line": "one", "pair": None}]),
+                question(started_by=c, pictures=[{"id": "p1", "pair": "before"},
+                                                 {"id": "p2", "pair": "after"}]),
+                question(started_by=c, owner_only=True),
+                question(started_by=c, look={"issue": 7, "pr": 8, "head": "a" * 40,
+                                             "state": "open", "line": "x", "approve_index": 1}),
+                question(started_by=c, look=None),
+                {"reason": "verify-approve", "kind": "approval", "confirm": "owner/p01#12",
+                 "started_by": c},
+                {"reason": "verify-approve", "kind": "paid-approval", "paid": True}],
+                "answered": []}}
+        before = copy.deepcopy(view_in)
+        result = guest.mark_steer(view_in, c)
+        found = {}
+
+        def walk(node):
+            if isinstance(node, dict):
+                if node.get("type") == "sprint":
+                    found[node["sprint_id"]] = node["steer"]
+                for member in node.values():
+                    walk(member)
+            elif isinstance(node, list):
+                for member in node:
+                    walk(member)
+
+        walk(result["projects"])
+        self.assertEqual(found, {"a": True, "b": False, "q": True})
+        self.assertEqual([item["steer"] for item in result["inbox"]["open"]],
+                         [True, False, True, False, False, False, True, False, False])
+        self.assertEqual(result["inbox"]["answered"], [])
+        self.assertFalse(guest.is_look([None, None]))
+        self.assertFalse(guest.is_look([None, "after"]))
+        self.assertFalse(guest.is_look(["before"]))
+        self.assertTrue(guest.is_look(["after", None, "before"]))
+        self.assertEqual(view_in, before)
+        self.assertEqual(json.dumps(result).count(c), json.dumps(view_in).count(c))
+
+    def test_mark_steer_offers_a_colleague_no_drop_on_an_unpicked_message(self):
+        nudge = "Tell the manager again, or drop the sprint."
+        turn = "It waits for the manager's next turn; drop the sprint if none comes."
+        sprint = lambda sid, by, action: {  # noqa: E731
+            "type": "sprint", "sprint_id": sid, "started_by": by,
+            "messages": [{"id": 1, "state": "not_picked_up", "action_text": action}]}
+        view_in = {"projects": [{"type": "project", "sprints": [
+            sprint("a", COLLEAGUE, nudge), sprint("b", None, nudge), sprint("c", COLLEAGUE, turn),
+            sprint("d", COLLEAGUE, None)]}], "inbox": {"open": [], "answered": []}}
+        before = copy.deepcopy(view_in)
+        result = guest.mark_steer(view_in, COLLEAGUE)
+        actions = [s["messages"][0]["action_text"] for s in result["projects"][0]["sprints"]]
+        self.assertEqual(actions, ["Tell the manager again.", "Tell the manager again.", turn, None])
+        self.assertEqual(view_in, before)
 
 
 if __name__ == "__main__":

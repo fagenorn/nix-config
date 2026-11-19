@@ -104,7 +104,7 @@ from pathlib import Path
 from agent_tools.console import manager
 from agent_tools.console.permission import BYPASS
 
-NUDGE_TEXT = ('The owner left you a message on the console. Run "sprint inbox" now and act on '
+NUDGE_TEXT = ('A message is waiting for you on the console. Run "sprint inbox" now and act on '
               "what it returns.")
 RESTART_TEXT = ('The console restarted this session because it had stopped while its sprint had '
                 'work. Run "sprint contract", then "sprint recap", and go on.')

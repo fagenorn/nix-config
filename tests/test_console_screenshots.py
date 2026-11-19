@@ -10,6 +10,7 @@ import pwd
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -115,10 +116,12 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_forty_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 40)
-        self.assertEqual(shots.STATES[-5:], ("sharing-panel", "sharing-off", "sharing-unreadable",
-                                             "sharing-reached", "guest-page"))
+    def test_the_set_is_forty_two_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 42)
+        self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
+                                             "sharing-reached", "guest-page", "guest-steer",
+                                             "owner-actors"))
+        self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
                          shots.STATES.index("waiting-its-turn") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("inbox-card"):][:3],
@@ -127,7 +130,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-22:-5], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-24:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -135,6 +138,82 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                               "activation-tooling", "activation-host"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
+
+    def test_the_actor_seed_holds_a_colleague_sprint_an_answer_and_an_owner_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp).resolve(), "guest-steer", now_s)
+            svc = shots.start_service(
+                fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent)
+            try:
+                view = json.loads(svc.view_bytes)
+                guest = json.loads(svc.guest_view_bytes(shots.COLLEAGUE))
+            finally:
+                svc.close()
+        sprints = all_sprints(view)
+        theirs = [s for s in sprints if s["started_by"] == shots.COLLEAGUE]
+        self.assertEqual(len(theirs), 2)
+        answered = [s for s in theirs if s["messages"] and s["messages"][-1]["kind"] == "answer"]
+        self.assertEqual(len(answered), 1)
+        self.assertEqual(answered[0]["messages"][-1]["by"], shots.COLLEAGUE)
+        self.assertEqual([s for s in sprints if s["started_by"] is None][0]["messages"][-1]["by"],
+                         None)
+        self.assertEqual(len([s for s in sprints if s["started_by"] is None]), 1)
+        opened = view["inbox"]["open"]
+        confirms = [i for i in opened if i.get("reason") == "verify-approve"]
+        self.assertEqual([i["confirm"] for i in confirms], ["owner/web#12"])
+        briefs = [i for i in opened if i["reason"] == "brief"]
+        self.assertEqual(len(briefs), 1)
+        self.assertEqual(briefs[0]["started_by"], shots.COLLEAGUE)
+        steer = {i["reason"]: i["steer"] for i in guest["inbox"]["open"]}
+        self.assertTrue(steer["brief"])
+        self.assertFalse(steer["verify-approve"])
+
+    def test_capture_shoots_the_guest_steer_state_through_the_guest_door(self) -> None:
+        class Browser:
+            def close(self):
+                pass
+
+        class Playwright:
+            chromium = types.SimpleNamespace(launch=lambda args=None: Browser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        api = types.ModuleType("playwright.sync_api")
+        api.Error = type("Error", (Exception,), {})
+        api.sync_playwright = Playwright
+        seen = []
+
+        def fake(browser, url, state, width, out, **kwargs):
+            host, port = url.split("//")[1].split("/")[0].split(":")
+            connection = http.client.HTTPConnection(host, int(port))
+            try:
+                connection.request("GET", "/api/state")
+                response = connection.getresponse()
+                seen.append((state, url, response.status, json.loads(response.read())))
+            finally:
+                connection.close()
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
+                                              "playwright.sync_api": api}), \
+                mock.patch.object(shots, "_shoot", side_effect=fake):
+            shots.capture(Path(tmp), states=("guest-steer",), widths=(shots.WIDTHS[0],))
+        self.assertEqual(len(seen), 1)
+        state, url, status, view = seen[0]
+        self.assertEqual((state, status), ("guest-steer", 200))
+        theirs = [s for s in all_sprints(view) if s["started_by"] == shots.COLLEAGUE]
+        self.assertEqual(len(theirs), 2)
+        self.assertEqual([s["steer"] for s in theirs], [True, True])
+        owners = [s for s in all_sprints(view) if s["started_by"] is None]
+        self.assertEqual([s["steer"] for s in owners], [False])
+        confirms = [i for i in view["inbox"]["open"] if i.get("reason") == "verify-approve"]
+        self.assertTrue(confirms)
+        self.assertEqual([i["steer"] for i in confirms], [False] * len(confirms))
 
     def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
         justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
@@ -864,6 +943,32 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 else:
                     shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
                 self.assertIn("#top-who:not([hidden])", page.waits)
+
+    def test_the_actor_shots_wait_for_what_the_owner_judges_and_guest_steer_refuses_the_owner_page(self) -> None:
+        door = "#console-door"
+        with tempfile.TemporaryDirectory() as tmp:
+            browser, page = fake_browser({door, "#capacity"})
+            with self.assertRaisesRegex(RuntimeError, "the guest shot is not the guest page"):
+                shots._shoot(browser, "http://console.test/", "guest-steer", 480, Path(tmp))
+            browser, page = fake_browser({door})
+            shots._shoot(browser, "http://console.test/", "guest-steer", 480, Path(tmp))
+            self.assertIn("#top-who:not([hidden])", page.waits)
+            judged = [w for w in page.waits if w != "#top-who:not([hidden])"][1:]
+            self.assertEqual(judged, [".started-by", "text=Answered by", ".guest-wait",
+                                      "#inbox button.approve"])
+            browser, page = fake_browser({door})
+            shots._shoot(browser, "http://console.test/", "owner-actors", 480, Path(tmp))
+            self.assertEqual(page.waits[1:], [".started-by", "text=Answered by"])
+
+    def test_the_actor_shots_of_a_base_page_wait_for_no_actor_part(self) -> None:
+        self.assertIs(shots.reads_actors(), True)
+        for state in ("guest-steer", "owner-actors"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "reads_actors", return_value=False):
+                browser, page = fake_browser({"#console-door"})
+                shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
+                for part in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
+                    self.assertNotIn(part, page.waits)
 
     def test_the_guest_shot_on_the_base_page_waits_for_no_guest_part(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

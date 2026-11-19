@@ -14,13 +14,18 @@ from collections import defaultdict
 from types import MappingProxyType
 
 from agent_tools.console import guest, service, sprints as sprint_words, view as consoleview
+from agent_tools.console.event_log import (
+    BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, INBOX_SEEN, QUESTIONS_ASKED, Event)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .test_console_guest import guest_inputs
+from .test_console_briefs import PARTS
+from .test_console_guest import at, guest_inputs
+from .test_console_inbox import C1, approve, comment_node, decision, issue_node
+from .test_console_inbox import page as tracker_page, read as tracker_read
 from .test_console_page import (
-    ACTIVATION, CHECK, CHECK_ITEM, F3, HANDOFF_W, HARNESS, HEADSUP_W, OWNER_W, PAGE, REPORTED, SPRINT, START,
-    UNDATED_WAIT,
-    box_open, full, has_class, message_entry, nodes, project, role, view, with_check, with_notices,
-    with_sprints)
+    ACTIVATION, APPROVED_TEXT, APPROVING_TEXT, BRIEF, CHECK, CHECK_ITEM, DONE_SPRINT, F3, HANDOFF_W, HARNESS,
+    HEADSUP_W, OWNER_W, PAGE, REPORTED, SENT_TEXT, SPRINT, START, UNDATED_WAIT,
+    box_open, full, has_class, message_entry, nodes, posted, project, question, role, view, with_check,
+    with_notices, with_sprints)
 
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_TAILNET = "other.invented-tailnet.ts.net"
@@ -425,14 +430,18 @@ class GuestPageTest(unittest.TestCase):
     def test_the_guest_page_draws_no_owner_part_even_from_an_owner_frame(self) -> None:
         snap = harness([*GUEST_STEPS, *KEYS, {"snapshot": "page"}], GUEST)[-1]
         for member in ("capacity", "accounts", "accounts_body", "account_add", "spend_link", "sharing",
-                       "sharing_body", "sharing_open", "goal", "register", "unmanaged", "digest", "promoted"):
+                       "sharing_body", "sharing_open", "register", "unmanaged", "digest", "promoted"):
             self.assertIsNone(snap[member], member)
+        self.assertIsNotNone(snap["goal"])
+        self.assertFalse(snap["goal"]["hidden"])
         shown = [n for child in snap["page"]["children"] if child != snap["viewer"] for n in nodes(child)]
+        in_goal = nodes(snap["goal"])
         roles = {role(n["cls"]) for n in shown if n["cls"]}
         for banned in ("activation", "ask-open", "ask-box", "ask-text", "register-open", "sprint-acts", "sprint-more"):
             self.assertNotIn(banned, roles)
-        self.assertLessEqual({role(n["cls"]) for n in shown if n["tag"] in CONTROLS and n["cls"]},
-                             {"pic-thumb", "sprint-check"})
+        self.assertLessEqual(
+            {role(n["cls"]) for n in shown if n["tag"] in CONTROLS and n["cls"] and n not in in_goal},
+            {"pic-thumb", "sprint-check"})
         for n in shown:
             if n["tag"] == "a":
                 self.assertTrue((n["href"] or "").startswith("https:"), n)
@@ -457,7 +466,7 @@ class GuestPageTest(unittest.TestCase):
         owner_snap = page_of(PAGE.read_bytes(), [START, {"frame": SCOPED}])
         who = guest_snap["top_who"]
         self.assertFalse(who["hidden"])
-        self.assertEqual(who["text"], "The owner's console, shared with you to read")
+        self.assertEqual(who["text"], "The owner's console, shared with you")
         self.assertNotIn("@", who["text"])
         self.assertNotIn("owner/", who["text"])
         self.assertTrue(owner_snap["top_who"]["hidden"])
@@ -597,3 +606,292 @@ class GuestPageTest(unittest.TestCase):
         self.assertTrue(full(shown).startswith("read "), full(shown))
         fresh = page_of(GUEST, [START, {"frame": with_check([{**CHECK_ITEM, "stale": False}])}])
         self.assertEqual(named(named(fresh["inbox"], "guest-item")[0], "read-at"), [])
+
+
+COLLEAGUE_SID, ROUND_SID = "s-mine", "s-round"
+ASKED = {"question": "Which store keeps the checkpoints?", "blocks": "the resume slice",
+         "options": ["sqlite", "files"], "recommended": "sqlite"}
+SECOND_PARTS = {**PARTS, "title": "Reader reads the checkpoint"}
+
+
+def tracker_items() -> list:
+    """The live approval (12), the paid approval (13) and the decision (15), read as the tracker reader reads them."""
+    cards = [issue_node(n, [comment_node(C1 + n, body)])
+             for n, body in ((12, approve()), (13, approve("paid")), (15, decision()))]
+    return [{**item, "project_id": "owner/p01", "repo": "owner/p01",
+             **({"confirm": f"owner/p01#{item['issue']}"} if item["confirm"] else {})}
+            for item in tracker_read(tracker_page(cards))]
+
+
+def steer_frame(*, tracker: bool = True, rounds: bool = False, asked: dict = ASKED) -> dict:
+    """The colleague's frame by the production path: the log's events, then `scoped`, `scrub` and `mark_steer`."""
+    events = [Event(1, at(1), consoleview.REGISTERED, "owner/p01", {"root": "/srv/p01"})]
+
+    def add(kind: str, payload: dict) -> None:
+        events.append(Event(len(events) + 1, at(len(events) + 1), kind, "owner/p01", payload))
+
+    for item in tracker_items() if tracker else []:
+        add(INBOX_SEEN, item)
+    add(GOAL_STATED, {"sprint_id": COLLEAGUE_SID, "goal": "Make the importer resumable", "by": COLLEAGUE})
+    add(BRIEF_SENT, {"sprint_id": COLLEAGUE_SID, "version": 1, "brief": PARTS})
+    if rounds:
+        add(GOAL_STATED, {"sprint_id": ROUND_SID, "goal": "Read the checkpoint back", "by": COLLEAGUE})
+        add(BRIEF_SENT, {"sprint_id": ROUND_SID, "version": 1, "brief": SECOND_PARTS})
+        add(BRIEF_APPROVED, {"sprint_id": ROUND_SID, "version": 1, "by": COLLEAGUE})
+        add(QUESTIONS_ASKED, {"sprint_id": ROUND_SID, "questions": [asked], "blocker": False})
+    inputs = {
+        "states": consoleview.project_states(events).values(),
+        "sprints": sprint_words.sprint_states(events),
+        "records": consoleview.inbox_records(events),
+        "sessions": [], "owner_notices": {}, "now_ms": 1_000,
+    }
+    scoped = guest.scoped(inputs, frozenset({"owner/p01"}))
+    return guest.mark_steer(guest.scrub(consoleview.derive_view(**scoped)), COLLEAGUE)
+
+
+def owner_frame_with(sprints: list, **extra: object) -> dict:
+    return {**OWNER_FRAME, **extra, "entries": [
+        {**entry, "sprints": sprints} if entry["project_id"] == "owner/p01" else entry
+        for entry in OWNER_FRAME["entries"]]}
+
+
+def sprint_of(snap: dict, title: str) -> dict:
+    (found,) = [n for n in nodes(snap["projects"])
+                if n["tag"] == "li" and has_class(n, "sprint") and title in full(n)]
+    return found
+
+
+def controls_of(tree: dict) -> list:
+    return [n for n in nodes(tree) if n["tag"] in CONTROLS]
+
+
+def posts_to(snap: dict, url: str) -> list:
+    return [p for p in snap["posts"] if p["url"] == url]
+
+
+class GuestSteerPageTest(unittest.TestCase):
+    def test_a_finished_sprint_keeps_its_starter_on_both_pages(self) -> None:
+        ended = {**DONE_SPRINT, "started_by": COLLEAGUE}
+        finished = {"label": "Finished sprints", "count": 1, "sprints": [ended]}
+        frame = view([{**project(1, []), "sprints": [], "finished_sprints": finished}])
+        for name, page in (("guest", GUEST), ("owner", PAGE.read_bytes())):
+            with self.subTest(name):
+                snap = page_of(page, [START, {"frame": frame}])
+                (line,) = [n for n in nodes(snap["projects"]) if n["tag"] == "li" and has_class(n, "finished-line")]
+                (summary,) = [c for c in nodes(line) if c["tag"] == "summary"]
+                self.assertIn("started by " + COLLEAGUE, full(summary))
+        plain = page_of(GUEST, [START, {"frame": view([{**project(1, []), "sprints": [], "finished_sprints": {
+            **finished, "sprints": [DONE_SPRINT]}}])}])
+        self.assertNotIn("started by", full(plain["projects"]))
+
+    def test_a_release_paid_or_production_card_waits_on_the_owner_with_no_control(self) -> None:
+        frame = steer_frame()
+        brief = [item for item in frame["inbox"]["open"] if item["reason"] == "brief"]
+        tracker = [item for item in frame["inbox"]["open"] if item["reason"] != "brief"]
+        self.assertEqual([item["steer"] for item in brief], [True])
+        self.assertEqual(len(tracker), 3)
+        self.assertEqual([item["steer"] for item in tracker], [False] * 3)
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        rows = named(snap["inbox"], "guest-item")
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            (wait,) = named(row, "guest-wait")
+            self.assertTrue(full(wait).startswith("Waiting on the owner"))
+            self.assertEqual(controls_of(row), [])
+        self.assertEqual(len(named(snap["inbox"], "approve")), 1)
+        self.assertEqual(snap["posts"], [])
+        (h1,) = [n for n in snap["statement"]["children"] if n["tag"] == "h1"]
+        self.assertEqual(full(h1), "3 things wait on the owner")
+        self.assertEqual([full(n) for n in named(snap["statement"], "sub")], ["1 thing waits on you"])
+
+    def test_a_production_question_the_manager_marked_owner_only_waits_with_no_control(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True, asked={**ASKED, "owner_only": True})
+        (asked,) = [item for item in frame["inbox"]["open"] if item["reason"] == "question"]
+        self.assertIs(asked["owner_only"], True)
+        self.assertIs(asked["steer"], False)
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        (row,) = named(snap["inbox"], "guest-item")
+        (wait,) = named(row, "guest-wait")
+        self.assertTrue(full(wait).startswith("Waiting on the owner"))
+        self.assertIn(ASKED["question"], full(row))
+        self.assertEqual(controls_of(row), [])
+        self.assertEqual(snap["posts"], [])
+
+    def test_a_goal_never_goes_to_another_project_when_the_chosen_one_leaves_the_list(self) -> None:
+        both = {**SCOPED, "recent_projects": ["owner/p01", "owner/p02"]}
+        left = {**SCOPED, "recent_projects": ["owner/p01"]}
+        words = "Make the importer resumable"
+        refused, sent = harness([
+            START, {"frame": both}, {"focus_on": "goal-text"},
+            {"type": {"class": "goal-text", "text": words}}, {"click": "goal-project", "nth": 1},
+            {"frame": left}, {"click": "goal-send"}, SNAP,
+            {"click": "goal-project"}, {"click": "goal-send"}, SNAP], GUEST)
+        self.assertEqual(posts_to(refused, "/api/goal"), [])
+        self.assertIn("Could not send: choose a project", full(refused["goal"]))
+        self.assertEqual([n["value"] for n in named(refused["goal"], "goal-text")], [words])
+        (post,) = posts_to(sent, "/api/goal")
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p01", "goal": words})
+
+    def test_a_mixed_guest_inbox_keeps_its_waiting_rows_through_an_approval(self) -> None:
+        frame = steer_frame()
+        steps = [START, {"frame": frame}, {"click": "approve"}, SNAP, {"clock": 5001}, SNAP,
+                 {"click": "tell-open"}, SNAP]
+        waiting, done, opened = harness(steps, GUEST)
+        for snap in (waiting, done, opened):
+            self.assertEqual(len(named(snap["inbox"], "guest-item")), 3)
+        self.assertIn(APPROVING_TEXT, full(waiting["inbox"]))
+        self.assertEqual(len(named(waiting["inbox"], "undo")), 1)
+        self.assertEqual(waiting["posts"], [])
+        (post,) = posts_to(done, "/api/approve")
+        self.assertEqual((post["method"], post["headers"]), ("POST", HEADERS))
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p01", "sprint_id": COLLEAGUE_SID, "version": 1})
+        self.assertEqual(len(done["posts"]), 1)
+        self.assertIn(APPROVED_TEXT, full(opened["inbox"]))
+        self.assertEqual(len(posts_to(opened, "/api/approve")), 1)
+
+    def test_a_steerable_brief_asks_for_changes_and_a_question_sends_its_answer(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True)
+        (asked,) = [item for item in frame["inbox"]["open"] if item["reason"] == "question"]
+        self.assertIs(asked["steer"], True)
+        snap = harness([
+            START, {"frame": frame},
+            {"input": {"cls": "reply-text", "value": "split the importer"}}, {"click": "reply-send"},
+            {"click": "opt", "nth": 1}, {"click": "send"}, {"clock": 5000}, SNAP], GUEST)[-1]
+        (reply,) = posts_to(snap, "/api/reply")
+        self.assertEqual(json.loads(reply["body"]), {
+            "project_id": "owner/p01", "sprint_id": COLLEAGUE_SID, "version": 1,
+            "reply": "split the importer"})
+        (answer,) = posts_to(snap, "/api/round-answer")
+        self.assertEqual(json.loads(answer["body"]), {
+            "project_id": "owner/p01", "sprint_id": ROUND_SID, "round": asked["round"], "question": 0,
+            "choice": 1})
+        for post in (reply, answer):
+            self.assertEqual((post["method"], post["headers"]), ("POST", HEADERS))
+        self.assertEqual(len(snap["posts"]), 2)
+        self.assertIn(SENT_TEXT, full(snap["inbox"]))
+        self.assertEqual([n["disabled"] for n in named(snap["inbox"], "send")], [True])
+        self.assertEqual([n["disabled"] for n in named(snap["inbox"], "opt")], [True, True])
+
+    def test_a_withdrawn_question_keeps_the_colleague_s_typed_words_and_its_dismiss(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True, asked={**ASKED, "needs_words": ["files"]})
+        gone = steer_frame(tracker=False)
+        kept, dismissed = harness([
+            START, {"frame": frame}, {"click": "opt", "nth": 1},
+            {"type": {"class": "words-text", "text": "keep the files"}},
+            {"click": "send"}, SNAP, {"frame": gone}, {"clock": 5000}, SNAP,
+            {"click": "kept-words-dismiss"}, SNAP], GUEST)[-2:]
+        (card,) = named(kept["inbox"], "kept-words")
+        self.assertEqual([n["value"] for n in named(card, "kept-words-text")], ["keep the files"])
+        self.assertEqual(len(named(card, "kept-words-dismiss")), 1)
+        self.assertEqual(named(dismissed["inbox"], "kept-words"), [])
+
+    def test_a_sprint_the_colleague_did_not_start_has_no_control(self) -> None:
+        mine = {**OWNER_SPRINT, "sprint_id": "b" * 16, "title": "Mine", "steer": True,
+                "started_by": COLLEAGUE, "retry": True}
+        theirs = {**OWNER_SPRINT, "sprint_id": "c" * 16, "title": "Theirs", "steer": False,
+                  "started_by": None, "retry": True}
+        frame = owner_frame_with([mine, theirs])
+        opened, sent = harness([
+            START, {"frame": frame}, {"click": "tell-open"}, SNAP,
+            {"type": {"class": "tell", "text": "keep the reader"}}, {"click": "tell-send"}, SNAP], GUEST)
+        line = sprint_of(opened, "Mine")
+        self.assertEqual(len(named(line, "tell")), 1)
+        self.assertEqual(len(named(line, "tell-send")), 1)
+        banned = {"retry", "sprint-more", "withdraw", "stop"}
+        self.assertEqual(banned & {role(n["cls"]) for n in nodes(line) if n["cls"]}, set())
+        other = sprint_of(opened, "Theirs")
+        self.assertLessEqual({role(n["cls"]) for n in controls_of(other)}, {"pic-thumb", "sprint-check"})
+        self.assertEqual(named(opened["projects"], "retry"), [])
+        self.assertEqual(len(named(other, "tell-open")), 0)
+        (post,) = posts_to(sent, "/api/message")
+        self.assertEqual(json.loads(post["body"]), {
+            "project_id": "owner/p01", "sprint_id": "b" * 16, "text": "keep the reader"})
+        self.assertEqual(len(sent["posts"]), 1)
+
+    def test_the_guest_door_asks_no_sign_in_link_from_an_owner_frame(self) -> None:
+        brief = {**BRIEF, "steer": True, "started_by": COLLEAGUE}
+        frame = {**OWNER_FRAME, "signin_runs": {"work": {"state": "running", "attempt": 1}},
+                 "inbox": {"open": [brief], "answered": []}}
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        self.assertEqual(snap["posts"], [])
+        roles = {role(n["cls"]) for n in nodes(snap["page"]) if n["cls"]}
+        self.assertEqual({"signin-send", "signin-link"} & roles, set())
+
+    def test_the_waiting_words_follow_who_can_act(self) -> None:
+        mine = {**OWNER_SPRINT, "sprint_id": "a" * 16, "title": "Mine", "steer": True,
+                "started_by": COLLEAGUE}
+        theirs = {**OWNER_SPRINT, "sprint_id": "b" * 16, "title": "Theirs", "steer": False}
+        terminal = {**OWNER_SPRINT, "sprint_id": "c" * 16, "title": "Terminal", "steer": True,
+                    "started_by": COLLEAGUE,
+                    "now_text": "waiting for your answer in the manager's terminal"}
+        asked = question(0, "Which store?", ["sqlite", "files"], "files", project_id="owner/p01",
+                         steer=True, started_by=COLLEAGUE)
+        frame = owner_frame_with([mine, theirs, terminal], inbox={"open": [asked], "answered": []})
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        text = full(sprint_of(snap, "Mine"))
+        self.assertIn("waiting on you", text)
+        self.assertIn("waiting for your answer: Which store?", text)
+        self.assertNotIn("the owner", text)
+        text = full(sprint_of(snap, "Theirs"))
+        self.assertIn("waiting on the owner", text)
+        self.assertIn("waiting for the owner's answer: Which store?", text)
+        self.assertIn("waiting for the owner's answer in the manager's terminal",
+                      full(sprint_of(snap, "Terminal")))
+        keys = [n for n in nodes(snap["page"]) if n["tag"] == "kbd" or (n["tag"] == "p" and has_class(n, "keys"))]
+        self.assertEqual(keys, [])
+
+    def test_a_mixed_round_names_the_owner_for_an_owner_only_first_question(self) -> None:
+        mine = {**OWNER_SPRINT, "sprint_id": "a" * 16, "title": "Mine", "steer": True,
+                "started_by": COLLEAGUE, "now_text": "waiting for your answer: Which store?"}
+        first = question(0, "Which store?", ["sqlite", "files"], "files", project_id="owner/p01",
+                         sprint_id="a" * 16, steer=False, started_by=COLLEAGUE, owner_only=True)
+        later = question(1, "May the reader change?", ["yes", "no"], "no", project_id="owner/p01",
+                         sprint_id="a" * 16, steer=True, started_by=COLLEAGUE)
+        frame = owner_frame_with([mine], inbox={"open": [first, later], "answered": []})
+        text = full(sprint_of(page_of(GUEST, [START, {"frame": frame}]), "Mine"))
+        self.assertIn("waiting for the owner's answer: Which store?", text)
+        self.assertNotIn("waiting for your answer", text)
+        reversed_ = owner_frame_with([mine], inbox={"open": [{**first, "steer": True}, {**later, "steer": False}],
+                                                    "answered": []})
+        text = full(sprint_of(page_of(GUEST, [START, {"frame": reversed_}]), "Mine"))
+        self.assertIn("waiting for your answer: Which store?", text)
+
+    def test_an_answered_look_card_never_decides_who_the_sprint_waits_on(self) -> None:
+        mine = {**OWNER_SPRINT, "sprint_id": "a" * 16, "title": "Mine", "steer": True,
+                "started_by": COLLEAGUE, "now_text": "waiting for your answer: May the reader change?"}
+        look = question(0, "Does the new line read right?", ["Approve", "Ask for changes"], "Approve",
+                        project_id="owner/p01", sprint_id="a" * 16, steer=False, answered=True,
+                        started_by=COLLEAGUE)
+        later = question(1, "May the reader change?", ["yes", "no"], "no", project_id="owner/p01",
+                         sprint_id="a" * 16, steer=True, started_by=COLLEAGUE)
+        frame = owner_frame_with([mine], inbox={"open": [look, later], "answered": []})
+        text = full(sprint_of(page_of(GUEST, [START, {"frame": frame}]), "Mine"))
+        self.assertIn("waiting for your answer: May the reader change?", text)
+        self.assertNotIn("the owner's answer", text)
+
+    def test_a_guest_answer_option_has_no_badge_column(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True)
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        options = named(snap["inbox"], "opt")
+        self.assertEqual(len(options), 2)
+        for option in options:
+            self.assertTrue(has_class(option, "keyless"), option["cls"])
+        owner = harness([START, {"frame": {**OWNER_FRAME, "inbox": {"open": [
+            question(0, "Which store?", ["sqlite", "files"], "files")], "answered": []}}},
+            {"snapshot": "page"}])[-1]
+        for option in named(owner["inbox"], "opt"):
+            self.assertFalse(has_class(option, "keyless"))
+
+    def test_the_guest_goal_box_offers_only_their_projects(self) -> None:
+        self.assertEqual(SCOPED["recent_projects"], ["owner/p01"])
+        typed, sent = harness([
+            START, {"frame": SCOPED}, {"focus_on": "goal-text"},
+            {"type": {"class": "goal-text", "text": "Make the importer resumable"}}, SNAP,
+            {"click": "goal-project"}, {"click": "goal-send"}, SNAP], GUEST)
+        self.assertEqual([full(n) for n in named(typed["goal"], "goal-project")], ["owner/p01"])
+        (post,) = posts_to(sent, "/api/goal")
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p01", "goal": "Make the importer resumable"})
+        self.assertEqual((post["method"], post["headers"]), ("POST", HEADERS))
+        self.assertEqual(len(sent["posts"]), 1)

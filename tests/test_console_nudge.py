@@ -58,8 +58,9 @@ class NudgeCommandTest(unittest.TestCase):
         self.assertIn(NUDGE_TEXT, argv[-1])
         self.assertIn('"owner/p01 sprint ' + SID + '"', argv[-1])
         self.assertEqual(
-            'The owner left you a message on the console. Run "sprint inbox" now and act on '
+            'A message is waiting for you on the console. Run "sprint inbox" now and act on '
             "what it returns.", NUDGE_TEXT)
+        self.assertNotIn("owner", NUDGE_TEXT)
 
     def test_the_continue_command_relays_the_idle_sentence_to_the_session_by_name(self):
         it = Nudge(SID, nudge_module.CONTINUE, NAME, "s-1", "work", "/r")
