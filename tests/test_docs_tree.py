@@ -639,11 +639,22 @@ class DocsTreeTest(unittest.TestCase):
         row = next(r for r in (adr_dir / "077-the-guest-door-on-eleven-m5-is-a-unix-socket-only-"
                                "serve-and-the-owner-can-open.md").read_text().splitlines()
                    if r.startswith("- **Status:**"))
-        self.assertEqual(row, "- **Status:** accepted; amended by ADR-console-078")
+        self.assertEqual(row, "- **Status:** accepted; amended by ADR-console-078, ADR-console-079")
         context = self.doc("docs/areas/console/CONTEXT.md")
         guest = context.split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
         self.assertIn("ADR-console-078", guest)
         self.assertIn("read from this host's Tailscale client", guest)
+
+    def test_the_access_rule_amendment_is_recorded_as_adr_079(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("079-*.md"))
+        self.assertEqual(len(found), 1, found)
+        raw = found[0].read_text()
+        self.assertEqual(tailnet_names_other_than_placeholder(raw), [])
+        self.assertEqual(logins_in(raw), [])
+        self.assertEqual(re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", raw), [])
+        self.assertEqual(
+            re.findall(r"(?<![\w:])[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![\w:])", raw), [])
 
     def test_sharing_sources_and_fixtures_name_only_placeholder_tailnets_and_logins(self):
         sources = sorted({

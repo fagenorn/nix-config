@@ -67,12 +67,15 @@ Wire format, one object:
      "sharing": {"shared": <bool>, "tailnet": <this host's read name> | null,
                  "colleagues": [{"login", "projects"}, ...],
                  "state": "off" | "unreadable" | "unchecked" | "not_proxying" | "serving",
-                 "last_request": <guest-door reading> | null, "socket": <guest socket path> | null}}
+                 "last_request": <guest-door reading> | null, "socket": <guest socket path> | null,
+                 "other_device_seen": <bool>}}
 
 `sharing` is the owner's access list for the guest door and its Serve state (#1237,
 `guest.sharing_entry`), `SHARING_OFF` when none is given; it is never on a guest's view
 (`guest.scrub`). `last_request` is the last guest-door request's `guest.reading` (counts and flags,
-never a login), null before the first one.
+never a login; its `client` is a comparison with this host's own addresses, never an address), null
+before the first one. `other_device_seen` is true once any reading since the service began had `client`
+`other_device` (ADR-console-079), false after a restart.
 
 `activation` is the one line the page shows about activating this host (#1114, #1193,
 ADR-console-043): `{"text", "state": "pending" | "running" | "activated" | "failed", "commit": <40 hex>,
@@ -964,7 +967,7 @@ ACTIVATE_LABEL = "Activate"
 OUTCOME_MS = 24 * 3600 * 1000
 SHARING_OFF = MappingProxyType({
     "shared": False, "tailnet": None, "colleagues": [], "state": "off", "last_request": None,
-    "socket": None})
+    "socket": None, "other_device_seen": False})
 
 
 @dataclass(frozen=True)

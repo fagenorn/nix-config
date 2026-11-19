@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the thirty-nine screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -76,8 +76,10 @@ Contract:
   `HEAD_ASK`: the field shown, the working question's line, the panel's Read line), `ask-goal`
   the fold, that line and the panel's Make it a goal, `questions-open` the fold and the newest
   thread's line; on a page without it each clicks what it always did.
-  `sharing-panel` is the owner's Sharing panel opened over one invented colleague of `owner/web`
-  after one admitted guest request; `sharing-off` is that panel with sharing switched off and
+  `sharing-panel` is the owner's Sharing panel, with Serve on, opened over one invented colleague
+  of `owner/web` after one admitted request from this host itself, so it shows the no-other-device
+  line; `sharing-reached` is that panel after a further request from another device;
+  `sharing-off` is that panel with sharing switched off and
   the read name shown, and `sharing-unreadable` is it with sharing on and no readable name, so
   it shows its line; neither makes a guest request; `guest-page` is that colleague's read-only page through a
   stand-in Serve that adds the tailnet Host and login header, refused when a page with a door
@@ -85,7 +87,7 @@ Contract:
   the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
   `guest-page` is the page the guest port served then, so a base run still writes every file.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 78 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 80 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -176,7 +178,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "sharing-panel",
-          "sharing-off", "sharing-unreadable", "guest-page")
+          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -189,8 +191,11 @@ LOOK_HEAD = "3f9c1d27a05be84c61d9f0273b8e5a14c7d0962e"
 LOOK_FOUND = "8e41b0a6d2c7f35918ae04b7c6d1259f3e0a7b84"
 TAILNET = "desk.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
-SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "guest-page")
-SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable")
+SELF_ADDRESS = "100.64.0.10"
+OTHER_DEVICE_ADDRESS = "100.64.0.20"
+SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
+                  "guest-page")
+SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
 MILESTONES = {"Add resumable uploads": "the upload form",
@@ -891,12 +896,23 @@ def _door_connection(door: str | tuple[str, int], timeout: float) -> http.client
     return http.client.HTTPConnection(*door, timeout=timeout)
 
 
-def _tailnet_kwargs(guest_dir: Path | None, readable: bool) -> dict:
-    """The reader of this host's tailnet name for a guest door; a base constructor takes none (#1305)."""
-    if guest_dir is None or "status_reader" not in inspect.signature(ConsoleService).parameters:
+def _tailnet_kwargs(guest_dir: Path | None, readable: bool, service: list) -> dict:
+    """The readers of this host's tailnet name and of Serve for a guest door; a base constructor takes none (#1305).
+
+    A readable name carries this host's own address, and Serve proxies the tailnet name to the
+    service's own guest socket; `service` is filled with that service as it is built, so the proxy
+    names the path the service keeps.
+    """
+    parameters = inspect.signature(ConsoleService).parameters
+    if guest_dir is None or "status_reader" not in parameters:
         return {}
-    return {"status_reader": (lambda: {"Self": {"DNSName": TAILNET + "."}}) if readable
-            else (lambda: None), "serve_seconds": 3600}
+    kwargs: dict = {"status_reader": (lambda: {"Self": {"DNSName": TAILNET + ".",
+                                                        "TailscaleIPs": [SELF_ADDRESS]}})
+                    if readable else (lambda: None), "serve_seconds": 3600}
+    if readable and "serve_reader" in parameters:
+        kwargs["serve_reader"] = lambda: {"Web": {f"{TAILNET}:443": {"Handlers": {
+            "/": {"Proxy": "unix:" + service[0].guest_socket}}}}}
+    return kwargs
 
 
 def start_service(fixture: Fixture, now_s: float, launches: list | None = None, *,
@@ -913,6 +929,7 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
             PullRequest(7, frozenset(fixture.holding), False, None, True),)
     if fixture.activating:
         forge["activation_reader"] = _activation_reader(fixture.activating)
+    bound: list = []
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: sorted((fixture.accounts / "profiles").glob("*")), token_path=fixture.token, sprint_secrets=fixture.secrets,
@@ -923,7 +940,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         dispatch=lambda job: job(),
         repo_of=lambda cwd: cwd, ping_log=lambda: None,
         **({} if guest_dir is None else guest_door_kwargs(ConsoleService, guest_dir)),
-        **_tailnet_kwargs(guest_dir, tailnet_readable), **forge)
+        **_tailnet_kwargs(guest_dir, tailnet_readable, bound), **forge)
+    bound.append(service)
     service.start()
     if guest_dir is not None and "status_reader" in inspect.signature(ConsoleService).parameters:
         service.poll_serve()
@@ -947,14 +965,26 @@ def _guest_headers(door: str | tuple[str, int]) -> dict:
 
 
 def _guest_get(door: str | tuple[str, int], path: str = "/", *,
-               login: str | None = COLLEAGUE) -> http.client.HTTPResponse:
-    """One GET to `door` carrying the door's host headers and the colleague's login header."""
+               login: str | None = COLLEAGUE,
+               forwarded_for: str | None = None) -> http.client.HTTPResponse:
+    """One GET to `door` carrying the door's host headers, the colleague's login header and, when given, `X-Forwarded-For`."""
     headers = _guest_headers(door)
     if login is not None:
         headers["Tailscale-User-Login"] = login
+    if forwarded_for is not None:
+        headers["X-Forwarded-For"] = forwarded_for
     connection = _door_connection(door, 10)
     connection.request("GET", path, headers=headers)
     return connection.getresponse()
+
+
+def guest_requests(state: str, door: str | tuple[str, int]) -> None:
+    """The guest-door requests a sharing `state` makes before it is shot: `sharing-panel` one from
+    this host itself, `sharing-reached` that and then one from another device, any other none."""
+    if state in ("sharing-panel", "sharing-reached"):
+        _guest_get(door, forwarded_for=SELF_ADDRESS).read()
+    if state == "sharing-reached":
+        _guest_get(door, forwarded_for=OTHER_DEVICE_ADDRESS).read()
 
 
 class _Serve:
@@ -1033,8 +1063,8 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                     serve = None
                     try:
                         host, port = service.address
-                        if state == "sharing-panel":
-                            _guest_get(guest_door(service)).read()
+                        if state in SHARING_PANELS:
+                            guest_requests(state, guest_door(service))
                         elif state == "guest-page":
                             serve = _Serve(guest_door(service))
                             host, port = serve.address
