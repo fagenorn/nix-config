@@ -14,6 +14,7 @@ import json
 import os
 import pwd
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -23,7 +24,7 @@ import unittest.mock
 from pathlib import Path
 
 from agent_tools.console import (
-    checkout_remote, event_log, folder_trust, register, register_check, sprints)
+    checkout_remote, event_log, folder_trust, manager, register, register_check, sprints)
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -1473,6 +1474,21 @@ class DraftRealTest(DraftCase):
         second = self.answered_draft(first["plan_id"], "build-command", "none")
         return self.answered_draft(second["plan_id"], "test-command", "none")
 
+    def test_the_draft_read_runs_git_in_its_own_group_under_the_stop(self):
+        runs = []
+        original = manager.run_in_own_group
+
+        def recording(argv, **kwargs):
+            runs.append((argv, kwargs))
+            return original(argv, **kwargs)
+
+        with unittest.mock.patch.object(manager, "run_in_own_group", recording):
+            self.registered(self.repo)
+        reads = [kwargs for argv, kwargs in runs if argv[1] == "-C" and "ls-remote" in argv]
+        self.assertEqual(len(reads), 1)
+        self.assertIs(reads[0]["cancel"], self.svc._stop)
+        self.assertIs(reads[0]["start_new_session"], True)
+
     def test_a_repository_with_no_contract_is_drafted_from_its_remote(self):
         reg = self.registered(self.repo)
         self.assertEqual(reg["result"], "drafting")
@@ -2037,6 +2053,38 @@ class RegisterCloseTest(Case):
         self.assertEqual(str(caught.exception), register.STOPPING)
         self.assertEqual(fake.calls, [])
         self.assertIsNone(self.svc._registering)
+
+    def test_a_failed_event_log_write_at_the_end_of_a_run_leaves_close_free(self):
+        self.begin(Fake(plan=PLANNED), dispatch=None)
+        repo = git_repo(self.parent / "r")
+        append = self.svc.log.append
+
+        def failing(events):
+            if any(event[0] == event_log.REGISTRATION_ENDED for event in events):
+                raise sqlite3.OperationalError("disk I/O error")
+            return append(events)
+
+        with (unittest.mock.patch.object(self.svc.log, "append", failing),
+              unittest.mock.patch.object(threading, "excepthook", lambda args: None)):
+            self.assertEqual(self.post({"path": str(repo)})[0], 204)
+            end = time.monotonic() + 10
+            while self.svc._registering is not None and time.monotonic() < end:
+                time.sleep(0.05)
+            self.assertIsNone(self.svc._registering)
+            closer, errors = closing(self.svc)
+            assert_freed(self, closer, errors)
+
+    def test_a_publication_that_fails_before_the_dispatch_releases_the_reservation(self):
+        queued = []
+        self.begin(Fake(plan=PLANNED), dispatch=queued.append)
+        repo = git_repo(self.parent / "r")
+        with unittest.mock.patch.object(self.svc, "_publish", side_effect=RuntimeError("publish")):
+            with self.assertRaises(RuntimeError):
+                self.svc.register_project(str(repo))
+        self.assertEqual(queued, [])
+        self.assertIsNone(self.svc._registering)
+        closer, errors = closing(self.svc)
+        assert_freed(self, closer, errors)
 
     def test_a_dispatch_that_refuses_leaves_close_free(self):
         def dispatch(job):

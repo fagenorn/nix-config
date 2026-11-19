@@ -3612,7 +3612,7 @@ class ConsoleService:
                  signer_out: Callable[[probe.Probe], None] | None = None,
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
-                 draft_reader: Callable[[str], dict] = contract_draft.read,
+                 draft_reader: Callable[[str], dict] | None = None,
                  checkout_reader: Callable[..., checkout_remote.Comparison] = checkout_remote.compare,
                  checkout_updater: Callable[..., checkout_remote.Updated] = checkout_remote.update,
                  forge=None,
@@ -3659,7 +3659,7 @@ class ConsoleService:
         self._signer_out = signer_out
         self._account_remover = account_remover
         self._adopter = adopter
-        self._draft_reader = draft_reader
+        self._draft_reader = draft_reader or self._read_draft
         self._checkout_reader = checkout_reader
         self._checkout_updater = checkout_updater
         self._forge = forge
@@ -4372,6 +4372,24 @@ class ConsoleService:
             raise sprints.Refused(register.STOPPING)
         self._registering = root
 
+    def _announce_run(self) -> None:
+        """Publish an admitted run, releasing it when the publication fails; `_ingest` held (#1330).
+
+        Nothing is dispatched yet at that point, so no worker would ever release the reservation
+        and `close` would wait on it for good.
+        """
+        try:
+            self._publish()
+        except BaseException:
+            self._answering = False
+            self._approving = False
+            self._end_run()
+            raise
+
+    def _read_draft(self, root: str) -> dict:
+        """Read a checkout for its draft, its git children ended by the stop (#1330)."""
+        return contract_draft.read(root, cancel=self._stop)
+
     def _end_run(self) -> None:
         """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
         self._registering = None
@@ -4819,7 +4837,7 @@ class ConsoleService:
             if self._registering is not None:
                 raise sprints.Refused(register.running(register.name_of(self._registering)))
             self._admit_run(str(root))
-            self._publish()
+            self._announce_run()
         try:
             self._dispatch(lambda: self._run_registration(str(root), entries))
         except BaseException:
@@ -4851,7 +4869,7 @@ class ConsoleService:
             if self._check_answerable(root, choice)["at"] != latest["at"]:
                 raise sprints.Refused(register.NOT_WAITING)
             self._admit_run(root)
-            self._publish()
+            self._announce_run()
 
         remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
 
@@ -4889,7 +4907,7 @@ class ConsoleService:
                 if self._cancellable(root) is not latest:
                     raise sprints.Refused(register.NOT_WAITING)
                 self._admit_run(root)
-                self._publish()
+                self._announce_run()
             try:
                 if self._adopter is None:
                     refused = True
@@ -4903,30 +4921,42 @@ class ConsoleService:
                     self._end_run()
                     self._publish()
                 raise
+            # The reservation stays through the log append: a registration admitted between the
+            # discard and the row would otherwise find the copy gone and no cancellation (#1330).
             with self._ingest:
-                self._end_run()
-                if refused:
+                try:
+                    if refused:
+                        raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+                    self._record_cancel(root, latest, held=True)
+                finally:
+                    self._end_run()
                     self._publish()
-            if refused:
-                raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+            return
         with self._ingest:
-            if self._cancellable(root) is not latest:
-                raise sprints.Refused(register.NOT_WAITING)
-            plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
-                                             if one != latest["plan_id"])]
-            self._cancelled[root] = self._cancelled.get(root, 0) + 1
-            self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
-            self._answer_refusal = None
+            self._record_cancel(root, latest, held=False)
             self._publish()
+
+    def _record_cancel(self, root: str, latest: dict, *, held: bool) -> None:
+        """Append the cancellation rows of `root`; `held` is the caller's own reservation; `_ingest` held."""
+        if self._cancellable(root, held=held) is not latest:
+            raise sprints.Refused(register.NOT_WAITING)
+        plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
+                                         if one != latest["plan_id"])]
+        self._cancelled[root] = self._cancelled.get(root, 0) + 1
+        self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
+        self._answer_refusal = None
 
     def _failed_applies(self, root: str) -> list[str]:
         """The plan ids of `root` whose apply failed, held under the ingest lock."""
         return sorted(plan_id for plan_id, found in self._adoptions.items()
                       if found["root"] == root and found["step"] == "apply_failed")
 
-    def _cancellable(self, root: str) -> dict:
-        """The shown registration of `root` when it may be cancelled, held under the ingest lock."""
-        if self._registering is not None:
+    def _cancellable(self, root: str, *, held: bool = False) -> dict:
+        """The shown registration of `root` when it may be cancelled, held under the ingest lock.
+
+        `held` is a cancel that keeps its own reservation, which is not another run.
+        """
+        if self._registering is not None and not held:
             raise sprints.Refused(register.running(register.name_of(self._registering)))
         latest = self._registration
         if latest is None or latest["root"] != root:
@@ -5026,9 +5056,11 @@ class ConsoleService:
         elif remote is not None:
             payload = {**payload, "remote": remote}
         with self._ingest:
-            if not self._closed:
-                self._fold(self.log.append([register.ended(payload)]))
-            self._end_run()
+            try:
+                if not self._closed:
+                    self._fold(self.log.append([register.ended(payload)]))
+            finally:
+                self._end_run()
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5085,7 +5117,7 @@ class ConsoleService:
             self._admit_run(root)
             self._answering = True
             self._answer_refusal = None
-            self._publish()
+            self._announce_run()
         try:
             self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed, remote))
         except BaseException:
@@ -5105,6 +5137,9 @@ class ConsoleService:
             plan_ids = sorted(plan_id for plan_id, found in self._adoptions.items()
                               if found["root"] == root and found["step"] == "apply_failed")
         for plan_id in plan_ids:
+            if self._stop.is_set():
+                # A run queued behind a kept copy starts no cleanup once the console stops (#1330).
+                raise register.RunFailed("cancelled")
             if not approve.left_behind(plan_id, root):
                 continue
             try:
@@ -5210,14 +5245,16 @@ class ConsoleService:
             traceback.print_exception(error, file=sys.stderr)
             text = plan_questions.rerun_failed(register.UNEXPECTED)
         with self._ingest:
-            if payload is not None and not self._closed:
-                self._fold(self.log.append([register.ended(payload)]))
-            elif payload is None:
-                self._answer_refusal = {
-                    "plan_id": plan_id, "text": text,
-                    "id": asked["id"], "subject": asked["subject"]}
-            self._end_run()
-            self._answering = False
+            try:
+                if payload is not None and not self._closed:
+                    self._fold(self.log.append([register.ended(payload)]))
+                elif payload is None:
+                    self._answer_refusal = {
+                        "plan_id": plan_id, "text": text,
+                        "id": asked["id"], "subject": asked["subject"]}
+            finally:
+                self._end_run()
+                self._answering = False
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5252,7 +5289,7 @@ class ConsoleService:
             adoption = None if found is None else dict(found)
             self._admit_run(root)
             self._approving = True
-            self._publish()
+            self._announce_run()
         try:
             self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
         except BaseException:
@@ -5379,11 +5416,13 @@ class ConsoleService:
             traceback.print_exception(error, file=sys.stderr)
         appended = False
         with self._ingest:
-            if final is not None and not self._closed:
-                self._fold(self.log.append([approve.step_row(final)]))
-                appended = True
-            self._end_run()
-            self._approving = False
+            try:
+                if final is not None and not self._closed:
+                    self._fold(self.log.append([approve.step_row(final)]))
+                    appended = True
+            finally:
+                self._end_run()
+                self._approving = False
             if not self._closed:
                 self._publish()
         if not self._closed:
