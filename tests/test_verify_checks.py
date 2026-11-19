@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import tracemalloc
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -573,6 +574,71 @@ class SuiteWallTimeTest(unittest.TestCase):
                     break
                 if time.monotonic() > deadline:
                     self.fail("the suite's grandchild survived the kill")
+
+    def test_a_slow_pass_reports_the_wall_time_it_was_judged_on(self):
+        code, report = verify_checks.suite_wall_verdict(0, 599.96, 600)
+        self.assertEqual((code, report["verdict"]), (0, "met"))
+        self.assertLess(report["wall_seconds"], report["limit"])
+        code, report = verify_checks.suite_wall_verdict(0, 600.04, 600)
+        self.assertEqual((code, report["verdict"]), (1, "slow"))
+        self.assertGreaterEqual(report["wall_seconds"], report["limit"])
+
+    def test_a_daemon_in_its_own_session_is_killed_at_the_deadline(self):
+        suite = (
+            "import subprocess, sys, time\n"
+            "daemon = subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'],\n"
+            "                          start_new_session=True)\n"
+            "open(sys.argv[1], 'w').write(str(daemon.pid))\n"
+            "time.sleep(60)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = Path(tmp) / "pid"
+            script = Path(tmp) / "suite.py"
+            script.write_text(suite)
+            code, report = verify_checks.suite_wall_time(
+                2.0, root=Path(tmp), argv=[sys.executable, str(script), str(pidfile)])
+            pid = pidfile.read_text().strip()
+            try:
+                self.assertEqual((code, report["verdict"]), (1, "deadline"))
+                deadline = time.monotonic() + 5
+                while True:
+                    stat = subprocess.run(["ps", "-o", "stat=", "-p", pid],
+                                          capture_output=True, text=True).stdout.strip()
+                    if stat == "" or stat.startswith("Z"):
+                        break
+                    if time.monotonic() > deadline:
+                        self.fail("the daemon started in its own session survived the deadline")
+            finally:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(int(pid), 9)
+
+    def test_the_summary_is_found_in_a_huge_log_without_holding_it(self):
+        line = "suite-runner: summary members=2 passed=1 failed=1 jobs=1 wall=1.0s cpu=0.1s"
+        body = (f"head -c 33554432 /dev/zero | tr '\\0' x\necho\necho 'suite-runner: summary old'\n"
+                f"echo '{line}'\necho tail\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _fake_program(tmp, "suite", body)
+            tracemalloc.start()
+            try:
+                _, report = verify_checks.suite_wall_time(60.0, root=Path(tmp), argv=[fake])
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertEqual(report["summary"], line)
+        self.assertLess(peak, 4 * 1024 * 1024)
+
+    def test_the_last_summary_scan_across_chunk_boundaries(self):
+        prefix = b"suite-runner: summary"
+        cases = [
+            (b"a\n" + prefix + b" one\nnoise\n" + prefix + b" two\nzzz", prefix.decode() + " two"),
+            (b"x" * 50 + b"\n" + prefix + b" only", prefix.decode() + " only"),
+            (b"no summary here\n" * 5, None),
+            (prefix + b" a\n" + b"y" * 10000 + b"\n", prefix.decode() + " a"),
+            (b"", None),
+        ]
+        for data, expected in cases:
+            for chunk in (1, 3, 7, 64):
+                with self.subTest(data=data[:30], chunk=chunk):
+                    self.assertEqual(verify_checks._last_summary(io.BytesIO(data), chunk), expected)
 
     def test_a_failing_suite_is_not_met(self):
         with tempfile.TemporaryDirectory() as tmp:

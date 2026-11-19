@@ -281,11 +281,12 @@ positive integer is a usage error (2).
 `suite-wall-time --limit SECONDS` (`verify_checks.suite_wall_time`, issue 1314) runs `just
 agent-workflow-tests` at the repository root and is met (0) only when the suite exits 0 in strictly under
 SECONDS of wall time; a suite that exits non-zero is not met (1, verdict `failed`) and so is one that takes
-SECONDS or longer (verdict `slow`). The suite is killed at SECONDS with its whole process group and a killed
-run reads as not met (1, verdict `deadline`). SECONDS may not exceed the runner's `verify_exec.TIMEOUT` less
+SECONDS or longer (verdict `slow`). At SECONDS the suite is killed with its whole process group and every
+descendant found by parentage, in whatever session (a test fixture's daemon included), and a killed run
+reads as not met (1, verdict `deadline`). `wall_seconds` is the unrounded value the verdict was judged on. SECONDS may not exceed the runner's `verify_exec.TIMEOUT` less
 `SUITE_REPORT_MARGIN`, so the check always reports before the runner kills it; a missing, non-numeric,
 non-positive or larger SECONDS is a usage error (2) before any suite starts. The suite runs with
-`GITHUB_TOKEN` and `GH_TOKEN` removed and its output kept off stdout, which is one JSON line `{"check",
+`GITHUB_TOKEN` and `GH_TOKEN` removed and its output kept in a temp file, scanned in chunks for the summary, and off stdout, which is one JSON line `{"check",
 "verdict", "wall_seconds", "limit", "suite_exit", "summary"}` (`summary` is the suite's last
 `suite-runner: summary` line, else null).
 """
@@ -312,6 +313,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Iterator, Mapping, Sequence
+from typing import IO
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -2342,14 +2344,74 @@ def suite_wall_verdict(suite_exit: int | None, wall_seconds: float, limit: float
         verdict = "slow"
     else:
         verdict = "met"
-    report = {"check": "suite-wall-time", "verdict": verdict, "wall_seconds": round(wall_seconds, 1),
+    report = {"check": "suite-wall-time", "verdict": verdict, "wall_seconds": wall_seconds,
               "limit": limit, "suite_exit": suite_exit, "summary": summary}
     return (0 if verdict == "met" else 1), report
 
 
+SUMMARY_PREFIX = b"suite-runner: summary"
+LOG_CHUNK = 1 << 16  # bytes read at a time from the suite's log
+LOG_LINE_CAP = 1 << 12  # bytes kept of one log line: a summary line is far shorter
+
+
+def _last_summary(log: IO[bytes], chunk: int = LOG_CHUNK) -> str | None:
+    """The last `suite-runner: summary` line of `log`, read `chunk` bytes at a time with at most
+    `LOG_LINE_CAP` bytes of any one line held, so a huge log costs time and never memory."""
+    summary: bytes | None = None
+    line = b""
+    while True:
+        block = log.read(chunk)
+        if not block:
+            break
+        parts = (line + block).split(b"\n")
+        for done in parts[:-1]:
+            if done.startswith(SUMMARY_PREFIX):
+                summary = done
+        line = parts[-1][:LOG_LINE_CAP]
+    if line.startswith(SUMMARY_PREFIX):
+        summary = line
+    return None if summary is None else summary.decode("utf-8", "replace")
+
+
+def _process_children() -> dict[int, list[int]]:
+    """Every live process's children, from one `ps` listing (empty when `ps` cannot be read)."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True,
+                                 timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    children: dict[int, list[int]] = {}
+    for row in listing.splitlines():
+        fields = row.split()
+        if len(fields) == 2 and all(field.isdigit() for field in fields):
+            children.setdefault(int(fields[1]), []).append(int(fields[0]))
+    return children
+
+
+def _freeze_descendants(root_pid: int) -> set[int]:
+    """Stop `root_pid`'s descendants, however many sessions they span, and return them: a stopped
+    process forks nothing, so repeating until a listing shows nothing new reaches the whole tree."""
+    seen: set[int] = set()
+    for _ in range(10):
+        children = _process_children()
+        queue, found = [root_pid], set()
+        while queue:
+            for child in children.get(queue.pop(), ()):
+                if child not in seen and child not in found:
+                    found.add(child)
+                    queue.append(child)
+        if not found:
+            break
+        for pid in found:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGSTOP)
+        seen |= found
+    return seen
+
+
 def suite_wall_time(limit: float, *, root: Path = Path("."),
                     argv: Sequence[str] = SUITE_ARGV) -> tuple[int, dict]:
-    """Run `argv` at `root`, kill its process group at `limit` seconds and judge the wall time."""
+    """Run `argv` at `root`, kill everything it started at `limit` seconds and judge the wall time."""
     with tempfile.TemporaryFile("w+b") as output:  # a file, never a pipe: the output is never read live
         started = time.monotonic()
         proc = subprocess.Popen(list(argv), cwd=root, stdin=subprocess.DEVNULL, stdout=output,
@@ -2358,17 +2420,19 @@ def suite_wall_time(limit: float, *, root: Path = Path("."),
         try:
             suite_exit: int | None = proc.wait(timeout=limit)
         except subprocess.TimeoutExpired:
+            # A fixture's daemon in its own session is outside the process group and its test is
+            # killed before it can reap it, so the descendants are found by parentage and killed too.
+            descendants = _freeze_descendants(proc.pid)
             with contextlib.suppress(OSError):
                 os.killpg(proc.pid, signal.SIGKILL)
+            for pid in descendants:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
             proc.wait()
             suite_exit = None
         wall_seconds = time.monotonic() - started
         output.seek(0)
-        text = output.read().decode("utf-8", "replace")
-    summary = None
-    for line in text.splitlines():
-        if line.startswith("suite-runner: summary"):
-            summary = line
+        summary = _last_summary(output)
     return suite_wall_verdict(suite_exit, wall_seconds, limit, summary)
 
 
