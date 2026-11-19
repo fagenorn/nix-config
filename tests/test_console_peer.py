@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 
+import errno
 import os
 import socket
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console.peer import (
     LOOKUP_TIMEOUT_SECONDS, NOT_OWNER_TEXT, UNREADABLE_TEXT, Holder, parse_lsof, read_lsof,
@@ -188,13 +190,47 @@ class ProcTest(unittest.TestCase):
         self.assertEqual(read_proc(PCLIENT, PSERVER, root=root),
                          (Holder(None, 1000, None), Holder(4242, 1000, "curl")))
 
+    def test_a_kernel_without_ipv6_has_no_tcp6_table_and_is_still_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = proc_root(tmp, [(PROC_CLIENT, PROC_SERVER, "01", 1000, 777)],
+                             processes={4242: ((1000,) * 4, "curl", [777])})
+            (root / "net/tcp6").unlink()
+            self.assertEqual(read_proc(PCLIENT, PSERVER, root=root),
+                             (Holder(None, 1000, None), Holder(4242, 1000, "curl")))
+
+    def test_a_process_whose_descriptors_cannot_be_read_is_not_seen(self):
+        real_listdir, real_readlink = os.listdir, os.readlink
+
+        def listdir(path):
+            if str(path).endswith("/1111/fd"):
+                raise OSError(errno.ESRCH, "no such process")
+            return real_listdir(path)
+
+        def readlink(path):
+            if "/2222/fd/" in str(path):
+                raise PermissionError(errno.EACCES, "denied")
+            return real_readlink(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = proc_root(tmp, [(PROC_CLIENT, PROC_SERVER, "01", 1000, 777)],
+                             processes={1111: ((1000,) * 4, "gone", [1]),
+                                        2222: ((1000,) * 4, "denied", [2]),
+                                        4242: ((1000,) * 4, "curl", [777])})
+            with mock.patch("os.listdir", listdir), mock.patch("os.readlink", readlink):
+                self.assertEqual(read_proc(PCLIENT, PSERVER, root=root),
+                                 (Holder(None, 1000, None), Holder(4242, 1000, "curl")))
+
     def test_an_unreadable_table_or_holder_reads_unreadable(self):
         row = [(PROC_CLIENT, PROC_SERVER, "01", 1000, 777)]
         with tempfile.TemporaryDirectory() as empty:
             self.assertIsNone(read_proc(PCLIENT, PSERVER, root=Path(empty)))
         with tempfile.TemporaryDirectory() as tmp:
             root = proc_root(tmp, row)
-            (root / "net/tcp6").unlink()
+            (root / "net/tcp").unlink()
+            self.assertIsNone(read_proc(PCLIENT, PSERVER, root=root))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = proc_root(tmp, row)
+            (root / "net/tcp6").write_text("  sl  local_address\n0: short\n")
             self.assertIsNone(read_proc(PCLIENT, PSERVER, root=root))
         with tempfile.TemporaryDirectory() as tmp:
             root = proc_root(tmp, row, processes={4242: ((1000,) * 4, "curl", [777])})

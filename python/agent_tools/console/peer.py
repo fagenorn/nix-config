@@ -27,8 +27,10 @@ Linux (`read_proc`) finds the row for the connection in `/proc/net/tcp` and `/pr
 pid-less holder. Holders with a pid are the processes whose `/proc/<pid>/fd/*` links read
 `socket:[<inode>]`, one holder per distinct value of the `Uid:` line of `/proc/<pid>/status`
 (real, effective, saved, filesystem), so a set-user-ID process or a socket owned by another uid
-refuses. A TIME_WAIT row (inode 0) has no holder. Either proc table unreadable, or a holder's
-`status` or `comm` unreadable, is `None`, never a skipped table.
+refuses. A TIME_WAIT row (inode 0) has no holder. A missing `/proc/net/tcp6` (a kernel without IPv6) is no
+IPv6 socket; `/proc/net/tcp` or `/proc/net/tcp6` otherwise unreadable, or a holder's `status` or
+`comm` unreadable, is `None`, never a skipped table. A process whose `fd` directory cannot be
+listed, or whose descriptor cannot be read, is not seen (like another user's process).
 
 `read_lsof` and `read_proc` never raise: any `OSError`, `subprocess.TimeoutExpired` or `ValueError`
 is `None`. `reader_for(platform)` names the reader (`darwin` lsof, `linux*` proc, else `None`).
@@ -146,8 +148,11 @@ def _credentials(status: str) -> list[int]:
 
 def read_proc(client: Address, server: Address, *, root: Path = Path("/proc")) -> tuple[Holder, ...] | None:
     try:
-        rows = (_rows(root / "net/tcp", client, server, False)
-                + _rows(root / "net/tcp6", client, server, True))
+        rows = _rows(root / "net/tcp", client, server, False)
+        try:
+            rows += _rows(root / "net/tcp6", client, server, True)
+        except FileNotFoundError:
+            pass  # a kernel without IPv6 has no tcp6 table, hence no IPv6 socket to find
         if not rows:
             return ()
         holders = [Holder(None, uid, None) for uid in dict.fromkeys(uid for uid, _ in rows)]
@@ -156,13 +161,13 @@ def read_proc(client: Address, server: Address, *, root: Path = Path("/proc")) -
             fd = root / entry / "fd"
             try:
                 names = os.listdir(fd)
-            except (PermissionError, FileNotFoundError):
-                continue
+            except OSError:
+                continue  # a process whose descriptors this user cannot list is not seen
             held = False
             for name in names:
                 try:
                     held = os.readlink(fd / name) in inodes
-                except FileNotFoundError:
+                except OSError:
                     continue
                 if held:
                     break
