@@ -47,6 +47,14 @@ def tailnet_names_other_than_placeholder(text: str) -> list:
     return [name for name in TAILNET_NAME.findall(text) if name != TAILNET_PLACEHOLDER]
 
 
+LOGIN_LIKE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*")
+
+
+def logins_in(text: str) -> list:
+    """Every email-style login in `text`; the `<colleague-login>` placeholder is not one."""
+    return LOGIN_LIKE.findall(text)
+
+
 def land_queue_section(text: str, name: str) -> str:
     """The text after the line `## <name>` up to the next `## ` line; "" when absent."""
     lines = text.splitlines(keepends=True)
@@ -848,6 +856,40 @@ class DocsTreeTest(unittest.TestCase):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
 
+    def test_the_guest_socket_amendment_is_recorded_as_adr_077(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("077-*.md"))
+        self.assertEqual(len(found), 1, found)
+        raw = found[0].read_text()
+        text = re.sub(r"\s+", " ", raw)
+        self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-077 \u2014 "))
+        for needle in (
+            "- **Status:** accepted", "- **Decided in:** #1298", "ADR-console-066", "ADR-console-076",
+            "eleven-m5", "Unix socket", "mode-0700", "peer user", "second line", "administrator",
+            "sudo tailscale serve --bg --https=443 unix:<socket-path>", "tailscale serve status",
+            "sudo tailscale serve --https=443 off", "<host>.<tailnet>.ts.net", "<colleague-login>",
+            "tailscaled", "console-guest-door", "Funnel", "D2", "tailscale.exe",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        self.assertEqual(logins_in(text), [])
+        d2 = text.split("**D2.", 1)[1].split("**D3.", 1)[0]
+        for needle in ("admits only root", "the owner's own user",
+                       "Any other peer is refused before a request is read"):
+            with self.subTest(d2=needle):
+                self.assertIn(needle, d2)
+        d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
+        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged"):
+            with self.subTest(d4=needle):
+                self.assertIn(needle, d4)
+        guest = self.doc("docs/areas/console/CONTEXT.md").split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("not yet built", guest)
+        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
+                                      "through-tailscale-serve-on-a-guest-port.md"
+                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
+        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
+
     def test_the_relay_sender_decision_is_recorded_as_adr_068_and_cited_by_number(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         found = sorted(adr_dir.glob("068-*.md"))
@@ -907,6 +949,12 @@ class DocsTreeTest(unittest.TestCase):
             tailnet_names_other_than_placeholder("at https://<host>.<tailnet>.ts.net/ only"), [])
         self.assertEqual(tailnet_names_other_than_placeholder("see box.tail1234.ts.net."),
                          ["box.tail1234.ts.net"])
+
+    def test_the_login_check_flags_a_literal_login_beside_the_placeholder(self):
+        self.assertEqual(logins_in("names a listed colleague (`<colleague-login>`) only"), [])
+        self.assertEqual(
+            logins_in("names `<colleague-login>`, for example Jane.Doe@example.com, only"),
+            ["Jane.Doe@example.com"])
 
     def test_the_held_review_decision_is_recorded(self):
         path = ("docs/areas/console/adr/054-a-held-issue-whose-only-open-criterion-is-an-owner-"
