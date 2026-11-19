@@ -19,7 +19,8 @@ from agent_tools.console import capacity, probe, service, signin, signin_run
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
-from .test_console_signin_run import CODE, FAKE, LINK, LINUX, until
+from .process_liveness import process_alive
+from .test_console_signin_run import CODE, FAKE, LINK, until
 from .test_console_stream import next_frame, open_stream
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -137,11 +138,7 @@ class Case(unittest.TestCase):
         return [line for line in lines if "argv" in line]
 
     def alive(self, pid):
-        try:
-            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        except OSError:
-            return False
-        return fields[0] != "Z"
+        return process_alive(pid)
 
     def grandchild(self):
         found = []
@@ -557,7 +554,6 @@ class SigninRunServiceTest(Case):
         self.assertEqual(self.view()["signin_runs"]["work"],
                          {"state": "running", "at": None, "attempt": acted[0][0]})
 
-    @unittest.skipUnless(LINUX, "reads /proc")
     def test_a_timed_out_or_cancelled_sign_in_is_killed_and_offered_again(self):
         self.environ["FAKE_MODE"] = "hang"
         svc = self.begin()
@@ -579,7 +575,6 @@ class SigninRunServiceTest(Case):
         self.assertEqual((ended[1][1]["outcome"], ended[1][1]["attempt"]), ("cancelled", again))
         self.assertEqual(self.item("signin/work")["run"]["state"], "cancelled")
 
-    @unittest.skipUnless(LINUX, "reads /proc")
     def test_an_unsuccessful_run_whose_status_read_fails_is_offered_again(self):
         for outcome in ("cancelled", "timed_out"):
             with self.subTest(outcome=outcome):
