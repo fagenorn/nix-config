@@ -37,8 +37,9 @@ unreadable one. `hook_stranded` judges a hook only when every non-comment line i
 allowlist of shapes, and every other hook is unjudged and never stranded, so its plan stays as it is
 today (#1333). The shapes are: a blank line; a first-line shebang whose interpreter is `sh`, `bash`,
 `dash` or `zsh` (directly or through `env`); `NAME=value` or `NAME="value"` for any `NAME` but `PATH`
-(a trailing `#` comment aside; a value that is wholly one `$( )` or backtick substitution is allowed,
-and is never a runner candidate); `if [ ... ]; then`, `else` and `fi` lines, the test holding no `;`,
+(a trailing `#` comment aside; the value is one literal word with no unquoted `;`, `&`, `|`, `<`, `>`,
+parenthesis or backtick, or is wholly one balanced `$( )` or backtick substitution, which is never a
+runner candidate, so a line holding several commands is never of this shape); `if [ ... ]; then`, `else` and `fi` lines, the test holding no `;`,
 `&`, `|`, `<`, `>`, backtick, parenthesis or brace; and exactly one line-leading `exec` of a word or of
 `"$NAME"` (`$NAME`, `${NAME}`), outside any `if`, followed by any arguments. A runner variable's
 candidates are only its literal assigned values. A line of any other shape (a `PATH` assignment, an
@@ -513,7 +514,6 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _EXEC = re.compile(r"^exec\s+(.*)$")
 _IF = re.compile(r"^if \[ [^;&|<>`(){}]* \]; then$")
-_SUBSTITUTION = re.compile(r"\"\$\(.*\)\"|\$\(.*\)|`[^`]*`")
 _VARIABLE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 _SHELL_SYNTAX = set("$`;&|<>()")
 _SHELLS = ("sh", "bash", "dash", "zsh")
@@ -532,15 +532,64 @@ def _shell_shebang(line: str) -> bool:
     return bool(words) and posixpath.basename(words[0]) in _SHELLS
 
 
-def _assigned_word(value: str) -> tuple[bool, str | None]:
-    """`(True, word)` for an assignment of exactly one literal word, `(True, None)` for a substitution.
+def _closing(text: str, index: int, quote: bool) -> int | None:
+    """The index after the `)` (or, when `quote`, the `"`) that ends what `text[index:]` opens, else `None`.
 
-    `(False, None)` when the value is anything else. A `#` that starts a word (after blanks) begins a
-    comment, which is dropped unread, so an apostrophe in it cannot spoil the split; a `#` inside a word
-    is not a comment, and the value is not judged.
+    Reads one balanced `$( )` quote-aware, so a quoted or nested parenthesis never ends it; a backtick
+    inside, a lone `'` or an unclosed form is `None`.
     """
-    if _SUBSTITUTION.fullmatch(value.rstrip()):
-        return True, None
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+        elif char == "'" and not quote:
+            index = text.find("'", index + 1) + 1 or len(text) + 1
+        elif char == "`":
+            return None
+        elif text.startswith("$(", index):
+            index = _closing(text, index + 2, False)
+            if index is None:
+                return None
+        elif char == '"':
+            if quote:
+                return index + 1
+            index = _closing(text, index + 1, True)
+            if index is None:
+                return None
+        elif char == "(" and not quote:
+            index = _closing(text, index + 1, False)
+            if index is None:
+                return None
+        elif char == ")" and not quote:
+            return index + 1
+        else:
+            index += 1
+    return None
+
+
+def _comment_only(rest: str) -> bool:
+    return not rest.strip() or (rest[0].isspace() and rest.lstrip().startswith("#"))
+
+
+def _assigned_word(value: str) -> tuple[bool, str | None]:
+    """`(True, word)` for an assignment of exactly one literal word, `(True, None)` for one substitution.
+
+    The value is one literal word (an unquoted `;`, `&`, `|`, `<`, `>`, parenthesis or backtick, or a `$(`
+    or backtick inside double quotes, makes it `(False, None)`), or wholly one balanced `$( )` or backtick
+    substitution, quoted or not. Only blanks then a `#` comment may follow; a `#` that starts a word after
+    blanks begins a comment, dropped unread, so an apostrophe in it cannot spoil the read, and a `#` inside
+    a word is not a comment and the value is not judged.
+    """
+    for opener, quote in (('"$(', True), ("$(", False)):
+        if value.startswith(opener):
+            end = _closing(value, len(opener), False)
+            if end is not None and quote:
+                end = end + 1 if value[end:end + 1] == '"' else None
+            return (True, None) if end is not None and _comment_only(value[end:]) else (False, None)
+    if value.startswith("`"):
+        end = value.find("`", 1) + 1
+        return (True, None) if end and "\\" not in value[:end] and _comment_only(value[end:]) \
+            else (False, None)
     quote = None
     escaped = False
     for index, char in enumerate(value):
@@ -549,9 +598,14 @@ def _assigned_word(value: str) -> tuple[bool, str | None]:
         elif char == "\\" and quote != "'":
             escaped = True
         elif quote:
-            quote = None if char == quote else quote
+            if char == quote:
+                quote = None
+            elif quote == '"' and (char == "`" or value.startswith("$(", index)):
+                return False, None
         elif char in "'\"":
             quote = char
+        elif char in ";&|<>()`" or value.startswith("$(", index):
+            return False, None
         elif char == "#":
             if index == 0 or not value[index - 1].isspace():
                 return False, None
@@ -568,7 +622,7 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
     """Whether a hook execs a runner that is found neither at its recorded path nor on `search_path`.
 
     A hook is judged only when every non-comment line has one of the allowlisted shapes (blank; a shell
-    shebang; `NAME=value`, `PATH` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
+    shebang; `NAME=value` as above, `PATH` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
     of a word or `"$NAME"` outside any `if`) and each candidate runner is a literal; the module docstring
     states the allowlist. Every other hook is unjudged and never stranded, and so is one read under a set
     `cancel` or with a `search_path` entry that is not absolute.

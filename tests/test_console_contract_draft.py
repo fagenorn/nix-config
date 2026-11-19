@@ -1143,6 +1143,30 @@ class StrandedHookTest(unittest.TestCase):
                 (self.bin / "prek").unlink()
                 self.assertFalse(cd.hook_stranded(text.format(body), str(self.bin)))
 
+    def test_an_assignment_line_that_is_several_commands_is_unjudged(self):
+        text = "#!/bin/sh\nPREK=/gone/prek\n{}\nexec \"$PREK\" hook-impl\n"
+        self.assertTrue(cd.hook_stranded(text.format("HERE=\"$(cd \"$(dirname \"$0\")\" && pwd)\""),
+                                         str(self.bin)))
+        for letter, body in (
+                ("semicolon", "X=1;PREK=prek"),
+                ("and", "X=1&&PREK=prek"),
+                ("pipe", "X=1|PREK=prek"),
+                ("redirect", "X=1>/dev/null"),
+                ("background", "X=1&"),
+                ("subshell", "X=(1)"),
+                ("quoted-substitutions-around-a-rebinding", "HERE=\"$(pwd)\"; PREK=prek; Y=\"$(pwd)\""),
+                ("substitution-then-a-direct-run", "HERE=$(pwd); prek hook-impl; exit $(true)"),
+                ("two-substitutions", "A=$(a) ; PREK=prek ; B=$(b)"),
+                ("quoted-paren-hides-the-end", "A=$(a \"(\" ) ; PREK=prek ; B=$(b \")\" )"),
+                ("unclosed-substitution", "A=$(a"),
+                ("two-backticks", "A=`a`; PREK=prek; B=`b`"),
+                ("substitution-and-a-word", "A=$(a)b")):
+            with self.subTest(case=letter):
+                self.tool("prek")
+                self.assertFalse(cd.hook_stranded(text.format(body), str(self.bin)))
+                (self.bin / "prek").unlink()
+                self.assertFalse(cd.hook_stranded(text.format(body), str(self.bin)))
+
     def test_an_exec_inside_an_if_is_unjudged(self):
         text = "#!/bin/sh\nif [ -n \"$X\" ]; then\n  exec /gone/prek hook-impl\nfi\n"
         self.assertFalse(cd.hook_stranded(text, str(self.bin)))
