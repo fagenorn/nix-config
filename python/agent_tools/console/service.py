@@ -3348,7 +3348,7 @@ class GuestHandler(ConsoleHandler):
         if route in GUEST_WRITES:
             if self.command != "POST":
                 return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "POST"))
-            return self._guest_write(route, policy, login)
+            return self._guest_write(route, policy, login, snapshot.epoch)
         if route in OWNER_ONLY:
             return self._refuse(403, guest.OWNER_ONLY_TEXT)
         if self.command != "GET":
@@ -3370,7 +3370,7 @@ class GuestHandler(ConsoleHandler):
         else:
             self._refuse(404, "not found")
 
-    def _guest_write(self, route: str, policy: "guest.Policy", login: str):
+    def _guest_write(self, route: str, policy: "guest.Policy", login: str, epoch: int):
         """One of the five guest writes (#1263): the owner's guard shape, the guest token and origin."""
         console = self.server.console
         refusal = write_guard.refusal(
@@ -3379,7 +3379,7 @@ class GuestHandler(ConsoleHandler):
             scheme="https")
         if refusal is not None:
             return self._refuse(*refusal)
-        by = guest.GuestActor(login, policy.name)
+        by = guest.GuestActor(login, policy.name, epoch)
         self.close_connection = True
         if route == GOAL_PATH:
             done = self._goal_request(console, route, by)
@@ -3890,6 +3890,7 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._access = guest.NO_ACCESS
+        self._guest_epoch = 0  # revocations so far (`guest.revokes`, a name change): an admitted write checks it
         self._guest = guest.NO_SNAPSHOT
         self._guest_token: str | None = None
         self._guest_page: bytes | None = None
@@ -4237,7 +4238,8 @@ class ConsoleService:
                 self._version += 1
             self._view = view
             self._guest = guest.Snapshot(
-                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked)
+                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked,
+                self._guest_epoch)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 
@@ -4408,6 +4410,8 @@ class ConsoleService:
                 raise sprints.Refused(text)
             if project_id not in self._states:
                 raise sprints.Refused(sprints.UNREGISTERED)
+            if by.epoch is not None and by.epoch != self._guest_epoch:
+                raise sprints.Refused(guest.REVOKED_TEXT)
 
     def _steered(self, by: "guest.GuestActor | None", project_id: str,
                  sprint_id: str) -> sprints.SprintState:
@@ -6000,6 +6004,8 @@ class ConsoleService:
                        brief: dict) -> tuple[sprints.SprintState, dict]:
         """Every refusal of a brief, in order, with nothing written (the caller holds the lock)."""
         sprint = self._manager_sprint(sprint_id, secret)
+        if sprint.stopped_at is not None or sprint.closing is not None:
+            raise sprints.Refused(sprints.ENDED)  # a card for it would show and no decision would take it (#1263)
         checked = sprints.checked_brief(brief)
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],
@@ -7697,7 +7703,11 @@ class ConsoleService:
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
-        self._access = guest.access_list(appended, self._access)
+        for event in appended:
+            after = guest.access_list([event], self._access)
+            if guest.revokes(self._access, after):
+                self._guest_epoch += 1
+            self._access = after
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
@@ -7889,6 +7899,8 @@ class ConsoleService:
         addresses = guest.own_addresses(status)
         with self._ingest:
             self._serve_status = found
+            if name != self._tailnet_name:
+                self._guest_epoch += 1
             self._tailnet_name = name
             if addresses and addresses != self._tailnet_addresses:
                 # a reading and the other-device flag were judged against the old addresses: a

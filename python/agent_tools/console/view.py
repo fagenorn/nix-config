@@ -875,6 +875,7 @@ from agent_tools.console.sprints import (
     progress_text,
     sprint_title,
     takes_notices,
+    takes_questions,
     unreachable,
 )
 from agent_tools.verification import verify_owner
@@ -2218,7 +2219,8 @@ def derive_view(
             kept.setdefault(sprint.project_id, []).append(sprint)
 
     briefs = sorted((s for group in drafted.values() for s in group
-                     if s.brief is not None and s.brief.decision == NONE and s.stop_at is None),
+                     if s.brief is not None and s.brief.decision == NONE and s.stop_at is None
+                     and takes_questions(s)),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
     asked = sorted(((s, q) for group in drafted.values() for s in group
                     for q in (*open_questions(s), *pending_looks(s))),

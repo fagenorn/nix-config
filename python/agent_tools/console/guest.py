@@ -125,7 +125,12 @@ this order and the first that fails gives its text: sharing is off (`SHARING_OFF
 name is read from this host's Tailscale client (`NAME_UNREAD_TEXT`); the name read from this host's
 Tailscale client is not the one the request was admitted under (`HOST_TEXT`); the login is no longer
 listed (`NOT_SHARED_TEXT`); the project is not on the login's list (`NOT_YOUR_PROJECT_TEXT`);
-otherwise None. `steer_refusal(login, started_by)` is None
+otherwise None. The service adds a last check under its ingest lock: the actor's `epoch` is the count of
+revocations (`revokes`: sharing switched off, a colleague or one of their projects removed, or the read
+name changed) when its request was admitted, and a write whose epoch is no longer the current count is
+refused with `REVOKED_TEXT` even when sharing, the name, the login and the project look as they did, so a
+write admitted before a revocation never lands after the access came back. `Snapshot.epoch` carries the
+count the admitting snapshot was published with. `steer_refusal(login, started_by)` is None
 exactly when the sprint was started by that login (`NOT_YOUR_SPRINT_TEXT`; a sprint with no starter
 is the owner's). A question that carries a before-and-after pair or a `look` is a look before merge
 and stays the owner's (`is_look` for the pair, `OWNER_LOOK_TEXT`; ADR-console-074), as does a question the manager marked `owner_only`
@@ -197,6 +202,7 @@ NUDGE_ACTION_TEXT_GUEST = "Tell the manager again."
 NOT_YOUR_PROJECT_TEXT = "That project is not shared with you."
 NOT_YOUR_SPRINT_TEXT = "You can steer only the sprints you started."
 OWNER_LOOK_TEXT = "Only the console's owner answers a look before merge."
+REVOKED_TEXT = "Your access changed while you were sending that. Reload the page and try again."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest socket.")
 
@@ -251,6 +257,7 @@ class Snapshot:
     views: Mapping[str, bytes]
     pictures: Mapping[str, frozenset[str]]
     revoked: int
+    epoch: int = 0
 
 
 NO_SNAPSHOT = Snapshot(NO_POLICY, MappingProxyType({}), MappingProxyType({}), 0)
@@ -258,10 +265,15 @@ NO_SNAPSHOT = Snapshot(NO_POLICY, MappingProxyType({}), MappingProxyType({}), 0)
 
 @dataclass(frozen=True)
 class GuestActor:
-    """Who acts on the guest port: the login and the tailnet name the request was admitted under."""
+    """Who acts on the guest port: the login, the tailnet name and the revocation epoch the request was admitted under.
+
+    `epoch` is the service's count of revocations at admission (None for a caller that has no admission, which is
+    never checked); a write whose epoch is not the service's current one is refused with `REVOKED_TEXT`.
+    """
 
     login: str
     tailnet: str
+    epoch: int | None = None
 
 
 def valid_tailnet(text: object) -> bool:
@@ -436,6 +448,14 @@ def write_refusal(policy: Policy, actor: GuestActor, project_id: str) -> str | N
     if project_id not in policy.access.colleagues[actor.login]:
         return NOT_YOUR_PROJECT_TEXT
     return None
+
+
+def revokes(before: Access, after: Access) -> bool:
+    """Whether going from `before` to `after` takes something away: the switch goes off, or a login or one of its projects goes."""
+    if before.shared and not after.shared:
+        return True
+    return any(login not in after.colleagues or not projects <= after.colleagues[login]
+               for login, projects in before.colleagues.items())
 
 
 def steer_refusal(login: str, started_by: str | None) -> str | None:

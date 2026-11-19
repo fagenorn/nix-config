@@ -432,6 +432,18 @@ class GuestWriteTableTest(GuestWriteCase):
         self.assertEqual(self.rows("brief.approved"), [])
         self.assertEqual(self.rows("brief.replied"), [])
 
+    def test_a_late_brief_of_a_stopped_sprint_is_refused_when_sent(self):
+        self.seed()
+        svc = self.start()
+        sid = self.waiting(svc, "owner/p01", ACTOR)
+        svc.stop_sprint("owner/p01", sid)
+        with svc._ingest:
+            svc._apply(svc.log.append([(MANAGER_STOPPED, "owner/p01", {"sprint_id": sid})]))
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.send_brief(sid, self.secret(sid), PARTS)
+        self.assertEqual(str(raised.exception), sprints.ENDED)
+        self.assertEqual(len(self.rows("brief.sent")), 1)
+
     def test_a_single_marked_picture_is_no_look_and_the_colleague_answers_it(self):
         self.seed()
         svc = self.start()
@@ -500,10 +512,32 @@ class GuestDoorWriteTest(GuestWriteCase):
             self.status = None
             svc.poll_serve()
 
+        def renamed_back(svc):
+            reading = self.status
+            rename(svc)
+            self.status = reading
+            svc.poll_serve()
+
+        def off_and_on(svc):
+            svc.set_sharing(False)
+            svc.set_sharing(True)
+
+        def removed_and_added(svc):
+            svc.remove_colleague(COLLEAGUE)
+            svc.set_colleague(COLLEAGUE, ("owner/p01",))
+
+        def narrowed_and_widened(svc):
+            svc.set_colleague(COLLEAGUE, ("owner/p00",))
+            svc.set_colleague(COLLEAGUE, ("owner/p01",))
+
         rows = (("rename", rename, guest.HOST_TEXT),
                 ("unread", unread, guest.NAME_UNREAD_TEXT),
                 ("off", lambda svc: svc.set_sharing(False), guest.SHARING_OFF_TEXT),
-                ("removed", lambda svc: svc.remove_colleague(COLLEAGUE), guest.NOT_SHARED_TEXT))
+                ("removed", lambda svc: svc.remove_colleague(COLLEAGUE), guest.NOT_SHARED_TEXT),
+                ("renamed and back", renamed_back, guest.REVOKED_TEXT),
+                ("off and on", off_and_on, guest.REVOKED_TEXT),
+                ("removed and added", removed_and_added, guest.REVOKED_TEXT),
+                ("narrowed and widened", narrowed_and_widened, guest.REVOKED_TEXT))
         for name, change, text in rows:
             with self.subTest(change=name):
                 self.setUp()

@@ -829,6 +829,19 @@ class GuestSteerPageTest(unittest.TestCase):
         text = full(sprint_of(page_of(GUEST, [START, {"frame": reversed_}]), "Mine"))
         self.assertIn("waiting for your answer: Which store?", text)
 
+    def test_an_answered_look_card_never_decides_who_the_sprint_waits_on(self) -> None:
+        mine = {**OWNER_SPRINT, "sprint_id": "a" * 16, "title": "Mine", "steer": True,
+                "started_by": COLLEAGUE, "now_text": "waiting for your answer: May the reader change?"}
+        look = question(0, "Does the new line read right?", ["Approve", "Ask for changes"], "Approve",
+                        project_id="owner/p01", sprint_id="a" * 16, steer=False, answered=True,
+                        started_by=COLLEAGUE)
+        later = question(1, "May the reader change?", ["yes", "no"], "no", project_id="owner/p01",
+                         sprint_id="a" * 16, steer=True, started_by=COLLEAGUE)
+        frame = owner_frame_with([mine], inbox={"open": [look, later], "answered": []})
+        text = full(sprint_of(page_of(GUEST, [START, {"frame": frame}]), "Mine"))
+        self.assertIn("waiting for your answer: May the reader change?", text)
+        self.assertNotIn("the owner's answer", text)
+
     def test_a_guest_answer_option_has_no_badge_column(self) -> None:
         frame = steer_frame(tracker=False, rounds=True)
         snap = page_of(GUEST, [START, {"frame": frame}])

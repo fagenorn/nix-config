@@ -970,11 +970,11 @@ function steersHere(sprint) {
   return guestDoor && sprint.steer === true && lastView !== null && lastView.inbox !== undefined
     && lastView.inbox.open.some((open) => open.steer === true && open.sprint_id === sprint.sprint_id);
 }
-// The card the sprint's `now_text` speaks of: its brief, or its first open question (the order the view reads).
+// The card the sprint's `now_text` speaks of: its brief, or its first unanswered question (the order the view reads).
 function nowSteers(sprint) {
   if (!guestDoor || sprint.steer !== true || lastView === null || lastView.inbox === undefined) return false;
   const cards = lastView.inbox.open.filter((open) => open.sprint_id === sprint.sprint_id
-    && (open.reason === "brief" || open.reason === "question"));
+    && open.answered !== true && (open.reason === "brief" || open.reason === "question"));
   cards.sort((a, b) => (a.round === undefined ? -1 : a.round) - (b.round === undefined ? -1 : b.round)
     || (a.index === undefined ? -1 : a.index) - (b.index === undefined ? -1 : b.index));
   return cards.length > 0 && cards[0].steer === true;

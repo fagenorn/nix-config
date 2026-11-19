@@ -1134,6 +1134,13 @@ class BriefViewTest(unittest.TestCase):
         view = derive_view([state("p00", 1)], sprints={sid: stopping})
         self.assertEqual(view["inbox"]["open"], [])
 
+    def test_a_brief_of_a_closed_or_stopped_sprint_is_no_item(self):
+        a, b = "a" * 16, "b" * 16
+        view = derive_view([state("p00", 1)], sprints={
+            a: closed(briefed(sprint(a)), 5 * MIN, ((12, "landed"),)),
+            b: dataclasses.replace(briefed(sprint(b)), stopped_at="t10")})
+        self.assertEqual(view["inbox"]["open"], [])
+
     def test_a_decided_or_unregistered_brief_is_no_item(self):
         a, b, c = "a" * 16, "b" * 16, "c" * 16
         view = derive_view([state("p00", 1)], sprints={

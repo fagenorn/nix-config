@@ -151,8 +151,10 @@ member of the closing report: the console decides, in one place.
 
 `sprint inbox` reads the secret the same way and sends `POST /api/inbox` with
 `{"sprint_id", "secret"}`, no `Origin`. It prints the console's answer as one line of JSON,
-`{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the owner's messages the manager has
-not read, in id order, each once, and exit 0. An answer to one of the manager's questions (kind
+`{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the unread messages of the sprint, in id
+order, each once, and exit 0. An entry from a listed colleague who started the sprint also carries the
+optional `"by"` login; a message without `by` is the owner's, and one with `by` is never the owner's
+authorization. An answer to one of the manager's questions (kind
 `answer`) also carries `"question"` (the question's text), `"round"` (the round id) and `"chosen"`
 (the option's text, or null for the owner's own words) and `"words"` (the owner's words, or null for
 an option alone). A notice from the console that a look card is stale (kind `look-moved`, #1260) carries its text only. An inbox with nothing unread is
@@ -332,7 +334,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("notices", "print the project's open notices"),
                        ("withdraw-notice", "take back one of the sprint's notices"),
                        ("close", "send the sprint's closing report"),
-                       ("inbox", "print the owner's unread messages to the sprint"),
+                       ("inbox", "print the unread messages to the sprint, the owner's and a colleague's"),
                        ("recap", "print what a manager needs to pick the sprint up"),
                        ("reply", "answer one of the owner's messages"),
                        ("picture", "send one PNG picture to the console"),
