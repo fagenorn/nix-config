@@ -1,16 +1,26 @@
 """The console's user service on each host as the configuration evaluates it (issue 856).
 
 Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
+Its evaluations run with the environment from before the accounts sandbox, so they read the
+host's Nix cache, while the sandbox still covers the module (#1286).
+On a host whose nix cannot build x86_64-linux (its `system`, `extra-platforms` and `builders`),
+`LinuxUnit` skips and says so; CI's Agent Workflow Tests runs it on Linux (#1286).
 Run: just agent-workflow-tests
 """
+import json
+import os
 import plistlib
 import re
 import shlex
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import manager, service
 
-from . import test_verify_pending_units as units
+from . import accounts_sandbox, test_verify_pending_units as units
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
@@ -33,6 +43,62 @@ def check_command(case, command, home, tailscale=None):
     case.assertRegex(rest[1], r"^/(home|Users)/[^/ ]+/tmp/clarity-screenshots$")
 
 
+def assert_outside_sandbox(case, env):
+    """`env` is the one from before the sandbox. A failure names variables, never prints the environment (it holds credentials)."""
+    if env is None:
+        env = os.environ
+    for name in accounts_sandbox.VARIABLES:
+        # `.get`: a variable unset before the sandbox must be unset here, not a KeyError.
+        case.assertEqual(env.get(name), accounts_sandbox.ORIGINAL[name], name)
+    root = str(accounts_sandbox.root())
+    case.assertEqual(sorted(k for k, v in env.items() if root in v), [])  # no variable points into the sandbox
+    others = set(env) | set(os.environ)
+    case.assertEqual(
+        sorted(k for k in others if k not in accounts_sandbox.VARIABLES and env.get(k) != os.environ.get(k)), [])
+
+
+NIX_CONFIG = ["nix", "--extra-experimental-features", "nix-command flakes", "config", "show", "--json"]
+NO_LINUX_BUILDER = (
+    "no x86_64-linux builder: nix's system, extra-platforms and builders name none, and evaluating "
+    "nixosConfigurations.anis-desktop builds x86_64-linux derivations; "
+    "CI's Agent Workflow Tests runs these on Linux (#1286)"
+)
+
+
+def builder_entries(text):
+    """The entries of a `builders` value or machines file, as Nix 2.31.5 expands them (`expandBuilderLines`)."""
+    for line in text.split("\n"):
+        for entry in line.split("#", 1)[0].split(";"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if entry.startswith("@"):
+                try:
+                    yield from builder_entries(Path(entry[1:].strip()).read_text())
+                except FileNotFoundError:
+                    pass
+            else:
+                yield entry
+
+
+def can_build(system):
+    """Whether this host's nix names `system` in its `system`, `extra-platforms` or `builders` settings."""
+    done = subprocess.run(NIX_CONFIG, cwd=units.ROOT, capture_output=True, text=True, timeout=60,
+                          env=accounts_sandbox.unsandboxed_environment())
+    if done.returncode != 0:
+        raise AssertionError(f"nix config show failed:\n{done.stderr[-4000:]}")
+    settings = json.loads(done.stdout)
+    local = settings["system"]["value"]
+    if system == local or system in settings["extra-platforms"]["value"]:
+        return True
+    for entry in builder_entries(settings["builders"]["value"]):
+        fields = entry.split()
+        systems = fields[1] if len(fields) > 1 and fields[1] != "-" else local
+        if system in systems.split(","):
+            return True
+    return False
+
+
 class LinuxUnit(unittest.TestCase):
     HOST = "anis-desktop"
     APPLY = """c: u: {
@@ -50,6 +116,8 @@ class LinuxUnit(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        if not can_build("x86_64-linux"):
+            raise unittest.SkipTest(NO_LINUX_BUILDER)
         cls.got = units.evaluate(f"nixosConfigurations.{cls.HOST}", cls.APPLY)
 
     def test_the_port_is_the_consoles_fixed_port(self):
@@ -202,6 +270,120 @@ class DarwinAgent(unittest.TestCase):
     def test_home_manager_declares_no_second_console_agent(self):
         for got, _ in self.hosts():
             self.assertIs(got["homeAgent"], False)
+
+
+class LinuxBuilderTest(unittest.TestCase):
+    """Whether this host's nix can build x86_64-linux decides the Linux unit (#1286); nothing here evaluates."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.t = self.tmp.name
+        self.machines = Path(self.t) / "machines"
+
+    @staticmethod
+    def config(system="aarch64-darwin", extra=(), builders=""):
+        return json.dumps({
+            "system": {"value": system},
+            "extra-platforms": {"value": list(extra)},
+            "builders": {"value": builders},
+        })
+
+    @staticmethod
+    def act(stdout, returncode=0):
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="broken nix")
+
+        raised = None
+        with mock.patch.object(subprocess, "run", fake), \
+                mock.patch.object(units, "evaluate", return_value={"marker": 1}) as evaluate, \
+                mock.patch.object(LinuxUnit, "got", None, create=True):
+            try:
+                LinuxUnit.setUpClass()
+            except BaseException as exc:  # noqa: BLE001 -- the case under test inspects it
+                raised = exc
+            got = LinuxUnit.got
+        return calls, evaluate, raised, got
+
+    def test_a_host_with_no_x86_64_linux_builder_skips_the_linux_unit(self):
+        self.machines.write_text("ssh://b aarch64-linux # x86_64-linux\n")
+        cases = {
+            "a": {},
+            "b": {"extra": ("x86_64-darwin",)},
+            "c": {"builders": "ssh://b aarch64-linux,aarch64-darwin - 4"},
+            "d": {"builders": "ssh://b - /key 4"},
+            "e": {"builders": "ssh://b"},
+            "f": {"builders": f"@{self.t}/missing"},
+            "g": {"builders": f"@{self.machines}"},
+        }
+        for name, settings in cases.items():
+            with self.subTest(name):
+                calls, evaluate, raised, _ = self.act(self.config(**settings))
+                self.assertTrue(isinstance(raised, unittest.SkipTest), repr(raised))
+                self.assertIn("x86_64-linux builder", str(raised))
+                evaluate.assert_not_called()
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][0][-3:], ["config", "show", "--json"])
+                self.assertIsNotNone(accounts_sandbox.root())
+                assert_outside_sandbox(self, calls[0][1].get("env"))
+
+    def test_a_host_that_builds_x86_64_linux_runs_the_linux_unit(self):
+        self.machines.write_text("# linux builders\nssh://b x86_64-linux /key\n")
+        cases = {
+            "a": {"system": "x86_64-linux"},
+            "b": {"extra": ("x86_64-darwin", "x86_64-linux")},
+            "c": {"builders": "ssh://a aarch64-linux ; ssh://b aarch64-linux,x86_64-linux - 4"},
+            "d": {"builders": f"@{self.machines}"},
+        }
+        for name, settings in cases.items():
+            with self.subTest(name):
+                _, evaluate, raised, got = self.act(self.config(**settings))
+                self.assertIsNone(raised, repr(raised))
+                evaluate.assert_called_once_with("nixosConfigurations.anis-desktop", LinuxUnit.APPLY)
+                self.assertEqual(got, {"marker": 1})
+
+    def test_a_failing_nix_config_errors_instead_of_skipping(self):
+        _, evaluate, raised, _ = self.act("", returncode=1)
+        self.assertIs(type(raised), AssertionError)
+        self.assertIn("nix config show failed", str(raised))
+        self.assertIn("broken nix", str(raised))
+        evaluate.assert_not_called()
+
+
+class NixCacheTest(unittest.TestCase):
+    """The environment this module's `nix` children start with (#1286); nothing here evaluates."""
+
+    def test_the_modules_setup_methods_run_nix_outside_the_sandbox(self):
+        self.assertIsNotNone(accounts_sandbox.root())
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if argv[-3:] == ["config", "show", "--json"]:
+                out = LinuxBuilderTest.config(system="x86_64-linux")
+            else:
+                out = json.dumps({"plist": plistlib.dumps({}).decode()})
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+        outputs = {LinuxUnit: [f"nixosConfigurations.{LinuxUnit.HOST}"],
+                   DarwinAgent: [f"darwinConfigurations.{h}" for h in DarwinAgent.HOSTS]}
+        with mock.patch.object(subprocess, "run", fake), \
+                mock.patch.object(LinuxUnit, "got", None, create=True), \
+                mock.patch.object(DarwinAgent, "got", None, create=True), \
+                mock.patch.object(DarwinAgent, "plist", None, create=True):
+            for case, wanted in outputs.items():
+                with self.subTest(case.__name__):
+                    before = len(calls)
+                    case.setUpClass()
+                    mine = calls[before:]
+                    for output in wanted:
+                        self.assertTrue(any(output in " ".join(argv) for argv, _ in mine), output)
+                    for _, kwargs in mine:
+                        assert_outside_sandbox(self, kwargs.get("env"))
+        self.assertTrue(any(argv[-3:] == ["config", "show", "--json"] for argv, _ in calls))
 
 
 if __name__ == "__main__":

@@ -34,6 +34,38 @@ from agent_tools.delivery.suite_runner import MemberResult
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EVAL_TREE_SCRIPT = "home/common/agent-skills/evals/tests/test-run-eval-tree.sh"
 
+# Members over 30 s of wall time on the run the committed suite timings were last
+# refreshed from: https://github.com/fagenorn/nix-config/actions/runs/44426940077
+# (job `Agent Workflow Tests`, head b31db72b4). A refresh from a newer run replaces both.
+SLOW_ON_LAST_FULL_RUN: tuple[str, ...] = (
+    "home/common/agent-skills/tests/test_deliver_standard_program.py",
+    "tests/test_forge_land_lock.py",
+    "tests/test_console_approve_service.py",
+    "home/common/agent-skills/tests/test_deliver_batch_program.py",
+    "tests/test_verify_checks.py",
+    "tests/test_verify_pending_owner.py",
+    "tests/test_console_bypass_proof_wakes.py",
+    "tests/test_console_service.py",
+    "tests/test_release_sync.py",
+    "tests/test_console_manager_service.py",
+    "tests/test_guard_policy.py",
+    "tests/test_release_driver.py",
+    "tests/test_console_sprint_command.py",
+    "tests/test_console_register_service.py",
+    "tests/test_verify_pending.py",
+    "tests/test_console_messages.py",
+    "tests/test_console_capacity_check.py",
+    "home/common/agent-skills/tests/test_adopt_apply.py",
+    "tests/test_console_pictures.py",
+    "tests/test_release_lock.py",
+    "tests/test_console_stops.py",
+    "tests/test_release_crash_matrix.py",
+    "tests/test_console_screenshots.py",
+    "tests/test_console_page.py",
+    "tests/test_console_activation.py",
+    "tests/test_forge_adapter.py",
+)
+
 # A unittest module that meets its peers at the barrier. It holds a live token
 # until `min(cap, members not yet done)` tokens are live, writes three stdout
 # and three stderr markers while that token is still live, and records the most
@@ -505,6 +537,12 @@ class ScheduleOrderTest(RunnerCase):
         self.assertEqual(starts, ["test_m1.py", "test_m3.py", "test_m2.py", "test_m0.py"])
         failed = [line.split()[-1] for line in lines if line.startswith("suite-runner: failed ")]
         self.assertEqual(failed, ["test_m0.py", "test_m2.py"])
+
+
+class CommittedTimingsTest(unittest.TestCase):
+    def test_the_timings_name_every_member_slower_than_30_seconds_on_the_last_full_run(self):
+        timings = suite_runner.load_timings()
+        self.assertEqual([m for m in SLOW_ON_LAST_FULL_RUN if m not in timings], [])
 
 
 class CapTest(RunnerCase):
