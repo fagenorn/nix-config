@@ -161,10 +161,12 @@ class PageTest(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
-    def test_the_page_is_under_61_kb_compressed(self) -> None:
+    def test_the_page_is_under_62_kb_compressed(self) -> None:
         # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could
         # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
-        self.assertLess(len(gzip.compress(self.data, 9)), 62464)
+        # Raised from 61 KB by #1323: the route sentence, its three wordings and the forward-command check
+        # (about 700 bytes compressed) did not fit the 439 bytes the cap had left.
+        self.assertLess(len(gzip.compress(self.data, 9)), 63488)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
@@ -8003,6 +8005,15 @@ SIGNIN = {
     "answered": False, "waiting_since": "2026-11-12T08:00:00+00:00",
 }
 ANSWER = "{\"attempt\":7,\"link\":\"https://claude.example/a?s=1\"}"
+LINK_A = "https://claude.example/a?s=1"
+FWD = "ssh -N -L 54321:localhost:54321 console-host"
+PORT_LINE = ("This sign-in returns to port 54321 on the console's machine. "
+             "If your browser is on another machine, forward that port to it first")
+MANUAL_SENTENCE = ("Sign in on that page; it then shows a code. "
+                   "Paste the code here and press Send code.")
+UNKNOWN_SENTENCE = ("The console could not tell where this sign-in returns, "
+                    "so a browser on another machine may not finish it.")
+LOOPBACK_ANSWER = {"attempt": 7, "forward": FWD, "link": LINK_A, "port": 54321, "route": "loopback"}
 
 
 def with_run(entry: dict, state: str, attempt: int) -> dict:
@@ -9013,6 +9024,67 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")],
                          ["A sign-in is running."])
 
+    def route_card(self, answer: dict | None = None, text: str | None = None) -> dict:
+        body = text if text is not None else json.dumps(answer, sort_keys=True, separators=(",", ":"))
+        steps = [START, {"frame": frame([SIGNIN])}, {"respond": {"status": 200, "text": body}},
+                 {"click": "signin-start"}, {"frame": frame([with_run(SIGNIN, "running", 7)])},
+                 {"snapshot": True}]
+        (snap,) = render(steps)
+        return sign_in_card(snap)
+
+    def route_texts(self, card: dict) -> list:
+        return [full(n) for n in of_class(card, "p", "signin-route")]
+
+    def test_a_manual_route_answer_shows_the_paste_the_code_sentence(self) -> None:
+        card = self.route_card({"attempt": 7, "forward": None, "link": LINK_A, "port": None,
+                                "route": "manual"})
+        (link,) = of_class(card, "a", "signin-link")
+        self.assertEqual(link["href"], LINK_A)
+        self.assertEqual(self.route_texts(card), [MANUAL_SENTENCE])
+        self.assertEqual(of_class(card, "code", "signin-forward"), [])
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+
+    def test_a_loopback_route_answer_names_the_port_and_the_forward_command(self) -> None:
+        card = self.route_card(LOOPBACK_ANSWER)
+        self.assertEqual(self.route_texts(card), [PORT_LINE + ": " + FWD])
+        (forward,) = of_class(card, "code", "signin-forward")
+        self.assertEqual(full(forward), FWD)
+
+    def test_a_loopback_route_answer_without_a_forward_still_names_the_port(self) -> None:
+        card = self.route_card({**LOOPBACK_ANSWER, "forward": None})
+        self.assertEqual(self.route_texts(card), [PORT_LINE + "."])
+        self.assertEqual(of_class(card, "code", "signin-forward"), [])
+
+    def test_an_unknown_route_answer_says_the_return_could_not_be_told(self) -> None:
+        for answer in (
+            {"attempt": 7, "forward": None, "link": LINK_A, "port": None, "route": "unknown"},
+            {"attempt": 7, "forward": None, "link": LINK_A, "port": 0, "route": "loopback"},
+            {"attempt": 7, "forward": FWD, "link": LINK_A, "port": "54321", "route": "loopback"},
+        ):
+            with self.subTest(answer=answer):
+                card = self.route_card(answer)
+                self.assertEqual(self.route_texts(card), [UNKNOWN_SENTENCE])
+                self.assertEqual(of_class(card, "code", "signin-forward"), [])
+
+    def test_an_answer_without_a_route_shows_no_route_sentence(self) -> None:
+        for text in (ANSWER, json.dumps({**json.loads(ANSWER), "route": "elsewhere"})):
+            with self.subTest(text=text):
+                card = self.route_card(text=text)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-route")], [])
+                (link,) = of_class(card, "a", "signin-link")
+                self.assertEqual(link["href"], LINK_A)
+                self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+
+    def test_a_forward_command_of_another_shape_is_not_shown(self) -> None:
+        control = self.route_card(LOOPBACK_ANSWER)
+        self.assertEqual(len(of_class(control, "code", "signin-forward")), 1)
+        for forward in ("rm -rf /", "ssh -N -L 1:localhost:1 console-host",
+                        "ssh -N -L 54321:localhost:54321 a;b"):
+            with self.subTest(forward=forward):
+                card = self.route_card({**LOOPBACK_ANSWER, "forward": forward})
+                self.assertEqual(of_class(card, "code", "signin-forward"), [])
+                self.assertEqual(self.route_texts(card), [PORT_LINE + "."])
+
     def test_a_code_is_sent_to_the_code_route_and_the_field_empties(self) -> None:
         (snap,) = render(SIGNED_IN_STEPS + [
             {"type": {"class": "signin-code", "text": "ab#C-1"}},
@@ -9367,6 +9439,19 @@ class AddAccountPageTest(unittest.TestCase):
         self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")], [ELSE])
         for cls in ("signin-link", "signin-code", "signin-start", "signin-cancel"):
             self.assertEqual([n for n in nodes(card) if has_class(n, cls)], [], cls)
+
+    def test_the_add_account_continuation_shows_the_route_sentence(self) -> None:
+        answer = json.dumps({"attempt": 9, "forward": None, "link": "https://claude.example/b",
+                             "port": None, "profile": "fresh", "route": "manual"},
+                            sort_keys=True, separators=(",", ":"))
+        steps = [step if step.get("respond", {}).get("text") != ADDED
+                 else {"respond": {"status": 200, "text": answer}} for step in ADD_STEPS]
+        (snap,) = render(steps + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in added(snap, "signin-route")], [MANUAL_SENTENCE])
+        order = [n for n in nodes(snap["account_add"])
+                 if has_class(n, "account-add-link") or has_class(n, "signin-route")]
+        self.assertEqual([n["tag"] for n in order], ["a", "p"])
 
     def test_the_add_box_shows_the_outcome_when_the_sign_in_ends(self) -> None:
         for state, text in (

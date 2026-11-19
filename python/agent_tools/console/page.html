@@ -425,6 +425,8 @@ a.spend:hover { color: var(--sub0); text-decoration-line: underline; }
 .signin-failed { color: var(--red); }
 .signin-link { color: var(--blue); overflow-wrap: anywhere; }
 .signin-code { flex: 1 1 14rem; max-width: 24rem; }
+.signin-route { flex-basis: 100%; margin: 0; color: var(--sub0); }
+.signin-forward { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; overflow-wrap: anywhere; user-select: all; }
 .account-add { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: .8125rem; color: var(--sub0); }
 .account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; }
 .account-add-note { margin: 0; color: var(--text); }
@@ -1596,6 +1598,7 @@ let accountSignin = null;
 let accountAttempt = null;
 let accountConfirmed = false;
 let accountLink = null;
+let accountRoute = null;
 let accountOutcome = null;
 const SIGNIN_NOTES = new Map([
   ["running", "A sign-in is running."],
@@ -1624,6 +1627,32 @@ function knownSigninAttempt(profile) {
   }
   return newest;
 }
+// How the sign-in returns, read from an answer: the route, the loopback port and the forward command, each null unless it is well formed. An older console sends none of them.
+function signinRoute(answer) {
+  const none = { route: null, port: null, forward: null };
+  if (answer === null || typeof answer !== "object") return none;
+  let route = ["manual", "loopback", "unknown"].includes(answer.route) ? answer.route : null;
+  const port = Number.isInteger(answer.port) && answer.port >= 1 && answer.port <= 65535 ? answer.port : null;
+  if (route === "loopback" && port === null) route = "unknown";
+  if (route !== "loopback") return { route, port: null, forward: null };
+  const shape = typeof answer.forward === "string" ? /^ssh -N -L (\d+):localhost:\1 [A-Za-z0-9][A-Za-z0-9-]*$/.exec(answer.forward) : null;
+  return { route, port, forward: shape !== null && Number(shape[1]) === port ? answer.forward : null };
+}
+const ROUTE_WORDS = new Map([
+  ["manual", "Sign in on that page; it then shows a code. Paste the code here and press Send code."],
+  ["unknown", "The console could not tell where this sign-in returns, so a browser on another machine may not finish it."],
+]);
+// The sentence under the link that says how to finish the sign-in, or null when the answer said nothing of the route.
+function signinRouteNote(held) {
+  if (held === null || held === undefined) return null;
+  if (ROUTE_WORDS.has(held.route)) return el("p", "signin-route", ROUTE_WORDS.get(held.route));
+  if (held.route !== "loopback") return null;
+  const words = "This sign-in returns to port " + held.port + " on the console's machine. If your browser is on another machine, forward that port to it first";
+  if (held.forward === null) return el("p", "signin-route", words + ".");
+  const note = el("p", "signin-route", words + ": ");
+  note.appendChild(el("code", "signin-forward", held.forward));
+  return note;
+}
 // An answer that arrives after its run ended or its item closed is held for no frame: the redraw that follows reconciles it away.
 function holdSigninLink(profile, answer, added = false) {
   if (answer === null || typeof answer !== "object") return;
@@ -1633,7 +1662,7 @@ function holdSigninLink(profile, answer, added = false) {
   if (!Number.isInteger(answer.attempt) || answer.attempt < 1) return;
   // An answer for an attempt older than one this page knows never replaces the newer attempt's link.
   if (answer.attempt < knownSigninAttempt(profile)) return;
-  signinLinks.set(profile, { link, attempt: answer.attempt, added });
+  signinLinks.set(profile, { link, attempt: answer.attempt, added, ...signinRoute(answer) });
 }
 // One ask per profile and attempt, kept after a refusal or a null link: a page that holds no link for a running sign-in asks the console for it once.
 const signinAsked = new Set();
@@ -1748,6 +1777,8 @@ function signinAct(item, quiet = false) {
     act.appendChild(signinStartButton(item, quiet ? "signin-start acct-signin btn-quiet" : "signin-start btn-primary"));
   } else {
     act.appendChild(signinLinkNode("signin-link", held));
+    const routeNote = signinRouteNote(held);
+    if (routeNote !== null) act.appendChild(routeNote);
     const input = document.createElement("input");
     input.type = "text";
     input.autocomplete = "off";
@@ -5300,6 +5331,7 @@ async function accountAddPost() {
         accountConfirmed = false;
         accountOutcome = null;
         accountLink = isHttps(answer.link) ? answer.link : null;
+        accountRoute = signinRoute(answer);
         accountName.value = "";
         accountState.phase = "closed";
       } else {
@@ -5360,11 +5392,14 @@ function beginAccountSignin() {
       // A continuation that ended meanwhile leaves the link to the profile's card.
       holdSigninLink(profile, answer, accountSignin === profile);
       if (accountSignin === profile && answer !== null && typeof answer === "object"
-          && answer.attempt === accountAttempt && isHttps(answer.link)) accountLink = answer.link;
+          && answer.attempt === accountAttempt && isHttps(answer.link)) {
+        accountLink = answer.link;
+        accountRoute = signinRoute(answer);
+      }
       redraw();
     }, 200);
   });
-  accountCont = { note: el("p", "account-add-note", "Added " + accountSignin + ". Its sign-in has started."), link: null, code, send, cancel, fetchLink };
+  accountCont = { note: el("p", "account-add-note", "Added " + accountSignin + ". Its sign-in has started."), link: null, route: null, code, send, cancel, fetchLink };
   accountState.phase = "closed";
   accountState.failure = "";
 }
@@ -5373,6 +5408,7 @@ function endAccountSignin() {
   accountAttempt = null;
   accountConfirmed = false;
   accountLink = null;
+  accountRoute = null;
   accountCont = null;
   accountState.codeSending = false;
   accountState.cancelling = false;
@@ -5411,7 +5447,10 @@ function renderAccountAdd(view) {
     const linked = accountLink !== null;
     want = linked ? "signin" : "signin-wait";
     reason = accountState.failure;
-    if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
+    if (linked && accountCont.link === null) {
+      accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
+      accountCont.route = signinRouteNote(accountRoute);
+    }
     accountCont.fetchLink.disabled = accountState.fetching;
     markBusy(accountCont.fetchLink, accountState.fetching);
     accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
@@ -5430,7 +5469,7 @@ function renderAccountAdd(view) {
   if (accountState.shown !== want) {
     accountState.shown = want;
     const parts = want === "signin"
-      ? [accountCont.note, accountCont.link, accountCont.code, accountCont.send, accountCont.cancel, accountReason]
+      ? [accountCont.note, accountCont.link, ...(accountCont.route === null ? [] : [accountCont.route]), accountCont.code, accountCont.send, accountCont.cancel, accountReason]
       : want === "signin-wait" ? [accountCont.note, accountCont.fetchLink, accountCont.cancel, accountReason]
       : want === "outcome" ? [accountOutcomeNote, accountOpen]
       : want === "naming" ? [accountName, accountSend, accountCancel, accountReason] : [accountOpen];
