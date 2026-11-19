@@ -608,6 +608,8 @@ MOVED += (
     moved(_CHECK_LINE, ".sprint-check", "min-height", NARROW, "check-line-min-height-480"),
     moved(_CHECK_LINE, ".sprint-check", "display", NARROW, "check-line-display-480"),
     moved(_CHECK_LINE, ".sprint-check", "align-items", NARROW, "check-line-align-items-480"),
+    moved(_CHECK_LINE, ".sprint-check", "flex", NARROW, "check-line-display-480",
+          via="the literal flex is the display value the row wants"),
     moved(_CHECK_LINE, ".sprint-checks", "padding", BOTH, "check-line-list-padding"),
     moved(_WAIT, ".sprint-checks", "padding", BOTH, "check-line-list-padding"),
     moved(_WAIT, ".sprint-checks .wait", "margin", BOTH, "wait-line-margin"),
@@ -642,11 +644,15 @@ MOVED += (
     # The brief rows, the register head and the answered rows.
     moved(_ROW_HEAD, ".row-head", "display", WIDE, "row-head-display"),
     moved(_ROW_HEAD, ".brief-row > summary", "display", WIDE, "row-head-summary-display"),
+    moved(_ROW_HEAD, ".row-head", "flex", WIDE, "row-head-display", "row-head-summary-display",
+          via="the literal flex is the display value the row wants"),
     moved(_REST_HEAD, ".rest .head", "display", WIDE, "rest-head-display"),
     moved(_REST_HEAD, ".card .head", "display", WIDE, "rest-head-display",
           via="the card head is what the register head is read against"),
     moved(_REST_HEAD, ".rest .head", "column-gap", WIDE, "rest-head-column-gap"),
     moved(_REST_HEAD, ".rest .head", "align-items", WIDE, "rest-head-align-items"),
+    moved(_REST_HEAD, ".rest .head", "flex", WIDE, "rest-head-display",
+          via="the literal flex is the display value the row wants"),
     moved(_REST_HEAD, ".head .wait", "margin-left", WIDE, "rest-head-wait-margin-left",
           "rest-head-wait-right"),
     moved(_ROW_TITLE, ".row-head b", "overflow-wrap", WIDE, "row-head-b-overflow-wrap"),
@@ -696,6 +702,8 @@ MOVED += (
     moved(_PAIR_ROW, ".pic-pair", "flex-direction", WIDE, "pics-pair-direction-1440"),
     moved(_PAIR_ROW, ".pic-pair .pic", "flex", WIDE, "pics-pair-pic-flex-1440"),
     moved(_VIEWER_PAIR, ".viewer-pair", "display", BOTH, "viewer-pair-display"),
+    moved(_VIEWER_PAIR, ".viewer-pair", "flex", BOTH, "viewer-pair-display",
+          via="the literal flex is the display value the row wants"),
     moved(_VIEWER_PAIR, ".viewer-pair", "flex-direction", WIDE, "viewer-pair-direction-1440"),
     moved(_VIEWER_PAIR, ".viewer-pair", "flex-direction", NARROW, "viewer-pair-direction-480"),
     moved(_VIEWER_PAIR, ".viewer img", "max-width", BOTH, "viewer-img-max-width"),
@@ -777,8 +785,13 @@ def uncovered(moved, rows) -> list[str]:
             or entry.selector in [part.strip() for part in by_name[name].selector.split(",")]]
         required = ((entry.prop,) if entry.prop not in LONGHANDS
                     or any(row.prop == entry.prop for row in counting) else LONGHANDS[entry.prop])
+        # A literal that is the value a listed row wants (`"flex"` for a `display`) is read there.
+        valued = {width for row in counting if entry.via and row.want == "equals"
+                  and row.value == entry.prop for width in row.widths}
+        if valued:
+            required = (entry.prop,)
         for prop in required:
-            seen = {width for row in counting if row.prop == prop for width in row.widths}
+            seen = {width for row in counting if row.prop == prop for width in row.widths} | valued
             if not set(entry.widths) <= seen:
                 misses.append(f"{entry.test} {entry.selector} {entry.prop} @{entry.widths}: "
                               "no row reads it")
@@ -1967,6 +1980,21 @@ class ScreenshotStyleTableTest(unittest.TestCase):
         listed = style_row("h", selector=".a, .held.blocks", widths=(1440,))
         self.assertEqual(
             uncovered([dataclasses.replace(other, selector=".held.blocks")], [listed]), [])
+
+    def test_a_value_a_removed_line_named_is_read_by_the_row_that_wants_it(self) -> None:
+        # `"flex"` in `.get("display", "flex")` is a value of `display`, not the property `flex`;
+        # an entry with a `via` is read by a listed row whose `equals` value is that literal.
+        entry = Moved("t", ".row-head", "flex", (1440,), ("d",), via="the value display equals")
+        display = style_row("d", selector=".row-head", prop="display", value="flex")
+        self.assertEqual(uncovered([entry], [display]), [])
+        for name, row, wanted in (
+                ("another value", dataclasses.replace(display, value="block"), entry),
+                ("another width", dataclasses.replace(display, widths=(480,)), entry),
+                ("another want", dataclasses.replace(display, want="starts"), entry),
+                ("no via", display, dataclasses.replace(entry, via=""))):
+            with self.subTest(name):
+                self.assertEqual(uncovered([wanted], [row]),
+                                 ["t .row-head flex @(1440,): no row reads it"])
 
     def test_every_moved_test_is_gone_or_stripped(self) -> None:
         import ast
