@@ -6,7 +6,7 @@ runs aborts the activation (exit 134 under a tty). The guard in
 hosts/common/darwin-user-agent-reload-guard.sh turns that call into one log line.
 
 The step run here is the real `system.activationScripts.userLaunchd.text` of each darwin host,
-evaluated purely, so it runs on any machine (the required CI job runs on Linux); only
+read from a pure evaluation, so it runs on any machine (the required CI job runs on Linux); only
 `launchctl`, `sudo` and `id` are fakes, and a regression in the wiring or in nix-darwin's
 step text fails these tests.
 Run: just agent-workflow-tests
@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from . import test_verify_pending_units as units
+from . import host_readings, test_verify_pending_units as units
 
 ROOT = Path(__file__).resolve().parents[1]
 GUARD = ROOT / "hosts/common/darwin-user-agent-reload-guard.sh"
@@ -51,12 +51,9 @@ echo 502
 class ReloadStep(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.user = units.username()
-        # pure: the required CI job runs on Linux, where only a pure evaluation works.
-        evaluated = {host: units.evaluate(f"darwinConfigurations.{host}", """c: u: {
-          text = c.system.activationScripts.userLaunchd.text;
-          agents = builtins.attrNames c.environment.userLaunchAgents;
-        }""", pure=True) for host in units.DarwinHosts.HOSTS}
+        cls.user = host_readings.username()
+        # Read from a pure evaluation: the required CI job runs on Linux, where only that works.
+        evaluated = {host: host_readings.read(host, "user-launchd") for host in units.DarwinHosts.HOSTS}
         cls.got = {host: got["text"] for host, got in evaluated.items()}
         cls.agents = {host: got["agents"] for host, got in evaluated.items()}
 
@@ -81,15 +78,22 @@ class ReloadStep(unittest.TestCase):
         return done, calls.read_text().splitlines() if calls.exists() else []
 
     def hosts(self):
-        for host in units.DarwinHosts.HOSTS:
+        # Only a login host reloads user agents; a boot host has none (issue 1290).
+        for host in units.DarwinHosts.LOGIN_HOSTS:
             with self.subTest(host=host):
                 yield self.got[host], self.agents[host]
 
-    def test_each_host_installs_the_console_and_verify_pending_agents(self):
-        for host in units.DarwinHosts.HOSTS:
+    def test_a_login_host_installs_the_console_and_verify_pending_agents(self):
+        for host in units.DarwinHosts.LOGIN_HOSTS:
             with self.subTest(host=host):
                 self.assertEqual(self.agents[host],
                                  ["org.nixos.agent-console.plist", "org.nixos.verify-pending.plist"])
+
+    def test_a_boot_host_installs_no_user_agent(self):
+        for host in units.DarwinHosts.BOOT_HOSTS:
+            with self.subTest(host=host):
+                self.assertEqual(self.agents[host], [])
+                self.assertNotIn("reloading user service", self.got[host])
 
     def test_the_guard_wraps_the_step_and_the_step_calls_bare_launchctl_asuser(self):
         guard = GUARD.read_text()

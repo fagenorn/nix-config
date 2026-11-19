@@ -71,15 +71,29 @@ changing no store; `reset()` forgets it. `comment_store(..., lose_reply=[...])` 
 `post`, `edit`, `delete`, `list`) and `ref_store(..., lose_reply=[...])` (`get`, `create`,
 `cas`) make the next call of each named operation make its change, save the store and then exit 1
 with `NETWORK_DOWN` and nothing on stdout, the reply lost on the way back; each entry is consumed once.
+
+`answer(command, env=..., input=...)` answers one call of a fake tool in this process by running the
+same script text, with the same log, store and response table, and returns a `CompletedProcess`;
+`answer_in_process(*modules)` replaces each module's `subprocess` with a stand-in whose `run`
+answers this world's tools that way until the test's cleanup, real `subprocess` for anything
+else, `Popen` included. An in-process answer ignores `timeout`, so a registered `sleep` really
+sleeps and a schedule entry that waits on another caller waits in this thread; tests whose
+callers race keep real children.
 """
 import contextlib
+import errno
+import io
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -473,10 +487,69 @@ sys.exit(response["exit"])
 """
 
 
+def _script_text() -> str:
+    """The text of every fake tool file."""
+    return SCRIPT.format(python=sys.executable).replace(
+        "# store handler\n", OUTAGE_HANDLER + REF_HANDLER + STORE_HANDLER)
+
+
+class _ToolExit(BaseException):
+    def __init__(self, code) -> None:
+        self.code = code
+
+
+_COMPILED: list[types.CodeType] = []
+
+
+def _tool_code() -> types.CodeType:
+    """The script compiled once per process, without its `#!` line, reading `os` and `sys` from its namespace."""
+    if not _COMPILED:
+        text = _script_text().split("\n", 1)[1]
+        if text.count("import json, os, sys, time\n") != 1:
+            raise AssertionError("the fake tool script no longer has its one import line")
+        text = text.replace("import json, os, sys, time\n", "import json, time\n")
+        _COMPILED.append(compile(text, "<forge_world fake tool>", "exec"))
+    return _COMPILED[0]
+
+
+def _universal_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _find_tool(name: str, env: Mapping[str, str] | None) -> str:
+    """Where a child started with `env` would find `name`: the search a real `subprocess.run` makes
+    (`os.get_exec_path`, which falls back to the OS default path when `env` has no `PATH`)."""
+    found = shutil.which(name, path=os.pathsep.join(os.get_exec_path(env)))
+    if found is None:
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", name)
+    return found
+
+
+class _InProcessSubprocess:
+    """Stands in for a module's `subprocess`: this world's tools answer in process, all else is real."""
+
+    def __init__(self, world: "ForgeWorld") -> None:
+        self.world = world
+
+    def run(self, command, **kwargs):
+        env = kwargs.get("env")
+        found = _find_tool(command[0], env)
+        if Path(found).parent != self.world.bin:
+            return subprocess.run(command, **kwargs)
+        done = self.world.answer(command, env=env, input=kwargs.get("input"))
+        if kwargs.get("check") and done.returncode:
+            raise subprocess.CalledProcessError(done.returncode, command, done.stdout, done.stderr)
+        return done
+
+    def __getattr__(self, name: str):
+        return getattr(subprocess, name)
+
+
 class ForgeWorld:
     def __init__(self, test_case: unittest.TestCase, tools: tuple[str, ...] = ()) -> None:
         tmp = tempfile.TemporaryDirectory()
         test_case.addCleanup(tmp.cleanup)
+        self._test_case = test_case
         root = Path(tmp.name).resolve()
         self.state, self.bin, self.checkout = root / "state", root / "bin", root / "checkout"
         self.state.mkdir()
@@ -484,8 +557,7 @@ class ForgeWorld:
         self.checkout.mkdir()
         for tool in TOOLS + tuple(tools):
             path = self.bin / tool
-            path.write_text(SCRIPT.format(python=sys.executable).replace("# store handler\n", OUTAGE_HANDLER + REF_HANDLER + STORE_HANDLER),
-                            encoding="utf-8")
+            path.write_text(_script_text(), encoding="utf-8")
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         patch = mock.patch.dict(os.environ, {"PATH": str(self.bin), "GITHUB_TOKEN": "harness-token",
                                              "FORGE_WORLD": str(self.state)})
@@ -609,6 +681,37 @@ class ForgeWorld:
 
     def argvs(self, tool: str) -> list[list[str]]:
         return [call["argv"] for call in self.calls() if call["tool"] == tool]
+
+    def answer(self, command: list[str], *, env: Mapping[str, str] | None = None,
+               input: str | None = None) -> subprocess.CompletedProcess:
+        """Answer one call of a fake tool in this process, as `bin/<tool>` would as a child."""
+        found = _find_tool(command[0], env)
+        if Path(found).parent != self.bin:
+            raise ValueError(f"{found} is not a tool of this world")
+        out, err = io.StringIO(), io.StringIO()
+
+        def leave(code=0):
+            raise _ToolExit(code)
+
+        sys_stub = types.SimpleNamespace(argv=[found, *command[1:]], stdin=io.StringIO(input or ""),
+                                         stdout=out, stderr=err, exit=leave)
+        os_stub = types.SimpleNamespace(environ=dict(env if env is not None else os.environ),
+                                        replace=os.replace)
+        namespace = {"__name__": "__forge_world_tool__", "sys": sys_stub, "os": os_stub}
+        code = 0
+        try:
+            exec(_tool_code(), namespace)
+        except _ToolExit as left:
+            code = left.code or 0
+        return subprocess.CompletedProcess(command, code, _universal_newlines(out.getvalue()),
+                                           _universal_newlines(err.getvalue()))
+
+    def answer_in_process(self, *modules: types.ModuleType) -> None:
+        """Make each module's `subprocess.run` answer this world's tools in process until cleanup."""
+        for module in modules:
+            patch = mock.patch.object(module, "subprocess", _InProcessSubprocess(self))
+            patch.start()
+            self._test_case.addCleanup(patch.stop)
 
     def canonical(self, slug: str = CANONICAL["slug"], **overrides: object) -> None:
         """Register the happy-path responses for the fixture's canonical values, with `slug`

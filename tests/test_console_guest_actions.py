@@ -3,7 +3,6 @@
 Run: just agent-workflow-tests
 """
 import contextlib
-import http.client
 import io
 import json
 import unittest
@@ -16,7 +15,7 @@ from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
 from .test_console_guest_page import GUEST, named, page_of
 from .test_console_guest_service import (
-    COLLEAGUE, GOAL, JSON, PARTS, STRANGER, TAILNET, GuestCase)
+    COLLEAGUE, GOAL, JSON, OTHER_HOST, PARTS, STRANGER, TAILNET, GuestCase)
 from .test_console_page import PAGE, START, full, has_class, nodes
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -56,7 +55,8 @@ class GuestWriteCase(GuestCase):
         self.rounds = {}
 
     def guest_post(self, svc, path, body, *, token=UNSET, origin=UNSET, logins=(COLLEAGUE,),
-                   host=TAILNET, extra=None, send_body=True, method="POST"):
+                   host="localhost", forwarded_host=TAILNET, extra=None, send_body=True,
+                   method="POST"):
         token = self.guest_token() if token is UNSET else token
         origin = "https://" + TAILNET if origin is UNSET else origin
         headers = {**JSON, **(extra or {})}
@@ -65,11 +65,14 @@ class GuestWriteCase(GuestCase):
         if origin is not None:
             headers["Origin"] = origin
         raw = json.dumps(body).encode() if isinstance(body, dict) else body
-        connection = http.client.HTTPConnection(*svc.guest_address, timeout=5)
+        connection = support.UnixHTTPConnection(svc.guest_socket)
         try:
             connection.putrequest(method, path, skip_host=True)
             if host is not None:
                 connection.putheader("Host", host)
+            for name in ([] if forwarded_host is None else [forwarded_host]
+                         if isinstance(forwarded_host, str) else forwarded_host):
+                connection.putheader("X-Forwarded-Host", name)
             for login in logins:
                 connection.putheader("Tailscale-User-Login", login)
             for name, value in headers.items():
@@ -79,9 +82,11 @@ class GuestWriteCase(GuestCase):
             connection.endheaders(raw if send_body else b"")
             response = connection.getresponse()
             self.last_headers = dict(response.getheaders())
-            return response.status, response.read()
+            got = response.status, response.read()
         finally:
             connection.close()
+        svc.settle_guest_readings()
+        return got
 
     def still(self, svc, action):
         before = {login: svc.guest_view_bytes(login) for login in (COLLEAGUE, SECOND)}
@@ -315,7 +320,8 @@ class GuestWriteTableTest(GuestWriteCase):
             ("no login", {"logins": ()}, 403, guest.NOT_SHARED_TEXT),
             ("two logins", {"logins": (COLLEAGUE, SECOND)}, 403, guest.NOT_SHARED_TEXT),
             ("forged login", {"logins": (STRANGER,)}, 403, guest.NOT_SHARED_TEXT),
-            ("other host", {"host": "other.invented-tailnet.ts.net"}, 403, guest.HOST_TEXT))
+            ("tailnet name as Host", {"host": TAILNET}, 403, guest.HOST_TEXT),
+            ("other forwarded host", {"forwarded_host": OTHER_HOST}, 403, guest.HOST_TEXT))
         for route in sorted(service.GUEST_WRITES):
             for name, kwargs, status, text in guards:
                 with self.subTest(route=route, case=name):
@@ -370,12 +376,19 @@ class GuestWriteTableTest(GuestWriteCase):
         self.seed()
         svc = self.start()
         calls = self.write_calls(svc)
-        svc.set_tailnet("other.invented-tailnet.ts.net")
+        reading = self.status
+        self.status = {"Self": {"DNSName": OTHER_HOST + ".",
+                                "TailscaleIPs": reading["Self"]["TailscaleIPs"]}}
+        svc.poll_serve()
         self.refused(svc, calls, guest.HOST_TEXT)
-        svc.set_tailnet(TAILNET)
-        svc.set_tailnet(None)
+        self.status = None
+        svc.poll_serve()
+        self.refused(svc, calls, guest.NAME_UNREAD_TEXT)
+        self.status = reading
+        svc.poll_serve()
+        svc.set_sharing(False)
         self.refused(svc, calls, guest.SHARING_OFF_TEXT)
-        svc.set_tailnet(TAILNET)
+        svc.set_sharing(True)
         svc.set_colleague(COLLEAGUE, ("owner/p00",))
         self.refused(svc, calls, guest.NOT_YOUR_PROJECT_TEXT)
 

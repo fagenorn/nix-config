@@ -592,7 +592,8 @@ class StopServiceTest(Case):
             self.assertEqual(console.main(["--port", "0"]), 1)
         self.assertIs(recorded["stopper"], manager.stopper_for(sys.platform))
         self.assertIs(manager.stopper_for("linux"), manager.stop_session)
-        self.assertIsNone(manager.stopper_for("darwin"))
+        self.assertIs(manager.stopper_for("darwin"), manager.stop_session)
+        self.assertIsNone(manager.stopper_for("win32"))
 
     def test_a_stop_and_a_nudge_never_overlap(self):
         svc = self.begin(dispatch=self.queued)

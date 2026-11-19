@@ -107,8 +107,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-open { flex: 0 0 auto; }
-.share-line, .share-last, .share-none { margin-top: 6px; }
-.share-tailnet-row, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
+.share-name, .share-line, .share-outside, .share-last, .share-none { margin-top: 6px; }
+.share-switch, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-people { list-style: none; }
 .share-person { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--hair); }
 .share-who { color: var(--sub1); overflow-wrap: anywhere; }
@@ -130,6 +130,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
+.card .look-line { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -3011,30 +3012,45 @@ document.getElementById("capacity").addEventListener("click", () => {
 });
 let sharingOpen = false;
 let sharingReturn = null;
-let tailnetDraft = null;
 let loginDraft = "";
 const sharePicks = new Set();
 const sharePosts = new Map();
 const SHARE_LINES = new Map([
-  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest port."],
-  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest port."],
-  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest port."],
+  ["unchecked", (t) => "Sharing is on at " + t + ", but the console cannot tell whether Tailscale Serve is set up for the guest door."],
+  ["not_proxying", (t) => "Sharing is on at " + t + ", but Tailscale Serve is not set up for the guest door."],
+  ["serving", (t) => "Sharing is on: Tailscale Serve sends " + t + " to the guest door."],
 ]);
 const SHARE_WHY = new Map([
-  ["sharing_off", "sharing is off"], ["host", "the Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+  ["sharing_off", "sharing is off"], ["name_unread", "the console could not read this host's tailnet name"], ["host", "the Host is not localhost or the forwarded Host is not the tailnet name"], ["not_shared", "that login is not on the list"]]);
+function shareName(sharing) {
+  return typeof sharing.tailnet === "string" ? "This host's tailnet name, read from Tailscale: " + sharing.tailnet + "." : null;
+}
 function shareLine(sharing) {
-  const words = SHARE_LINES.get(sharing.state);
-  return sharing.tailnet === null || words === undefined ? "Sharing is off: no tailnet name is set." : words(sharing.tailnet);
+  if (typeof sharing.tailnet !== "string") {
+    return sharing.shared === true
+      ? "Sharing is on, but the console can't read this host's tailnet name from Tailscale, so guests can't get in."
+      : "Sharing is off, and the console can't read this host's tailnet name from Tailscale.";
+  }
+  if (sharing.shared !== true || sharing.state === "off") return "Sharing is off.";
+  return (SHARE_LINES.get(sharing.state) || SHARE_LINES.get("unchecked"))(sharing.tailnet);
+}
+function shareOutside(sharing) {
+  if (sharing.shared !== true) return null;
+  return sharing.other_device_seen === true
+    ? "A request from another device has reached the guest door since the console started."
+    : "No request from another device has reached the guest door since the console started; the tailnet's access rules must allow TCP 443 to this host for the people this console is shared with.";
 }
 function shareLast(r) {
-  if (r === null || typeof r !== "object") return "No request has come to the guest port yet.";
+  if (r === null || typeof r !== "object") return "No request has come to the guest door yet.";
   const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
+  const forwarded = r.forwarded_host !== null ? "forwarded Host " + r.forwarded_host : r.forwarded_hosts === 0 ? "no forwarded Host" : r.forwarded_hosts > 1 ? r.forwarded_hosts + " forwarded Host headers" : "a forwarded Host the console does not keep";
   const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
   const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
-  return "Last request on the guest port: " + host + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
+  const from = r.client === "this_host" ? ", from this host" : r.client === "other_device" ? ", from another device" : "";
+  return "Last request on the guest door" + from + ": " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
-function shareTailnet(tailnet) {
-  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ tailnet }) });
+function shareSwitch(shared) {
+  return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) });
 }
 async function postShare(key, send, done, cls) {
   const current = sharePosts.get(key);
@@ -3090,7 +3106,7 @@ function renderSharing(view) {
     body.replaceChildren();
     return;
   }
-  const sharing = view.sharing || { tailnet: null, colleagues: [], state: "off", last_request: null };
+  const sharing = view.sharing || { shared: false, tailnet: null, colleagues: [], state: "off", last_request: null, other_device_seen: false };
   const projects = view.recent_projects || [];
   for (const id of [...sharePicks]) if (!projects.includes(id)) sharePicks.delete(id);
   let kept = null;
@@ -3104,20 +3120,18 @@ function renderSharing(view) {
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Sharing"));
   head.appendChild(actionButton("share-close btn-quiet", "Close", closeSharing));
-  const row = el("div", "share-tailnet-row");
-  const tailnet = accountField("share-tailnet field-line", "Tailnet name", "<host>.<tailnet>.ts.net");
-  const typed = tailnetDraft === null ? sharing.tailnet || "" : tailnetDraft;
-  tailnet.value = typed;
-  tailnet.addEventListener("input", () => {
-    tailnetDraft = tailnet.value;
-    renderSharing(lastView);
-  });
-  row.appendChild(tailnet);
-  shareAct(row, "tailnet", "share-tailnet-save btn-quiet", "Save", () => postShare("tailnet", () => shareTailnet(typed.trim()), () => { if (tailnetDraft === typed) tailnetDraft = null; }, "share-tailnet-save"), typed.trim() === "");
-  if (sharing.tailnet !== null) {
-    shareAct(row, "tailnet", "share-off btn-danger", "Turn sharing off", () => postShare("tailnet", () => shareTailnet(null), () => {}, "share-off"), false);
+  const row = el("div", "share-switch");
+  if (sharing.shared === true) {
+    shareAct(row, "sharing", "share-off btn-danger", "Turn sharing off", () => postShare("sharing", () => shareSwitch(false), () => {}, "share-off"), false);
+  } else {
+    shareAct(row, "sharing", "share-on btn-quiet", "Turn sharing on", () => postShare("sharing", () => shareSwitch(true), () => {}, "share-on"), false);
   }
-  const parts = [head, el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row];
+  const parts = [head];
+  if (shareName(sharing) !== null) parts.push(el("p", "share-name", shareName(sharing)));
+  parts.push(el("p", "share-line", shareLine(sharing)));
+  const outside = shareOutside(sharing);
+  if (outside !== null) parts.push(el("p", "share-outside", outside));
+  parts.push(el("p", "share-last", shareLast(sharing.last_request)), row);
   if (sharing.colleagues.length === 0) parts.push(el("p", "share-none", "No colleague has access."));
   else {
     const list = el("ul", "share-people");
@@ -3370,6 +3384,37 @@ function itemId(item) {
 }
 function isQuestion(item) {
   return item.reason === "question";
+}
+function lookOf(item) {
+  return isQuestion(item) && item.look !== null && typeof item.look === "object" ? item.look : null;
+}
+function lookLine(node, item) {
+  const look = lookOf(item);
+  if (look !== null && typeof look.line === "string") node.appendChild(el("p", "look-line", look.line));
+}
+function isLookCard(item) {
+  return item.answered === true && lookOf(item) !== null;
+}
+function lookCard(item) {
+  const card = el("article", "card look-card");
+  card.appendChild(headLine(item));
+  card.appendChild(pathWords(el("h2", "q"), item.headline));
+  lookLine(card, item);
+  if (item.look.state === "failed") {
+    const again = stallPosts.get("look-retry\n" + itemId(item));
+    const sending = again !== undefined && again.phase === "sending";
+    const retry = actionButton("look-retry btn-primary", "Retry", () => stallPost({ sprint_id: itemId(item) }, "look-retry", "Could not retry: ", () => fetch("/api/look-retry", {
+      method: "POST", headers: stallHeaders(),
+      body: JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index }),
+    })));
+    if (sending) retry.setAttribute("disabled", "");
+    markBusy(retry, sending);
+    const act = el("div", "act");
+    act.appendChild(retry);
+    if (again !== undefined && again.phase === "failed") act.appendChild(el("span", "fail", again.failure + again.reason));
+    card.appendChild(act);
+  }
+  return card;
 }
 const pictureCache = new Map();
 function pictureSequence(pictures) {
@@ -3661,13 +3706,18 @@ function recommendedIndex(q) {
 function soleOption(item) {
   return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
 }
+// A look card's approving option (#1260) never starts picked: an approval is the owner's own choice.
+function approvingIndex(item) {
+  const look = lookOf(item);
+  return look !== null && Number.isInteger(look.approve_index) ? look.approve_index : -1;
+}
 function startPicks(item) {
   if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
     const recommended = recommendedIndex(q);
-    return recommended >= 0 ? recommended : null;
+    return recommended >= 0 && recommended !== approvingIndex(item) ? recommended : null;
   });
 }
 function answerState(item) {
@@ -3864,7 +3914,7 @@ const NO_REASON = "the console did not say why.";
 const WORDS_NEEDED_NOTICE = "Say what to change.";
 function trackerAnswer(state) {
   return state.pending !== undefined && state.pending !== null
-    && !state.pending.round && !state.pending.retry && !state.pending.plan;
+    && !state.pending.retry && !state.pending.plan;
 }
 function sendAgain(item, state) {
   if (state.phase !== "failed" || state.again !== true || !trackerAnswer(state)) return false;
@@ -4195,7 +4245,8 @@ function statusLine(act, state, item) {
     act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") {
-      act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+      const look = lookOf(item);
+      if (look === null || look.state !== "moved" || look.line !== state.reason) act.appendChild(el("span", "fail", "Could not send: " + state.reason));
       if (state.again === true && trackerAnswer(state)) {
         act.appendChild(actionButton("try-again answer-again btn-quiet", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
       }
@@ -4437,6 +4488,7 @@ function leadItem(item) {
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
+  lookLine(card, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) card.appendChild(gallery);
@@ -4478,6 +4530,7 @@ function itemLine(item) {
   }
   if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
+  lookLine(line, item);
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
     if (gallery !== null) line.appendChild(gallery);
@@ -4592,12 +4645,13 @@ function drawInbox(view, guest = null) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isFailedStart(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item) && !isLookCard(item));
+  const looks = open.filter(isLookCard);
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
-    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
+    const shown = key.startsWith("look-retry\n") ? looks : key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress
       : key.startsWith("start-retry\n") || key.startsWith("start-withdraw\n") ? starts : stalls;
-    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id || itemId(item) === id)) stallPosts.delete(key);
   }
   // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
   const profiles = guest === null && view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
@@ -4687,6 +4741,7 @@ function drawInbox(view, guest = null) {
     section.appendChild(kept);
   }
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
+  for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);
     cardOf.set(stateId(tracked[0]), lead);

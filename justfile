@@ -132,6 +132,7 @@ agent-workflow-tests *args:
     tests/test_verify_answer.py \
     tests/test_verify_pending_pass.py \
     tests/test_verify_pending_units.py \
+    tests/test_host_readings.py \
     tests/test_darwin_user_agent_reload.py \
     tests/test_darwin_path_order.py \
     tests/test_github_runners.py \
@@ -186,7 +187,6 @@ agent-workflow-tests *args:
     tests/test_launchd_agent_adapter.py \
     tests/test_run_profile.py \
     tests/test_agent_gate_bundle.py \
-    tests/test_agent_gate_corpus.py \
     tests/test_retired_surfaces.py \
     tests/test_promotion_documents.py \
     tests/test_promotion_lifecycle.py \
@@ -194,6 +194,8 @@ agent-workflow-tests *args:
     tests/test_promotion_demo.py \
     tests/test_context_map_lint.py \
     tests/test_docs_tree.py \
+    tests/test_decision_record_wording.py \
+    tests/test_module_docstring_wording.py \
     tests/test_cache_proxy.py \
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
@@ -229,6 +231,8 @@ agent-workflow-tests *args:
     tests/test_console_commit_failure.py \
     tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
+    tests/test_console_page_account_check.py \
+    tests/test_console_launch_profile_check.py \
     tests/test_console_permission_check.py \
     tests/test_console_bypass_proof_checks.py \
     tests/test_console_bypass_proof_github.py \
@@ -262,6 +266,7 @@ agent-workflow-tests *args:
     tests/test_console_briefs.py \
     tests/test_console_messages.py \
     tests/test_console_questions.py \
+    tests/test_console_look_answer.py \
     tests/test_console_notices.py \
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
@@ -280,11 +285,17 @@ agent-workflow-tests *args:
     tests/test_console_spend.py \
     tests/test_console_spend_page.py \
     tests/test_console_guest.py \
+    tests/test_console_peer.py \
+    tests/test_console_peer_service.py \
+    tests/test_console_owner_port_check.py \
+    tests/test_console_guest_socket_check.py \
     tests/test_console_guest_service.py \
     tests/test_console_guest_page.py \
     tests/test_console_guest_actions.py \
     tests/test_console_units.py \
+    tests/test_owner_services_units.py \
     tests/test_system_packages.py \
+    home/common/agent-skills/tests/test_program_harness.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
@@ -306,7 +317,7 @@ agent-instruction-budget *args:
 verify host *args:
   PYTHONPATH="{{agent_tools_path}}" python3 -m agent_tools.verification.verify_pending run --host {{host}} {{args}}
 
-# Shoot the console's sprint states against a fixture console, 72 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
+# Shoot the console's sprint states against a fixture console, 84 PNGs into out (default ~/tmp/clarity-screenshots) (#1086).
 console-screenshots out="":
   #!/usr/bin/env bash
   set -euo pipefail

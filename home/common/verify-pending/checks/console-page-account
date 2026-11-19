@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify check for issues 894, 1027 and 1030: a throwaway profile added and removed through the console's page.
+# It adds a profile on the console, then removes it, so it is an `effects: live` check; it is run only where the
+# verify runner has an approval. Exit 0 met, 1 not met, 75 not yet, 2 a bad argument.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.console.page_account_check "$@"

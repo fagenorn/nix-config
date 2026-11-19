@@ -1035,13 +1035,30 @@ class ManagerContractTest(unittest.TestCase):
                 '"pair": "before"', '"pair": "after"', "the same delivery's resume",
                 "the full 40-hex sha of the head the pictures show",
                 "the id of the owner's `answer` message as `sprint inbox` printed it",
-                "records the approval with that message id", "approve for that head",
+                "the console records the approval", "approve for that head",
                 "changes with the owner's own words", "Never merge it any other way"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
         self.assertLess(section.index("Report it"), section.index("`sprint ask`"))
         self.assertLess(section.index("`sprint ask`"),
                         section.index("the same delivery's resume"))
+
+    def test_the_contract_says_a_look_card_names_its_look_and_the_console_records_it(self):
+        text = run_sprint("contract").stdout
+        section = " ".join(
+            text.partition("## A look before merge\n")[2].partition("\n## ")[0].split())
+        for needle in ("`look`", "`issue`", "`pr`", "`head`", "`approve`",
+                       "the console records the approval", "never record an approval yourself",
+                       "an approve with the owner's words is an ordinary answer",
+                       "whenever the head of a pull request changes while its look card is open",
+                       "replace that card at once with `replaces`",
+                       "A look card you opened without a `look` member",
+                       "a fresh look card for the same head that carries `look`",
+                       "a `look-moved` message in `sprint inbox`", "with no `replaces`",
+                       "never one of the `needs_words` options"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertNotIn("The resume records the approval", section)
 
     def test_the_contract_says_how_a_question_carries_pictures(self):
         text = CONTRACT.read_text(encoding="utf-8")

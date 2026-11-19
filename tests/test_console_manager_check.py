@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import signal
 import socket
 import subprocess
 import tempfile
@@ -111,6 +112,143 @@ class Registry:
         return self.maps[min(self.calls, len(self.maps)) - 1]
 
 
+JOB = "org.nixos.agent-console"
+
+
+def job_text(pid=None, nested=False):
+    lines = [f"gui/501/{JOB} = {{", "\tstate = running" if pid else "\tstate = not running"]
+    if pid:
+        lines.append(("\t\tpid = " if nested else "\tpid = ") + str(pid))
+    return "\n".join(lines) + "\n}\n"
+
+
+class Host:
+    """A fake `run`, `kill` and clock for the macOS restart: `launchctl print <domain>/<label>`
+    answers from a per-domain script of (rc, stdout) taken in order (the last repeats), lsof from
+    a script of stdout texts, `ps -o ppid= -p <p>` from a dict."""
+
+    def __init__(self, gui=(), system=((113, ""),), lsof=(), ps=None):
+        self.scripts = {"gui/501": list(gui), "system": list(system)}
+        self.lsof, self.ps = list(lsof), ps or {}
+        self.argvs, self.kills, self.now = [], [], 1000.0
+
+    def run(self, argv, **kwargs):
+        self.argvs.append(list(argv))
+        if argv[0] == "launchctl":
+            script = self.scripts[argv[2].rsplit("/", 1)[0]]
+            code, text = script.pop(0) if len(script) > 1 else script[0]
+        elif argv[0] == "/usr/sbin/lsof":
+            code, text = 0, self.lsof.pop(0) if len(self.lsof) > 1 else (self.lsof or [""])[0]
+        elif argv[0] == "ps":
+            parent = self.ps.get(int(argv[4]))
+            code, text = (0, f"{parent}\n") if parent is not None else (1, "")
+        else:
+            raise AssertionError(argv)
+        return subprocess.CompletedProcess(argv, code, text, "")
+
+    def kill(self, pid, sig):
+        self.kills.append((pid, sig))
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+    def restart(self, platform="darwin"):
+        manager_check.default_restart(platform, port=27184, run=self.run, kill=self.kill,
+                                      uid=lambda: 501, clock=self.clock, sleep=self.sleep)
+
+    def printed(self):
+        return [argv[2] for argv in self.argvs if argv[0] == "launchctl"]
+
+
+class MacosRestartTest(unittest.TestCase):
+    def test_the_macos_restart_ends_the_login_session_job_and_waits_for_its_return(self):
+        host = Host(gui=[(0, job_text(4242)), (0, job_text(5151))], lsof=["4242\n", "5151\n"])
+        host.restart()
+        self.assertEqual(host.argvs[0], ["launchctl", "print", f"gui/501/{JOB}"])
+        self.assertEqual(host.kills, [(4242, signal.SIGTERM)])
+        self.assertNotIn(f"system/{JOB}", host.printed())
+        for argv in host.argvs:
+            for word in ("kickstart", "bootout", "sudo"):
+                self.assertNotIn(word, argv)
+
+    def test_the_macos_restart_finds_the_job_in_the_system_domain(self):
+        host = Host(system=[(0, job_text(777)), (0, job_text(778))], gui=[(113, "")],
+                    lsof=["777\n", "778\n"])
+        host.restart()
+        self.assertEqual(host.printed()[:2], [f"gui/501/{JOB}", f"system/{JOB}"])
+        self.assertEqual(host.kills, [(777, signal.SIGTERM)])
+
+    def test_a_macos_job_that_is_not_running_is_not_the_job(self):
+        for gui in ((0, job_text()), (0, job_text(9, nested=True))):
+            with self.subTest(gui=gui[1]):
+                host = Host(gui=[gui], lsof=["9\n"])
+                with self.assertRaises(manager_check.NotTheJob):
+                    host.restart()
+                self.assertEqual(host.kills, [])
+
+    def test_the_job_that_serves_the_port_is_the_one_restarted_in_its_own_domain(self):
+        host = Host(gui=[(0, job_text(4242))], system=[(0, job_text(777)), (0, job_text(778))],
+                    lsof=["777\n", "777\n", "778\n"])
+        host.restart()
+        self.assertEqual(host.kills, [(777, signal.SIGTERM)])
+        self.assertEqual(host.printed(), [f"gui/501/{JOB}", f"system/{JOB}", f"system/{JOB}"])
+        with self.subTest("another domain's job appearing while polling is not the return"):
+            host = Host(gui=[(0, job_text(4242)), (0, job_text(5151))],
+                        system=[(0, job_text(777))], lsof=["777\n", "777\n", "5151\n"], ps={})
+            with self.assertRaisesRegex(
+                    RuntimeError, "the console did not come back under its launchd job"):
+                host.restart()
+            self.assertEqual(host.kills, [(777, signal.SIGTERM)])
+
+    def test_a_foreign_listener_is_never_signalled(self):
+        host = Host(gui=[(0, job_text(4242)), (0, job_text(5151))],
+                    lsof=["9999\n", "5151\n"], ps={9999: 1})
+        with self.assertRaises(manager_check.NotTheJob):
+            host.restart()
+        self.assertEqual(host.kills, [])
+        child = Host(gui=[(0, job_text(4242)), (0, job_text(5151))],
+                     lsof=["9999\n", "5151\n"], ps={9999: 4242})
+        child.restart()
+        self.assertEqual(child.kills, [(4242, signal.SIGTERM)])
+
+    def test_a_job_that_does_not_come_back_is_a_failed_restart(self):
+        cases = {"the same pid": ([(0, job_text(4242))], ["4242\n"]),
+                 "a new pid not serving": ([(0, job_text(4242)), (0, job_text(5151))],
+                                           ["4242\n", ""])}
+        for name, (gui, lsof) in cases.items():
+            with self.subTest(name):
+                host = Host(gui=gui, lsof=lsof)
+                with self.assertRaisesRegex(
+                        RuntimeError, "the console did not come back under its launchd job"):
+                    host.restart()
+                self.assertEqual(host.kills, [(4242, signal.SIGTERM)])
+                self.assertGreaterEqual(host.now, 1060)
+
+    def test_the_linux_restart_and_preflight_are_unchanged(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+
+        manager_check.default_restart("linux", run=run)
+        self.assertEqual(calls, [(["systemctl", "--user", "restart", "agent-console"],
+                                  {"check": True, "timeout": 60})])
+        calls.clear()
+        self.assertIs(manager_check.default_owner("linux", run=run), True)
+        self.assertEqual(calls, [])
+
+    def test_an_unknown_platform_has_no_restart(self):
+        def run(argv, **kwargs):
+            raise AssertionError(argv)
+
+        with self.assertRaisesRegex(RuntimeError, "win32"):
+            manager_check.default_restart("win32", run=run)
+        self.assertIs(manager_check.default_owner("win32", run=run), False)
+
+
 class ManagerCheckTest(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -141,7 +279,7 @@ class ManagerCheckTest(unittest.TestCase):
             raise manager.RemoveFailed(f"cannot remove {session_id}")
 
     def start(self, views, *, resume=False, at=T0, registry=None, budget="30", url=None,
-              withdraws=()):
+              withdraws=(), owner=None, restart=None):
         if url is None:
             url, self.posts = serve(self, views, withdraws)
         if resume:
@@ -156,7 +294,8 @@ class ManagerCheckTest(unittest.TestCase):
                 ["start", "--project", "owner/p01", "--url", url, "--state-file",
                  str(self.state_file), "--result-file", str(self.result_file),
                  "--token-file", str(self.token_file), "--budget", budget],
-                restart=lambda: self.restarts.append(1), registry=self.registry, stop=self.stop,
+                restart=restart or (lambda: self.restarts.append(1)),
+                owner=owner or (lambda: True), registry=self.registry, stop=self.stop,
                 remove=self.remove,
                 clock=self.time.clock, sleep=self.time.sleep)
         return code, json.loads(out.getvalue())
@@ -427,6 +566,40 @@ class ManagerCheckTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             timing = manager_check.main(["timing", "--result-file", str(self.result_file)])
         self.assertEqual((timing, json.loads(out.getvalue())), (75, {"status": "no_result"}))
+
+    def test_a_console_that_is_not_the_job_states_no_goal(self):
+        for managers in (True, False):
+            with self.subTest(managers=managers):
+                code, out = self.start([view([], managers=managers)], owner=lambda: False)
+                self.assertEqual((code, out), (75, {"status": "console_not_the_job"}))
+                self.assertEqual(self.posts, [])
+                self.assertFalse(self.state_file.exists())
+                self.assertEqual(self.restarts, [])
+
+    def test_a_resumed_run_on_a_console_that_is_not_the_job_tears_nothing_down(self):
+        # saved sprint ids the hand-run console's view lacks: without the preflight this is
+        # "the sprint is gone", an exit 1 and a withdrawal
+        code, out = self.start([view([])], resume=True, owner=lambda: False)
+        self.assertEqual((code, out), (75, {"status": "console_not_the_job"}))
+        self.assertTrue(self.state_file.exists())
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertEqual((self.calls, self.restarts), ([], []))
+        self.assertFalse(self.result_file.exists())
+
+    def test_a_restart_that_finds_another_console_keeps_the_sprints(self):
+        def other():
+            raise manager_check.NotTheJob()
+
+        briefs = view(both(), [brief(A, "10:02:00"), brief(B, "10:03:00")])
+        code, out = self.start([briefs], resume=True, restart=other,
+                               registry=Registry({1: obs(A), 2: obs(B)}))
+        self.assertEqual((code, out), (75, {"status": "waiting",
+                                            "reason": manager_check.NOT_THE_JOB_TEXT}))
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual([row["sprint_id"] for row in saved["sprints"]], [A, B])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertFalse(self.result_file.exists())
 
     def test_the_wrapper_is_executable_in_the_index(self):
         listed = subprocess.run(["git", "ls-files", "-s", WRAPPER], cwd=ROOT,

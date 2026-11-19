@@ -71,7 +71,8 @@ stderr to a temporary file; `TimeoutExpired` (`TIMED_OUT`); a missing `claude-ac
 `cancel` (`STOPPED_TEXT`); a non-zero exit (the last non-empty stderr line); then the JSON on
 stdout: not an object with a string `result` (`UNREADABLE_TEXT`), `is_error` true (the result text),
 else `ANSWERED` with `answer_text`, which adds `NO_PRODUCTION_LINE` when no route is declared (D5).
-`asker_for(platform)` is `run_question` where the manager is supported, else None.
+`asker_for(platform)` is `run_question` on Linux only, else None (ADR-console-058 D2: a project
+question runs on Linux only, though managers run on macOS too).
 
 Fold and answer shape (#1177). `asked_questions(events, known)` folds the two row kinds into each
 project's questions, a tuple of `AskedQuestion` in ascending `seq`. An asked row counts only with
@@ -450,7 +451,7 @@ def settings_document(routes: Sequence[Route], repo: str | None = None) -> dict:
 
 
 def launch_command(ask: Ask, platform: str) -> list[str] | None:
-    if not manager.supported(platform):
+    if not platform.startswith("linux"):
         return None
     return ["claude-account", "run", "-p", "--model", MODEL, "--session-id", ask.session_id,
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
@@ -540,7 +541,7 @@ def _outcome_of(stdout: bytes | None, routes: Sequence[Route]) -> Outcome:
 
 
 def asker_for(platform: str) -> Callable[[Ask, threading.Event | None], Outcome] | None:
-    return run_question if manager.supported(platform) else None
+    return run_question if platform.startswith("linux") else None
 
 
 @dataclass(frozen=True)

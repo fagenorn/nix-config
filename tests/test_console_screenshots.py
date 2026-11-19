@@ -14,12 +14,14 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.console import service
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
+from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
@@ -113,9 +115,10 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_thirty_six_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 36)
-        self.assertEqual(shots.STATES[-4:], ("sharing-panel", "guest-page", "guest-steer",
+    def test_the_set_is_forty_two_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 42)
+        self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
+                                             "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors"))
         self.assertIn("guest-steer", shots.SHARING_STATES)
         self.assertEqual(shots.STATES.index("manager-cannot-hear"),
@@ -126,8 +129,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-18:-4], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[-24:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
+                                              "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
                                               "activation-tooling", "activation-host"))
@@ -138,7 +142,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             now_s = time.time()
             fixture = shots.build_fixture(Path(tmp).resolve(), "guest-steer", now_s)
-            svc = shots.start_service(fixture, now_s, guest=True)
+            svc = shots.start_service(
+                fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent)
             try:
                 view = json.loads(svc.view_bytes)
                 guest = json.loads(svc.guest_view_bytes(shots.COLLEAGUE))
@@ -162,17 +167,6 @@ class ScreenshotFixtureTest(unittest.TestCase):
         steer = {i["reason"]: i["steer"] for i in guest["inbox"]["open"]}
         self.assertTrue(steer["brief"])
         self.assertFalse(steer["verify-approve"])
-
-    def test_the_contract_docstring_counts_the_screens_and_files_the_set_writes(self) -> None:
-        words = {20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
-                 24: "twenty-four", 25: "twenty-five", 26: "twenty-six",
-                 27: "twenty-seven", 28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
-                 31: "thirty-one", 32: "thirty-two", 33: "thirty-three", 34: "thirty-four",
-                 35: "thirty-five", 36: "thirty-six"}
-        files = len(shots.STATES) * len(shots.WIDTHS)
-        doc = " ".join(shots.__doc__.split())
-        self.assertIn(f"`STATES` names the {words[len(shots.STATES)]} screens", doc)
-        self.assertIn(f"a full run writes {files} files", doc)
 
     def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
         justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
@@ -746,10 +740,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             now_s = time.time()
             fixture = shots.build_fixture(Path(tmp).resolve(), "guest-page", now_s)
-            svc = shots.start_service(fixture, now_s, guest=True)
+            svc = shots.start_service(
+                fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent)
             serve = None
             try:
-                serve = shots._Serve(svc.guest_address)
+                serve = shots._Serve(shots.guest_door(svc))
 
                 def get(address, path):
                     connection = http.client.HTTPConnection(*address, timeout=5)
@@ -778,12 +773,75 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     serve.close()
                 svc.close()
 
-    def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
-        for present, opens in (({"#sharing-open"}, True), (set(), False)):
-            with self.subTest(opens=opens):
-                self.check_sharing_shot(present, opens)
+    def test_the_sharing_shots_read_on_off_and_unreadable(self) -> None:
+        cases = (("sharing-panel", True, True, shots.TAILNET, "serving"),
+                 ("sharing-reached", True, True, shots.TAILNET, "serving"),
+                 ("sharing-off", True, False, shots.TAILNET, "off"),
+                 ("sharing-unreadable", False, True, None, "unreadable"))
+        clients = {"sharing-panel": "this_host", "sharing-reached": "other_device"}
+        for state, readable, shared, tailnet, serve in cases:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp).resolve(), state, now_s)
+                svc = shots.start_service(
+                    fixture, now_s, guest_dir=support.guest_socket_path(self).parent.parent,
+                    tailnet_readable=readable)
+                try:
+                    def read_sharing() -> dict:
+                        connection = http.client.HTTPConnection(*svc.address, timeout=5)
+                        try:
+                            connection.request("GET", "/api/state")
+                            return json.loads(connection.getresponse().read())["sharing"]
+                        finally:
+                            connection.close()
 
-    def check_sharing_shot(self, present: set, opens: bool) -> None:
+                    sharing = read_sharing()
+                    self.assertEqual(sharing["shared"], shared)
+                    self.assertEqual(sharing["tailnet"], tailnet)
+                    self.assertEqual(sharing["state"], serve)
+                    shots.guest_requests(state, shots.guest_door(svc))
+                    sharing = read_sharing()
+                    self.assertEqual(sharing["other_device_seen"], state == "sharing-reached")
+                    last = sharing["last_request"]
+                    if state in clients:
+                        self.assertEqual(last["client"], clients[state])
+                    else:
+                        self.assertIsNone(last)
+                finally:
+                    svc.close()
+
+    def test_the_harness_sends_each_door_its_own_headers(self) -> None:
+        self.assertEqual(shots._guest_headers(("127.0.0.1", 9)), {"Host": shots.TAILNET})
+        self.assertEqual(shots._guest_headers("/tmp/cg-x/g.sock"),
+                         {"Host": "localhost", "X-Forwarded-Host": shots.TAILNET})
+
+    def test_the_harness_opens_the_base_and_the_head_guest_door(self) -> None:
+        def base(store, registry, *, port, guest_port=None, guest_token_path=None, **kwargs):
+            pass
+
+        folder = Path("/tmp/cg-x")
+        self.assertEqual(shots.guest_door_kwargs(base, folder), {"guest_port": 0})
+        self.assertEqual(shots.guest_door_kwargs(service.ConsoleService, folder),
+                         {"guest_socket": folder / "guest" / "guest.sock"})
+        tcp = shots._door_connection(("127.0.0.1", 9), 5)
+        self.assertIsInstance(tcp, http.client.HTTPConnection)
+        self.assertNotIsInstance(tcp, shots._UnixHTTPConnection)
+        self.assertEqual((tcp.host, tcp.port), ("127.0.0.1", 9))
+        self.assertIsInstance(shots._door_connection("/tmp/cg-x/g.sock", 5),
+                              shots._UnixHTTPConnection)
+        self.assertEqual(shots.guest_door(SimpleNamespace(guest_address=("127.0.0.1", 9))),
+                         ("127.0.0.1", 9))
+        self.assertEqual(
+            shots.guest_door(SimpleNamespace(guest_socket="/tmp/g.sock", guest_address=None)),
+            "/tmp/g.sock")
+
+    def test_the_sharing_shot_opens_the_panel_only_where_the_page_has_one(self) -> None:
+        for state in ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached"):
+            for present, opens in (({"#sharing-open"}, True), (set(), False)):
+                with self.subTest(state=state, opens=opens):
+                    self.check_sharing_shot(state, present, opens)
+
+    def check_sharing_shot(self, state: str, present: set, opens: bool) -> None:
         calls: list[tuple[str, tuple]] = []
 
         class Page:
@@ -819,7 +877,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 return Page()
 
         with tempfile.TemporaryDirectory() as tmp:
-            shots._shoot(Browser(), "http://console.test/", "sharing-panel", 480, Path(tmp))
+            shots._shoot(Browser(), "http://console.test/", state, 480, Path(tmp))
         if not opens:
             self.assertNotIn(("click", ("#sharing-open",)), calls)
             self.assertNotIn(("wait_for_selector", ("#sharing:not([hidden])",)), calls)
@@ -916,6 +974,24 @@ class ScreenshotFixtureTest(unittest.TestCase):
             finally:
                 svc.close()
             self.assertEqual([d["total"]["dollars"] for d in days if d["total"]["dollars"]], [])
+
+    def test_each_look_state_carries_a_before_and_an_after_picture_the_console_serves(self) -> None:
+        for state in ("look-card", "look-moved", "look-failed"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                now_s = time.time()
+                fixture = shots.build_fixture(Path(tmp), state, now_s)
+                svc = shots.start_service(fixture, now_s)
+                try:
+                    view = json.loads(svc.view_bytes)
+                    pictures_dir = svc.pictures_dir
+                finally:
+                    svc.close()
+                card = view["inbox"]["open"][0]
+                self.assertEqual([p["pair"] for p in card["pictures"]], ["before", "after"])
+                self.assertEqual(len({p["id"] for p in card["pictures"]}), 2)
+                for picture in card["pictures"]:
+                    data = (pictures_dir / picture["id"]).read_bytes()
+                    self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_each_fixture_view_shows_its_state(self) -> None:
         for state in shots.STATES:

@@ -10,7 +10,7 @@ Console covers the local pages, the desk page that tells the owner whether they 
 ## Language
 
 **Console**:
-The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` reaches it, and a named colleague reaches it only through Tailscale Serve on a guest port (ADR-console-066).
+The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-052). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001). Only a loopback `Host` from a process of the owner's own user reaches the owner's port (ADR-console-076), and a named colleague reaches it only through Tailscale Serve on a guest socket of its own (ADR-console-066, ADR-console-077).
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
@@ -34,7 +34,7 @@ A registered project with no open work, no live session and no open sprint. It r
 _Avoid_: dormant project, idle project
 
 **Guest**:
-A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest port of its own and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); on the guest page a guest may state a goal on a listed project and, on sprints they started, approve or ask for changes to the brief, answer questions other than a look before merge, and message the manager; everything else there is read-only.
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), reachable from another device only while the tailnet's access rules allow TCP 443 to this host (ADR-console-079), and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); on the guest page a guest may state a goal on a listed project and, on sprints they started, approve or ask for changes to the brief, answer questions other than a look before merge, and message the manager; everything else there is read-only.
 _Avoid_: user, viewer
 
 **Goal**:
@@ -50,11 +50,11 @@ The one agent a sprint has: it writes the brief and the reports and never writes
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
-What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux, else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after 5 min, with what the owner can do about it. A brief approval shows only until the manager picks it up; a reply to it shows as the manager's own line, with no approval line above it. The owner's words read "You: <words>" and the manager's reply "Manager: <reply>". Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
+What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux or macOS (ADR-console-075), else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after 5 min, with what the owner can do about it. A brief approval shows only until the manager picks it up; a reply to it shows as the manager's own line, with no approval line above it. The owner's words read "You: <words>" and the manager's reply "Manager: <reply>". Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
 _Avoid_: chat, comment
 
 **Question round**:
-The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option, their own words, or both in one send, and the answer reaches the manager as a message (ADR-console-072). A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040).
+The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option, their own words, or both in one send, and the answer reaches the manager as a message (ADR-console-072). A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040). A look card names its issue, pull request and head, and the console records the owner's approval on the issue itself (ADR-console-074).
 _Avoid_: poll, survey
 
 **Notice**:
@@ -122,7 +122,7 @@ The console's second page, at `/spend`, opened from the "Spend" link in the desk
 _Avoid_: metrics page, dashboard
 
 **Limit reading**:
-The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
+The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux and macOS the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
 _Avoid_: usage
 
 **Limit stop**:
@@ -142,7 +142,7 @@ The one line at the head of the Work column when origin's integration branch car
 _Avoid_: deploy banner, update notice
 
 **Sign-in state**:
-Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025). The reading also keeps the account name (address) the status command reports; the profile's row of the accounts panel shows it and flags two profiles on one account as "same account as <other>" (ADR-console-022, ADR-console-023).
+Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux and macOS. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025). The reading also keeps the account name (address) the status command reports; the profile's row of the accounts panel shows it and flags two profiles on one account as "same account as <other>" (ADR-console-022, ADR-console-023).
 _Avoid_: login expiry
 
 **Excluded profile**:
@@ -154,7 +154,7 @@ The one account the owner pins with Pin in the accounts panel (Unpin while pinne
 _Avoid_: favourite profile, default account
 
 **Console service**:
-The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS.
+The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS, whose job also leaves its children's process groups alone (`AbandonProcessGroup`, ADR-console-075), so a manager started in its own session outlives a restart of the console.
 _Avoid_: daemon
 
 **Registration**:

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check for issue 1291: no open issue holds a live owner-action prompt, from a trusted author, that names the retired host. Reads the forge only.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks host-prompts "$@"

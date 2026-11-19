@@ -5,6 +5,17 @@ parameter names a host. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`
 for the port actually bound, else the answer is `403` `text/plain`
 `loopback only`.
 
+Before the `Host` check and before any interim `100 Continue`, on every route and method of the
+owner port, the lookup (`peer_reader`, default `peer.reader_for(sys.platform)`) must find a process
+of `owner_uid` (default the service's own effective uid) holding the connection's client end and no
+holder of another uid, else the answer is `403` `text/plain` `peer.NOT_OWNER_TEXT` or
+`peer.UNREADABLE_TEXT`, `Connection: close`, with nothing read, appended or published, and one
+stderr line `console: peer_refused <other_user|not_found|unreadable>` (ADR-console-076). There is
+one lookup per connection, and at most `PEER_LOOKUPS` lookups run at once: a connection that finds
+no free slot is answered as `unreadable` (fail closed) rather than queued. The guest door is not judged by this rule; it has its own (below). A request line or header block the
+inherited parser refuses as malformed is answered `400` before this check; it is not a route of the
+port and carries nothing of the console.
+
 Routes (every response carries `Cache-Control: no-store`, except a picture read's 200, which
 carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and every one but the
 stream `Content-Length`):
@@ -61,15 +72,45 @@ stream `Content-Length`):
                     `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
-Guest door (#1237, ADR-console-066). With `guest_port` (`console --guest-port`, default
-`DEFAULT_GUEST_PORT`, loopback only) the service binds a second server on `127.0.0.1`, served by
-`GuestHandler` on its own thread, for Tailscale Serve to proxy to; without it there is no second
-server, no `guest-token` file and `guest_address` is None. A guest request is admitted by
+Guest door (#1237, ADR-console-066, #1299, ADR-console-077). With `guest_socket` (`console
+--guest-socket PATH`, absolute) the service binds a Unix socket at PATH (`GuestServer`), served by
+`GuestHandler` on its own thread, for Tailscale Serve to proxy to as `unix:PATH`; without it there
+is no second server, no `guest-token` file and `guest_socket` is None. The service binds exactly two
+listeners, the owner's TCP port and this socket. At start the console state folder, when the console
+creates it, is mode 0700, the socket's folder is made mode 0700 (an existing one is tightened) and the
+socket is chmod 0600 at once after the bind, both the owner's; a folder that is a symlink, not a
+directory or not the owner's, or a non-socket file at PATH, is a `GuestSocketError` and the console
+does not start. A socket file at PATH is removed only when a connect to it is refused (a stale file); a
+connect that succeeds is `GuestSocketError` with `errno.EADDRINUSE` and leaves the running console's
+file alone; any other connect error is a `GuestSocketError` and leaves the file. A path that is not
+absolute is a `GuestSocketError` (`EINVAL`) before the console touches the file system or binds the
+owner's port. The stale-file probe, the bind and the listen run under an exclusive `flock` on
+`<socket>.lock` in the folder, so a second console never finds the first bound but not yet
+listening and unlinks its file; `close` takes the same lock around its inode check and unlink, so a
+console stopping never unlinks the socket of one starting at the same path. A folder that holds an
+ACL allow entry (`guest_acl_reader`, default `guest.acl_reader_for(sys.platform)`; macOS only) is a
+`GuestSocketError` (`EPERM`). `close` and a
+failed construction remove the socket file this console bound (the same device and inode) and nothing
+else.
+Every guest connection is judged in `verify_request` before a byte is read: `guest.door_refusal` on
+the `os.lstat` of the folder and the socket (any bit beyond 0700 or 0600, or not the owner's, refuses),
+the socket path still naming the file this console bound (same device and inode, else the listener
+is not the one the path names and the connection is refused as `door_wider`), no ACL allow entry on
+the folder or the socket (a reader that raises counts as one), then the peer's uid (`guest_peer_reader`, default `peer.unix_reader_for(sys.platform)`; `peer.unix_refusal`
+admits only root and `owner_uid`; an absent or failing reader refuses as `unreadable`). A refusal closes
+the connection with no answer, appends nothing, records no reading and prints one stderr line `console:
+guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitted by
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
-nothing appended (the one thing a guest-port request may publish is the reading below): sharing
-off (no tailnet name), a `Host` that is not exactly the configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
-`GET /api/whoami` is answered to any request before admission: it reports the `Host` it saw, how
-many `Host` and login headers arrived, whether `X-Forwarded-For` did, and whether the login named
+nothing appended (the one thing a guest-door request may publish is the reading below): sharing
+off, then a tailnet name this console cannot read (`guest.NAME_UNREAD_TEXT`: the name is read from
+this host's Tailscale, ADR-console-078), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the read name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
+One request is judged by one `guest.Snapshot` (the switch, the list and the read name, with the scoped views
+and picture ids derived under them): the handler reads `ConsoleService.guest_snapshot` once, in `parse_request`,
+and the recorded reading, the decision, the state read and the picture check all use that snapshot; the
+service replaces the snapshot as one assignment.
+`GET /api/whoami` is answered to any request before admission, except `403` `guest.NAME_UNREAD_TEXT` while
+sharing is on and no name is read: it reports the `Host` and the
+`X-Forwarded-Host` it saw, how many of each and of the login headers arrived, whether `X-Forwarded-For` did, and whether the login named
 by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
@@ -77,34 +118,51 @@ its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`)
 scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
 desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
-stream of it, which re-admits on every publish and ends when the colleague, the tailnet name or the
-sharing is gone, and a picture read needs the guest token, an `Origin` (when sent) of `https://<tailnet>`
+stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
+read tailnet name moved or went, even when the change came and went while a frame was being written
+(`guest.Snapshot.revoked`), and a picture read needs the guest token, an `Origin` (when sent) of `https://<the read name>`
 and an id on the colleague's own view, else `404` `this picture is not known`. Every guest response closes
 its connection, so a body or a second request sent on it is never parsed. `ROUTES` registers every
 route: a handler compares `route` only with registered names, and a method other than GET on a guest
 read is `405` `Allow: GET`. The owner's port refuses, on every route, a request carrying a
 `Tailscale-*` header or `X-Forwarded-For` with `403` `guest.OWNER_PORT_TEXT`, after the `Host` check.
-With `serve_reader` (`console --tailscale PATH`, `guest.serve_reader`) a daemon thread `SERVE_THREAD`
-calls `poll_serve` at once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads the Windows
-Tailscale client's `serve status --json` outside the ingest lock, keeps the reading in memory only (never
-in the log) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve proxies
-the tailnet name to the bound guest port. A reader that raises is one stderr line `console:
-serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); without a reader no
-thread starts and the state stays `unchecked`.
+With `serve_reader` and `status_reader` (`console --tailscale PATH`, `guest.serve_reader`,
+`guest.status_reader`) a daemon thread `SERVE_THREAD` (started for either reader) calls `poll_serve` at
+once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads this host's Tailscale client's `serve
+status --json` and `status --json` outside the ingest lock, each in its own `try`, keeps the readings
+(the Serve status, the name `guest.self_name` derives and the own addresses `guest.own_addresses`
+derives, ADR-console-079) in memory only (never in the log, the name and the addresses
+never printed) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve
+proxies the read name to `unix:<the bound guest socket>`, and a name that moved or went is a publish
+that ends an open guest stream. A Serve reader that raises is one stderr line `console:
+serve_status_failed <Type>: <message>` and the reading is None (`unchecked`); a status reader that raises
+is one stderr line `console: tailnet_status_failed <Type>` (the type only, as the message could carry the
+name) and reads None (the name is unread, `unreadable`); without a reader no thread starts.
 The guest token is `guest-token` beside `page-token`, made and checked as the page token is; it is
 a different token, refused on every owner route, as the page token is on the guest picture read.
-The service keeps the last guest-port request's `guest.reading` (every request the port parses,
+The service keeps the last guest-door request's `guest.reading` (every request the door parses,
 whatever its method) in memory only (never logged, null after a restart) as the owner's
-`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it.
+`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it. Its
+`client` tells this host's own requests from another device's (ADR-console-079), and `sharing.other_device_seen`
+becomes true on the first reading whose `client` is `other_device` and stays true until the service
+stops or a poll reads own addresses that differ from the ones before, which drops the reading and the
+flag taken under the old ones (memory only, false after a restart); a status read that gives no address
+changes none of this. A reading of another device that would change what is shown is confirmed by one fresh
+`status --json` read before it is kept (kept as `unknown` when that read gives no address, dropped when it
+gives addresses other than the ones it was judged under, the poll then taking the new ones), and a poll that
+reads a tailnet name other than the one a reading was judged under drops that reading, so a request sent just
+before a change of address or name is never kept as one judged under the old. That read runs on one worker
+thread, never on the request's thread (a guest request never waits on Tailscale), the latest waiting
+reading alone kept; `settle_guest_readings` waits for it and `close` does.
 
-Guest writes (#1263). Five page writes are open to a listed colleague on the guest port, the members of
+Guest writes (#1263). Five page writes are open to a listed colleague on the guest door, the members of
 `GUEST_WRITES`: `POST /api/goal`, `/api/approve`, `/api/reply`, `/api/round-answer` and `/api/message`.
 `GuestHandler._guest_write` takes them in this order after admission: a method other than POST is `405`
-`Allow: POST`; then `write_guard.refusal` with `https://<tailnet>` and the guest token (`403` `origin
+`Allow: POST`; then `write_guard.refusal` with `https://<read name>` and the guest token (`403` `origin
 refused` or `token refused`, the body unread, the owner's page token refused as `token refused`); then
 the owner's body helper for the route with a `guest.GuestActor` (`411`, `415`, `413`, `400` `bad
 <name>`); then, under the ingest lock and before anything is appended, the write-time re-check of the
-tailnet the request was admitted under, the access list, the project, the starter (`409`
+sharing switch, the read tailnet name the request was admitted under, the access list, the project, the starter (`409`
 `guest.NOT_YOUR_SPRINT_TEXT` unless the colleague started the sprint) and the look rule (`409`
 `guest.OWNER_LOOK_TEXT` for a question carrying a before-and-after pair, `guest.OWNER_ONLY_TEXT` for a
 question marked `owner_only`); success is an empty `204`.
@@ -114,18 +172,18 @@ The owner's access-list writes (#1237) are three page writes, `POST /api/share-t
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
 `SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
 (4096; 411, 415, 411, 413 as every JSON page write). Their bodies are the exactly-keyed objects
-`guest.parse_tailnet` (`{"tailnet": "<host>.<tailnet>.ts.net" or null}`), `guest.parse_colleague`
+`guest.parse_sharing` (`{"shared": true|false}`), `guest.parse_colleague`
 (`{"login", "projects"}`) and `guest.parse_removal` (`{"login"}`) read; a body they refuse is `400`
-`bad tailnet`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
+`bad sharing`, `bad colleague` or `bad removal`. A write refused on its merits (`guest.Refused`:
 a project that is not registered, a login that is not listed) is one stderr line `console:
 share_refused <reason>` and `409` with the reason; any other failure is `console: share_failed
 <Type>: <message>` and `500` `share failed`; no stderr line carries a login or a tailnet name.
 Success appends one row under the console's ingest lock, applies it and answers an empty `204`:
-`ConsoleService.set_tailnet` a `sharing.tailnet` row, `set_colleague` a `sharing.colleague` row
+`ConsoleService.set_sharing` a `sharing.tailnet` row (`{"shared"}`), `set_colleague` a `sharing.colleague` row
 that replaces the login's whole project list, `remove_colleague` a `sharing.removed` row. A
 refusal appends nothing and publishes nothing. Each write publishes, and the guest stream
-re-admits on every publish, so a removed colleague's open stream, a cleared tailnet's and a
-moved tailnet's end before any further frame, and the next guest request is `403`.
+re-admits on every publish, so a removed colleague's open stream and a switched-off one's end before any further frame
+(a moved or gone name ends one on the Serve thread's publish), and the next guest request is `403`.
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -203,8 +261,58 @@ line `console: stop_refused <reason>` and 409 with the reason, any other excepti
 stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`. `POST /api/round-answer` (#891) runs the same checks with
 `MAX_ROUND_ANSWER_BYTES` (16384) and `sprints.parse_round_answer`: 400 `bad round answer`,
 `sprints.Refused` is one stderr line `console: round_answer_refused <reason>` and 409 with the
-reason, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
-answer failed`; success is an empty `204`. `POST /api/signin`, `POST /api/signin-code` and
+reason, a `ForgeError` (the read of a look card's pull request, below) is 502 with
+`answer.tracker_words`, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
+answer failed`; success is an empty `204`. `POST /api/look-retry` (#1260) runs the same checks with
+`MAX_LOOK_RETRY_BYTES` (4096) and `sprints.parse_look_retry`: 400 `bad look retry`, `sprints.Refused` is one
+stderr line `console: look_retry_refused <reason>` and 409 with the reason, a `ForgeError` or `answer.Refused`
+from the post is 502 with the plain reason recorded for it (`tracker_words`, or the refusal's text), any other
+exception is `console: look_retry_failed <Type>: <message>` and 500 `look retry failed`; success is an empty
+`204`.
+
+Approving a look card (#1260, ADR-console-074). An answer that chooses the `look.approve` option of a question
+that carries a `look` and carries no words of the owner's (`text` absent: an option picked with words typed beside
+it is an ordinary answer that reaches the manager as it is, because those words may ask for a fix) is recorded by
+the console on the issue itself, in this order. The project's repository
+is `slug_of(root)`; none is `sprints.Refused(LOOK_NO_REPOSITORY)` with nothing read or appended. The slot
+`(sprint, round, index)` is reserved (a second approval or retry meanwhile is `LOOK_SENDING`), and the pull
+request is read through `look_reader` with `answer.with_retries`, outside the ingest lock and before anything
+is appended; a failed read appends nothing, logs `console: look_head_failed <sprint> <round> <index> <code>:
+<detail>` and is the 502 above. A head that is not the card's, or a pull request that is closed or merged,
+appends one `look.recorded moved` row and is a 409 with `LOOK_MOVED` or `LOOK_CLOSED`; the question stays open.
+The repository is the one the card was issued for: `ask_questions` writes the project's `slug_of(root)` into the
+round's `questions.asked` row as `look_repo` when a question carries a look, and an answer reads and posts to
+that, never to the checkout's origin at answer time (a card issued without one is `LOOK_NO_REPOSITORY`).
+Otherwise the refusals of any answer are checked again (a question withdrawn or answered meanwhile is refused
+and nothing is posted), one `question.answered` row is appended with its `look` member (the repository too), and the approval is
+posted through `look_recorder` with `str(<that row's seq>)` as the message, outside the lock, retrying
+transient failures (each retry logs `console: look_post_retry <sprint> <round> <index> <attempt> <code>:
+<detail>`). It then appends `look.recorded posted` and nudges the manager, or `look.recorded failed` with the
+plain reason after logging `console: look_post_failed <sprint> <round> <index> <code>: <detail>` (`refused:
+<reason>` for `answer.Refused`); the answer is still 204 and the card stays on the page with Retry
+(`retry_look` posts again, refusing `NOT_OPEN`, `UNKNOWN_QUESTION`, `ENDED`, `LOOK_NOT_PENDING` and `LOOK_SENDING`; it posts to the repository kept in the answer's row, never to the
+checkout's repository now, and `answer.record_look` finds a trusted marker already posted for that message,
+ended or not, and posts nothing, else reads the pull request again and posts nothing when it is not open at the
+card's head, so no attempt, an automatic retry included, posts a stale approval). A post that finds the pull
+request closed, merged or at another head (`answer.LookMoved`, on the first attempt or on a retry) appends
+`look.recorded moved` with the answer's id: the fold takes the answer back and the question is open again for the
+manager to replace, so the answer or the retry is a 409 with `LOOK_MOVED` or `LOOK_CLOSED` after logging
+`console: look_post_moved <sprint> <round> <index>: <reason>`. Every post is followed by one more read of the pull
+request (`look_reader`, retried the same way): a pull request that moved or closed between the read before the
+post and the post is recorded as `moved` the same way, and a failed final read is recorded `failed` (a retry finds
+the marker and reads again), so the answer is released to the manager only for a head still the card's at the last
+read. A pull request found moved or closed at that last read has the approval already on the issue, so the console
+ends it with a trusted `end` marker (`answer.end_look` through `look_ender`, retried the same way) before it records
+`moved`: no later head that keeps the approved changes can pass the merge guard on it; an end that fails is a failed
+post with Retry, whose attempt finds the marker, reads the head again and ends it. The tracker cannot make the read and
+the post one step, so a push landing after that last read still leaves a marker that names the head the owner looked at,
+which the merge guard judges against the head it then sees. Every attempt of a post, an automatic retry after a backoff
+included, first finds the sprint still taking questions, else it posts nothing and records `failed` with `ENDED`.
+Every `look.recorded moved` row, first read or last, reserves a nudge, so an idle manager is told by the sprint's
+`look-moved` message (`sprints.MESSAGE_LOOK_MOVED`) that its card is stale. `retry_look` also refuses `ENDED` once the sprint
+has ended or stopped, and posts nothing. The manager's answer message is
+held until `posted`. At `start()`, before the threads, each approval left `posting` by a stopped console gets
+`look.recorded failed` with `LOOK_INTERRUPTED`. An answer that does not approve a look card is unchanged. `POST /api/signin`, `POST /api/signin-code` and
 `POST /api/signin-cancel` (#1026) run the same checks with `MAX_SIGNIN_BYTES` (4096) and
 `signin_run.parse_profile_request` (start and cancel) or `signin_run.parse_code_request`: 400 `bad
 sign-in`, `bad code` or `bad cancel`; a refusal is one stderr line `console: signin_refused <profile>
@@ -836,7 +944,7 @@ refused` and 403 `secret refused`; any other `sprints.Refused` is `console: clos
 `{"at":"<the row's at>"}`. Every refusal is `text/plain`, one line, closes the connection, appends
 nothing and publishes nothing. The secret appears in no stderr line or answer.
 
-A state request reads only `view_bytes`, which is memory: no log access, no
+Once the connection's peer is admitted (one lookup per connection, ADR-console-076), a state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
 subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
@@ -1205,9 +1313,10 @@ it lists the sessions named `manager.session_name(project, sprint)`: a listed on
 there is no nudger call and the reason is `nudge.UNKNOWN_SESSION` with a null route; a `NudgeFailed`
 gives its text and any other exception (the listing's included) `<Type>: <message>`. Under the lock
 again it releases the reservation and, while the sprint is open and the service is not stopping,
-appends one `sprint.nudged {sprint_id, through: the last unread id, route, ok[, reason]}` (a failure
+appends one `sprint.nudged {sprint_id, through: the last unread id, covers: the unread ids, route, ok[, reason]}` (a failure
 also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
-`_nudge_again` and now holds an unread message above `through`, it is reserved and dispatched once
+`_nudge_again` and now holds an unread message `covers` does not list (one above `through`, or an approval
+released while the nudge ran), it is reserved and dispatched once
 more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
 failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
@@ -1466,10 +1575,14 @@ session. Nothing in this path reads the tracker or the forge.
 
 import contextlib
 import dataclasses
+import errno
+import fcntl
 import hmac
 import http.server
 import json
+import socket
 import socketserver
+import stat
 import sys
 import os
 import threading
@@ -1487,12 +1600,12 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
-    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
+    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
@@ -1520,7 +1633,7 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
-DEFAULT_GUEST_PORT = 27185
+PEER_LOOKUPS = 8  # concurrent holder lookups on the owner port (#1294)
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'none'")
@@ -1568,6 +1681,7 @@ ACTIVATE_RUNNING = "an activation is already running"
 ACTIVATE_MOVED = "that commit is no longer the tip of origin's integration branch"
 ACTIVATE_UNREADABLE = "the tip of origin's integration branch could not be read"
 ROUND_ANSWER_PATH = "/api/round-answer"
+LOOK_RETRY_PATH = "/api/look-retry"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
 SIGNIN_CODE_PATH = "/api/signin-code"
@@ -1596,7 +1710,7 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
-    SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
+    LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1639,6 +1753,7 @@ MAX_OWNER_NOTICE_BYTES = 4096
 MAX_OWNER_NOTICE_WITHDRAW_BYTES = 4096
 MAX_ACTIVATE_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
+MAX_LOOK_RETRY_BYTES = 4096
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
 MAX_MESSAGE_REPLY_BYTES = 16384
@@ -1683,6 +1798,7 @@ SPEND_SECONDS = 60.0
 SPEND_THREAD = "console-spend"
 SERVE_SECONDS = 60.0
 SERVE_THREAD = "console-serve-poll"
+CONFIRM_THREAD = "console-guest-confirm"
 MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
@@ -1769,7 +1885,36 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    _peer_admitted = False
+
+    def _owner_peer(self) -> bool:
+        """Whether this connection's peer is the owner's own process; a refusal is already sent."""
+        if self._peer_admitted:
+            return True
+        console = self.server.console
+        reader = console.peer_reader
+        holders = None
+        if reader is not None and console.peer_slots.acquire(blocking=False):
+            try:
+                holders = reader(self.client_address[:2], self.server.server_address[:2])
+            except Exception:
+                holders = None
+            finally:
+                console.peer_slots.release()
+        found = peer.refusal(holders, self.server.console.owner_uid)
+        if found is None:
+            self._peer_admitted = True
+            return True
+        print(f"console: peer_refused {found[0]}", file=sys.stderr)
+        self._refuse(403, found[1])
+        return False
+
+    def handle_expect_100(self) -> bool:
+        return self._owner_peer() and super().handle_expect_100()
+
     def _loopback(self) -> bool:
+        if not self._owner_peer():
+            return False
         port = self.server.server_address[1]
         if self.headers.get("Host") not in (f"{HOST}:{port}", f"localhost:{port}"):
             self.close_connection = True
@@ -2610,10 +2755,41 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: round_answer_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
             return False
+        except ForgeError as error:
+            self._refuse(502, answer.tracker_words(error))
+            return False
         except Exception as error:
             print(f"console: round_answer_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
             self._refuse(500, "round answer failed")
+            return False
+        return True
+
+    def _look_retry_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's retry of a look approval; False when it was refused."""
+        body = self._json_body(MAX_LOOK_RETRY_BYTES)
+        if body is None:
+            return False
+        try:
+            parsed = sprints.parse_look_retry(body)
+        except ValueError:
+            self._refuse(400, "bad look retry")
+            return False
+        try:
+            console.retry_look(*parsed)
+        except sprints.Refused as error:
+            print(f"console: look_retry_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except ForgeError as error:
+            self._refuse(502, answer.tracker_words(error))
+            return False
+        except answer.Refused as error:
+            self._refuse(502, str(error))
+            return False
+        except Exception as error:
+            print(f"console: look_retry_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "look retry failed")
             return False
         return True
 
@@ -2646,7 +2822,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         if route == SHARE_TAILNET_PATH:
-            bad, parse, write = "bad tailnet", guest.parse_tailnet, console.set_tailnet
+            bad, parse, write = "bad sharing", guest.parse_sharing, console.set_sharing
         elif route == SHARE_COLLEAGUE_PATH:
             bad, parse = "bad colleague", guest.parse_colleague
             write = lambda parsed: console.set_colleague(*parsed)
@@ -2941,6 +3117,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._round_answer_request(console):
                 return
+        elif route == LOOK_RETRY_PATH:
+            self.close_connection = True
+            if not self._look_retry_request(console):
+                return
         elif route == STOP_PATH:
             self.close_connection = True
             if not self._stop_request(console):
@@ -3135,6 +3315,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 class GuestHandler(ConsoleHandler):
     """The guest port's one handler (#1237); it never calls the owner's route methods."""
 
+    handle_expect_100 = http.server.BaseHTTPRequestHandler.handle_expect_100
+    snapshot = guest.NO_SNAPSHOT
+
     def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
               cache: str = "no-store"):
         self.close_connection = True
@@ -3144,23 +3327,28 @@ class GuestHandler(ConsoleHandler):
 
     def _guest_request(self):
         console = self.server.console
+        snapshot = self.snapshot
+        policy = snapshot.policy
         route = self.path.split("?", 1)[0]
         hosts = self.headers.get_all("Host") or []
+        forwarded_hosts = self.headers.get_all(guest.FORWARDED_HOST_HEADER) or []
         logins = self.headers.get_all(guest.LOGIN_HEADER) or []
         if self.command == "GET" and route == WHOAMI_PATH:
+            if policy.access.shared and policy.name is None:
+                return self._refuse(403, guest.NAME_UNREAD_TEXT)
             body = json.dumps(
-                guest.whoami(hosts, logins, self.headers.get_all("X-Forwarded-For") or [],
+                guest.whoami(hosts, forwarded_hosts, logins,
+                             self.headers.get_all("X-Forwarded-For") or [],
                              self.headers.get_all(guest.PROBE_HEADER) or []),
                 sort_keys=True, separators=(",", ":"))
             return self._send(200, "application/json", body.encode())
-        access = console.access
-        login, text = guest.admit(access, hosts, logins)
+        login, text = guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
         if text is not None:
             return self._refuse(403, text)
         if route in GUEST_WRITES:
             if self.command != "POST":
                 return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "POST"))
-            return self._guest_write(route, access, login)
+            return self._guest_write(route, policy, login)
         if route in OWNER_ONLY:
             return self._refuse(403, guest.OWNER_ONLY_TEXT)
         if self.command != "GET":
@@ -3171,27 +3359,27 @@ class GuestHandler(ConsoleHandler):
             self._send(200, "text/html; charset=utf-8", console.guest_page_bytes,
                        ("Content-Security-Policy", CSP))
         elif route == STATE_PATH:
-            view = console.guest_view_bytes(login)
+            view = snapshot.views.get(login)
             if view is None:
                 return self._refuse(403, guest.NOT_SHARED_TEXT)
             self._send(200, "application/json", view)
         elif route == STREAM_PATH:
-            self._stream(self._readmitting(login, hosts, logins))
+            self._stream(self._readmitting(snapshot, login, hosts, forwarded_hosts, logins))
         elif route.startswith(PICTURE_PREFIX):
-            self._guest_picture(route, access, login)
+            self._guest_picture(route, policy.name, snapshot.pictures.get(login, frozenset()))
         else:
             self._refuse(404, "not found")
 
-    def _guest_write(self, route: str, access: "guest.Access", login: str):
+    def _guest_write(self, route: str, policy: "guest.Policy", login: str):
         """One of the five guest writes (#1263): the owner's guard shape, the guest token and origin."""
         console = self.server.console
         refusal = write_guard.refusal(
-            access.tailnet, self.headers.get_all("Origin") or [],
+            policy.name, self.headers.get_all("Origin") or [],
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
             scheme="https")
         if refusal is not None:
             return self._refuse(*refusal)
-        by = guest.GuestActor(login, access.tailnet)
+        by = guest.GuestActor(login, policy.name)
         self.close_connection = True
         if route == GOAL_PATH:
             done = self._goal_request(console, route, by)
@@ -3213,7 +3401,8 @@ class GuestHandler(ConsoleHandler):
         except OSError:
             return
 
-    def _readmitting(self, login: str, hosts: list[str], logins: list[str]):
+    def _readmitting(self, admitted: "guest.Snapshot", login: str, hosts: list[str],
+                     forwarded_hosts: list[str], logins: list[str]):
         console = self.server.console
         last: list[bytes | None] = [None]
 
@@ -3222,11 +3411,15 @@ class GuestHandler(ConsoleHandler):
             while True:
                 remaining = deadline - time.monotonic()
                 change = None if remaining <= 0 else console.wait_for_guest_change(
-                    login, seen, remaining)
+                    seen, remaining)
                 if change is None:
                     return None
-                version, access, view = change
-                if guest.admit(access, hosts, logins) != (login, None) or view is None:
+                version, snapshot = change
+                policy, view = snapshot.policy, snapshot.views.get(login)
+                if (snapshot.revoked != admitted.revoked
+                        or guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
+                        != (login, None)
+                        or view is None):
                     return version, None
                 if view == last[0]:
                     seen = version
@@ -3236,10 +3429,10 @@ class GuestHandler(ConsoleHandler):
 
         return wait
 
-    def _guest_picture(self, route: str, access: "guest.Access", login: str):
+    def _guest_picture(self, route: str, name: str, known: frozenset[str]):
         console = self.server.console
         refusal = write_guard.read_refusal(
-            access.tailnet, self.headers.get_all("Origin") or [],
+            name, self.headers.get_all("Origin") or [],
             self.headers.get_all(write_guard.FETCH_SITE_HEADER) or [],
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
             scheme="https")
@@ -3248,7 +3441,7 @@ class GuestHandler(ConsoleHandler):
         picture_id = route[len(PICTURE_PREFIX):]
         if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
             return self._refuse(400, "bad picture id")
-        if picture_id not in console.guest_pictures(login):
+        if picture_id not in known:
             return self._refuse(404, "this picture is not known")
         self._send_picture(picture_id)
 
@@ -3258,11 +3451,14 @@ class GuestHandler(ConsoleHandler):
         if ok:
             headers = self.headers
             console = self.server.console
+            self.snapshot = console.guest_snapshot
             console.record_guest_request(guest.reading(
-                console.access, headers.get_all("Host") or [],
+                self.snapshot.policy.access, self.snapshot.policy.name, headers.get_all("Host") or [],
+                headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
-                headers.get_all(guest.PROBE_HEADER) or []))
+                headers.get_all(guest.PROBE_HEADER) or [], own=self.snapshot.policy.addresses),
+                self.snapshot.policy)
         return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
@@ -3274,12 +3470,12 @@ class GuestHandler(ConsoleHandler):
         raise AttributeError(name)
 
 
-class GuestPortError(OSError):
-    """The guest port could not be bound; `port` is the one that failed."""
+class GuestSocketError(OSError):
+    """The guest socket could not be made; `path` is the one that failed."""
 
-    def __init__(self, port: int, error: OSError):
+    def __init__(self, path: str, error: OSError):
         super().__init__(error.errno, error.strerror)
-        self.port = port
+        self.path = path
 
 
 class ConsoleServer(socketserver.ThreadingTCPServer):
@@ -3291,6 +3487,114 @@ class ConsoleServer(socketserver.ThreadingTCPServer):
     def __init__(self, port: int, console: "ConsoleService", handler=ConsoleHandler):
         self.console = console
         super().__init__((HOST, port), handler)
+
+
+class GuestServer(socketserver.ThreadingUnixStreamServer):
+    """The guest door: a Unix socket at `path` in a private folder, every connection judged first."""
+    daemon_threads = True
+    request_queue_size = BACKLOG
+
+    def __init__(self, path: Path, console: "ConsoleService"):
+        self.console = console
+        self._path = Path(path)
+        self._bound: tuple[int, int] | None = None
+        self._lock_fd: int | None = None
+        super().__init__(str(path), GuestHandler)
+
+    @property
+    def bound(self) -> tuple[int, int] | None:
+        """The `(st_dev, st_ino)` of the socket file this server bound, None before the bind."""
+        return self._bound
+
+    def _lock(self) -> None:
+        fd = os.open(self._path.with_name(self._path.name + ".lock"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._lock_fd = fd
+
+    def _unlock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is not None:
+            os.close(fd)
+
+    def server_bind(self) -> None:
+        path = self._path
+        folder = path.parent
+        folder.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass
+        found = os.lstat(folder)
+        if not stat.S_ISDIR(found.st_mode) or found.st_uid != self.console.owner_uid:
+            raise PermissionError(
+                errno.EPERM, "the guest socket folder is not the owner's own directory")
+        os.chmod(folder, guest.FOLDER_MODE)
+        if self.console.acl_grants(folder):
+            raise PermissionError(
+                errno.EPERM, "the guest socket folder grants access through an ACL")
+        self._lock()
+        try:
+            held = os.lstat(path)
+        except FileNotFoundError:
+            held = None
+        if held is not None:
+            if not stat.S_ISSOCK(held.st_mode):
+                raise FileExistsError(
+                    errno.EEXIST, "a file that is not a socket holds the guest socket path")
+            probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                probe.settimeout(1)
+                probe.connect(str(path))
+            except ConnectionRefusedError:
+                os.unlink(path)
+            else:
+                raise OSError(errno.EADDRINUSE, "another console listens on the guest socket")
+            finally:
+                probe.close()
+        super().server_bind()
+        bound = os.lstat(path)
+        self._bound = (bound.st_dev, bound.st_ino)
+        os.chmod(path, guest.SOCKET_MODE)
+
+    def server_activate(self) -> None:
+        try:
+            super().server_activate()
+        finally:
+            self._unlock()
+
+    def verify_request(self, request, client_address) -> bool:
+        code = self.console.guest_refusal(request)
+        if code is not None:
+            print(f"console: guest_refused {code}", file=sys.stderr)
+        return code is None
+
+    def server_close(self) -> None:
+        super().server_close()
+        try:
+            self.remove_socket()
+        finally:
+            self._unlock()
+
+    def remove_socket(self) -> None:
+        if self._bound is None:
+            return
+        held = self._lock_fd is not None
+        try:
+            if not held:
+                self._lock()
+            found = os.lstat(self._path)
+            if stat.S_ISSOCK(found.st_mode) and (found.st_dev, found.st_ino) == self._bound:
+                os.unlink(self._path)
+        except OSError:
+            pass
+        finally:
+            if not held:
+                self._unlock()
 
 
 class _ProfileRemoving(Exception):
@@ -3346,6 +3650,9 @@ class ConsoleService:
                  criterion_path: Callable[..., None] = answer.answer_criterion,
                  write_sleep: Callable[[float], object] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
+                 look_reader: Callable[[str, int], tuple[str, str | None]] = answer.look_head,
+                 look_recorder: Callable[[str, int, int, str, str], int] = answer.record_look,
+                 look_ender: Callable[[str, int, int], None] = answer.end_look,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
@@ -3377,10 +3684,26 @@ class ConsoleService:
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None,
                  screenshot_dirs: Iterable[Path] = (),
-                 guest_port: int | None = None,
+                 guest_socket: Path | None = None,
                  guest_token_path: Path | None = None,
                  serve_reader: Callable[[], object | None] | None = None,
-                 serve_seconds: float = SERVE_SECONDS):
+                 status_reader: Callable[[], object | None] | None = None,
+                 serve_seconds: float = SERVE_SECONDS,
+                 peer_reader: peer.PeerReader | None = peer.reader_for(sys.platform),
+                 owner_uid: int | None = None,
+                 peer_lookups: int = PEER_LOOKUPS,
+                 guest_peer_reader: peer.UnixPeerReader | None = peer.unix_reader_for(sys.platform),
+                 guest_acl_reader: Callable[[str], bool] | None = guest.acl_reader_for(
+                     sys.platform)):
+        if guest_socket is not None and not Path(guest_socket).is_absolute():
+            raise GuestSocketError(str(guest_socket), OSError(
+                errno.EINVAL, "the guest socket path is not absolute"))
+        self.peer_reader = peer_reader
+        self.peer_slots = threading.BoundedSemaphore(peer_lookups)
+        self.owner_uid = os.geteuid() if owner_uid is None else owner_uid
+        self.guest_peer_reader = guest_peer_reader
+        self.guest_acl_reader = guest_acl_reader
+        self._guest_socket_path = None if guest_socket is None else Path(guest_socket)
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file
@@ -3522,6 +3845,13 @@ class ConsoleService:
         self._digest_seconds = digest_seconds
         self._spend_seconds = spend_seconds
         self._serve_reader = serve_reader
+        self._status_reader = status_reader
+        self._tailnet_name: str | None = None
+        self._tailnet_addresses: frozenset = frozenset()
+        self._other_device_seen = False
+        self._confirm_pending: tuple[Mapping, guest.Policy] | None = None
+        self._confirm_worker: threading.Thread | None = None
+        self._guest_reading_name: str | None = None
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
         self._guest_reading: dict | None = None
@@ -3537,6 +3867,10 @@ class ConsoleService:
         self._stop = threading.Event()
         self._write_sleep = self._stop.wait if write_sleep is None else write_sleep
         self._monotonic = monotonic
+        self._look_reader = look_reader
+        self._look_recorder = look_recorder
+        self._look_ender = look_ender
+        self._look_sending: set[tuple[str, int, int]] = set()
         self._watcher: threading.Thread | None = None
         self._signature = None
         self.log: EventLog | None = None
@@ -3556,22 +3890,18 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._access = guest.NO_ACCESS
-        self._published_access = guest.NO_ACCESS
-        self._guest_views: dict[str, bytes] = {}
-        self._guest_pictures: dict[str, frozenset[str]] = {}
+        self._guest = guest.NO_SNAPSHOT
         self._guest_token: str | None = None
         self._guest_page: bytes | None = None
-        self._guest_server: ConsoleServer | None = None
+        self._guest_server: GuestServer | None = None
         self._guest_thread: threading.Thread | None = None
-        self._guest_port_number: int | None = None
         self._server = ConsoleServer(port, self)
         try:
-            if guest_port is not None:
+            if self._guest_socket_path is not None:
                 try:
-                    self._guest_server = ConsoleServer(guest_port, self, GuestHandler)
+                    self._guest_server = GuestServer(self._guest_socket_path, self)
                 except OSError as error:
-                    raise GuestPortError(guest_port, error) from error
-                self._guest_port_number = self._guest_server.server_address[1]
+                    raise GuestSocketError(str(self._guest_socket_path), error) from error
             self._token = write_guard.load_token(
                 Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
                 else token_path)
@@ -3638,16 +3968,51 @@ class ConsoleService:
         return self._server.server_address[:2]
 
     @property
-    def guest_address(self) -> tuple[str, int] | None:
-        return None if self._guest_server is None else self._guest_server.server_address[:2]
+    def guest_socket(self) -> str | None:
+        return None if self._guest_server is None else str(self._guest_socket_path)
+
+    def guest_refusal(self, sock: socket.socket) -> str | None:
+        """Why the guest connection `sock` is refused (door first, then peer), else None."""
+        path = self._guest_socket_path
+        stats = []
+        for target in (path.parent, path):
+            try:
+                stats.append(os.lstat(target))
+            except OSError:
+                stats.append(None)
+        refused = guest.door_refusal(stats[0], stats[1], self.owner_uid)
+        if refused is not None:
+            return refused
+        server = self._guest_server
+        if (server is None or server.bound is None
+                or (stats[1].st_dev, stats[1].st_ino) != server.bound):
+            return guest.DOOR_WIDER
+        if self.acl_grants(path.parent) or self.acl_grants(path):
+            return guest.DOOR_WIDER
+        if self.guest_peer_reader is None:
+            return "unreadable"
+        try:
+            uid = self.guest_peer_reader(sock)
+        except Exception:
+            uid = None
+        return peer.unix_refusal(uid, self.owner_uid)
+
+    def acl_grants(self, target: Path) -> bool:
+        """Whether `target` grants through an ACL; a reader that fails counts as a grant."""
+        if self.guest_acl_reader is None:
+            return False
+        try:
+            return bool(self.guest_acl_reader(str(target)))
+        except Exception:
+            return True
 
     @property
     def guest_token(self) -> str | None:
         return self._guest_token
 
     @property
-    def access(self) -> "guest.Access":
-        return self._access
+    def guest_snapshot(self) -> "guest.Snapshot":
+        return self._guest
 
     @property
     def guest_page_bytes(self) -> bytes | None:
@@ -3656,12 +4021,7 @@ class ConsoleService:
     def guest_view_bytes(self, login: str) -> bytes | None:
         """The login's guest view; None when the login is not listed or sharing is off."""
         with self._published:
-            return self._guest_views.get(login)
-
-    def guest_pictures(self, login: str) -> frozenset[str]:
-        """The pictures on the login's guest view."""
-        with self._published:
-            return self._guest_pictures.get(login, frozenset())
+            return self._guest.views.get(login)
 
     @property
     def view_bytes(self) -> bytes:
@@ -3697,14 +4057,14 @@ class ConsoleService:
                 return None
             return self._version, self._view
 
-    def wait_for_guest_change(self, login: str, seen: int, timeout: float
-                              ) -> tuple[int, "guest.Access", bytes | None] | None:
-        """Like `wait_for_change`, with the access list and the login's view of that publish."""
+    def wait_for_guest_change(self, seen: int, timeout: float
+                              ) -> tuple[int, "guest.Snapshot"] | None:
+        """Like `wait_for_change`, with the guest snapshot of that publish."""
         with self._published:
             self._published.wait_for(lambda: self._version > seen or self._closing, timeout)
             if self._closing or self._version <= seen:
                 return None
-            return self._version, self._published_access, self._guest_views.get(login)
+            return self._version, self._guest
 
     def delivered(self, version: int) -> None:
         """Record that the view of `version` was written to a page stream (ADR-console-071)."""
@@ -3742,13 +4102,65 @@ class ConsoleService:
         return entry, action, approve.apply_items(
             latest, found, entry, action, deferred=self._deferred)
 
-    def record_guest_request(self, reading: Mapping) -> None:
-        """Keep the latest guest-port request's reading for the owner; see the module docstring."""
+    def record_guest_request(self, reading: Mapping, judged: guest.Policy = guest.NO_POLICY) -> None:
+        """Keep the latest guest-port request's reading for the owner; see the module docstring.
+
+        Never reads Tailscale on the caller's thread. A reading of another device that would change what
+        the owner is shown is handed to the confirming worker; a reading that would change nothing is
+        not confirmed. A reading judged under addresses or a name other than the current ones is dropped.
+        """
+        if reading.get("client") == guest.OTHER_DEVICE:
+            with self._ingest:
+                if (reading == self._guest_reading and self._other_device_seen
+                        and judged.addresses == self._tailnet_addresses):
+                    return
+                self._confirm_pending = (reading, judged)
+                if self._confirm_worker is None:
+                    self._confirm_worker = threading.Thread(
+                        target=self._confirm_guest_readings, name=CONFIRM_THREAD, daemon=True)
+                    self._confirm_worker.start()
+            return
+        self._keep_guest_reading(reading, judged)
+
+    def _keep_guest_reading(self, reading: Mapping, judged: guest.Policy) -> None:
         with self._ingest:
-            if reading == self._guest_reading:
+            if judged.addresses != self._tailnet_addresses or (
+                    judged.name is not None and self._tailnet_name is not None
+                    and judged.name != self._tailnet_name):
+                return
+            seen = self._other_device_seen or reading.get("client") == guest.OTHER_DEVICE
+            if reading == self._guest_reading and seen == self._other_device_seen:
                 return
             self._guest_reading = dict(reading)
+            self._guest_reading_name = judged.name
+            self._other_device_seen = seen
             self._publish(guests=False)
+
+    def _confirm_guest_readings(self) -> None:
+        """Confirm each waiting reading of another device by a fresh status read, outside every lock."""
+        while True:
+            with self._ingest:
+                pending, self._confirm_pending = self._confirm_pending, None
+                if pending is None:
+                    self._confirm_worker = None
+                    return
+            reading, judged = pending
+            addresses = guest.own_addresses(self._tailnet_status())
+            if not addresses:
+                self._keep_guest_reading({**reading, "client": guest.UNKNOWN_CLIENT}, judged)
+            elif addresses == judged.addresses:
+                self._keep_guest_reading(reading, judged)
+            else:
+                self.poll_serve()  # the reading was judged under addresses that have moved: drop it
+
+    def settle_guest_readings(self) -> None:
+        """Wait until no guest reading waits to be confirmed."""
+        while True:
+            with self._ingest:
+                worker = self._confirm_worker
+            if worker is None:
+                return
+            worker.join()
 
     def _publish(self, *, guests: bool = True) -> None:
         """Derive and publish the views; `guests=False` publishes the owner's view alone.
@@ -3791,9 +4203,12 @@ class ConsoleService:
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
         access = self._access
+        name = self._tailnet_name
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
-            access, guest.serve_state(self._serve_status, access.tailnet, self._guest_port_number),
-            self._guest_reading)))
+            access, name,
+            guest.serve_state(access.shared, name, self._serve_status, self.guest_socket),
+            self._guest_reading, self.guest_socket,
+            other_device_seen=self._other_device_seen)))
         found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
         evidence_key = None
         if found is not None and found["step"] == "apply_failed" and found.get("evidence") is not None:
@@ -3808,19 +4223,21 @@ class ConsoleService:
             return
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
-        if self._guest_server is not None and access.tailnet is not None:
+        if self._guest_server is not None and access.shared and name is not None:
             for login, projects in access.colleagues.items():
                 derived = guest.mark_steer(
                     guest.scrub(derive_view(**guest.scoped(inputs, projects))), login)
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
         with self._published:
-            if view != self._view or views != self._guest_views:
+            before = self._guest
+            revoked = before.revoked + (
+                before.policy.name != name or (before.policy.access.shared and not access.shared))
+            if view != self._view or views != before.views or revoked != before.revoked:
                 self._version += 1
             self._view = view
-            self._published_access = access
-            self._guest_views = views
-            self._guest_pictures = seen_pictures
+            self._guest = guest.Snapshot(
+                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 
@@ -3986,7 +4403,7 @@ class ConsoleService:
     def _guest_refusal(self, by: "guest.GuestActor | None", project_id: str) -> None:
         """Under the ingest lock: refuse a guest whose access is gone or does not cover the project, or whose project is no longer registered."""
         if by is not None:
-            text = guest.write_refusal(self._access, by, project_id)
+            text = guest.write_refusal(guest.Policy(self._access, self._tailnet_name), by, project_id)
             if text is not None:
                 raise sprints.Refused(text)
             if project_id not in self._states:
@@ -5853,7 +6270,8 @@ class ConsoleService:
 
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
                       reason: str | None, listing_failed: str | None = None,
-                      written: permission.Permission | None = None) -> None:
+                      written: permission.Permission | None = None,
+                      covers: list[int] | None = None) -> None:
         """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
         sprint = self._sprints.get(sprint_id)
         if sprint is None or self._stop.is_set():
@@ -5863,7 +6281,8 @@ class ConsoleService:
             if not unread:
                 return
             through = unread[-1].message_id
-        payload = {"sprint_id": sprint_id, "through": through, "route": route,
+            covers = [message.message_id for message in unread]
+        payload = {"sprint_id": sprint_id, "through": through, "covers": covers, "route": route,
                    "ok": reason is None}
         if reason is not None:
             payload["reason"] = reason
@@ -5928,6 +6347,7 @@ class ConsoleService:
                 sprint, unread = found
                 covered = self._notice_due.pop(sprint_id, None)
                 through = unread[-1].message_id
+                heard = {message.message_id for message in unread}
                 name = manager.session_name(sprint.project_id, sprint_id)
                 profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
         if found is None or project is None:
@@ -5950,12 +6370,13 @@ class ConsoleService:
             self._settled[sprint_id] = int(self._clock() * 1000)
             wanted = sprint_id in self._nudge_again
             self._nudge_again.discard(sprint_id)
-            self._record_nudge(sprint_id, through, route, reason, listing_failed, written)
+            self._record_nudge(sprint_id, through, route, reason, listing_failed, written,
+                               sorted(heard))
             if covered is not None and reason is not None:
                 self._notice_due[sprint_id] = max(covered, self._notice_due.get(sprint_id, 0))
             found = self._nudgeable(sprint_id)
-            if wanted and found is not None and found[1][-1].message_id > through \
-                    and not self._stop.is_set():
+            if wanted and found is not None and not self._stop.is_set() \
+                    and any(message.message_id not in heard for message in found[1]):
                 self._nudging.add(sprint_id)
                 again = True
             else:
@@ -6221,10 +6642,31 @@ class ConsoleService:
 
     def _revive_step(self, sprint: sprints.SprintState, now: int) -> str | None:
         """Under the ingest lock: the one bring-back decision for the sprint at `now` (milliseconds)."""
+        out = self._quota_wait(sprint) is not None
         return revive.next_step(
             sprint, self._waiting(sprint),
             self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
-            self._nudger is not None, self._quota_wait(sprint) is not None)
+            self._nudger is not None, out, out and self._room_elsewhere(sprint))
+
+    def _room_elsewhere(self, sprint: sprints.SprintState) -> bool:
+        """Under the ingest lock: whether a takeover would land on another account with room (#1278).
+
+        The view is the launch's own (`_prepared_launch`: signed in, not removing, the owner's
+        exclusions and pin), so the decision and the launch agree. The chosen profile must not be
+        the manager's, must share no account with it, and must read as having room: an unread
+        profile or the launcher's last-used fallback is no reason to leave a session that only waits.
+        """
+        view = capacity.capacity_view(self._profiles - self._removing, self._capacity, self._clock(),
+                                      self._signins, excluded=self._excluded, pinned=self._pinned)
+        choice = manager.choose_profile(view, self._use.last)
+        mine = sprint.manager.profile if sprint.manager else None
+        if not isinstance(choice, str) or choice == mine:
+            return False
+        entries = {entry["profile"]: entry for entry in view["profiles"]}
+        chosen = entries.get(choice)
+        if chosen is None or chosen["state"] not in ("ok", "reset") or chosen["excluded"]:
+            return False
+        return mine not in chosen["same_account_as"] and chosen.get("duplicate_of") != mine
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
@@ -6595,6 +7037,11 @@ class ConsoleService:
                        "questions": checked["questions"]}
             if listed := sprints.round_pictures(checked):
                 payload["pictures"] = listed
+            if any("look" in question for question in checked["questions"]):
+                state = self._states.get(sprint.project_id)
+                bound = self._slug_of(state.root) if state is not None else None
+                if bound is not None:
+                    payload["look_repo"] = bound
             appended = self.log.append([(QUESTIONS_ASKED, sprint.project_id, payload)])
             self._apply(appended)
             return appended[-1].seq, len(checked["questions"])
@@ -6647,10 +7094,10 @@ class ConsoleService:
             self._dispatch_notice_nudge(sprint_id)
         return seq
 
-    def set_tailnet(self, tailnet: str | None) -> None:
-        """Append one `sharing.tailnet` row: the guest door's tailnet name, or None for off."""
+    def set_sharing(self, shared: bool) -> None:
+        """Append one `sharing.tailnet` row: the guest door's switch, on or off."""
         with self._ingest:
-            self._apply(self.log.append([(SHARING_TAILNET, None, {"tailnet": tailnet})]))
+            self._apply(self.log.append([(SHARING_TAILNET, None, {"shared": shared})]))
 
     def set_colleague(self, login: str, projects: tuple[str, ...]) -> None:
         """Append one `sharing.colleague` row: the login's whole project list (it replaces)."""
@@ -6698,48 +7145,227 @@ class ConsoleService:
             self._apply(appended)
             return notice_id
 
+    def _open_question(self, project_id: str, sprint_id: str, round_id: int,
+                       index: int) -> tuple[sprints.SprintState, sprints.Question]:
+        """Under the ingest lock: the sprint and the unanswered question, or the usual refusal."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or sprint.project_id != project_id:
+            raise sprints.Refused(sprints.NOT_OPEN)
+        asked = next((question for question in sprint.questions
+                      if (question.round_id, question.index) == (round_id, index)), None)
+        if asked is not None and asked.withdrawn_at is not None:
+            raise sprints.Refused(sprints.TAKEN_BACK)
+        if not sprints.takes_questions(sprint):
+            raise sprints.Refused(sprints.ENDED)
+        if asked is None:
+            raise sprints.Refused(sprints.UNKNOWN_QUESTION)
+        if asked.answer is not None:
+            raise sprints.Refused(sprints.ANSWERED_ALREADY)
+        return sprint, asked
+
+    def _answered_row(self, project_id: str, sprint: sprints.SprintState, asked: sprints.Question,
+                      chosen: str | None, text: str, **extra) -> tuple:
+        return (QUESTION_ANSWERED, project_id, {
+            "sprint_id": sprint.sprint_id, "goal": sprint.goal, "round": asked.round_id,
+            "index": asked.index, "question": asked.question, "answer": text, "chosen": chosen,
+            "recommended": asked.recommended, "differs": chosen != asked.recommended, **extra})
+
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
                         choice: int | None, text: str | None, *,
                         by: "guest.GuestActor | None" = None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
+        slot = (sprint_id, round_id, index)
         with self._ingest:
             self._guest_refusal(by, project_id)
-            sprint = self._steered(by, project_id, sprint_id)
-            asked = next((question for question in sprint.questions
-                          if (question.round_id, question.index) == (round_id, index)), None)
-            if asked is not None and asked.withdrawn_at is not None:
-                raise sprints.Refused(sprints.TAKEN_BACK)
-            if not sprints.takes_questions(sprint):
-                raise sprints.Refused(sprints.ENDED)
-            if asked is None:
-                raise sprints.Refused(sprints.UNKNOWN_QUESTION)
+            self._steered(by, project_id, sprint_id)
+            sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
             if by is not None and guest.is_look(p.pair for p in asked.pictures):
                 raise sprints.Refused(guest.OWNER_LOOK_TEXT)
             if by is not None and asked.owner_only:
                 raise sprints.Refused(guest.OWNER_ONLY_TEXT)
-            if asked.answer is not None:
-                raise sprints.Refused(sprints.ANSWERED_ALREADY)
             words = None
             if choice is not None:
                 if not 0 <= choice < len(asked.options):
                     raise sprints.Refused(sprints.NOT_AN_OPTION)
-                chosen = answer = asked.options[choice]
+                chosen = said = asked.options[choice]
                 if text is not None:
                     words = sprints.checked_message(text)
                 elif chosen in asked.needs_words:
                     raise sprints.Refused(sprints.WORDS_NEEDED)
             else:
-                chosen, answer = None, sprints.checked_message(text)
-            appended = self.log.append([(QUESTION_ANSWERED, project_id, {
-                "sprint_id": sprint_id, "goal": sprint.goal, "round": round_id, "index": index,
-                "question": asked.question, "answer": answer, "chosen": chosen,
-                "recommended": asked.recommended, "differs": chosen != asked.recommended,
-                **({} if words is None else {"words": words}), **_by(by)})])
-            self._apply(appended)
+                chosen, said = None, sprints.checked_message(text)
+            extra = {} if words is None else {"words": words}
+            look = asked.look
+            plain = look is None or chosen != look.approve or words is not None
+            if plain:
+                appended = self.log.append([self._answered_row(
+                    project_id, sprint, asked, chosen, said, **extra, **_by(by))])
+                self._apply(appended)
+                reserved = self._reserve_nudge(sprint_id)
+            else:
+                slug = look.repo
+                if slug is None:
+                    raise sprints.Refused(answer.LOOK_NO_REPOSITORY)
+                if slot in self._look_sending:
+                    raise sprints.Refused(answer.LOOK_SENDING)
+                self._look_sending.add(slot)
+        if plain:
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            return appended[-1].seq
+        try:
+            return self._approve_look(project_id, sprint_id, round_id, index, slug, look, said, extra)
+        finally:
+            with self._ingest:
+                self._look_sending.discard(slot)
+
+    def _approve_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
+                      look: sprints.QuestionLook, said: str, extra: dict) -> int:
+        """Read the pull request head, record the answer when it is the head shown, then post it."""
+        key = f"{sprint_id} {round_id} {index}"
+        try:
+            state, head = answer.with_retries(
+                lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
+                sleep=self._write_sleep)
+        except ForgeError as error:
+            print(f"console: look_head_failed {key} {error.code}: {' '.join(error.detail.split())}",
+                  file=sys.stderr)
+            raise
+        with self._ingest:
+            sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
+            moved = state != "open" or head != look.head
+            if moved:
+                appended = self.log.append([(LOOK_RECORDED, project_id, {
+                    "sprint_id": sprint_id, "round": round_id, "index": index,
+                    "outcome": sprints.LOOK_MOVED, "found": head, "state": state})])
+                self._apply(appended)
+                reserved = self._reserve_nudge(sprint_id)
+            else:
+                appended = self.log.append([self._answered_row(
+                    project_id, sprint, asked, look.approve, said,
+                    look={"issue": look.issue, "pr": look.pr, "head": look.head, "repo": slug}, **extra)])
+                self._apply(appended)
+        if moved:
+            # The manager is told the card is stale (an idle one would never ask), outside the lock.
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            raise sprints.Refused(
+                answer.LOOK_CLOSED.format(state=state) if state != "open"
+                else answer.LOOK_MOVED.format(found=head[:7], head=look.head[:7]))
+        seq = appended[-1].seq
+        try:
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+        except answer.LookMoved as error:
+            raise sprints.Refused(str(error)) from None
+        except (ForgeError, answer.Refused):
+            pass
+        return seq
+
+    def _post_look(self, project_id: str, sprint_id: str, round_id: int, index: int, slug: str,
+                   look: sprints.QuestionLook, seq: int) -> None:
+        """Post the approval of the answer `seq` and record the outcome; a failure is raised after it is recorded.
+
+        A pull request found closed or at another head is recorded as `moved` with the answer's id, which
+        takes the answer back and opens the question again; `answer.LookMoved` is raised after it."""
+        key = f"{sprint_id} {round_id} {index}"
+
+        def on_retry(attempt: int, error: ForgeError) -> None:
+            print(f"console: look_post_retry {key} {attempt} {error.code}: "
+                  f"{' '.join(error.detail.split())}", file=sys.stderr)
+
+        def record() -> int:
+            # Every attempt, an automatic retry after a backoff included, finds the sprint still taking
+            # questions: a sprint the manager closed meanwhile posts nothing.
+            with self._ingest:
+                current = self._sprints.get(sprint_id)
+                if current is None or not sprints.takes_questions(current):
+                    raise answer.Refused(sprints.ENDED)
+            return self._look_recorder(slug, look.issue, look.pr, look.head, str(seq))
+
+        try:
+            comment = answer.with_retries(
+                record, clock=self._monotonic, sleep=self._write_sleep, on_retry=on_retry)
+            # The tracker offers no way to make the read and the post one step, so the pull request is
+            # read once more before the answer is declared recorded (ADR-console-074 D10).
+            state, found = answer.with_retries(
+                lambda: self._look_reader(slug, look.pr), clock=self._monotonic,
+                sleep=self._write_sleep, on_retry=on_retry)
+            if state != "open" or found != look.head:
+                # The marker is already on the issue: end it, so a later head that keeps the approved
+                # changes cannot pass the merge guard on it. A failed end is a failed post with Retry,
+                # whose next attempt finds the marker, reads the head again and ends it.
+                answer.with_retries(
+                    lambda: self._look_ender(slug, look.issue, comment), clock=self._monotonic,
+                    sleep=self._write_sleep, on_retry=on_retry)
+                raise answer.LookMoved(state, found, look.head)
+        except answer.LookMoved as error:
+            print(f"console: look_post_moved {key}: {error}", file=sys.stderr)
+            reserved = False
+            with self._ingest:
+                if not self._stop.is_set():
+                    self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                        "sprint_id": sprint_id, "round": round_id, "index": index,
+                        "outcome": sprints.LOOK_MOVED, "message": seq, "found": error.found,
+                        "state": error.state})]))
+                    reserved = self._reserve_nudge(sprint_id)
+            if reserved:
+                self._dispatch_nudge(sprint_id)
+            raise
+        except (ForgeError, answer.Refused) as error:
+            if isinstance(error, ForgeError):
+                print(f"console: look_post_failed {key} {error.code}: "
+                      f"{' '.join(error.detail.split())}", file=sys.stderr)
+                reason = answer.tracker_words(error)
+            else:
+                print(f"console: look_post_failed {key} refused: {error}", file=sys.stderr)
+                reason = str(error)
+            with self._ingest:
+                if not self._stop.is_set():
+                    self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                        "sprint_id": sprint_id, "round": round_id, "index": index,
+                        "outcome": sprints.LOOK_FAILED, "message": seq, "reason": reason})]))
+            raise
+        with self._ingest:
+            if self._stop.is_set():
+                return
+            self._apply(self.log.append([(LOOK_RECORDED, project_id, {
+                "sprint_id": sprint_id, "round": round_id, "index": index,
+                "outcome": sprints.LOOK_POSTED, "message": seq, "comment_id": comment})]))
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
             self._dispatch_nudge(sprint_id)
-        return appended[-1].seq
+
+    def retry_look(self, project_id: str, sprint_id: str, round_id: int, index: int) -> int:
+        """Post a look approval again; the id of the answer it records. See the module docstring."""
+        slot = (sprint_id, round_id, index)
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            asked = next((question for question in sprint.questions
+                          if (question.round_id, question.index) == (round_id, index)), None)
+            if asked is None:
+                raise sprints.Refused(sprints.UNKNOWN_QUESTION)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
+            if (asked.look is None or asked.answer is None
+                    or asked.look_state not in (sprints.LOOK_POSTING, sprints.LOOK_FAILED)
+                    or asked.look_message is None):
+                raise sprints.Refused(answer.LOOK_NOT_PENDING)
+            if slot in self._look_sending:
+                raise sprints.Refused(answer.LOOK_SENDING)
+            look, seq, slug = asked.look, asked.look_message, asked.look_repo
+            if slug is None:
+                raise sprints.Refused(answer.LOOK_NOT_PENDING)
+            self._look_sending.add(slot)
+        try:
+            self._post_look(project_id, sprint_id, round_id, index, slug, look, seq)
+        except answer.LookMoved as error:
+            raise sprints.Refused(str(error)) from None
+        finally:
+            with self._ingest:
+                self._look_sending.discard(slot)
+        return seq
 
     def sprint_status(self, sprint_id: str) -> dict:
         """What became of a sprint's brief: its decision, version and the reply asking for changes."""
@@ -7233,17 +7859,45 @@ class ConsoleService:
         """The reading the page and Activate go by: none while a successful run awaits a reading begun after it."""
         return None if self._activation_after is not None else self._activation
 
-    def poll_serve(self) -> None:
-        """One reading of Tailscale Serve's status; see the module docstring (guest door)."""
-        if self._serve_reader is None:
-            return
+    def _tailnet_status(self) -> object:
+        """One `status --json` reading, None when there is no reader or it raised."""
+        if self._status_reader is None:
+            return None
         try:
-            found = self._serve_reader()
+            return self._status_reader()
         except Exception as error:
-            print(f"console: serve_status_failed {type(error).__name__}: {error}", file=sys.stderr)
-            found = None
+            print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
+            return None
+
+    def poll_serve(self) -> None:
+        """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door).
+
+        A read that gives no address keeps the addresses before it, so a failed read moves nothing.
+        """
+        if self._serve_reader is None and self._status_reader is None:
+            return
+        found = None
+        if self._serve_reader is not None:
+            try:
+                found = self._serve_reader()
+            except Exception as error:
+                print(f"console: serve_status_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+        status = self._tailnet_status()
+        name = guest.self_name(status)
+        addresses = guest.own_addresses(status)
         with self._ingest:
             self._serve_status = found
+            self._tailnet_name = name
+            if addresses and addresses != self._tailnet_addresses:
+                # a reading and the other-device flag were judged against the old addresses: a
+                # self-probe from a moved address read as another device (ADR-console-079)
+                self._guest_reading = None
+                self._other_device_seen = False
+                self._tailnet_addresses = addresses
+            if (name is not None and self._guest_reading_name is not None
+                    and name != self._guest_reading_name):
+                self._guest_reading = None  # judged under a name that has gone (ADR-console-079 D3)
             self._publish()
 
     def activate(self, commit: str) -> None:
@@ -7676,7 +8330,20 @@ class ConsoleService:
             else:
                 self._signature = current
 
+    def _settle_looks(self) -> None:
+        """Mark each approval a stopped console left posting as failed, so it shows Retry."""
+        with self._ingest:
+            rows = [(LOOK_RECORDED, sprint.project_id, {
+                        "sprint_id": sprint.sprint_id, "round": question.round_id,
+                        "index": question.index, "outcome": sprints.LOOK_FAILED,
+                        "message": question.look_message, "reason": answer.LOOK_INTERRUPTED})
+                    for sprint in self._sprints.values() for question in sprints.pending_looks(sprint)
+                    if question.look_state == sprints.LOOK_POSTING]
+            if rows:
+                self._apply(self.log.append(rows))
+
     def start(self) -> None:
+        self._settle_looks()
         self._resume_activation()
         self._watcher = threading.Thread(target=self._watch, name=WATCH_THREAD, daemon=True)
         self._watcher.start()
@@ -7727,7 +8394,7 @@ class ConsoleService:
             self._guest_thread = threading.Thread(
                 target=self._guest_server.serve_forever, name="console-guest-http", daemon=True)
             self._guest_thread.start()
-        if self._serve_reader is not None:
+        if self._serve_reader is not None or self._status_reader is not None:
             self._serve_thread = threading.Thread(
                 target=self._serve_loop, name=SERVE_THREAD, daemon=True)
             self._serve_thread.start()
@@ -7778,6 +8445,7 @@ class ConsoleService:
             workers = list(self._approval_workers)
         for worker in workers:
             worker.join()
+        self.settle_guest_readings()
         with self._ingest:
             while self._project_questions_open:
                 self._project_questions_done.wait()
@@ -7791,6 +8459,7 @@ class ConsoleService:
             if self._guest_thread is not None:
                 self._guest_server.shutdown()
             self._guest_server.server_close()
+        manager.reap_stops()
         with self._ingest:
             while self._grants_running:
                 self._grants_done.wait()

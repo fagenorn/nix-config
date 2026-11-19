@@ -19,6 +19,9 @@ Contract:
   `os.environ`, so it names the real directories even while a fixture is active.
 - `real_environment()` is `os.environ` with the three variables put back to `ORIGINAL`
   (removed when they were unset): the environment a fault-injected child starts with.
+- `unsandboxed_environment()` is None outside a fixture, else `os.environ` with the three
+  variables put back to what the outermost `setUpModule` found: the environment of every
+  configuration evaluation of `tests/host_readings.py` (#1286).
 - `accounts_snapshot(path)` records an accounts directory's structure, never its
   contents, and never follows a link or opens a file: `.` and every root entry as
   `link:<target>`, `dir:<mode>`, `file:<mode>` or `other`; each `profiles/<n>`; and per
@@ -116,6 +119,18 @@ def real_environment() -> dict[str, str]:
             env.pop(name, None)
         else:
             env[name] = ORIGINAL[name]
+    return env
+
+
+def unsandboxed_environment() -> dict[str, str] | None:
+    if _root is None:
+        return None
+    env = dict(os.environ)
+    for name in VARIABLES:
+        if _saved[name] is None:
+            env.pop(name, None)
+        else:
+            env[name] = _saved[name]
     return env
 
 
