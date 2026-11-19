@@ -8,7 +8,8 @@
 2. the owner's page loads through an SSH local forward, the way the owner's browser reaches the
    console: a forward from the owner to `127.0.0.1` opened by this check, whose listening end the
    owner's `sshd-session` serves, so the peer rule sees the owner's uid on the connection;
-3. that forward's listening end cannot be used by `USER`.
+3. that forward's listening end is shown unusable by `USER`: a connect attempt to it as `USER`
+   fails with the explicit permission-denied error (`connect_as` is `denied`).
 
 Why the forward listens on a Unix socket. The peer rule judges the uid of the process holding the
 connection's client end, and through an SSH forward that is the owner's `sshd-session`. An
@@ -25,8 +26,10 @@ The rules, read in this order, each printing one line:
 2. the answer is not `403` with that exact body: `not_refused`, exit 1; the forward is not opened;
 3. the forward could not be opened or its page not read: `no_forward`, exit 75;
 4. the owner's page through the forward is not `200`: `owner_page_not_loaded`, exit 1;
-5. `USER`'s request through the forward's socket got an answer: `forward_reachable_by_other_user`, 1;
-6. otherwise `met`, exit 0.
+5. `USER` connected to the forward's socket: `forward_reachable_by_other_user`, 1;
+6. `USER`'s attempt gave no permission-denied proof (a timeout, a failed sudo, any other connect
+   error, or the forward gone before the attempt): `isolation_not_proven`, exit 75;
+7. otherwise (permission denied) `met`, exit 0.
 
 Output: exactly one stdout line, `json.dumps(result, sort_keys=True)`, with `forward_other_status`,
 `other_status`, `owner_status` (each an integer or null) and `status` (`met`, `not_met` or
@@ -57,6 +60,18 @@ SSH = "/usr/bin/ssh"
 FORWARD_WAIT_SECONDS = 15
 SOCKET_NAME = "console.sock"
 NOT_YET = 75
+PROBE = ("import socket, sys\n"
+         "s = socket.socket(socket.AF_UNIX)\n"
+         "try:\n"
+         "    s.connect(sys.argv[1])\n"
+         "except PermissionError:\n"
+         "    sys.exit(13)\n"
+         "except OSError:\n"
+         "    sys.exit(14)\n")
+PYTHON = "/usr/bin/python3"
+DENIED = "denied"
+CONNECTED = "connected"
+UNKNOWN = "unknown"
 
 
 def request_as(user: str, port: int, *, unix_socket: str | None = None,
@@ -77,6 +92,20 @@ def request_as(user: str, port: int, *, unix_socket: str | None = None,
     if not newline or len(tail) != 3 or not tail.isdigit() or not tail.isascii() or tail == b"000":
         return None
     return int(tail), head
+
+
+def connect_as(user: str, sock: str, *, run=subprocess.run) -> str:
+    """Try to connect to `sock` as `user`: `denied` only on the explicit permission-denied exit."""
+    argv = [SUDO, "-n", "-u", user, PYTHON, "-c", PROBE, sock]
+    try:
+        done = run(argv, capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return UNKNOWN
+    if done.returncode == 13:
+        return DENIED
+    if done.returncode == 0:
+        return CONNECTED
+    return UNKNOWN
 
 
 def forward_argv(sock: str, port: int, owner: str, known_hosts: str) -> list[str]:
@@ -121,24 +150,32 @@ def unix_get(sock: str, port: int, proc, *, wait: float = FORWARD_WAIT_SECONDS) 
 
 class Forward(NamedTuple):
     owner_status: int
+    isolation: str
     other: tuple[int, bytes] | None
 
 
 def request_through_forward(port: int, user: str, *, owner: str | None = None,
-                            popen=subprocess.Popen, get=unix_get,
+                            popen=subprocess.Popen, get=unix_get, connect=connect_as,
                             other=request_as) -> Forward | None:
     """Open the forward, read the owner's page through it, and try it as `user`; None if no forward."""
     owner = owner or getpass.getuser()
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="owner-port-") as tmp:
         sock = f"{tmp}/{SOCKET_NAME}"
-        proc = popen(forward_argv(sock, port, owner, f"{tmp}/known_hosts"),
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL)
+        try:
+            proc = popen(forward_argv(sock, port, owner, f"{tmp}/known_hosts"),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        except OSError:
+            return None
         try:
             status = get(sock, port, proc)
             if status is None:
                 return None
-            return Forward(status, other(user, port, unix_socket=sock))
+            isolation = connect(user, sock)
+            if isolation == DENIED and proc.poll() is not None:
+                isolation = UNKNOWN
+            answer = other(user, port, unix_socket=sock) if isolation == CONNECTED else None
+            return Forward(status, isolation, answer)
         finally:
             proc.terminate()
             try:
@@ -179,9 +216,12 @@ def main(argv: list[str] | None = None, *, as_other=request_as,
     shown["owner_status"] = forward.owner_status
     if forward.owner_status != 200:
         return finish("not_met", 1, "owner_page_not_loaded")
-    if forward.other is not None:
-        shown["forward_other_status"] = forward.other[0]
+    if forward.isolation == CONNECTED:
+        if forward.other is not None:
+            shown["forward_other_status"] = forward.other[0]
         return finish("not_met", 1, "forward_reachable_by_other_user")
+    if forward.isolation != DENIED:
+        return finish("not_yet", NOT_YET, "isolation_not_proven")
     return finish("met", 0)
 
 

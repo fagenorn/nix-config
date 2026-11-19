@@ -298,6 +298,34 @@ class UnreadableTest(Case):
                                          ["console: peer_refused unreadable"])
 
 
+class BoundedLookupsTest(Case):
+    def test_lookups_beyond_the_bound_fail_closed_without_running(self):
+        import threading
+        entered, release, running = threading.Event(), threading.Event(), []
+
+        def blocking(client, server):
+            running.append(client)
+            entered.set()
+            release.wait(5)
+            return (peer.Holder(4243, os.geteuid(), "python3"),)
+
+        svc = self.start(blocking, peer_lookups=1)
+        self.addCleanup(release.set)
+        first = http.client.HTTPConnection(*svc.address, timeout=10)
+        self.addCleanup(first.close)
+        first.request("GET", "/api/state")
+        self.assertTrue(entered.wait(5))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            got = self.raw(svc, "GET", "/api/state")
+        self.assertEqual((got[0], got[2]), (403, UNREADABLE))
+        self.assertEqual(errors.getvalue().splitlines(), ["console: peer_refused unreadable"])
+        self.assertEqual(len(running), 1)
+        release.set()
+        self.assertEqual(first.getresponse().status, 200)
+        self.assertEqual(self.raw(svc, "GET", "/api/state")[0], 200)
+
+
 class GuestPortTest(Case):
     def test_the_guest_port_is_not_peer_checked(self):
         rec = Recording(other)

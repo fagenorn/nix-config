@@ -112,7 +112,7 @@ class LsofTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         argv, kwargs = calls[0]
         self.assertEqual(
-            argv, ["/usr/sbin/lsof", "-w", "-nP", "-iTCP@127.0.0.1:53075", "-Fpcun"])
+            argv, ["/usr/sbin/lsof", "-nP", "-iTCP@127.0.0.1:53075", "-Fpcun"])
         self.assertEqual(kwargs, {"capture_output": True, "text": True,
                                   "timeout": LOOKUP_TIMEOUT_SECONDS, "check": False})
         self.assertEqual(result, (Holder(65310, 502, "sshd-session"),))
@@ -137,6 +137,9 @@ class LsofTest(unittest.TestCase):
             "partial then failure": returning(1, LSOF_FORWARD),
             "stderr on exit 1": returning(1, "", "lsof: can't open kernel memory\n"),
             "stderr on exit 0": returning(0, LSOF_FORWARD, "lsof: status error\n"),
+            "warning that output is incomplete":
+                returning(0, LSOF_FORWARD, "lsof: WARNING: can't stat() fuse file system\n"
+                                           "      Output information may be incomplete.\n"),
             "exit 2": returning(2, ""),
         }
         for name, stub in stubs.items():

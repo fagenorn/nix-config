@@ -11,7 +11,8 @@ of `owner_uid` (default the service's own effective uid) holding the connection'
 holder of another uid, else the answer is `403` `text/plain` `peer.NOT_OWNER_TEXT` or
 `peer.UNREADABLE_TEXT`, `Connection: close`, with nothing read, appended or published, and one
 stderr line `console: peer_refused <other_user|not_found|unreadable>` (ADR-console-076). There is
-one lookup per connection. The guest port is not checked. A request line or header block the
+one lookup per connection, and at most `PEER_LOOKUPS` lookups run at once: a connection that finds
+no free slot is answered as `unreadable` (fail closed) rather than queued. The guest port is not checked. A request line or header block the
 inherited parser refuses as malformed is answered `400` before this check; it is not a route of the
 port and carries nothing of the console.
 
@@ -1563,6 +1564,7 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
+PEER_LOOKUPS = 8  # concurrent holder lookups on the owner port (#1294)
 DEFAULT_GUEST_PORT = 27185
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
@@ -1817,12 +1819,16 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         """Whether this connection's peer is the owner's own process; a refusal is already sent."""
         if self._peer_admitted:
             return True
-        reader = self.server.console.peer_reader
-        try:
-            holders = None if reader is None else reader(
-                self.client_address[:2], self.server.server_address[:2])
-        except Exception:
-            holders = None
+        console = self.server.console
+        reader = console.peer_reader
+        holders = None
+        if reader is not None and console.peer_slots.acquire(blocking=False):
+            try:
+                holders = reader(self.client_address[:2], self.server.server_address[:2])
+            except Exception:
+                holders = None
+            finally:
+                console.peer_slots.release()
         found = peer.refusal(holders, self.server.console.owner_uid)
         if found is None:
             self._peer_admitted = True
@@ -3450,8 +3456,10 @@ class ConsoleService:
                  serve_reader: Callable[[], object | None] | None = None,
                  serve_seconds: float = SERVE_SECONDS,
                  peer_reader: peer.PeerReader | None = peer.reader_for(sys.platform),
-                 owner_uid: int | None = None):
+                 owner_uid: int | None = None,
+                 peer_lookups: int = PEER_LOOKUPS):
         self.peer_reader = peer_reader
+        self.peer_slots = threading.BoundedSemaphore(peer_lookups)
         self.owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)

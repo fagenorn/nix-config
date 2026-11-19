@@ -13,11 +13,11 @@ local forward) is admitted like any other process of the owner.
 holder has a pid. The check fails closed: only a completed lookup whose every holder is the
 owner admits.
 
-macOS (`read_lsof`) runs `/usr/sbin/lsof -w -nP -iTCP@<client ip>:<client port> -Fpcun` once, with
+macOS (`read_lsof`) runs `/usr/sbin/lsof -nP -iTCP@<client ip>:<client port> -Fpcun` once, with
 a `LOOKUP_TIMEOUT_SECONDS` timeout and no state filter, so a half-closed client end (FIN_WAIT_1
 or 2 after `shutdown(SHUT_WR)`) is attributed like an established one. `-i` matches both ends of
 the connection; only the file named exactly `<client ip>:<client port>-><server ip>:<server
-port>` makes its process a holder, never the server end. Only a completed lookup admits: exit 0
+port>` makes its process a holder, never the server end. lsof's warnings are kept (no `-w`): a warning means its output may be incomplete. Only a completed lookup admits: exit 0
 with empty stderr parses stdout; exit 1 with empty stdout and empty stderr (lsof found no
 matching file) is `()`; every other outcome, including exit 1 with any stdout and any non-empty
 stderr, is `None`. Measured cost: about 50 ms per lsof run.
@@ -96,7 +96,7 @@ def parse_lsof(output: str, client: Address, server: Address) -> tuple[Holder, .
 
 
 def read_lsof(client: Address, server: Address, *, run=subprocess.run) -> tuple[Holder, ...] | None:
-    argv = [LSOF, "-w", "-nP", f"-iTCP@{client[0]}:{client[1]}", "-Fpcun"]
+    argv = [LSOF, "-nP", f"-iTCP@{client[0]}:{client[1]}", "-Fpcun"]
     try:
         done = run(argv, capture_output=True, text=True, timeout=LOOKUP_TIMEOUT_SECONDS,
                    check=False)
