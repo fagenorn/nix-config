@@ -1,7 +1,7 @@
 """The console's drafted project contract for a repository that has none (#1067).
 
 Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. The proposed
-commit environment is ADR-console-075. A repository with no `.agents/project.json` is registered with a contract
+commit environment is ADR-console-082. A repository with no `.agents/project.json` is registered with a contract
 the console drafts from what the repository says and what the owner answers. This module reads the
 repository, drafts the 29 fields of the contract, words the open ones as cards, takes the owner's
 answers, and renders the wire-format contract that `adopt-project plan --contract-draft` takes. It

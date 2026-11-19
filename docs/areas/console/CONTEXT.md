@@ -166,7 +166,7 @@ One open question of a repository's adoption plan, shown on the page as an inbox
 _Avoid_: adoption prompt, open decision
 
 **Drafted contract**:
-The project contract the console drafts for a repository that has none, from its remote and its tracked files; the values it read are shown with where they came from and the rest under one counted line that opens to a plain list, every value changeable before the plan is applied; for a checkout with a devenv.nix and installed commit hooks it also proposes that commits run in its development shell, `devenv shell --`; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-031, ADR-console-033, ADR-console-075).
+The project contract the console drafts for a repository that has none, from its remote and its tracked files; the values it read are shown with where they came from and the rest under one counted line that opens to a plain list, every value changeable before the plan is applied; for a checkout with a devenv.nix and installed commit hooks it also proposes that commits run in its development shell, `devenv shell --`; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-031, ADR-console-033, ADR-console-082).
 _Avoid_: generated contract, default contract
 
 **Folder trust**:

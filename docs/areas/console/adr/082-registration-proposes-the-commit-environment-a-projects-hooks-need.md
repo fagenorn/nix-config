@@ -1,4 +1,4 @@
-# ADR-console-075 — Registration proposes the commit environment a project's hooks need
+# ADR-console-082 — Registration proposes the commit environment a project's hooks need
 
 - **Status:** accepted
 - **Decided in:** #1268
