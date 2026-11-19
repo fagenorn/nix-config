@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    approve, folder_trust, register, register_check, service, signin, sprints)
+    approve, contract_draft, folder_trust, register, register_check, service, signin, sprints)
 from agent_tools.console import event_log
 from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
@@ -27,8 +27,8 @@ from agent_tools.system.forge_api import ForgeError
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_register_service import (
-    DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, Fake, Held, answer_of,
-    assert_freed, assert_held, closing, git, real_home_state, reconcile_repository)
+    A1, DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, CancelChecks, Case, DraftCase, Fake, Held,
+    answer_of, assert_freed, assert_held, closing, git, git_repo, real_home_state, reconcile_repository)
 
 PATH = "/api/plan-approve"
 RETRY_PATH = "/api/adoption-register"
@@ -2094,3 +2094,123 @@ class MergedReadoptionRealTest(MergedRealCase):
         self.assertEqual([row["result"] for row in self.registrations()], ["waiting"])
         self.assertFalse(self.listed("fixture/console-merged"))
         self.assertEqual(self.retry_items(), [])
+
+
+class ReconcileProposalTest(ApproveCase):
+    """A contract checkout whose installed hook is stranded proposes the commit environment (#1333)."""
+
+    PID_C = "sha256:" + "c" * 64
+    PID_D = "sha256:" + "d" * 64
+    READ_STRANDED = {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
+                     "environments": ["devenv.nix"]}
+    READ_UNSTRANDED = {**READ_STRANDED, "stranded": []}
+    TOOK = {**READY, "plan": {**READY["plan"], "commit_environment": ["devenv", "shell", "--"]}}
+    LEFT = READY
+    LINE = "commits run in its development shell: devenv shell (found in its files)"
+    draft_answer = DraftCase.draft_answer
+    answered_draft = DraftCase.answered_draft
+
+    def settled_card(self, root):
+        self.registered(root)
+        (card,) = self.apply_cards()
+        return card
+
+    def test_a_stranded_hook_and_devenv_plan_the_contract_checkout_with_the_command(self):
+        fake = Fake(plan=self.TOOK)
+        self.start(fake, hook_reader=lambda root: self.READ_STRANDED)
+        root = git_repo(self.parent / "r")
+        card = self.settled_card(root)
+        self.assertEqual(fake.environments, ["devenv shell --"])
+        self.assertEqual(fake.contracts, [(None, False, True)])
+        self.assertEqual(fake.answers, [[]])
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertEqual(row["draft"], contract_draft.reconcile_fields(str(root), self.READ_STRANDED))
+        self.assertEqual(card["lines"][0], self.LINE)
+
+    def test_no_stranded_hook_plans_as_today(self):
+        fake = Fake(plan=READY)
+        self.start(fake, hook_reader=lambda root: self.READ_UNSTRANDED)
+        card = self.settled_card(git_repo(self.parent / "r"))
+        self.assertEqual(fake.environments, [None])
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertIsNone(row["draft"])
+        self.assertFalse([x for x in card["lines"]
+                          if x.startswith("commits run in its development shell")])
+
+    def test_a_plan_that_did_not_take_the_command_carries_no_proposal(self):
+        fake = Fake(plan=self.LEFT)
+        self.start(fake, hook_reader=lambda root: self.READ_STRANDED)
+        card = self.settled_card(git_repo(self.parent / "r"))
+        self.assertEqual(fake.environments, ["devenv shell --"])
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertIsNone(row["draft"])
+        self.assertFalse([x for x in card["lines"]
+                          if x.startswith("commits run in its development shell")])
+
+    def test_the_owner_changes_the_proposal_to_none_and_to_another_command(self):
+        fake = Fake(plan=[
+            self.TOOK, {**self.LEFT, "plan": {**self.LEFT["plan"], "plan_id": self.PID_C}},
+            {**self.TOOK, "plan": {**self.TOOK["plan"], "plan_id": self.PID_D}}])
+        self.start(fake, hook_reader=lambda root: self.READ_STRANDED)
+        self.registered(git_repo(self.parent / "r"))
+        self.assertEqual(self.defer(PID_B)[0], 204)
+        self.assertEqual(self.apply_cards(), [])
+        self.answered_draft(PID_B, "commit-environment", "none")
+        self.assertIsNone(fake.environments[-1])
+        self.assertIsNone(fake.contracts[-1][0])
+        (card,) = self.apply_cards()
+        self.assertEqual(card["lines"][0], "commits run in its development shell: none (set by you)")
+        self.answered_draft(self.PID_C, "commit-environment", "nix develop -c")
+        self.assertEqual(fake.environments[-1], "nix develop -c")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["lines"][0],
+                         "commits run in its development shell: nix develop -c (set by you)")
+
+    def test_an_answer_to_another_question_resends_the_command(self):
+        took = {**DRAFT, "plan": {**DRAFT["plan"], "commit_environment": ["devenv", "shell", "--"]}}
+        fake = Fake(plan=[took, self.TOOK])
+        self.start(fake, hook_reader=lambda root: self.READ_STRANDED)
+        self.registered(git_repo(self.parent / "r"))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+            self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+        self.assertEqual(fake.environments, ["devenv shell --", "devenv shell --"])
+        self.assertEqual(fake.answers, [[], [A1]])
+
+    def test_an_answer_run_whose_plan_left_the_command_out_carries_no_proposal(self):
+        took = {**DRAFT, "plan": {**DRAFT["plan"], "commit_environment": ["devenv", "shell", "--"]}}
+        fake = Fake(plan=[took, self.LEFT])
+        self.start(fake, hook_reader=lambda root: self.READ_STRANDED)
+        self.registered(git_repo(self.parent / "r"))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+            self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertIsNone(row["draft"])
+
+    def test_only_a_fresh_run_reads_the_hooks(self):
+        reads = []
+        nothing = {**READY, "plan": {**READY["plan"], "outcome": "no_change"}, "changes": []}
+
+        class Answered(Fake):
+            def plan(self, root, cancel=None, answers=(), contract=None, environment=None):
+                super().plan(root, cancel, answers, contract, environment)
+                return nothing if answers else DRAFT
+
+        def read(root):
+            reads.append(root)
+            return self.READ_UNSTRANDED
+
+        fake = Answered(report={"registered": True, "project_id": "o/r"})
+        self.start(fake, hook_reader=read)
+        root = git_repo(self.parent / "r")
+        self.registered(root)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+            self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+            self.assertEqual(self.confirm({"root": str(root), "choice": "register"})[0], 204)
+            self.wait_for(lambda r: r["result"] == "registered")
+        self.assertEqual(len(reads), 1)

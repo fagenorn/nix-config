@@ -27,7 +27,8 @@ exists but cannot be read (an absent registry is an empty fleet), also decided b
 Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=APPLY_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
 <subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4, then
-`--contract-draft <contract>` when `contract` is given: ADR-console-031) or
+`--contract-draft <contract>` when `contract` is given: ADR-console-031, then `--commit-environment
+<environment>` when `environment` is given: ADR-console-083) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
 "--plan-id", plan_id]` with `--acknowledge-deletions` and then `--discard-retained` added when asked
 (`apply`, #1054, #1088) or `[*command, "discard", "--plan-id", plan_id]` (`discard`, #1088), the command
@@ -799,12 +800,14 @@ class Adopter:
         self._apply_timeout = apply_timeout
 
     def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = (),
-             contract: str | None = None) -> dict:
+             contract: str | None = None, environment: str | None = None) -> dict:
         arguments = ["plan", "--repo-root", root, "--format", "json"]
         for answer in answers:
             arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
         if contract is not None:
             arguments += ["--contract-draft", contract]
+        if environment is not None:
+            arguments += ["--commit-environment", environment]
         return self._run(arguments, cancel, self._timeout)
 
     def register(self, root: str, cancel=None, *, integration_branch: str | None = None,

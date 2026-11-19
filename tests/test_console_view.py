@@ -3512,6 +3512,19 @@ class ProposedEnvironmentViewTest(unittest.TestCase):
         self.assertEqual((entry["line"], entry["lines"], entry["draft"], entry["draft_more"]),
                          ("Register sample-app: needs you", [], None, None))
 
+    def test_a_reconcile_plan_s_apply_card_states_the_proposal_first(self):
+        latest = {**self.LATEST, "outcome": "reconcile", "draft": contract_draft.reconcile_fields(
+            "/srv/sample-app", {"hooks": ["pre-commit"], "stranded": ["pre-commit"],
+                                "environments": ["devenv.nix"]})}
+        items = approve.apply_items(latest, None, None, "approve", deferred=set())
+        shown = derive_view([], registration=register.view_entry(None, latest), apply_items=items)
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["lines"], [self.LINE, *latest["lines"]])
+        (row,) = register.view_entry(None, latest)["draft"]
+        self.assertEqual((row["field"], row["line"], row["more"]),
+                         ("commit-environment", self.LINE, False))
+        self.assertIsNone(register.view_entry(None, latest)["draft_more"])
+
     def test_with_no_card_asking_the_draft_offers_the_proposal_as_a_changeable_line(self):
         latest = self.latest()
         shown = derive_view([], registration=register.view_entry(None, latest))

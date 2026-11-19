@@ -504,6 +504,16 @@ drafts the plan again from the changed fields as a registration does, appending 
 or the plan's row. An answer of any other question to a row that holds a draft plans it with the
 draft file the same way, and the plan's row carries the draft.
 
+A checkout that already has a contract proposes the commit environment a stranded hook needs
+(ADR-console-083). A fresh run (no draft, no answers, not confirmed) reads its hooks once
+(`hook_reader`, `contract_draft.read_hooks` by default); when
+`contract_draft.reconcile_fields` is non-empty the run plans with the one `commit-environment`
+record: the adopter's `--commit-environment` command, never a draft file, and the row carries the
+record as its draft only when the plan took the command (`contract_draft.carried`). An answer run
+and a confirm run read no hooks and resend the command the row's draft holds. A `contract-draft`
+answer to such a row changes the record through `contract_draft.set_value`; `none` plans as
+today, and the run never writes a draft file.
+
 `POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
 (4096) and `approve.parse_approve_request`: 400 `bad plan approval`. The service refuses, each as
 409 with the text, one stderr line `console: plan_approve_refused <reason>`, appending and running
@@ -3673,6 +3683,7 @@ class ConsoleService:
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
                  draft_reader: Callable[[str], dict] | None = None,
+                 hook_reader: Callable[[str], dict] | None = None,
                  checkout_reader: Callable[..., checkout_remote.Comparison] = checkout_remote.compare,
                  checkout_updater: Callable[..., checkout_remote.Updated] = checkout_remote.update,
                  forge=None,
@@ -3720,6 +3731,7 @@ class ConsoleService:
         self._account_remover = account_remover
         self._adopter = adopter
         self._draft_reader = draft_reader or self._read_draft
+        self._hook_reader = hook_reader or self._read_hooks
         self._checkout_reader = checkout_reader
         self._checkout_updater = checkout_updater
         self._forge = forge
@@ -4477,6 +4489,10 @@ class ConsoleService:
         """Read a checkout for its draft, its git children ended by the stop (#1330)."""
         return contract_draft.read(root, cancel=self._stop)
 
+    def _read_hooks(self, root: str) -> dict:
+        """Read a contract checkout's installed commit hooks, its git children ended by the stop (#1333)."""
+        return contract_draft.read_hooks(root, cancel=self._stop)
+
     def _end_run(self) -> None:
         """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
         self._registering = None
@@ -5120,14 +5136,21 @@ class ConsoleService:
                         fields = contract_draft.draft(root, reading, entries=entries)
                         payload = self._plan_draft(root, fields, [])
                     else:
-                        plan = (self._plan_with(root, draft, answers) if answers or draft
-                                else self._adopter.plan(root, cancel=self._stop))
+                        proposal = []
+                        if draft is None and answers is None and not confirmed:
+                            proposal = contract_draft.reconcile_fields(
+                                root, self._hook_reader(root))
+                        start = draft if draft is not None else (proposal or None)
+                        plan = (self._plan_with(root, start, answers or [])
+                                if answers or start else self._adopter.plan(root, cancel=self._stop))
                         report = None
                         if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                             verb = "register"
                             report = self._adopter.register(root, cancel=self._stop)
                         self._log_registration_failure(root, plan, report)
-                        payload = register.summary(root, plan, report)
+                        payload = (register.summary(
+                            root, plan, report, draft=contract_draft.carried(proposal, plan))
+                            if proposal else register.summary(root, plan, report))
         except register.RunFailed as error:
             self._log_registration_error({"root": root, "verb": verb, "failure": error.kind,
                                           "cause": repr(error.__cause__)})
@@ -5251,9 +5274,15 @@ class ConsoleService:
         return Path(name)
 
     def _plan_with(self, root: str, fields: list[dict] | None, answers: list[dict]) -> dict:
-        """The adopter's plan, with the drafted contract as a file that is gone when it returns."""
+        """The adopter's plan: the drafted contract as a file that is gone when it returns, or an amendment's command (#1333)."""
         if fields is None:
             return self._adopter.plan(root, cancel=self._stop, answers=answers)
+        if contract_draft.amends(fields):
+            command = contract_draft.environment(fields)
+            if command is None:
+                return self._adopter.plan(root, cancel=self._stop, answers=answers)
+            return self._adopter.plan(root, cancel=self._stop, answers=answers,
+                                      environment=command)
         path = self._write_draft(fields)
         try:
             return self._adopter.plan(root, cancel=self._stop, answers=answers, contract=str(path))
@@ -5287,7 +5316,7 @@ class ConsoleService:
             if refusals:
                 return plan
             self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
-        return register.summary(root, plan, None, draft=fields)
+        return register.summary(root, plan, None, draft=contract_draft.carried(fields, plan))
 
     def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,
                     draft: list[dict] | None = None, changed: list[dict] | None = None,
@@ -5315,7 +5344,8 @@ class ConsoleService:
                         result = register.drafting(
                             root, contract_draft.mark_refused(draft, *refused), answers)
                     elif "error" not in result:
-                        result = register.summary(root, result, draft=draft)
+                        result = register.summary(
+                            root, result, draft=contract_draft.carried(draft, result))
                 if "error" in result:
                     self._log_answer_error({"root": root, "error": result["error"]})
                     text = plan_questions.refusal_text(result["error"])

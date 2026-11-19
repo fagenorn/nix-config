@@ -144,6 +144,7 @@ class Fake:
         self.register_operands = []
         self.answers = []
         self.contracts = []
+        self.environments = []
         self.applied = []
         self.discards = []
         self.order = []
@@ -155,7 +156,8 @@ class Fake:
         if self.raises is not None:
             raise self.raises
 
-    def plan(self, root, cancel=None, answers=(), contract=None):
+    def plan(self, root, cancel=None, answers=(), contract=None, environment=None):
+        self.environments.append(environment)
         self.contracts.append((
             contract, contract is not None and os.path.exists(contract),
             contract is None or not Path(contract).resolve().is_relative_to(Path(root).resolve())))
@@ -708,8 +710,8 @@ class RegisterTrustTest(Case):
         nothing = {**NO_CHANGE, "decisions": {"open": [], "recommended": [], "answered": [A1]}}
 
         class Answered(Fake):
-            def plan(self, root, cancel=None, answers=(), contract=None):
-                super().plan(root, cancel, answers, contract)
+            def plan(self, root, cancel=None, answers=(), contract=None, environment=None):
+                super().plan(root, cancel, answers, contract, environment)
                 return nothing if answers else DRAFT
 
         self.svc.close()
