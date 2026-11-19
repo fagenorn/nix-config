@@ -521,6 +521,140 @@ class SuiteRegressionsCommandTest(unittest.TestCase):
         self.assertEqual(committed_mode(f"{CHECKS}/suite-regressions"), "100755")
 
 
+def _fake_program(tmp, name, body):
+    path = Path(tmp) / name
+    path.write_text("#!/bin/sh\n" + body)
+    path.chmod(0o755)
+    return str(path)
+
+
+class SuiteWallTimeTest(unittest.TestCase):
+    def test_the_verdict_table(self):
+        rows = [
+            ((0, 412.0, 600), (0, "met", 0)),
+            ((0, 600.0, 600), (1, "slow", 0)),
+            ((0, 599.9, 600), (0, "met", 0)),
+            ((3, 100.0, 600), (1, "failed", 3)),
+            ((None, 600.0, 600), (1, "deadline", None)),
+        ]
+        for given, expected in rows:
+            with self.subTest(given=given):
+                code, report = verify_checks.suite_wall_verdict(*given)
+                self.assertEqual((code, report["verdict"], report["suite_exit"]), expected)
+                self.assertEqual(set(report), {"check", "verdict", "wall_seconds", "limit",
+                                               "suite_exit", "summary"})
+                self.assertEqual(report["check"], "suite-wall-time")
+
+    def test_a_suite_passing_below_the_limit_is_met(self):
+        line = "suite-runner: summary members=1 passed=1 failed=0 jobs=1 wall=2.0s cpu=0.1s"
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _fake_program(tmp, "suite", f"sleep \"$1\"\necho '{line}'\nexit 0\n")
+            code, report = verify_checks.suite_wall_time(4.0, root=Path(tmp), argv=[fake, "2"])
+        self.assertEqual((code, report["verdict"], report["suite_exit"]), (0, "met", 0))
+        self.assertEqual(report["summary"], line)
+        self.assertTrue(2.0 <= report["wall_seconds"] < 4.0, report)
+
+    def test_a_suite_reaching_the_limit_is_killed_and_not_met(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = str(Path(tmp) / "pid")
+            fake = _fake_program(tmp, "suite", "sleep 30 &\necho $! > \"$1\"\nwait\n")
+            started = time.monotonic()
+            code, report = verify_checks.suite_wall_time(2.0, root=Path(tmp), argv=[fake, pidfile])
+            elapsed = time.monotonic() - started
+            pid = Path(pidfile).read_text().strip()
+            self.assertEqual((code, report["verdict"], report["suite_exit"]), (1, "deadline", None))
+            self.assertGreaterEqual(report["wall_seconds"], 2.0)
+            self.assertLess(elapsed, 10)
+            deadline = time.monotonic() + 5
+            while True:
+                stat = subprocess.run(["ps", "-o", "stat=", "-p", pid],
+                                      capture_output=True, text=True).stdout.strip()
+                if stat == "" or stat.startswith("Z"):
+                    break
+                if time.monotonic() > deadline:
+                    self.fail("the suite's grandchild survived the kill")
+
+    def test_a_failing_suite_is_not_met(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = _fake_program(tmp, "suite", "exit 3\n")
+            code, report = verify_checks.suite_wall_time(60.0, root=Path(tmp), argv=[fake])
+        self.assertEqual((code, report["verdict"], report["suite_exit"]), (1, "failed", 3))
+
+    def test_the_suite_runs_without_forge_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "env"
+            fake = _fake_program(tmp, "suite", "env > \"$1\"\n")
+            with mock.patch.dict(os.environ, {"GITHUB_TOKEN": "t1", "GH_TOKEN": "t2"}):
+                code, _ = verify_checks.suite_wall_time(60.0, root=Path(tmp), argv=[fake, str(out)])
+            lines = out.read_text().splitlines()
+        self.assertEqual(code, 0)
+        self.assertFalse([line for line in lines
+                          if line.startswith(("GITHUB_TOKEN=", "GH_TOKEN="))])
+
+
+class SuiteWallTimeCommandTest(unittest.TestCase):
+    FAKE_JUST = (
+        "printf '%s\\n' \"$@\" > \"$FAKE_JUST_LOG\"\n"
+        "pwd -P >> \"$FAKE_JUST_LOG\"\n"
+        "i=0; while [ $i -lt 500 ]; do echo noise; i=$((i+1)); done\n"
+        "echo 'suite-runner: summary members=1 passed=1 failed=0 jobs=1 wall=0.1s cpu=0.1s'\n")
+
+    def test_a_bad_limit_is_a_usage_error(self):
+        cap = str(verify_exec.TIMEOUT - verify_checks.SUITE_REPORT_MARGIN + 1)
+        for value in (["0"], ["-5"], ["ten"], [cap], []):
+            with self.subTest(value=value):
+                argv = ["suite-wall-time", *(["--limit", *value] if value else [])]
+                with mock.patch.object(verify_checks, "suite_wall_time",
+                                       side_effect=AssertionError("ran the suite")):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as raised:
+                            verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_the_full_window_fits_the_runner_timeout(self):
+        met = verify_checks.suite_wall_verdict(0, 1.0, 600.0)
+        with mock.patch.object(verify_checks, "suite_wall_time", return_value=met) as ran:
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = verify_checks.main(["suite-wall-time", "--limit", "600"])
+        self.assertEqual(code, 0)
+        ran.assert_called_once()
+        self.assertEqual(ran.call_args.args[0], 600.0)
+        self.assertLessEqual(600 + verify_checks.SUITE_REPORT_MARGIN, verify_exec.TIMEOUT)
+
+    def test_the_wrapper_runs_the_suite_recipe_at_the_repo_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bin").mkdir()
+            _fake_program(Path(tmp) / "bin", "just", self.FAKE_JUST)
+            log = str(Path(tmp) / "log")
+            result = run_from_root(
+                [str(ROOT / CHECKS / "suite-wall-time"), "--limit", "600"],
+                {"PATH": f"{tmp}/bin:{os.environ['PATH']}", "FAKE_JUST_LOG": log})
+            logged = Path(log).read_text().splitlines()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(logged, ["agent-workflow-tests", str(ROOT)])
+        self.assertEqual(result.stdout.count("\n"), 1)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["verdict"], "met")
+        self.assertEqual(report["summary"],
+                         "suite-runner: summary members=1 passed=1 failed=0 jobs=1 wall=0.1s cpu=0.1s")
+        self.assertNotIn("noise", result.stdout)
+
+    def test_the_wrapper_refuses_a_zero_limit_without_running_the_suite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "bin").mkdir()
+            _fake_program(Path(tmp) / "bin", "just", self.FAKE_JUST)
+            log = Path(tmp) / "log"
+            result = run_from_root(
+                [str(ROOT / CHECKS / "suite-wall-time"), "--limit", "0"],
+                {"PATH": f"{tmp}/bin:{os.environ['PATH']}", "FAKE_JUST_LOG": str(log)})
+            ran = log.exists()
+        self.assertEqual((result.returncode, result.stdout), (2, ""), result.stderr)
+        self.assertFalse(ran)
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/suite-wall-time"), "100755")
+
+
 class IssueClosedTest(unittest.TestCase):
     PATH = "repos/o/r/issues/1009"
     COMMENTS = PATH + "/comments?per_page=100"

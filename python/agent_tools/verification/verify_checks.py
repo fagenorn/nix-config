@@ -277,11 +277,23 @@ cannot be attributed and is listed in `unattributed`, never passed. Exit 0 when 
 line; a malformed payload is a `payload_invalid` forge error. A bad `--repo`, an empty `--workflow`,
 `--job` or `--branch`, a `--merge` that is not 40 lowercase hex characters, or an `--n` that is not a
 positive integer is a usage error (2).
+
+`suite-wall-time --limit SECONDS` (`verify_checks.suite_wall_time`, issue 1314) runs `just
+agent-workflow-tests` at the repository root and is met (0) only when the suite exits 0 in strictly under
+SECONDS of wall time; a suite that exits non-zero is not met (1, verdict `failed`) and so is one that takes
+SECONDS or longer (verdict `slow`). The suite is killed at SECONDS with its whole process group and a killed
+run reads as not met (1, verdict `deadline`). SECONDS may not exceed the runner's `verify_exec.TIMEOUT` less
+`SUITE_REPORT_MARGIN`, so the check always reports before the runner kills it; a missing, non-numeric,
+non-positive or larger SECONDS is a usage error (2) before any suite starts. The suite runs with
+`GITHUB_TOKEN` and `GH_TOKEN` removed and its output kept off stdout, which is one JSON line `{"check",
+"verdict", "wall_seconds", "limit", "suite_exit", "summary"}` (`summary` is the suite's last
+`suite-runner: summary` line, else null).
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import fcntl
 import functools
 import http.client
@@ -2315,6 +2327,62 @@ def _port(value: str) -> int:
     return port
 
 
+SUITE_ARGV = ("just", "agent-workflow-tests")
+SUITE_REPORT_MARGIN = 30  # seconds the wrapper keeps after the suite's window to kill, read and report
+
+
+def suite_wall_verdict(suite_exit: int | None, wall_seconds: float, limit: float,
+                       summary: str | None = None) -> tuple[int, dict]:
+    """The verdict of one timed suite run: met only for exit 0 strictly under `limit` seconds."""
+    if suite_exit is None:
+        verdict = "deadline"
+    elif suite_exit != 0:
+        verdict = "failed"
+    elif wall_seconds >= limit:
+        verdict = "slow"
+    else:
+        verdict = "met"
+    report = {"check": "suite-wall-time", "verdict": verdict, "wall_seconds": round(wall_seconds, 1),
+              "limit": limit, "suite_exit": suite_exit, "summary": summary}
+    return (0 if verdict == "met" else 1), report
+
+
+def suite_wall_time(limit: float, *, root: Path = Path("."),
+                    argv: Sequence[str] = SUITE_ARGV) -> tuple[int, dict]:
+    """Run `argv` at `root`, kill its process group at `limit` seconds and judge the wall time."""
+    with tempfile.TemporaryFile("w+b") as output:  # a file, never a pipe: the output is never read live
+        started = time.monotonic()
+        proc = subprocess.Popen(list(argv), cwd=root, stdin=subprocess.DEVNULL, stdout=output,
+                                stderr=subprocess.STDOUT, start_new_session=True,
+                                env=verify_exec.child_env())
+        try:
+            suite_exit: int | None = proc.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            suite_exit = None
+        wall_seconds = time.monotonic() - started
+        output.seek(0)
+        text = output.read().decode("utf-8", "replace")
+    summary = None
+    for line in text.splitlines():
+        if line.startswith("suite-runner: summary"):
+            summary = line
+    return suite_wall_verdict(suite_exit, wall_seconds, limit, summary)
+
+
+def _suite_limit(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    cap = verify_exec.TIMEOUT - SUITE_REPORT_MARGIN
+    if not 0 < seconds <= cap:
+        raise argparse.ArgumentTypeError(f"must be a number above 0 and at most {cap}")
+    return seconds
+
+
 def _issue_number(value: str) -> int:
     try:
         number = int(value)
@@ -2450,6 +2518,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     regress.add_argument("--branch", type=_nonempty, required=True)
     regress.add_argument("--merge", type=_merge_sha, required=True)
     regress.add_argument("--n", type=_issue_number, required=True)  # a positive integer
+    wall = checks.add_parser(
+        "suite-wall-time",
+        help="issue 1314: a full agent workflow suite run at this commit passes in under --limit seconds")
+    wall.add_argument("--limit", type=_suite_limit, required=True)
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
@@ -2547,6 +2619,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = managed_pre_push_hook(args.slug, git_bin=git_bin, environ=os.environ)
         except FixtureError as error:
             print(f"verify-checks: fixture_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "suite-wall-time":
+        try:
+            code, report = suite_wall_time(args.limit, argv=SUITE_ARGV)
+        except OSError as error:
+            print(f"verify-checks: suite_unrunnable: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code
