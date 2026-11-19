@@ -15,7 +15,7 @@ ADR-console-066 fixed how a named colleague reaches the console through Tailscal
 
 **D3. ADR-console-066 D1, restated for a shared host.** An administrator with sudo stays out of reach, as ADR-console-076 D6 says: this record does not claim to stop one, who can run as root or as the owner. No other local account can pose as a colleague any more, because it can neither open the folder nor connect as a permitted peer, so a forged login header from it never reaches the console. The Windows-era argument that a forged header gains a local process nothing no longer carries the rule.
 
-**D4. The rule of ADR-console-066 D2 stands unchanged.** A request on the guest door is a guest only when its `Host` is exactly the tailnet name the owner configured (`<host>.<tailnet>.ts.net`) and it carries exactly one login header naming a listed colleague (`<colleague-login>`); anything else is refused. The owner's port, the guest token, the owner-only list of ADR-console-066 D3 and the diagnostics reading of the last guest request all stay as written.
+**D4. The rule of ADR-console-066 D2 stands, except its first bullet.** The first bullet of ADR-console-066 D2, that Serve proxies to a second loopback port of the console, is superseded by D1: Serve proxies to the guest socket. The remaining bullets of ADR-console-066 D2 stand unchanged. A request on the guest door is a guest only when its `Host` is exactly the tailnet name the owner configured (`<host>.<tailnet>.ts.net`) and it carries exactly one login header naming a listed colleague (`<colleague-login>`); anything else is refused. The owner's port, the guest token, the owner-only list of ADR-console-066 D3 and the diagnostics reading of the last guest request all stay as written.
 
 **D5. The commands, replacing ADR-console-066 D4's `tailscale.exe` ones.** The lead runs these on eleven-m5; `<socket-path>` is the path the console reports for the guest socket, and Serve stays off until the socket is in.
 
@@ -40,6 +40,6 @@ The page is then at `https://<host>.<tailnet>.ts.net/`. Never use Funnel: it is 
 
 ## Consequences
 
-- This amends ADR-console-066 (its D1 and D4) for eleven-m5; its D2 and D3 stand. The `tailscale.exe` commands there are history of anis-desktop.
+- This amends ADR-console-066 (its D1, D4 and the first bullet of its D2) for eleven-m5; the rest of its D2 and its D3 stand. The `tailscale.exe` commands there are history of anis-desktop.
 - ADR-console-076 D7 is superseded for the guest door; the owner's port stays as ADR-console-076 decided.
 - A guest is still only as trusted as Serve's header, now with no other local account able to forge it.
