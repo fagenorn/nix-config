@@ -214,6 +214,23 @@ read. A payload that is not an object, or whose state is neither `open` nor `clo
 comment page, is a `payload_invalid` forge error (exit 2), as is any other forge error; a bad `--repo`
 or `--issue` (a positive integer) is a usage error (2).
 
+`host-mentions --repo R --phrase P [--phrase P ...] --gone G [--exempt N ...]`
+(`verify_checks.host_mentions`, issue 1291) reads every page of `repos/R/issues?state=open&per_page=100`
+(pull requests skipped) and reports `{"mentioning", "offenders"}`, both ascending issue numbers. An issue
+mentions when any P occurs, ignoring case, in its title or body; it is an offender when it mentions, is
+not named by `--exempt` and its body does not contain G, ignoring case. Exit 0 when there is no offender,
+1 otherwise. A page that is not a list, an element that is not an object or a `number` that is not an
+integer is a `payload_invalid` forge error (exit 2), as is any other forge error.
+
+`host-prompts --repo R [--repo R ...] --host H` (`verify_checks.host_prompts`, issue 1291) lists the open
+issues of each R as `host-mentions` does, reads one comment listing per open issue (whatever its labels),
+and reports `{"host", "live": [{"repo", "issue", "comment", "reason"}]}` sorted by repo, issue and comment.
+A live `owner-action` marker counts when its `host` field, or one `+`-separated member of it, is H: a
+runner prompt (`verify_answer.is_runner_prompt`) only from an OWNER or MEMBER comment and live over the
+markers of those comments, any other owner-action marker only from an OWNER, MEMBER or COLLABORATOR comment
+and live over the markers of those, as the console inbox reads each. Exit 0 when nothing is live, 1
+otherwise, 2 on a forge error.
+
 `suite-regressions --repo R --workflow W --job J --branch B --merge SHA --n N`
 (`verify_checks.suite_regressions`, issue 1215) is met when no member of the agent workflow suite failed in
 any of the first N completed push runs of workflow W on branch B from the merge's run on that passed, in
@@ -269,10 +286,11 @@ from urllib.parse import quote
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
 from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote, siblings
 from agent_tools.system.semver import parse_semver
-from agent_tools.verification import verify_exec, verify_issues
+from agent_tools.verification import verify_answer, verify_exec, verify_issues
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -430,6 +448,68 @@ def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
                if held is not None else None)
     report["verified"] = closing is not None and closing.fields.get("outcome") == "verified"
     return (0 if report["verified"] else 1), report
+
+
+def _open_issues(repo: str) -> list[dict]:
+    """Every open issue of `repo` in listing order, pull requests skipped, the shape checked."""
+    found = []
+    for page in forge_api.api_pages(f"repos/{repo}/issues?state=open&per_page=100"):
+        if not isinstance(page, list):
+            raise _invalid("issue page is not a list")
+        for issue in page:
+            if not isinstance(issue, dict):
+                raise _invalid("issue is not an object")
+            if "pull_request" in issue:
+                continue
+            number = issue.get("number")
+            if isinstance(number, bool) or not isinstance(number, int):
+                raise _invalid("issue number is not an integer")
+            found.append(issue)
+    return found
+
+
+def host_mentions(repo: str, phrases: Sequence[str], gone: str, exempt: Sequence[int]) -> tuple[int, dict]:
+    """Met when every open issue naming a phrase is exempt or carries the `gone` line in its body."""
+    needles = [p.lower() for p in phrases]
+    mentioning, offenders = [], []
+    for issue in _open_issues(repo):
+        title, body = issue.get("title") or "", issue.get("body") or ""
+        text = f"{title}\n{body}".lower()
+        if not any(needle in text for needle in needles):
+            continue
+        mentioning.append(issue["number"])
+        if issue["number"] not in exempt and gone.lower() not in body.lower():
+            offenders.append(issue["number"])
+    return (0 if not offenders else 1), {"mentioning": sorted(mentioning), "offenders": sorted(offenders)}
+
+
+def _names_host(marker: forge_markers.Marker, host: str) -> bool:
+    named = marker.fields.get("host", "")
+    return named == host or host in named.split("+")
+
+
+def host_prompts(repos: Sequence[str], host: str) -> tuple[int, dict]:
+    """Met when no open issue holds a live owner-action prompt that names `host`."""
+    live = []
+    for repo in repos:
+        for issue in _open_issues(repo):
+            comments = forge_markers.list_comments(repo, issue["number"])
+
+            def read(trusted):
+                parsed = (forge_markers.parse(c) for c in comments if c.get("author_association") in trusted)
+                return [m for m in parsed if m is not None]
+            runner = read(verify_issues.TRUSTED)
+            forge = read(forge_owner_action.TRUSTED)
+            for markers, wanted in ((runner, True), (forge, False)):
+                for marker in markers:
+                    if (marker.kind == forge_owner_action.KIND
+                            and verify_answer.is_runner_prompt(marker) == wanted
+                            and _names_host(marker, host)
+                            and forge_markers.is_live(marker, markers)):
+                        live.append({"repo": repo, "issue": issue["number"], "comment": marker.comment_id,
+                                     "reason": marker.fields.get("reason", "")})
+    live.sort(key=lambda row: (row["repo"], row["issue"], row["comment"]))
+    return (0 if not live else 1), {"host": host, "live": live}
 
 
 SUITE_ROW = re.compile(r"^suite-runner:\s+[0-9.]+s wall\s+[0-9.]+s cpu (passed|failed) (\S+)$")
@@ -2205,6 +2285,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="issue 1010: an issue was closed as completed, by its own verify run")
     closed.add_argument("--repo", type=_repo, required=True)
     closed.add_argument("--issue", type=_issue_number, required=True)
+    mentions = checks.add_parser(
+        "host-mentions",
+        help="issue 1291: every open issue naming a retired host is exempt or carries its gone line")
+    mentions.add_argument("--repo", type=_repo, required=True)
+    mentions.add_argument("--phrase", type=_nonempty, action="append", required=True)
+    mentions.add_argument("--gone", type=_nonempty, required=True)
+    mentions.add_argument("--exempt", type=_issue_number, action="append", default=[])
+    prompts = checks.add_parser(
+        "host-prompts",
+        help="issue 1291: no open issue holds a live owner prompt that names a retired host")
+    prompts.add_argument("--repo", type=_repo, action="append", required=True)
+    prompts.add_argument("--host", type=_nonempty, required=True)
     regress = checks.add_parser(
         "suite-regressions",
         help="issue 1215: no suite member that passed before the merge failed in the runs from it on")
@@ -2308,6 +2400,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
         elif args.check == "issue-closed":
             code, report = issue_closed(args.repo, args.issue)
+        elif args.check == "host-mentions":
+            code, report = host_mentions(args.repo, args.phrase, args.gone, args.exempt)
+        elif args.check == "host-prompts":
+            code, report = host_prompts(args.repo, args.host)
         elif args.check == "suite-regressions":
             code, report = suite_regressions(args.repo, args.workflow, args.job, args.branch,
                                              args.merge, args.n)
