@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import ast
 import contextlib
 import errno
+import fcntl
 import http.client
 import inspect
 import io
@@ -615,6 +616,24 @@ class DoorTest(GuestCase):
         ino = os.lstat(self.guest_socket).st_ino
         svc.close()
         self.assertEqual(os.lstat(self.guest_socket).st_ino, ino)
+
+    def test_close_removes_its_socket_only_while_holding_the_path_lock(self):
+        self.seed()
+        svc = self.start()
+        lock = os.open(str(self.guest_socket) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        closer = threading.Thread(target=svc.close)
+        closer.start()
+        closer.join(0.5)
+        try:
+            self.assertTrue(closer.is_alive())
+            self.assertTrue(os.path.lexists(self.guest_socket))
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            closer.join(10)
+        self.assertFalse(closer.is_alive())
+        self.assertFalse(os.path.lexists(self.guest_socket))
 
     def test_a_replaced_socket_path_refuses_the_listener_it_no_longer_names(self):
         self.seed()

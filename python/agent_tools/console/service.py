@@ -86,8 +86,10 @@ file alone; any other connect error is a `GuestSocketError` and leaves the file.
 absolute is a `GuestSocketError` (`EINVAL`) before the console touches the file system or binds the
 owner's port. The stale-file probe, the bind and the listen run under an exclusive `flock` on
 `<socket>.lock` in the folder, so a second console never finds the first bound but not yet
-listening and unlinks its file. A folder that holds an ACL allow entry (`guest_acl_reader`, default
-`guest.acl_reader_for(sys.platform)`; macOS only) is a `GuestSocketError` (`EPERM`). `close` and a
+listening and unlinks its file; `close` takes the same lock around its inode check and unlink, so a
+console stopping never unlinks the socket of one starting at the same path. A folder that holds an
+ACL allow entry (`guest_acl_reader`, default `guest.acl_reader_for(sys.platform)`; macOS only) is a
+`GuestSocketError` (`EPERM`). `close` and a
 failed construction remove the socket file this console bound (the same device and inode) and nothing
 else.
 Every guest connection is judged in `verify_request` before a byte is read: `guest.door_refusal` on
@@ -3480,18 +3482,26 @@ class GuestServer(socketserver.ThreadingUnixStreamServer):
 
     def server_close(self) -> None:
         super().server_close()
-        self.remove_socket()
-        self._unlock()
+        try:
+            self.remove_socket()
+        finally:
+            self._unlock()
 
     def remove_socket(self) -> None:
         if self._bound is None:
             return
+        held = self._lock_fd is not None
         try:
+            if not held:
+                self._lock()
             found = os.lstat(self._path)
             if stat.S_ISSOCK(found.st_mode) and (found.st_dev, found.st_ino) == self._bound:
                 os.unlink(self._path)
         except OSError:
             pass
+        finally:
+            if not held:
+                self._unlock()
 
 
 class _ProfileRemoving(Exception):
