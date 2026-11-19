@@ -18,7 +18,7 @@ from agent_tools.claims import forge_claim
 from agent_tools.claims import forge_land_lock as land_lock
 from agent_tools.claims import forge_markers as fm
 from agent_tools.system import forge_api
-from .forge_world import NETWORK_DOWN, ForgeWorld, host_clock
+from .forge_world import NETWORK_DOWN, ForgeWorld, _InProcessSubprocess, host_clock
 
 SLUG, BRANCH = "octo/widgets", "main"
 OWNER, NAME = SLUG.split("/")
@@ -2367,6 +2367,33 @@ class InProcessForgeTest(unittest.TestCase):
                 if name == "comment list":
                     self.assertIn("held by the parity row", child[1])
                     self.assertEqual(child[5], [stored_comment])
+
+        with self.subTest("a missing PATH"):
+            tool = "forge-world-absent-tool"
+            world = ForgeWorld(self, tools=(tool,))
+            env = {"FORGE_WORLD": str(world.state)}
+            with self.assertRaises(FileNotFoundError):
+                subprocess.run([tool], env=env, capture_output=True)
+            with self.assertRaises(FileNotFoundError):
+                _InProcessSubprocess(world).run([tool], env=env, capture_output=True)
+            with self.assertRaises(FileNotFoundError):
+                world.answer([tool], env=env)
+            self.assertEqual(world.calls(), [])
+        with self.subTest("check=True"):
+            self.world.reset()
+            self.world.respond("gh", ["api", "x"], exit=1, stderr="gh: Not Found (HTTP 404)")
+            argv, env = ["api", "x"], self.world.env()
+            with self.assertRaises(subprocess.CalledProcessError) as child:
+                subprocess.run([str(self.world.bin / "gh"), *argv], capture_output=True, text=True,
+                               check=True, env=env)
+            with self.assertRaises(subprocess.CalledProcessError) as answered:
+                _InProcessSubprocess(self.world).run(["gh", *argv], capture_output=True, text=True,
+                                                     check=True, env=env)
+            self.assertEqual((answered.exception.returncode, answered.exception.stderr),
+                             (child.exception.returncode, child.exception.stderr))
+            self.assertEqual(answered.exception.returncode, 1)
+            done = _InProcessSubprocess(self.world).run(["gh", *argv], capture_output=True, env=env)
+            self.assertEqual(done.returncode, 1)
 
 
 class IdleRaceTest(Base):

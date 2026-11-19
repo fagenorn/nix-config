@@ -516,6 +516,15 @@ def _universal_newlines(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _find_tool(name: str, env: Mapping[str, str] | None) -> str:
+    """Where a child started with `env` would find `name`: the search a real `subprocess.run` makes
+    (`os.get_exec_path`, which falls back to the OS default path when `env` has no `PATH`)."""
+    found = shutil.which(name, path=os.pathsep.join(os.get_exec_path(env)))
+    if found is None:
+        raise FileNotFoundError(errno.ENOENT, "No such file or directory", name)
+    return found
+
+
 class _InProcessSubprocess:
     """Stands in for a module's `subprocess`: this world's tools answer in process, all else is real."""
 
@@ -524,12 +533,13 @@ class _InProcessSubprocess:
 
     def run(self, command, **kwargs):
         env = kwargs.get("env")
-        found = shutil.which(command[0], path=(env or os.environ).get("PATH"))
-        if found is None:
-            raise FileNotFoundError(errno.ENOENT, "No such file or directory", command[0])
+        found = _find_tool(command[0], env)
         if Path(found).parent != self.world.bin:
             return subprocess.run(command, **kwargs)
-        return self.world.answer(command, env=env, input=kwargs.get("input"))
+        done = self.world.answer(command, env=env, input=kwargs.get("input"))
+        if kwargs.get("check") and done.returncode:
+            raise subprocess.CalledProcessError(done.returncode, command, done.stdout, done.stderr)
+        return done
 
     def __getattr__(self, name: str):
         return getattr(subprocess, name)
@@ -675,9 +685,7 @@ class ForgeWorld:
     def answer(self, command: list[str], *, env: Mapping[str, str] | None = None,
                input: str | None = None) -> subprocess.CompletedProcess:
         """Answer one call of a fake tool in this process, as `bin/<tool>` would as a child."""
-        found = shutil.which(command[0], path=(env or os.environ).get("PATH"))
-        if found is None:
-            raise FileNotFoundError(errno.ENOENT, "No such file or directory", command[0])
+        found = _find_tool(command[0], env)
         if Path(found).parent != self.bin:
             raise ValueError(f"{found} is not a tool of this world")
         out, err = io.StringIO(), io.StringIO()
