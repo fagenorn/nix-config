@@ -95,10 +95,14 @@ def request_as(user: str, port: int, *, unix_socket: str | None = None,
 
 
 def connect_as(user: str, sock: str, *, run=subprocess.run) -> str:
-    """Try to connect to `sock` as `user`: `denied` only on the explicit permission-denied exit."""
-    argv = [SUDO, "-n", "-u", user, PYTHON, "-c", PROBE, sock]
+    """Try to connect to `sock` as `user`: `denied` only on the explicit permission-denied exit.
+
+    The probe runs isolated (`-I`) from `/`: the check's own working folder can be unreadable to
+    `user`, and Python would otherwise put it on its import path and exit 1 before connecting.
+    """
+    argv = [SUDO, "-n", "-u", user, PYTHON, "-I", "-c", PROBE, sock]
     try:
-        done = run(argv, capture_output=True, timeout=15, check=False)
+        done = run(argv, capture_output=True, timeout=15, check=False, cwd="/")
     except (OSError, subprocess.TimeoutExpired):
         return UNKNOWN
     if done.returncode == 13:
