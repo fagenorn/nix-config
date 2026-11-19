@@ -1769,6 +1769,18 @@ class ScreenshotStyleTest(unittest.TestCase):
                "x</div>")
         self.assertEqual(self.styled(lit, [shadow]), ("s: div.s box-shadow is rgb(1, 2, 3)",))
 
+    def test_palette_names_a_shadow_colour_written_in_a_perceptual_space(self) -> None:
+        row = style_row("s", selector=".s", prop="color", want="palette", value="desk")
+        for prop in ("box-shadow", "text-shadow"):
+            for colour in ("oklch(0.8 0.1 50)", "oklab(0.8 0.05 0.05)",
+                           "lch(70 40 50)", "lab(70 20 30)"):
+                with self.subTest(prop=prop, colour=colour):
+                    spread = " 1px" if prop == "box-shadow" else ""
+                    html = (f'<div class="s" style="color: rgb(202, 211, 245); '
+                            f'{prop}: 0 0 0{spread} {colour}">x</div>')
+                    (miss,) = self.styled(html, [row])
+                    self.assertTrue(miss.startswith(f"s: div.s {prop} is "), miss)
+
     def test_tokens_read_each_token_and_name_a_wrong_one(self) -> None:
         lists = shots.STYLE_LISTS["tokens"]["desk"]
         values = {**lists["colours"], "--ui": "sans-serif", "--display": "serif"}

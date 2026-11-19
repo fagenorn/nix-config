@@ -588,7 +588,7 @@ STYLE_READING = r"""((rows) => {
     + (node.getAttribute('class') || '').split(/\s+/)[0];
   const LISTS = __LISTS__;
   const SHAPES = new Set(['path', 'circle', 'rect', 'line', 'polyline', 'polygon', 'ellipse', 'text']);
-  const COLOURS = /(?:rgba?|color)\([^)]*\)/g;
+  const COLOURS = /(?:rgba?|color|oklab|oklch|lab|lch)\([^)]*\)/g;
   const painted = (node) => {
     const s = getComputedStyle(node);
     const out = [['color', s.color], ['background-color', s.backgroundColor]];
