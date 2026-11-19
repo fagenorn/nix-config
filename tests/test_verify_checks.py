@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import inbox
 from agent_tools.console import manager as console_manager
 from agent_tools.console import sprints as console_sprints
 from agent_tools.console import view as console_view
@@ -2264,6 +2265,108 @@ class ConsoleFailedStartTest(unittest.TestCase):
 
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-failed-start"), "100755")
+
+
+class ConsoleNoCardTest(unittest.TestCase):
+    """`console-no-card` (issue 1327): the console lists no inbox card with any of the given keys."""
+
+    K = "octo/widgets#1326/ac1"
+    UNREADABLE = (75, {"verdict": "unreachable", "listed": 0})
+
+    def stub(self, routes):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                status, body = routes.get(self.path.split("?", 1)[0], (404, b""))
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def closed_port(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    def test_no_listed_key_is_met(self):
+        view = {"inbox": {"open": [{"key": "octo/widgets#7/ac1"}], "answered": []}}
+        self.assertEqual(verify_checks.no_card_state(view, [self.K]), (0, {"verdict": "absent", "listed": 0}))
+
+    def test_a_listed_key_is_not_yet(self):
+        other = "octo/widgets#9/ac2"
+        listed = (75, {"verdict": "listed", "listed": 1})
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [{"key": self.K}], "answered": []}}, [self.K]), listed)
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [], "answered": [{"key": self.K}]}}, [self.K]), listed)
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [{"key": self.K}], "answered": [{"key": other}]}}, [self.K, other]),
+            (75, {"verdict": "listed", "listed": 2}))
+        self.assertEqual(verify_checks.no_card_state(
+            {"inbox": {"open": [{"key": self.K}], "answered": [{"key": self.K}]}}, [self.K]), listed)
+
+    def test_an_unreadable_inbox_is_never_met(self):
+        for view in ([], {}, {"inbox": []}, {"inbox": {"open": {}, "answered": []}},
+                     {"inbox": {"open": [], "answered": None}}):
+            with self.subTest(view=view):
+                self.assertEqual(verify_checks.no_card_state(view, [self.K]), self.UNREADABLE)
+        for entry in ("x", {}, {"key": []}):
+            for where in ("open", "answered"):
+                with self.subTest(entry=entry, where=where):
+                    lists = {"open": [], "answered": [], where: [entry]}
+                    self.assertEqual(verify_checks.no_card_state({"inbox": lists}, [self.K]), self.UNREADABLE)
+
+    def test_a_real_view_lists_the_review_card(self):
+        node = {"__typename": "Issue", "number": 1326, "issueDependenciesSummary": {"blocking": 0},
+                "blocking": {"totalCount": 0, "nodes": []}, "comments": {"totalCount": 0, "nodes": []},
+                "authorAssociation": "OWNER",
+                "body": "## Acceptance criteria\n\n- [ ] [human] It reads plainly\n",
+                "labels": {"nodes": [{"name": "needs-verification"}]}}
+        item = inbox.items_from_node("p00", "octo/widgets", node)[0]
+        records = {("p00", item["key"]): console_view.InboxRecord(item, "t1", "t1")}
+        view = json.loads(console_view.encode_view(console_view.derive_view(
+            [ProjectState("p00", "/srv/p00", 1, "t1")], records)))
+        self.assertEqual(verify_checks.no_card_state(view, [item["key"]]),
+                         (75, {"verdict": "listed", "listed": 1}))
+        self.assertEqual(verify_checks.no_card_state(view, ["octo/widgets#1/ac9"]),
+                         (0, {"verdict": "absent", "listed": 0}))
+
+    def test_an_unreachable_console_is_not_yet(self):
+        self.assertEqual(verify_checks.console_no_card(self.closed_port(), [self.K]), self.UNREADABLE)
+        self.assertEqual(verify_checks.console_no_card(
+            self.stub({"/api/state": (503, b"{}")}), [self.K]), self.UNREADABLE)
+        self.assertEqual(verify_checks.console_no_card(
+            self.stub({"/api/state": (200, b"not json")}), [self.K]), self.UNREADABLE)
+
+    def test_the_command_and_its_wrapper_print_one_json_line(self):
+        port = self.stub({"/api/state": (200, b'{"inbox": {"open": [], "answered": []}}')})
+        expected = json.dumps({"listed": 0, "verdict": "absent"}, sort_keys=True) + "\n"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-no-card", "--port", str(port), "--key", self.K])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), expected)
+        result = run_from_root([str(ROOT / CHECKS / "console-no-card"), "--port", str(port), "--key", self.K])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, expected)
+        for argv in (["console-no-card", "--port", str(port)], ["console-no-card", "--key", self.K],
+                     ["console-no-card", "--port", "0", "--key", self.K]):
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-no-card"), "100755")
 
 
 class ConsoleNoticeListsTest(unittest.TestCase):
