@@ -177,7 +177,7 @@ LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
 REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
            "another way that needs no permission, or bring the choice to the owner with "
-           "`sprint ask`.")
+           "`sprint ask`, marking the question `owner_only`.")
 
 UNAVAILABLE_TEXT = "managers are not available on this host yet"
 FAILED_TEXT = "could not start a manager"

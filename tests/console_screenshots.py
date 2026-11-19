@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-two screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -86,8 +86,22 @@ Contract:
   meta (`#console-door`) is not the guest page. On the base commit's page, which has neither
   the Sharing button nor a door meta, `sharing-panel` is the desk with no panel opened and
   `guest-page` is the page the guest port served then, so a base run still writes every file.
+  `guest-steer` is `guest-page` over a fixture of three `owner/web` sprints and a release confirm: two
+  sprints the colleague started (every row of theirs carries `"by"`), one whose brief is approved and
+  whose newest message is the colleague's answer to a plain question, so the line `Answered by
+  COLLEAGUE: ...` shows, and one whose brief version 1 waits, so the page shows an open card the colleague
+  can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
+  and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
+  draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed. Each
+  width waits for what the owner judges to be visible, which fails the run when it is not:
+  `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
+  `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
+  straight into the event log, so the base commit's service, which ignores `by`, serves a page
+  without those parts. On a page whose service does not read the actor (`reads_actors()` is False,
+  `SprintState` having no `started_by`) those waits are skipped, so a base run still writes every
+  file and the pictures are the before pictures of the actors.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 80 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 84 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -167,7 +181,7 @@ from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
-from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question
+from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
 
 from .console_test_support import hook_body, write_registry
 
@@ -178,7 +192,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "sharing-panel",
-          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page")
+          "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 GOAL_NEAR_CHARS = 1900
@@ -194,7 +208,7 @@ COLLEAGUE = "colleague@example.invalid"
 SELF_ADDRESS = "100.64.0.10"
 OTHER_DEVICE_ADDRESS = "100.64.0.20"
 SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
-                  "guest-page")
+                  "guest-page", "guest-steer")
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
@@ -545,6 +559,57 @@ class _Seed:
             "answers": ["passed", "failed", "note"], "paid": False, "confirm": "",
             "answered": False, "held_work": 1, "blocking": [], "version": "v1"})
 
+    def approval(self, project: str, issue: int, ago: float) -> None:
+        """One open release confirm of `issue`: a `verify-approve` card waiting on the owner."""
+        self.put(ago, "inbox.seen", project, {
+            "key": f"{project}#{issue}/9002", "project_id": project, "repo": project,
+            "issue": issue, "comment_id": 9002,
+            "url": f"https://github.com/{project}/issues/{issue}#issuecomment-9002",
+            "reason": "verify-approve", "kind": "approval",
+            "question": "Approve the release of the importer change?", "detail": "",
+            "check_id": "", "questions": [], "items": [], "answers": ["approve"],
+            "paid": False, "confirm": f"{project}#{issue}", "answered": False,
+            "held_work": 1, "blocking": [], "version": "v1"})
+
+    def colleague_sprint(self, project: str, title: str, *, started: float, by: str,
+                         answered: bool = False) -> tuple[str, str]:
+        """One sprint stated by the colleague `by`, every row of theirs carrying `"by"`.
+
+        Without `answered` its brief version 1 is sent and waits. With it the brief is approved, one
+        message is sent, one plain question is asked and answered last, so the answer is the
+        sprint's newest message.
+        """
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        base = {"sprint_id": sid, "goal": goal}
+        actor = {"by": by}
+        self.put(started, "goal.stated", project, {**base, **actor})
+        self.put(started - 1 * MINUTE, "manager.started", project, {
+            "sprint_id": sid, "profile": "work-main",
+            "session_name": manager.session_name(project, sid)})
+        self.put(started - 4 * MINUTE, "brief.sent", project, {**base, "version": 1, "brief": {
+            "title": title, "done": f"{title}, merged and checked.",
+            "slices": ["the first slice", "the second slice"], "excluded": [],
+            "risks": ["a partial write"], "asks": []}})
+        if not answered:
+            return sid, goal
+        self.put(started - 8 * MINUTE, "brief.approved", project, {**base, "version": 1, **actor})
+        self.put(started - 10 * MINUTE, "sprint.messaged", project,
+                 {**base, "text": TELL_TEXT, **actor})
+        asked = self.put(started - 12 * MINUTE, "questions.asked", project, {
+            **base, "blocker": False, "questions": [{
+                "question": "Which store should the checkpoint use?",
+                "blocks": "the first slice",
+                "options": ["the existing database", "a new file"],
+                "recommended": "the existing database"}]})
+        self.put(started - 14 * MINUTE, "question.answered", project, {
+            **base, "round": asked.seq, "index": 0,
+            "question": "Which store should the checkpoint use?", "answer": "a new file",
+            "chosen": "a new file", "recommended": "the existing database", "differs": True,
+            **actor})
+        return sid, goal
+
     def account(self, name: str, week: float) -> None:
         """A signed-in profile with one capacity reading whose week window is `week` used."""
         self._at[0] = _iso(self.now_s)
@@ -591,13 +656,22 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
             "name": manager.session_name(web, sid)})
     elif state == "failed-start":
         seed.failed_start(web, "Add resumable uploads", 3 * MINUTE)
-    elif state in SHARING_STATES:
+    elif state in (*SHARING_STATES, "owner-actors"):
         seed.put(3 * MINUTE, SHARING_TAILNET, None, {"tailnet": TAILNET})
         if state == "sharing-off":
             seed.put(MINUTE, SHARING_TAILNET, None, {"shared": False})
         seed.put(2 * MINUTE, SHARING_COLLEAGUE, None, {"login": COLLEAGUE, "projects": [web]})
-        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
-        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        if state in ("guest-steer", "owner-actors"):
+            seed.colleague_sprint(web, "Add resumable uploads", started=40 * MINUTE,
+                                  by=COLLEAGUE, answered=True)
+            seed.colleague_sprint(web, "Fix the settings page", started=20 * MINUTE, by=COLLEAGUE)
+            sid, goal = seed.sprint(web, "Try a new cache", started=30 * MINUTE,
+                                    report=6 * MINUTE)
+            seed.message(web, sid, goal, sent=2 * MINUTE)
+            seed.approval(web, 12, MINUTE)
+        else:
+            seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
+            seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -857,6 +931,11 @@ def reads_other() -> bool:
     return "other" in Activation.__dataclass_fields__
 
 
+def reads_actors() -> bool:
+    """Whether this page's service reads who started a sprint (`SprintState` has `started_by`)."""
+    return "started_by" in SprintState.__dataclass_fields__
+
+
 def _activation_reader(paths: tuple[str, ...]):
     """A stand-in reading of merged changes outside the console; a base commit's `Activation` has no `other`."""
     def read(roots):
@@ -1065,7 +1144,7 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                         host, port = service.address
                         if state in SHARING_PANELS:
                             guest_requests(state, guest_door(service))
-                        elif state == "guest-page":
+                        elif state in ("guest-page", "guest-steer"):
                             serve = _Serve(guest_door(service))
                             host, port = serve.address
                         for width in widths:
@@ -1223,10 +1302,16 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
-        if state == "guest-page" and page.query_selector("#console-door") is not None:
+        if state in ("guest-page", "guest-steer") and page.query_selector("#console-door") is not None:
             page.wait_for_selector("#top-who:not([hidden])")
             if page.query_selector("#capacity") is not None:
                 raise RuntimeError("the guest shot is not the guest page")
+        if state == "guest-steer" and reads_actors():
+            for selector in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
+                page.wait_for_selector(selector)
+        if state == "owner-actors" and reads_actors():
+            for selector in (".started-by", "text=Answered by"):
+                page.wait_for_selector(selector)
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')

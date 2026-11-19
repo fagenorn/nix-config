@@ -65,6 +65,14 @@ NaN or Infinity literal or nesting too deep to parse raises `ValueError`.
 (`stated_seq` and `stated_at` are the event's `seq` and `at`); a `goal.withdrawn` with a string
 `sprint_id` removes it; the brief rows and the manager rows below change an open sprint; every other
 event and any malformed goal event changes nothing.
+
+A guest's `goal.stated`, `brief.approved`, `brief.replied`, `sprint.messaged` and
+`question.answered` rows carry `"by": <login>` (#1263), and an owner's row carries none. `actor_of`
+reads it: the login when it is already a normal login (`event_log.normal_login`, the definition
+admission uses), else None, which means the owner. `SprintState.started_by` is the actor of the
+`goal.stated` row, `Message.by` the actor of the row that made the message, and
+`Question.answered_by` the actor of its `question.answered` row. A malformed `by` reads as the
+owner, so no guest can steer that sprint.
 Registration events change nothing here: a goal row outlives the registration rows retention
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
@@ -296,6 +304,7 @@ console did about a look card's approval:
                        "look_repo"?: <str> (the project's repository when a question has a look),
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "needs_words"?: [<option text>],
+                                      "owner_only"?: true,
                                       "pictures"?: [{"picture": <id>,
                                       "line": <str>, "pair"?: "before" | "after"}],
                                       "look"?: {"issue": <int>, "pr": <int>, "head": <40 hex>,
@@ -335,8 +344,8 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended, needs_words, pictures, look,
-replaces`),
+a key outside `question, context, blocks, options, recommended, needs_words, owner_only,
+pictures, look, replaces`),
 `QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
@@ -350,7 +359,8 @@ at least 1, `head`, 40 lowercase hex, and `approve`, a string) and `LOOK_APPROVE
 whose strip equals no stripped option), then `NEEDS_WORDS_SHAPE`
 (`needs_words` present and not a non-empty list of strings whose strips are each one stripped
 option, each named once) and (#1260) `LOOK_APPROVE_WORDS` (the look's `approve` is also in `needs_words`: choosing it
-records the approval and takes no words, so the owner could never approve), then `REPLACES_SHAPE`
+records the approval and takes no words, so the owner could never approve), then `OWNER_ONLY_SHAPE` (`owner_only` present and not `true`),
+then `REPLACES_SHAPE`
 (`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
 and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
@@ -382,7 +392,8 @@ order. With
 picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
 text stripped, a question carrying `"context"` only when the round gave one, `"needs_words"` (the
-stripped option texts, in the given order) only when it gave one, `"look"` (`{"issue",
+stripped option texts, in the given order) only when it gave one, `"owner_only"` (`true`) only when it
+gave it, `"look"` (`{"issue",
 "pr", "head", "approve"}`, `approve` stripped) only when it gave one, and `"pictures"`
 (`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
 (`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
@@ -404,8 +415,10 @@ index)`. A `questions.asked` row changes a sprint only when it is open, its brie
 (`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
 (absent: false), so a logged round over a limit folds whole and renders cut; each
 checked question is then added with `round_id` the row's `seq`, its `index` and `at`, and its
-`look` kept as a `QuestionLook`, and its `needs_words` (`Question.needs_words`, `()` when the round
-gave none). Each checked
+`look` kept as a `QuestionLook`, its `needs_words` (`Question.needs_words`, `()` when the round
+gave none) and `owner_only`
+(`Question.owner_only`, false unless the round marked it: a question only the console's owner
+answers, #1263). Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
 matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
@@ -656,6 +669,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
                                            MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED,
+                                           normal_login,
                                            NOTICE_WITHDRAWN,
                                            PICTURE_STORED, QUESTION_ANSWERED,
                                            QUESTION_WITHDRAWN, QUESTIONS_ASKED,
@@ -842,6 +856,7 @@ OPTION_COUNT = "question {n} needs two to four options"
 OPTION_TWICE = "question {n} offers one option twice"
 NO_RECOMMENDATION = "question {n} recommends none of its options"
 NEEDS_WORDS_SHAPE = "question {n}'s needs_words must list some of its options, each once"
+OWNER_ONLY_SHAPE = "question {n}'s owner_only must be true when given"
 WORDS_NEEDED = "say what to change"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
@@ -1019,6 +1034,7 @@ class Message:
     chosen: str | None = None
     held: bool = False
     words: str | None = None
+    by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1065,6 +1081,8 @@ class Question:
     look_repo: str | None = None
     needs_words: tuple[str, ...] = ()
     words: str | None = None
+    answered_by: str | None = None
+    owner_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1114,6 +1132,7 @@ class SprintState:
     pictures: frozenset[str] = frozenset()
     notices: tuple[Notice, ...] = ()
     permission: Permission | None = None
+    started_by: str | None = None
 
     @property
     def state(self) -> str:
@@ -1460,8 +1479,8 @@ LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/
 def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
-                                                                "needs_words", "pictures", "look",
-                                                                "replaces"}:
+                                                                "needs_words", "owner_only",
+                                                                "pictures", "look", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1511,6 +1530,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
             raise Refused(NEEDS_WORDS_SHAPE.format(n=n))
         if "look" in question and look["approve"].strip() in kept:
             raise Refused(LOOK_APPROVE_WORDS.format(n=n))
+    if "owner_only" in question and question["owner_only"] is not True:
+        raise Refused(OWNER_ONLY_SHAPE.format(n=n))
     replaces = question.get("replaces")
     if "replaces" in question and not _replaces_mark(replaces):
         raise Refused(REPLACES_SHAPE.format(n=n))
@@ -1527,6 +1548,8 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         checked["context"] = context.strip()
     if "needs_words" in question:
         checked["needs_words"] = kept
+    if "owner_only" in question:
+        checked["owner_only"] = True
     if pictures:
         checked["pictures"] = pictures
     if "look" in question:
@@ -1930,6 +1953,8 @@ def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str
 def inbox_entry(message: Message) -> dict:
     entry = {"id": message.message_id, "kind": message.kind, "version": message.version,
              "text": message.text, "at": message.at}
+    if message.by is not None:
+        entry["by"] = message.by
     if message.kind == MESSAGE_ANSWER:
         words = (message.words if message.words is not None
                  else message.text if message.chosen is None else None)
@@ -1975,18 +2000,28 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if event.kind == BRIEF_APPROVED:
         return _with_message(
             replace(state, brief=replace(brief, decision=APPROVED, decided_at=event.at)),
-            Message(event.seq, MESSAGE_APPROVED, event.at, version, None))
+            Message(event.seq, MESSAGE_APPROVED, event.at, version, None, by=actor_of(payload)))
     reply = payload.get("reply")
     if isinstance(reply, str):
         return _with_message(
             replace(state,
                     brief=replace(brief, decision=CHANGES, reply=reply, decided_at=event.at)),
-            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply))
+            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply, by=actor_of(payload)))
     return state
 
 
 def _id(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def actor_of(payload: Mapping) -> str | None:
+    """The guest login a row's `by` names, or None for the owner (#1263).
+
+    `by` counts only when it is already a normal login (`event_log.normal_login`, the one definition
+    admission shares); an absent, malformed or non-canonical member reads as the owner, so no guest
+    can steer a sprint whose start row is malformed."""
+    value = payload.get("by")
+    return value if isinstance(value, str) and normal_login(value) == value else None
 
 
 def _folded_notice(state: SprintState, event: Event) -> SprintState:
@@ -2059,7 +2094,8 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
     if event.kind == SPRINT_MESSAGED:
         text = payload.get("text")
         if isinstance(text, str):
-            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text))
+            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text,
+                                                by=actor_of(payload)))
     elif event.kind == SPRINT_READ:
         through = payload.get("through")
         if _id(through):
@@ -2117,6 +2153,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                context=row.get("context"),
                                look=QuestionLook(**row["look"], repo=bound) if "look" in row else None,
                                needs_words=tuple(row.get("needs_words", ())),
+                               owner_only=row.get("owner_only", False) is True,
                                pictures=tuple(QuestionPicture(p["picture"], p["line"],
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
@@ -2146,6 +2183,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         words = payload.get("words")
         answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
                            differs=chosen != question.recommended, words=words,
+                           answered_by=actor_of(payload),
                            look_state=LOOK_POSTING if held else None,
                            look_found=None, look_found_state=None,
                            look_message=event.seq if held else None,
@@ -2154,7 +2192,7 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
         return _with_message(
             replace(state, questions=questions),
             Message(event.seq, MESSAGE_ANSWER, event.at, None, answer, question=question.question,
-                    round_id=round_id, chosen=chosen, held=held, words=words))
+                    round_id=round_id, chosen=chosen, held=held, words=words, by=actor_of(payload)))
     return state
 
 
@@ -2427,7 +2465,7 @@ def sprint_states(events: Iterable[Event],
             goal = event.payload.get("goal")
             if event.project is not None and isinstance(goal, str):
                 folded[sprint_id] = SprintState(sprint_id, event.project, goal, event.seq,
-                                                event.at)
+                                                event.at, started_by=actor_of(event.payload))
         elif event.kind == GOAL_WITHDRAWN:
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:

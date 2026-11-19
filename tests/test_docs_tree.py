@@ -541,7 +541,7 @@ class DocsTreeTest(unittest.TestCase):
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
                     "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1237, #1294, #1305"))
+        self.assertTrue(decided.endswith("#1237, #1263, #1294, #1305"))
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)

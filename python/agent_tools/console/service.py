@@ -116,7 +116,7 @@ owner-only route (`OWNER_ONLY`: every page write, manager write, hook and readin
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
 its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
 scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
-read-only layout) carrying the guest token, `GET
+desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
 read tailnet name moved or went, even when the change came and went while a frame was being written
@@ -154,6 +154,19 @@ reads a tailnet name other than the one a reading was judged under drops that re
 before a change of address or name is never kept as one judged under the old. That read runs on one worker
 thread, never on the request's thread (a guest request never waits on Tailscale), the latest waiting
 reading alone kept; `settle_guest_readings` waits for it and `close` does.
+
+Guest writes (#1263). Five page writes are open to a listed colleague on the guest door, the members of
+`GUEST_WRITES`: `POST /api/goal`, `/api/approve`, `/api/reply`, `/api/round-answer` and `/api/message`.
+`GuestHandler._guest_write` takes them in this order after admission: a method other than POST is `405`
+`Allow: POST`; then `write_guard.refusal` with `https://<read name>` and the guest token (`403` `origin
+refused` or `token refused`, the body unread, the owner's page token refused as `token refused`); then
+the owner's body helper for the route with a `guest.GuestActor` (`411`, `415`, `413`, `400` `bad
+<name>`); then, under the ingest lock and before anything is appended, the write-time re-check of the
+sharing switch, the read tailnet name the request was admitted under, the access list, the project, the starter (`409`
+`guest.NOT_YOUR_SPRINT_TEXT` unless the colleague started the sprint) and the look rule (`409`
+`guest.OWNER_LOOK_TEXT` for a question carrying a `look` or a before-and-after pair, `guest.OWNER_ONLY_TEXT` for a
+question marked `owner_only`); success is an empty `204`.
+A guest's row carries `"by": <login>`, an owner's carries none; no refusal body or stderr line names a login.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -1609,6 +1622,11 @@ from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
 
+def _by(actor: "guest.GuestActor | None") -> dict:
+    """The `by` member a guest's row carries; an owner's row carries none."""
+    return {} if actor is None else {"by": actor.login}
+
+
 def _epoch_ms(at: str) -> int:
     return int(datetime.fromisoformat(at).timestamp() * 1000)
 
@@ -1761,8 +1779,11 @@ STREAM_PATH = "/api/stream"
 WHOAMI_PATH = "/api/whoami"
 OWNER_READS: frozenset[str] = frozenset({SPEND_PAGE_PATH, STATUS_PATH, PROFILE_PATH, EXCLUDED_PATH})
 GUEST_READS: frozenset[str] = frozenset({PAGE_PATH, STATE_PATH, STREAM_PATH, WHOAMI_PATH})
-OWNER_ONLY: frozenset[str] = (PAGE_WRITES | MANAGER_WRITES | frozenset(POST_LIMITS) | OWNER_READS)
-ROUTES: frozenset[str] = OWNER_ONLY | GUEST_READS | {PICTURE_PREFIX}
+GUEST_WRITES: frozenset[str] = frozenset({GOAL_PATH, APPROVE_PATH, REPLY_PATH, ROUND_ANSWER_PATH,
+                                          MESSAGE_PATH})
+OWNER_ONLY: frozenset[str] = ((PAGE_WRITES - GUEST_WRITES) | MANAGER_WRITES
+                              | frozenset(POST_LIMITS) | OWNER_READS)
+ROUTES: frozenset[str] = OWNER_ONLY | GUEST_WRITES | GUEST_READS | {PICTURE_PREFIX}
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
@@ -2044,7 +2065,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _goal_request(self, console: "ConsoleService", route: str) -> bool:
+    def _goal_request(self, console: "ConsoleService", route: str,
+                      by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out a goal or a withdrawal; False when it was refused."""
         name = "goal" if route == GOAL_PATH else "withdraw"
         body = self._json_body(MAX_GOAL_BYTES if route == GOAL_PATH else MAX_WITHDRAW_BYTES)
@@ -2060,7 +2082,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         try:
             if route == GOAL_PATH:
-                console.state_goal(project_id, goal)
+                console.state_goal(project_id, goal, by=by)
             else:
                 console.withdraw_goal(project_id, sprint_id)
         except sprints.Refused as error:
@@ -2721,7 +2743,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"picture": picture_id}, sort_keys=True, separators=(",", ":")).encode())
 
-    def _round_answer_request(self, console: "ConsoleService") -> bool:
+    def _round_answer_request(self, console: "ConsoleService",
+                              by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out the owner's answer to one question; False when it was refused."""
         body = self._json_body(MAX_ROUND_ANSWER_BYTES)
         if body is None:
@@ -2732,7 +2755,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._refuse(400, "bad round answer")
             return False
         try:
-            console.answer_question(*parsed)
+            console.answer_question(*parsed, by=by)
         except sprints.Refused as error:
             print(f"console: round_answer_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2775,7 +2798,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _message_request(self, console: "ConsoleService") -> bool:
+    def _message_request(self, console: "ConsoleService",
+                         by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out an owner's message; False when it was refused."""
         body = self._json_body(MAX_MESSAGE_BYTES)
         if body is None:
@@ -2786,7 +2810,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._refuse(400, "bad message")
             return False
         try:
-            console.send_message(*parsed)
+            console.send_message(*parsed, by=by)
         except sprints.Refused as error:
             print(f"console: message_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2895,7 +2919,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
-    def _decision_request(self, console: "ConsoleService", route: str) -> bool:
+    def _decision_request(self, console: "ConsoleService", route: str,
+                          by: "guest.GuestActor | None" = None) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
         name = "approve" if route == APPROVE_PATH else "reply"
         body = self._json_body(MAX_APPROVE_BYTES if route == APPROVE_PATH else MAX_REPLY_BYTES)
@@ -2911,9 +2936,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         try:
             if route == APPROVE_PATH:
-                console.approve_brief(*parsed)
+                console.approve_brief(*parsed, by=by)
             else:
-                console.reply_brief(*parsed)
+                console.reply_brief(*parsed, by=by)
         except sprints.Refused as error:
             print(f"console: {name}_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -3325,6 +3350,10 @@ class GuestHandler(ConsoleHandler):
         login, text = guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
         if text is not None:
             return self._refuse(403, text)
+        if route in GUEST_WRITES:
+            if self.command != "POST":
+                return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "POST"))
+            return self._guest_write(route, policy, login, snapshot.epoch)
         if route in OWNER_ONLY:
             return self._refuse(403, guest.OWNER_ONLY_TEXT)
         if self.command != "GET":
@@ -3345,6 +3374,37 @@ class GuestHandler(ConsoleHandler):
             self._guest_picture(route, policy.name, snapshot.pictures.get(login, frozenset()))
         else:
             self._refuse(404, "not found")
+
+    def _guest_write(self, route: str, policy: "guest.Policy", login: str, epoch: int):
+        """One of the five guest writes (#1263): the owner's guard shape, the guest token and origin."""
+        console = self.server.console
+        refusal = write_guard.refusal(
+            policy.name, self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.guest_token,
+            scheme="https")
+        if refusal is not None:
+            return self._refuse(*refusal)
+        by = guest.GuestActor(login, policy.name, epoch)
+        self.close_connection = True
+        if route == GOAL_PATH:
+            done = self._goal_request(console, route, by)
+        elif route in (APPROVE_PATH, REPLY_PATH):
+            done = self._decision_request(console, route, by)
+        elif route == ROUND_ANSWER_PATH:
+            done = self._round_answer_request(console, by)
+        else:
+            done = self._message_request(console, by)
+        if not done:
+            return
+        try:
+            self.send_response(204)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+        except OSError:
+            return
 
     def _readmitting(self, admitted: "guest.Snapshot", login: str, hosts: list[str],
                      forwarded_hosts: list[str], logins: list[str]):
@@ -3836,6 +3896,7 @@ class ConsoleService:
         self._thread: threading.Thread | None = None
         self._closed = False
         self._access = guest.NO_ACCESS
+        self._guest_epoch = 0  # revocations so far (`guest.revokes`, a name change): an admitted write checks it
         self._guest = guest.NO_SNAPSHOT
         self._guest_token: str | None = None
         self._guest_page: bytes | None = None
@@ -4171,7 +4232,8 @@ class ConsoleService:
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.shared and name is not None:
             for login, projects in access.colleagues.items():
-                derived = guest.scrub(derive_view(**guest.scoped(inputs, projects)))
+                derived = guest.mark_steer(
+                    guest.scrub(derive_view(**guest.scoped(inputs, projects))), login)
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
         with self._published:
@@ -4182,7 +4244,8 @@ class ConsoleService:
                 self._version += 1
             self._view = view
             self._guest = guest.Snapshot(
-                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked)
+                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked,
+                self._guest_epoch)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 
@@ -4345,9 +4408,32 @@ class ConsoleService:
         self._answered[slot] = self._answer_generation
         self._publish()
 
-    def state_goal(self, project_id: str, goal: str) -> str:
+    def _guest_refusal(self, by: "guest.GuestActor | None", project_id: str) -> None:
+        """Under the ingest lock: refuse a guest whose access is gone or does not cover the project, or whose project is no longer registered."""
+        if by is not None:
+            text = guest.write_refusal(guest.Policy(self._access, self._tailnet_name), by, project_id)
+            if text is not None:
+                raise sprints.Refused(text)
+            if project_id not in self._states:
+                raise sprints.Refused(sprints.UNREGISTERED)
+            if by.epoch is not None and by.epoch != self._guest_epoch:
+                raise sprints.Refused(guest.REVOKED_TEXT)
+
+    def _steered(self, by: "guest.GuestActor | None", project_id: str,
+                 sprint_id: str) -> sprints.SprintState:
+        """Under the ingest lock: the sprint, and for a guest the check that they started it."""
+        sprint = self._project_sprint(project_id, sprint_id)
+        if by is not None:
+            text = guest.steer_refusal(by.login, sprint.started_by)
+            if text is not None:
+                raise sprints.Refused(text)
+        return sprint
+
+    def state_goal(self, project_id: str, goal: str, *,
+                   by: "guest.GuestActor | None" = None) -> str:
         """Append one `goal.stated` event for a registered project and return the new sprint id."""
         with self._ingest:
+            self._guest_refusal(by, project_id)
             if project_id not in self._states:
                 raise sprints.Refused(sprints.UNREGISTERED)
             goal = sprints.checked_goal(goal)
@@ -4355,7 +4441,8 @@ class ConsoleService:
             sprints.create_secret(self._sprint_secrets, sprint_id)
             try:
                 appended = self.log.append(
-                    [(GOAL_STATED, project_id, {"sprint_id": sprint_id, "goal": goal})])
+                    [(GOAL_STATED, project_id, {"sprint_id": sprint_id, "goal": goal,
+                                                **_by(by)})])
             except BaseException:
                 sprints.remove_secret(self._sprint_secrets, sprint_id)
                 raise
@@ -5975,6 +6062,10 @@ class ConsoleService:
                        brief: dict) -> tuple[sprints.SprintState, dict]:
         """Every refusal of a brief, in order, with nothing written (the caller holds the lock)."""
         sprint = self._manager_sprint(sprint_id, secret)
+        if sprint.stopped_at is not None or sprint.closing is not None:
+            raise sprints.Refused(sprints.ENDED)  # a card for it would show and no decision would take it (#1263)
+        if sprint.stop_at is not None:
+            raise sprints.Refused(sprints.ALREADY_STOPPING)  # the page hides it and no decision takes it (#1263)
         checked = sprints.checked_brief(brief)
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],
@@ -6062,10 +6153,17 @@ class ConsoleService:
             self._dispatch_stop(sprint_id)
         return appended[-1].at
 
-    def _waiting_brief(self, project_id: str, sprint_id: str, version: int) -> sprints.SprintState:
+    def _project_sprint(self, project_id: str, sprint_id: str) -> sprints.SprintState:
         sprint = self._sprints.get(sprint_id)
         if sprint is None or sprint.project_id != project_id:
             raise sprints.Refused(sprints.NOT_OPEN)
+        return sprint
+
+    def _waiting_brief(self, sprint: sprints.SprintState, version: int) -> sprints.SprintState:
+        if not sprints.takes_questions(sprint):
+            raise sprints.Refused(sprints.ENDED)
+        if sprint.stop_at is not None:
+            raise sprints.Refused(sprints.ALREADY_STOPPING)
         if sprint.brief is None:
             raise sprints.Refused(sprints.NOT_WAITING)
         if version != sprint.brief.version:
@@ -6074,41 +6172,46 @@ class ConsoleService:
             raise sprints.Refused(sprints.NOT_WAITING)
         return sprint
 
-    def approve_brief(self, project_id: str, sprint_id: str, version: int) -> None:
+    def approve_brief(self, project_id: str, sprint_id: str, version: int, *,
+                      by: "guest.GuestActor | None" = None) -> None:
         """Append one `brief.approved` event for the waiting brief of that version."""
         with self._ingest:
-            sprint = self._waiting_brief(project_id, sprint_id, version)
+            self._guest_refusal(by, project_id)
+            sprint = self._waiting_brief(self._steered(by, project_id, sprint_id), version)
             appended = self.log.append([(BRIEF_APPROVED, project_id, {
-                "sprint_id": sprint_id, "version": version, "goal": sprint.goal})])
+                "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
+                **_by(by)})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
             self._dispatch_nudge(sprint_id)
 
-    def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str) -> None:
+    def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str, *,
+                    by: "guest.GuestActor | None" = None) -> None:
         """Append one `brief.replied` event carrying the owner's words exactly as sent."""
         with self._ingest:
-            sprint = self._waiting_brief(project_id, sprint_id, version)
+            self._guest_refusal(by, project_id)
+            sprint = self._waiting_brief(self._steered(by, project_id, sprint_id), version)
             sprints.checked_reply(reply)
             appended = self.log.append([(BRIEF_REPLIED, project_id, {
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
-                "reply": reply})])
+                "reply": reply, **_by(by)})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
             self._dispatch_nudge(sprint_id)
 
-    def send_message(self, project_id: str, sprint_id: str, text: str) -> int:
+    def send_message(self, project_id: str, sprint_id: str, text: str, *,
+                     by: "guest.GuestActor | None" = None) -> int:
         """Append one `sprint.messaged` event with the owner's text exactly as sent; its id."""
         with self._ingest:
-            sprint = self._sprints.get(sprint_id)
-            if sprint is None or sprint.project_id != project_id:
-                raise sprints.Refused(sprints.NOT_OPEN)
+            self._guest_refusal(by, project_id)
+            sprint = self._steered(by, project_id, sprint_id)
             if sprint.stopped_at is not None or sprints.ended_at(sprint) is not None:
                 raise sprints.Refused(sprints.ENDED)
             sprints.checked_message(text)
             appended = self.log.append([(SPRINT_MESSAGED, project_id, {
-                "sprint_id": sprint_id, "goal": sprint.goal, "text": text})])
+                "sprint_id": sprint_id, "goal": sprint.goal, "text": text, **_by(by)})])
             self._apply(appended)
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
@@ -7134,11 +7237,19 @@ class ConsoleService:
             "recommended": asked.recommended, "differs": chosen != asked.recommended, **extra})
 
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
-                        choice: int | None, text: str | None) -> int:
+                        choice: int | None, text: str | None, *,
+                        by: "guest.GuestActor | None" = None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
         slot = (sprint_id, round_id, index)
         with self._ingest:
+            self._guest_refusal(by, project_id)
+            self._steered(by, project_id, sprint_id)
             sprint, asked = self._open_question(project_id, sprint_id, round_id, index)
+            if by is not None and (asked.look is not None
+                                   or guest.is_look(p.pair for p in asked.pictures)):
+                raise sprints.Refused(guest.OWNER_LOOK_TEXT)
+            if by is not None and asked.owner_only:
+                raise sprints.Refused(guest.OWNER_ONLY_TEXT)
             words = None
             if choice is not None:
                 if not 0 <= choice < len(asked.options):
@@ -7155,7 +7266,7 @@ class ConsoleService:
             plain = look is None or chosen != look.approve or words is not None
             if plain:
                 appended = self.log.append([self._answered_row(
-                    project_id, sprint, asked, chosen, said, **extra)])
+                    project_id, sprint, asked, chosen, said, **extra, **_by(by))])
                 self._apply(appended)
                 reserved = self._reserve_nudge(sprint_id)
             else:
@@ -7652,7 +7763,11 @@ class ConsoleService:
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
-        self._access = guest.access_list(appended, self._access)
+        for event in appended:
+            after = guest.access_list([event], self._access)
+            if guest.revokes(self._access, after):
+                self._guest_epoch += 1
+            self._access = after
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
@@ -7844,6 +7959,8 @@ class ConsoleService:
         addresses = guest.own_addresses(status)
         with self._ingest:
             self._serve_status = found
+            if name != self._tailnet_name:
+                self._guest_epoch += 1
             self._tailnet_name = name
             if addresses and addresses != self._tailnet_addresses:
                 # a reading and the other-device flag were judged against the old addresses: a
