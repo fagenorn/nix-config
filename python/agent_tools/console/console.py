@@ -7,6 +7,8 @@ the desk page, `GET /api/state` and the `GET /api/stream` update stream
 `~/.agents/state/fleet/registry.json`. The page's write token is created once in
 `~/.agents/state/console/page-token` (mode 0600) and kept across restarts. Every two minutes it also reads the owner-action items of
 each active project from the tracker into the log (`agent_tools.console.service` holds the rules).
+The owner port answers only processes of the user the console runs as (`agent_tools.console.peer`,
+ADR-console-076).
 
 Once serving it prints exactly one stdout line, `console: serving http://127.0.0.1:<port>/`.
 SIGTERM or SIGINT closes the service and exits 0. A port that cannot be bound is stderr

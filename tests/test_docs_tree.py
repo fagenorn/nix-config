@@ -47,6 +47,14 @@ def tailnet_names_other_than_placeholder(text: str) -> list:
     return [name for name in TAILNET_NAME.findall(text) if name != TAILNET_PLACEHOLDER]
 
 
+LOGIN_LIKE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*")
+
+
+def logins_in(text: str) -> list:
+    """Every email-style login in `text`; the `<colleague-login>` placeholder is not one."""
+    return LOGIN_LIKE.findall(text)
+
+
 def land_queue_section(text: str, name: str) -> str:
     """The text after the line `## <name>` up to the next `## ` line; "" when absent."""
     lines = text.splitlines(keepends=True)
@@ -543,6 +551,45 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, context)
 
+    def test_the_owner_port_peer_decision_is_recorded(self):
+        path = "docs/areas/console/adr/076-the-owners-port-answers-only-the-owners-own-processes.md"
+        adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"
+        admin = ("An administrator (sudo) or root can always act as the owner, and this record "
+                 "does not claim to stop one.")
+        relay = ("Any relay the owner runs on this host, such as an `ssh -L` or `-D` forward or "
+                 "`socat`, admits whoever reaches it, because the console sees only the owner's "
+                 "own process holding the connection.")
+        shared = ("A descriptor an owner process hands to another user's process, by descriptor "
+                  "passing or across a set-user-ID program, is seen only through the owner's "
+                  "holder, so it is a relay of the same kind.")
+        raw = (REPO_ROOT / path).read_text()
+        text = re.sub(r"\s+", " ", raw)
+        self.assertEqual(raw.splitlines()[0], "# ADR-console-076 \u2014 The owner's port answers "
+                                              "only the owner's own processes")
+        for needle in ("- **Status:** accepted", "- **Decided in:** #1294", "ADR-console-008",
+                       "ADR-console-066", admin, relay, shared, "sshd-session", "lsof",
+                       "/proc/net/tcp", "fails closed", "console: peer_refused",
+                       "console-owner-port", "mode-0700"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        d6 = next(re.sub(r"\s+", " ", para) for para in raw.split("\n\n")
+                  if para.startswith("**D6."))
+        self.assertIn(admin, d6)
+        self.assertIsNone(re.search(r"(?i)(stops|prevents|blocks|refuses) (an|any|every) "
+                                    r"administrator", text))
+        lines = (REPO_ROOT / adr008).read_text().splitlines()
+        status = next(row for row in lines if row.startswith("- **Status:**"))
+        self.assertEqual(
+            status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
+                    "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
+                    "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
+                    "ADR-console-076")
+        decided = next(row for row in lines if row.startswith("- **Decided in:**"))
+        self.assertTrue(decided.endswith("#1237, #1294"))
+        context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
+        console = next(row for row in context if row.startswith("The per-host loopback service"))
+        self.assertIn("ADR-console-076", console)
+
     def test_the_wait_signals_decision_is_recorded(self):
         path = ("docs/areas/console/adr/050-a-sprint-waiting-on-ci-a-committing-delivery-"
                 "or-a-release-step-reads-what-it-waits-for.md")
@@ -809,6 +856,40 @@ class DocsTreeTest(unittest.TestCase):
             entry = context.split(term, 1)[1].split("_Avoid_", 1)[0]
             self.assertIn("ADR-console-066", entry)
 
+    def test_the_guest_socket_amendment_is_recorded_as_adr_077(self):
+        adr_dir = REPO_ROOT / "docs/areas/console/adr"
+        found = sorted(adr_dir.glob("077-*.md"))
+        self.assertEqual(len(found), 1, found)
+        raw = found[0].read_text()
+        text = re.sub(r"\s+", " ", raw)
+        self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-077 \u2014 "))
+        for needle in (
+            "- **Status:** accepted", "- **Decided in:** #1298", "ADR-console-066", "ADR-console-076",
+            "eleven-m5", "Unix socket", "mode-0700", "peer user", "second line", "administrator",
+            "sudo tailscale serve --bg --https=443 unix:<socket-path>", "tailscale serve status",
+            "sudo tailscale serve --https=443 off", "<host>.<tailnet>.ts.net", "<colleague-login>",
+            "tailscaled", "console-guest-door", "Funnel", "D2", "tailscale.exe",
+        ):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        self.assertEqual(tailnet_names_other_than_placeholder(text), [])
+        self.assertEqual(logins_in(text), [])
+        d2 = text.split("**D2.", 1)[1].split("**D3.", 1)[0]
+        for needle in ("admits only root", "the owner's own user",
+                       "Any other peer is refused before a request is read"):
+            with self.subTest(d2=needle):
+                self.assertIn(needle, d2)
+        d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
+        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged"):
+            with self.subTest(d4=needle):
+                self.assertIn(needle, d4)
+        guest = self.doc("docs/areas/console/CONTEXT.md").split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("not yet built", guest)
+        status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
+                                      "through-tailscale-serve-on-a-guest-port.md"
+                                      ).read_text().splitlines() if row.startswith("- **Status:**"))
+        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077")
+
     def test_the_relay_sender_decision_is_recorded_as_adr_068_and_cited_by_number(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
         found = sorted(adr_dir.glob("068-*.md"))
@@ -868,6 +949,12 @@ class DocsTreeTest(unittest.TestCase):
             tailnet_names_other_than_placeholder("at https://<host>.<tailnet>.ts.net/ only"), [])
         self.assertEqual(tailnet_names_other_than_placeholder("see box.tail1234.ts.net."),
                          ["box.tail1234.ts.net"])
+
+    def test_the_login_check_flags_a_literal_login_beside_the_placeholder(self):
+        self.assertEqual(logins_in("names a listed colleague (`<colleague-login>`) only"), [])
+        self.assertEqual(
+            logins_in("names `<colleague-login>`, for example Jane.Doe@example.com, only"),
+            ["Jane.Doe@example.com"])
 
     def test_the_held_review_decision_is_recorded(self):
         path = ("docs/areas/console/adr/054-a-held-issue-whose-only-open-criterion-is-an-owner-"
@@ -1093,7 +1180,8 @@ class DocsTreeTest(unittest.TestCase):
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
+                         "ADR-console-076"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064"),
@@ -1128,7 +1216,7 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, "
                                           "ADR-console-036, ADR-console-037, ADR-console-053, "
-                                          "ADR-console-058, ADR-system-004"),
+                                          "ADR-console-058, ADR-system-004, ADR-console-076"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064")):
@@ -1310,7 +1398,8 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, "
-                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004"),
+                         "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
+                         "ADR-console-076"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035, "
                          "ADR-console-070; extended by #1055 (D10, D11)")):
