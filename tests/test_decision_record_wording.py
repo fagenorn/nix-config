@@ -46,7 +46,7 @@ Scan rule for a `.py` source:
    E itself (through `not` and each operand of `and`/`or`) is a wording
    comparison, or E is a Name with MATCH, or a Subscript, Compare or Call with a
    MATCH part (so `len(hits)` of a saved result is MATCH), or a comprehension with
-   a MATCH condition. A wording comparison is a Compare, or a call named in
+   a MATCH condition (its loop items carry no TEXT: the condition reads the record itself). A wording comparison is a Compare, or a call named in
    MATCH_CALLS or PROBE_CALLS (`startswith`, `search`, `count`, `find`), whose
    parts (the compared operands, or the receiver plus positional arguments) hold
    a TEXT part and a PHRASE part. Any other call (`re.findall`, `split`,
@@ -497,7 +497,8 @@ class _Scan:
         if isinstance(node, COMPREHENSIONS):
             inner = dict(env)
             for generator in node.generators:
-                _bind(generator.target, self.kinds(generator.iter, inner), inner)
+                # An item bound by the loop is no record text; the condition must read it itself.
+                _bind(generator.target, self.kinds(generator.iter, inner) - {"TEXT"}, inner)
                 if any(self.is_match(condition, inner) for condition in generator.ifs):
                     return True
             return False
@@ -1130,6 +1131,18 @@ PATTERN_FINDALL = _fixture(r'''
             self.assertEqual(LOGIN_LIKE.findall(text), [])
 ''')
 
+LINK_FILTER_COMPREHENSION = _fixture(r'''
+    class T(unittest.TestCase):
+        def test_x(self):
+            directory = ROOT / "docs/areas/a/adr"
+            text = (directory / "001-x.md").read_text()
+            missing = [
+                t for t in re.findall(r"\]\(([^)]+)\)", text)
+                if not t.startswith("http") and not (directory / t).exists()
+            ]
+            self.assertEqual(missing, [])
+''')
+
 COMPREHENSION_FILTER = _fixture(r'''
     class T(unittest.TestCase):
         def test_x(self):
@@ -1538,6 +1551,7 @@ class WordingScanTest(unittest.TestCase):
             "link targets": LINK_TARGETS,
             "link targets by joinpath": LINK_TARGETS_JOINPATH,
             "link membership": LINK_MEMBERSHIP,
+            "link filter comprehension": LINK_FILTER_COMPREHENSION,
             "file name": FILE_NAME,
         }
         for label, source in cases.items():
