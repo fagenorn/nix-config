@@ -23,9 +23,11 @@ a longer line is dropped, together with any token the limit cut in two), and `ou
 `https://` and runs to the next byte outside 0x21 to 0x7E, the ones that pass `valid_link`. The first
 token whose route is `manual` is the run's manual link.
 
-Route. `link_route(url)` classifies a link by its one `redirect_uri` query member, and never raises:
-`("manual", None)` for an `https` return address on a host that is present and not in
-`LOOPBACK_HOSTS` (`localhost`, `127.0.0.1`, `::1`), whose port is none or in 1 to 65535; `("loopback", port)` for an `http` one on such a
+Route. `link_route(url)` classifies a link by its one `redirect_uri` query member, and never raises. The link
+itself must be `https` with a host, else None. A host is loopback when it is in
+`LOOPBACK_HOSTS` (`localhost`, `127.0.0.1`, `::1`) or an IP literal equal to `127.0.0.1` or `::1` in
+any spelling (`0:0:0:0:0:0:0:1`). `("manual", None)` for an `https` return address on a host that is present and not
+loopback, whose port is none or in 1 to 65535; `("loopback", port)` for an `http` one on a loopback
 host, the port being the written one or 80 when none is written, in 1 to 65535; None for any other
 link (no `redirect_uri` or two of them, another scheme or host, an unreadable port in the link's own
 authority or in its return address, a URL that does not parse). A link of the browser hook that is None is handed out as `unknown`.
@@ -116,6 +118,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import ipaddress
 import json
 import os
 import pty
@@ -147,6 +150,7 @@ MAX_OUTPUT_LINE = 16384
 MANUAL_GRACE = 2.0
 ROUTES = ("manual", "loopback", "unknown")
 LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+_LOOPBACK_ADDRESSES = (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"))
 MAX_CODE_CHARS = 512
 ACTIONS = ("start", "code", "cancel")
 START_OUTCOMES = ("started", "running", "failed")
@@ -177,21 +181,34 @@ def valid_link(text: str) -> bool:
     return text.startswith("https://") and len(text) <= MAX_LINK_CHARS and _printable(text)
 
 
+def _loopback(host: str | None) -> bool:
+    if host is None:
+        return False
+    if host in LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host) in _LOOPBACK_ADDRESSES
+    except ValueError:
+        return False
+
+
 def link_route(url: str) -> tuple[str, int | None] | None:
     try:
         link = urlsplit(url)
         link.port  # noqa: B018 -- raises ValueError for an authority that cannot be read
+        if link.scheme != "https" or not link.hostname:
+            return None
         values = parse_qs(link.query, keep_blank_values=True).get("redirect_uri")
         if values is None or len(values) != 1:
             return None
         target = urlsplit(values[0])
         host = target.hostname
         port = target.port
-        if target.scheme == "http" and host in LOOPBACK_HOSTS:
+        if target.scheme == "http" and _loopback(host):
             if port is None:
                 port = 80
             return ("loopback", port) if 1 <= port <= 65535 else None
-        if target.scheme == "https" and host and host not in LOOPBACK_HOSTS:
+        if target.scheme == "https" and host and not _loopback(host):
             return ("manual", None) if port is None or 1 <= port <= 65535 else None
     except ValueError:
         return None

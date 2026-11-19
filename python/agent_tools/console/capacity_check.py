@@ -93,22 +93,23 @@ from another host keeps its rows below N), and the add and the start must both b
 `--remote-signin --profile NAME` (#1323, exclusive with the other modes, `--max-age` ignored, `--after-seq`
 not allowed, `--profile` required) meets when the console's own event log shows the sign-in of the
 profile NAME, which the operator names as the one signed in from a browser on another machine,
-finished from the page. The console cannot see where the owner's browser is (a page read over an SSH
-forward reaches it from the loopback), so the operator's naming is the identification of the remote
-attempt. It never asks the console, so the `--url` is not used; the log is `--log PATH` or the
-console's own, opened read-only as for `--page-add`. It is met when, for one attempt A (the `seq` of
-the start row), the log holds a `signin.acted` row at `seq` A whose payload has `by` `owner`, `action`
-`start`, `outcome` `started` and `profile` NAME, and a `signin.ended` row for NAME with `attempt` A
-and `outcome` `signed_in`. Both finishing routes count: the route is `code` when a `signin.acted`
-row with `by` `owner`, `action` `code`, `outcome` `sent` and `profile` NAME lies between the start
-and the end (the code of the manual link, pasted into the page), else `forward` (the browser reached
-the client's return port through a forward, so no code was sent). A code counts only for the latest
-start of its profile. `--after-commit SHA` (40 lowercase hex) keeps only rows whose `at` is strictly
-after the commit's committer time, read with `git show -s --format=%cI SHA` in the current
-directory; the start and the end must both be later. Met is `{"status": "met", "profile": NAME,
-"route": "code" | "forward"}`, exit 0; otherwise `{"status": "pending"}`, exit 75; an unreadable log
-`{"status": "no_log"}`, exit 75; a commit time Git cannot give (a failure, a timeout or an unparsable
-time) `{"status": "no_commit"}`, exit 75. It never exits 1, and it only reads: no request, no write.
+finished by the code of the client's manual link pasted into the page. The console cannot see where
+the owner's browser is (a page read over an SSH forward reaches it from the loopback), so the
+operator's naming is the identification of the remote attempt, and the pasted code is what the log
+shows of it: a sign-in finished with no code (through a forward of the return port, or a browser on
+the console's own machine) is not met. It never asks the console, so the `--url` is not used; the
+log is `--log PATH` or the console's own, opened read-only as for `--page-add`. It is met when, for
+one attempt A (the `seq` of the start row), the log holds a `signin.acted` row at `seq` A whose
+payload has `by` `owner`, `action` `start`, `outcome` `started` and `profile` NAME, a
+`signin.acted` row with `by` `owner`, `action` `code`, `outcome` `sent` and `profile` NAME between
+the start and the end, and a `signin.ended` row for NAME with `attempt` A and `outcome`
+`signed_in`. A code counts only for the latest start of its profile. `--after-commit SHA` (40
+lowercase hex) keeps only rows whose `at` is strictly after the commit's committer time, read with
+`git show -s --format=%cI SHA` in the current directory; the start, the code and the end must all
+be later. Met is `{"status": "met", "profile": NAME, "route": "code"}`, exit 0; otherwise
+`{"status": "pending"}`, exit 75; an unreadable log `{"status": "no_log"}`, exit 75; a commit time
+Git cannot give (a failure, a timeout or an unparsable time) `{"status": "no_commit"}`, exit 75. It
+never exits 1, and it only reads: no request, no write.
 
 `--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
 manager has started under a profile while the owner's page pin of that profile was in force. It
@@ -542,7 +543,7 @@ def _later(text: object, after: datetime | None) -> bool:
 
 def remote_signin_verdict(log: Path, profile: str,
                           after: datetime | None = None) -> tuple[int, dict]:
-    """Met when the log shows an owner start of `profile` and a signed-in end of that attempt."""
+    """Met when the log shows an owner start of `profile`, its pasted code and a signed-in end of that attempt."""
     try:
         connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
     except (sqlite3.Error, OSError):
@@ -578,8 +579,8 @@ def remote_signin_verdict(log: Path, profile: str,
         elif kind == "signin.ended" and payload.get("outcome") == "signed_in":
             attempt = payload.get("attempt")
             if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt in starts:
-                route = "code" if attempt in coded else "forward"
-                return 0, {"status": "met", "profile": profile, "route": route}
+                if attempt in coded:
+                    return 0, {"status": "met", "profile": profile, "route": "code"}
     return NOT_YET, {"status": "pending"}
 
 
@@ -681,7 +682,7 @@ def build_parser() -> argparse.ArgumentParser:
                            "and that profile's sign-in started from the page")
     mode.add_argument("--remote-signin", action="store_true",
                       help="require the console's log to show the sign-in of the profile named "
-                           "by --profile, signed in from another machine, finished")
+                           "by --profile, finished by a pasted code")
     mode.add_argument("--pin", action="store_true",
                       help="require a new session or manager started under a profile while the "
                            "owner's pin of it was in force, read from the console's log")

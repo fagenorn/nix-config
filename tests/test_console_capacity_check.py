@@ -542,21 +542,13 @@ class CapacityCheckTest(unittest.TestCase):
                                    *extra)
         return code, json.loads(out)
 
-    def test_remote_signin_is_met_by_either_route_of_the_named_profiles_attempt(self):
+    def test_remote_signin_is_met_by_a_pasted_code_of_the_named_profiles_attempt(self):
         start, code, end = self.start, self.code, self.end
-        cases = {
-            "pasted code": ([start("work"), code("work"), end("work", "signed_in", 1)], "code"),
-            "forwarded port, no code": ([start("work"), end("work", "signed_in", 1)], "forward"),
-            "code of a failed attempt does not mark a later one": (
-                [start("work"), code("work"), end("work", "failed", 1), start("work"),
-                 end("work", "signed_in", 4)], "forward"),
-        }
-        for label, (rows, route) in cases.items():
-            with self.subTest(label=label):
-                self.assertEqual(self.remote_signin(rows),
-                                 (0, {"profile": "work", "route": route, "status": "met"}))
+        rows = [start("work"), code("work"), end("work", "signed_in", 1)]
+        self.assertEqual(self.remote_signin(rows),
+                         (0, {"profile": "work", "route": "code", "status": "met"}))
 
-    def test_remote_signin_is_not_yet_without_a_signed_in_end_of_a_start_of_the_named_profile(self):
+    def test_remote_signin_is_not_yet_without_a_pasted_code_inside_a_signed_in_attempt(self):
         start, code, end = self.start, self.code, self.end
         guest = ("signin.acted", None, {"by": "guest", "profile": "work", "action": "start",
                                          "outcome": "started"})
@@ -566,9 +558,19 @@ class CapacityCheckTest(unittest.TestCase):
             "failed end": [start("work"), code("work"), end("work", "failed", 1)],
             "end of another attempt": [start("work"), code("work"),
                                        end("work", "signed_in", 99)],
-            "start by a guest": [guest, end("work", "signed_in", 1)],
-            "no start": [end("work", "signed_in", 1)],
+            "start by a guest": [guest, code("work"), end("work", "signed_in", 1)],
+            "no start": [code("work"), end("work", "signed_in", 1)],
             "no end": [start("work"), code("work")],
+            "signed in with no code, as a forwarded port or a local browser would": [
+                start("work"), end("work", "signed_in", 1)],
+            "code of a failed attempt does not mark a later one": [
+                start("work"), code("work"), end("work", "failed", 1), start("work"),
+                end("work", "signed_in", 4)],
+            "local sign-in, then a remote attempt that failed": [
+                start("work"), end("work", "signed_in", 1), start("work"), code("work"),
+                end("work", "failed", 3)],
+            "code before the start": [code("work"), start("work"), end("work", "signed_in", 2)],
+            "code after the end": [start("work"), end("work", "signed_in", 1), code("work")],
         }
         for label, rows in cases.items():
             with self.subTest(label=label):
