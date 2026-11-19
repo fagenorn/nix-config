@@ -402,8 +402,11 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 <reason>`, appending and running nothing: without an adopter, `register.UNAVAILABLE`; a path
 `register.refusal` rejects (not a full path, not a directory, not the top of a checkout, already
 registered); and, under the ingest lock, a second registration while one runs
-(`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
-adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
+(`register.running`). With `"unless_open": true`, under the same lock, a registration the owner's view
+shows open (`register.open_shown` of `derive_view` of the inputs `_publish` uses: not null and not
+dismissed; a card that reduces the entry makes it open) is refused with `register.OPEN_SHOWN` (#1334,
+ADR-console-084 D2); the page never sends the member. Otherwise the answer is an empty `204` at once
+and the run is dispatched: the adopter's plan. A fresh run first compares the checkout with its remote (`checkout_reader`, #1233,
 ADR-console-070): a checkout behind a remote's default branch is one `behind` row (`register.behind`)
 and the `register_behind` card, with no plan, no draft and no child; an unreadable remote runs today's
 run and carries `remote` (`register.unread`) on its row, and each plan-answer row after it; no origin or no default branch runs today's
@@ -444,8 +447,11 @@ child. Nothing is granted or registered before this answer. Any other exception 
 register_confirm_failed <Type>` and 500 `registering failed`.
 
 `POST /api/register-cancel` (#1088, ADR-console-037) is the owner's Cancel registration of the shown
-registration, which was not applied yet or whose apply failed. It takes exactly `{"root"}` with
-`MAX_REGISTER_CANCEL_BYTES` (4096) and `register.parse_cancel_request`: 400 `bad registration cancel`.
+registration, which was not applied yet or whose apply failed. It takes `{"root"}`, or `{"root", "restore":
+true}` (#1334): a restoring Cancel writes the shown plan's row with `"restore": true` and gives the page
+back the registration shown before the cancelled one (ADR-console-084 D2) instead of none; the page sends
+only `{"root"}`. The body has `MAX_REGISTER_CANCEL_BYTES` (4096) and goes through
+`register.parse_cancel_request`: 400 `bad registration cancel`.
 The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
 <reason>`, appending nothing, in this order: while a run is under way, `register.running`; when the shown
 registration is none or names another root, `register.NOT_WAITING`; when `register.cancellable` is false
@@ -2255,12 +2261,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            path = register.parse_register_request(body)
+            path, unless_open = register.parse_register_request(body)
         except ValueError:
             self._refuse(400, "bad registration")
             return False
         try:
-            console.register_project(path)
+            console.register_project(path, unless_open=unless_open)
         except sprints.Refused as error:
             print(f"console: registration_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2388,12 +2394,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            root = register.parse_cancel_request(body)
+            root, restore = register.parse_cancel_request(body)
         except ValueError:
             self._refuse(400, "bad registration cancel")
             return False
         try:
-            console.cancel_registration(root)
+            console.cancel_registration(root, restore=restore)
         except sprints.Refused as error:
             print(f"console: register_cancel_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -4170,12 +4176,8 @@ class ConsoleService:
                 return
             worker.join()
 
-    def _publish(self, *, guests: bool = True) -> None:
-        """Derive and publish the views; `guests=False` publishes the owner's view alone.
-
-        A guest view is derived from the clock (a sprint's age text), so recomputing it for a
-        guest-port reading would change a guest's bytes: the cached guest views are kept.
-        """
+    def _view_inputs(self) -> dict:
+        """The `derive_view` inputs of the owner's view as they stand; `_ingest` held, no side effect."""
         adoption, action, apply_items = self._approval_view()
         latest = self._registration
         cancel = (self._registering is None and latest is not None
@@ -4210,6 +4212,17 @@ class ConsoleService:
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
             nudges=self._nudger is not None, looked=self._looked, movement=self._movement)
+        return inputs
+
+    def _publish(self, *, guests: bool = True) -> None:
+        """Derive and publish the views; `guests=False` publishes the owner's view alone.
+
+        A guest view is derived from the clock (a sprint's age text), so recomputing it for a
+        guest-port reading would change a guest's bytes: the cached guest views are kept.
+        """
+        inputs = self._view_inputs()
+        latest = self._registration
+        apply_items = inputs["apply_items"]
         access = self._access
         name = self._tailnet_name
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
@@ -4909,8 +4922,11 @@ class ConsoleService:
                 print(f"console: trust_start_failed {entry['project_id']} {type(error).__name__}",
                       file=sys.stderr)
 
-    def register_project(self, path: str) -> None:
-        """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`."""
+    def register_project(self, path: str, *, unless_open: bool = False) -> None:
+        """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`.
+
+        With `unless_open`, a registration the owner's view shows open refuses it (#1334).
+        """
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         entries = read_fleet(self.registry)
@@ -4924,6 +4940,9 @@ class ConsoleService:
         with self._ingest:
             if self._registering is not None:
                 raise sprints.Refused(register.running(register.name_of(self._registering)))
+            if unless_open and register.open_shown(
+                    derive_view(**self._view_inputs())["registration"]):
+                raise sprints.Refused(register.OPEN_SHOWN)
             self._admit_run(str(root))
             self._announce_run()
         try:
@@ -4980,8 +4999,10 @@ class ConsoleService:
                 self._publish()
             raise
 
-    def cancel_registration(self, root: str) -> None:
+    def cancel_registration(self, root: str, *, restore: bool = False) -> None:
         """Cancel the shown registration of `root` before apply; refusals are `sprints.Refused`.
+
+        With `restore` the page gets back the registration shown before it (#1334).
 
         Every failed apply of the root is cleaned and forgotten, not only the shown plan's: a shown
         failure can carry no plan id while an earlier attempt still keeps its copy (#1088).
@@ -5015,23 +5036,24 @@ class ConsoleService:
                 try:
                     if refused:
                         raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
-                    self._record_cancel(root, latest, held=True)
+                    self._record_cancel(root, latest, held=True, restore=restore)
                 finally:
                     self._end_run()
                     self._publish()
             return
         with self._ingest:
-            self._record_cancel(root, latest, held=False)
+            self._record_cancel(root, latest, held=False, restore=restore)
             self._publish()
 
-    def _record_cancel(self, root: str, latest: dict, *, held: bool) -> None:
+    def _record_cancel(self, root: str, latest: dict, *, held: bool, restore: bool = False) -> None:
         """Append the cancellation rows of `root`; `held` is the caller's own reservation; `_ingest` held."""
         if self._cancellable(root, held=held) is not latest:
             raise sprints.Refused(register.NOT_WAITING)
         plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
                                          if one != latest["plan_id"])]
         self._cancelled[root] = self._cancelled.get(root, 0) + 1
-        self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
+        self._fold(self.log.append([register.cancelled_row(root, one, restore and index == 0)
+                                    for index, one in enumerate(plan_ids)]))
         self._answer_refusal = None
 
     def _failed_applies(self, root: str) -> list[str]:

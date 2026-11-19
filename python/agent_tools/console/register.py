@@ -5,10 +5,14 @@ tools as children, off the request path, and tells the owner in plain words what
 change. The adoption tools stay the one implementation: nothing here edits a repository or writes the
 fleet registry.
 
-Request. `parse_register_request(body)` takes a UTF-8 JSON object with exactly the member `path`,
-whose value is a string with no character below 0x20 and no 0x7F (the empty string included:
-`refusal` judges the rule, so that an empty path is answered as a refusal, not as a malformed
-request), and returns it. It raises `ValueError` otherwise. `expand(path, home)` strips the path and
+Request. `parse_register_request(body)` takes a UTF-8 JSON object with the member `path`, whose value
+is a string with no character below 0x20 and no 0x7F (the empty string included: `refusal` judges
+the rule, so that an empty path is answered as a refusal, not as a malformed request), and
+optionally the member `unless_open`, only the JSON `true` (#1334, ADR-console-084), and returns
+`(path, unless_open)`. It raises `ValueError` otherwise. `OPEN_SHOWN` is the 409 text of a
+conditional request that finds a registration open, and `open_shown(entry)` is the one rule of an
+open registration, read on the entry the owner's view shows: false for None and for a done entry
+whose note is `LATER_NOTE` (the owner's Not now), true for anything else. `expand(path, home)` strips the path and
 turns a leading `~` (alone, or before a `/`) into `home`. `name_of(root)` is the last path segment.
 
 Refusals. `refusal(path, entries, *, home, toplevel=checkout_root)` returns `(reason, None)` for the
@@ -126,11 +130,14 @@ Try again card). `unread(payload)` is the row with the member `remote` set to `R
 sentence that the remote could not be read and the checkout was used as it is; it changes no line.
 
 Cancel (#1088, ADR-console-037). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
-plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
-None, and clears the chain of earlier registrations (see Row), when a valid cancel row names the folded
-row's root and plan id (a cancel naming another, or malformed, changes nothing; a later
-`registration.ended` row starts a new registration).
-`parse_cancel_request(body)` is exactly `{"root"}`, a non-empty string with no character below 0x20 and
+plan_id, restore=False)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`, with `"restore":
+true` added when `restore` (#1334, ADR-console-084). `latest` folds the registration to None, and clears
+the chain of earlier registrations (see Row), when a valid cancel row names the folded row's root and
+plan id (a cancel naming another, or malformed, changes nothing; a later `registration.ended` row
+starts a new registration); a row that carries `"restore": true` folds it to the registration shown
+before it instead (none when there is none).
+`parse_cancel_request(body)` is `{"root"}`, or `{"root", "restore"}` with `restore` the JSON `true`, returning
+`(root, restore)`; `root` is a non-empty string with no character below 0x20 and
 no 0x7F (`ValueError` otherwise). `cancellable(latest, adoption)` is true when `latest` is not None,
 its `result` is not `registered` and the plan's folded adoption is None or `apply_failed`.
 `CANCEL_REFUSED`, `CANCEL_UNSEEN` (a failed commit's evidence card no page stream was sent yet, ADR-console-071)
@@ -276,6 +283,7 @@ UPDATE_VALUE = "update"
 UPDATE_STEP = "Update the checkout in a terminal, then " + AGAIN
 REMOTE_UNREAD = "The remote could not be read, so the console used the checkout as it is."
 NOT_WAITING = "that project is not waiting to be registered"
+OPEN_SHOWN = "another registration is open on the page"
 CANCEL_REFUSED = "only a registration that was not applied yet can be cancelled"
 CANCEL_UNSEEN = "the reason the last attempt failed has not been shown yet; read its card, then cancel"
 CANCEL_DISCARD_FAILED = ("The copy that the failed attempt left on this computer could not be removed, "
@@ -306,16 +314,25 @@ def waiting_headline(name: str) -> str:
     return f"{name} is already adopted and is not registered yet."
 
 
-def parse_register_request(body: bytes) -> str:
+def parse_register_request(body: bytes) -> tuple[str, bool]:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("not a JSON object") from error
-    if not isinstance(value, dict) or set(value) != {"path"} or not isinstance(value["path"], str):
+    if (not isinstance(value, dict) or set(value) not in ({"path"}, {"path", "unless_open"})
+            or not isinstance(value["path"], str)):
         raise ValueError("wrong members")
+    if "unless_open" in value and value["unless_open"] is not True:
+        raise ValueError("wrong types")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value["path"]):
         raise ValueError("control character")
-    return value["path"]
+    return value["path"], "unless_open" in value
+
+
+def open_shown(entry: object) -> bool:
+    """True when the entry the owner's view shows is an open registration (#1334, ADR-console-084)."""
+    return not (entry is None or (isinstance(entry, Mapping) and entry.get("status") == "done"
+                                  and entry.get("note") == LATER_NOTE))
 
 
 def expand(path: str, home: str) -> str:
@@ -640,7 +657,10 @@ def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
         cancelled = event_log.cancelled_registration(event)
         if cancelled is not None:
             if found is not None and cancelled == (found["root"], found["plan_id"]):
-                found, before = None, ()
+                if event.payload.get("restore") is True and before:
+                    found, before = before[-1], before[:-1]
+                else:
+                    found, before = None, ()
             continue
         if event.kind == PROJECT_REGISTERED:
             root = _root_of(event.payload)
@@ -760,23 +780,24 @@ def parse_confirm_request(body: bytes) -> tuple[str, str]:
     return root, choice
 
 
-def cancelled_row(root: str, plan_id: str | None) -> tuple[str, None, dict]:
-    return (CANCELLED, None, {"by": "owner", "root": root, "plan_id": plan_id})
+def cancelled_row(root: str, plan_id: str | None, restore: bool = False) -> tuple[str, None, dict]:
+    payload = {"by": "owner", "root": root, "plan_id": plan_id}
+    return (CANCELLED, None, {**payload, "restore": True} if restore else payload)
 
 
-def parse_cancel_request(body: bytes) -> str:
+def parse_cancel_request(body: bytes) -> tuple[str, bool]:
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("not a JSON object") from error
-    if not isinstance(value, dict) or set(value) != {"root"}:
+    if not isinstance(value, dict) or set(value) not in ({"root"}, {"root", "restore"}):
         raise ValueError("wrong members")
     root = value["root"]
-    if not isinstance(root, str) or not root:
+    if not isinstance(root, str) or not root or ("restore" in value and value["restore"] is not True):
         raise ValueError("wrong types")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
         raise ValueError("control character")
-    return root
+    return root, "restore" in value
 
 
 def cancellable(latest: Mapping | None, adoption: Mapping | None) -> bool:

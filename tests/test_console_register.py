@@ -36,12 +36,17 @@ def git_init(path: Path) -> Path:
 
 class ParseTest(unittest.TestCase):
     def test_a_path_body_is_parsed(self):
-        self.assertEqual(register.parse_register_request(b'{"path": "/srv/x"}'), "/srv/x")
-        self.assertEqual(register.parse_register_request(b'{"path": ""}'), "")
+        self.assertEqual(register.parse_register_request(b'{"path": "/srv/x"}'), ("/srv/x", False))
+        self.assertEqual(register.parse_register_request(b'{"path": ""}'), ("", False))
+        self.assertEqual(
+            register.parse_register_request(b'{"path": "/srv/x", "unless_open": true}'),
+            ("/srv/x", True))
 
     def test_other_bodies_raise(self):
         for body in (b"[]", b"{}", b'{"path": 1}', b'{"path": "/a", "x": 1}',
                      b'{"path": "/a\\u0000"}', b'{"path": "/a\\n"}', b'{"path": "/a\\u007f"}',
+                     b'{"path": "/a", "unless_open": false}', b'{"path": "/a", "unless_open": 1}',
+                     b'{"path": "/a", "unless_open": "true"}', b'{"unless_open": true}',
                      b"\xff"):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 register.parse_register_request(body)
@@ -637,6 +642,36 @@ class CancelFoldTest(unittest.TestCase):
         self.assertIsNone(register.latest([self.cancel_event(2)], state))
         self.assertIsNotNone(state)
 
+    def test_a_restoring_cancel_folds_back_to_the_registration_before(self):
+        a = Event(1, "t1", register.ENDED, None,
+                  register.dismissed(register.failed("/x/a", "failed")))
+        ended = self.ended_event(2)
+        row = register.cancelled_row("/x/r", "P", restore=True)
+        restoring = Event(3, "t3", row[0], None, row[2])
+        self.assertEqual(row[2], {"by": "owner", "root": "/x/r", "plan_id": "P", "restore": True})
+        found = register.fold([a, ended, restoring])
+        self.assertEqual(found.latest["root"], "/x/a")
+        self.assertEqual(found.latest["at"], "t1")
+        self.assertEqual(found.before, ())
+        self.assertIsNone(register.fold([a, ended, self.cancel_event(3)]).latest)
+
+    def test_a_restoring_cancel_never_returns_an_older_entry_of_a_recurring_root(self):
+        a1 = register.dismissed(register.failed("/x/a", "failed"))
+        b = register.failed("/x/b", "failed")
+        a2 = register.failed("/x/a", "failed")
+
+        def restoring(seq, root):
+            row = register.cancelled_row(root, None, restore=True)
+            return Event(seq, f"t{seq}", row[0], None, row[2])
+
+        events = [Event(1, "t1", register.ENDED, None, a1), Event(2, "t2", register.ENDED, None, b),
+                  Event(3, "t3", register.ENDED, None, a2), restoring(4, "/x/a"),
+                  restoring(5, "/x/b")]
+        self.assertEqual(register.fold(events[:4]).latest["root"], "/x/b")
+        found = register.fold(events)
+        self.assertIsNone(found.latest)
+        self.assertEqual(found.before, ())
+
     def test_cancellable_before_apply_only(self):
         planned = {"result": "planned"}
         self.assertFalse(register.cancellable(None, None))
@@ -649,8 +684,11 @@ class CancelFoldTest(unittest.TestCase):
                 self.assertFalse(register.cancellable(planned, {"step": step}))
 
     def test_parse_cancel_request(self):
-        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r"}'), "/x/r")
-        for body in (b'{"root": "/x/r", "choice": "register"}', b'{}', b'{"root": ""}',
+        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r"}'), ("/x/r", False))
+        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r", "restore": true}'),
+                         ("/x/r", True))
+        for body in (b'{"root": "/x/r", "restore": false}', b'{"root": "/x/r", "restore": 1}',
+                     b'{"root": "/x/r", "choice": "register"}', b'{}', b'{"root": ""}',
                      b'{"root": 3}', b'{"root": "/x\nr"}', b'{"root": "/x\u007fr"}',
                      b'not json', b'\xff', b'[]'):
             with self.subTest(body=body), self.assertRaises(ValueError):
@@ -661,6 +699,20 @@ class CancelFoldTest(unittest.TestCase):
             register.CANCEL_DISCARD_FAILED,
             "The copy that the failed attempt left on this computer could not be removed, so the "
             "registration was not cancelled. Choose Cancel registration to try again.")
+
+
+class OpenShownTest(unittest.TestCase):
+    def test_only_none_and_a_dismissed_entry_are_not_open(self):
+        self.assertEqual(register.OPEN_SHOWN, "another registration is open on the page")
+        self.assertIs(register.open_shown(None), False)
+        self.assertIs(register.open_shown(
+            {"root": "/x/r", "status": "done", "note": register.LATER_NOTE}), False)
+        for entry in ({"root": "/x/r", "status": "done", "note": None},
+                      {"root": "/x/r", "status": "running", "note": None},
+                      {"root": "/x/r", "status": "done", "note": "The plan is a draft."},
+                      "not a dict"):
+            with self.subTest(entry=entry):
+                self.assertIs(register.open_shown(entry), True)
 
 
 class UnregisteredFoldTest(unittest.TestCase):
