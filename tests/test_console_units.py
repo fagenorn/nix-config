@@ -1,16 +1,22 @@
 """The console's user service on each host as the configuration evaluates it (issue 856).
 
 Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
+Its evaluations run with the environment from before the accounts sandbox, so they read the
+host's Nix cache, while the sandbox still covers the module (#1286).
 Run: just agent-workflow-tests
 """
+import os
 import plistlib
 import re
 import shlex
+import subprocess
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import manager, service
 
-from . import test_verify_pending_units as units
+from . import accounts_sandbox, test_verify_pending_units as units
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
@@ -188,6 +194,35 @@ class DarwinAgent(unittest.TestCase):
     def test_home_manager_declares_no_second_console_agent(self):
         for got, _ in self.hosts():
             self.assertIs(got["homeAgent"], False)
+
+
+class NixCacheTest(unittest.TestCase):
+    """The environment this module's `nix eval` children start with (#1286); nothing here evaluates."""
+
+    def test_the_modules_evaluations_run_outside_the_sandbox(self):
+        root = accounts_sandbox.root()
+        self.assertIsNotNone(root)
+        calls = []
+
+        def fake(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+        with mock.patch.object(units.subprocess, "run", fake):
+            units.evaluate("nixosConfigurations.anis-desktop", "c: u: {}")
+            units.evaluate("darwinConfigurations.mbp", "c: u: {}", pure=True)
+        self.assertEqual(len(calls), 4)
+        variables = accounts_sandbox.VARIABLES
+        for _, kwargs in calls:
+            env = os.environ if kwargs.get("env") is None else kwargs["env"]
+            self.assertIn("HOME", env)
+            for v in variables:
+                if v in env:
+                    self.assertFalse(Path(env[v]).resolve().is_relative_to(root), v)
+            self.assertEqual(
+                {k: x for k, x in env.items() if k not in variables},
+                {k: x for k, x in os.environ.items() if k not in variables},
+            )
 
 
 if __name__ == "__main__":

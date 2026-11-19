@@ -1,14 +1,25 @@
 """The verify-pending schedule as each host's configuration evaluates it (issue 632).
 
 Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
-Run: just agent-workflow-tests
+An evaluation started under the accounts sandbox runs with the environment from before it, so it
+reads the user's Nix cache instead of fetching every flake input into an empty one (#1286).
+Run: just agent-workflow-tests (the file also runs directly).
 """
 import json
+import os
 import platform
 import plistlib
 import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+try:
+    from . import accounts_sandbox
+except ImportError:  # run directly: no parent package, and tests/ is sys.path[0]
+    import accounts_sandbox
 
 ROOT = Path(__file__).resolve().parents[1]
 EVAL_TIMEOUT = 1200
@@ -19,7 +30,14 @@ NIX = ["nix", "--extra-experimental-features", "nix-command flakes", "eval"]
 def nix(*args, pure=False):
     """`pure` forbids import-from-derivation, so the evaluation needs no build of another system."""
     options = ["--option", "allow-import-from-derivation", "false"] if pure else []
-    done = subprocess.run([*NIX, *options, *args], cwd=ROOT, capture_output=True, text=True, timeout=EVAL_TIMEOUT)
+    done = subprocess.run(
+        [*NIX, *options, *args],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=EVAL_TIMEOUT,
+        env=accounts_sandbox.unsandboxed_environment(),
+    )
     if done.returncode != 0:
         raise AssertionError(f"nix eval {' '.join(args)} failed:\n{done.stderr[-4000:]}")
     return done.stdout
@@ -275,6 +293,88 @@ class DarwinActivation(unittest.TestCase):
                 self.assertIn(self.REPOINT, activate)
                 self.assertLess(activate.index(line), activate.index(self.REPOINT))
                 self.assertLess(activate.rindex(line), activate.index(self.REPOINT))
+
+
+class EvaluationEnvironmentTest(unittest.TestCase):
+    """The environment each `nix eval` child starts with (#1286); nothing here evaluates."""
+
+    CACHE_INPUTS = ("NIX_CACHE_HOME", "XDG_CACHE_HOME")
+
+    def record(self):
+        calls = []
+
+        def fake(argv, **kwargs):
+            # The child's environment as of the call: a fixture's tear-down must not change it.
+            env = dict(os.environ) if kwargs.get("env") is None else dict(kwargs["env"])
+            calls.append((argv, env))
+            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+        return calls, fake
+
+    def act(self):
+        calls, fake = self.record()
+        with mock.patch.object(subprocess, "run", fake):
+            evaluate("nixosConfigurations.anis-desktop", "c: u: {}")
+            evaluate("darwinConfigurations.mbp", "c: u: {}", pure=True)
+        self.assertEqual(len(calls), 4)
+        # Each evaluate() is a username call, then the evaluation; only the pure one forbids IFD.
+        for index, (argv, _) in enumerate(calls):
+            self.assertEqual("allow-import-from-derivation" in argv, index == 3, argv)
+        return calls
+
+    def test_a_sandboxed_evaluation_runs_with_the_environment_from_before_the_sandbox(self):
+        self.assertIsNone(accounts_sandbox.root())
+        variables = accounts_sandbox.VARIABLES
+        with tempfile.TemporaryDirectory() as t:
+            before = {"HOME": f"{t}/real-home", "CLAUDE_ACCOUNTS_DIR": f"{t}/real-accounts"}
+            cases = {
+                "both cache inputs absent": {},
+                "XDG_CACHE_HOME only": {"XDG_CACHE_HOME": f"{t}/xdg"},
+                "NIX_CACHE_HOME present and empty": {"NIX_CACHE_HOME": ""},
+            }
+            for name, inputs in cases.items():
+                with self.subTest(name), mock.patch.dict(os.environ, clear=False):
+                    os.environ.update(before)
+                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                    for v in self.CACHE_INPUTS:
+                        os.environ.pop(v, None)
+                    os.environ.update(inputs)
+                    parent = dict(os.environ)
+                    accounts_sandbox.setUpModule()
+                    try:
+                        calls = self.act()
+                    finally:
+                        accounts_sandbox.tearDownModule()
+                    for _, env in calls:
+                        self.assertEqual(
+                            {v: env.get(v) for v in variables},
+                            {v: parent.get(v) for v in variables},
+                        )
+                        for v in self.CACHE_INPUTS:
+                            self.assertEqual((v in env, env.get(v)), (v in parent, parent.get(v)), v)
+                        self.assertEqual(
+                            {k: x for k, x in env.items() if k not in variables},
+                            {k: x for k, x in parent.items() if k not in variables},
+                        )
+
+    def test_an_unsandboxed_evaluation_inherits_the_callers_environment(self):
+        self.assertIsNone(accounts_sandbox.root())
+        with mock.patch.dict(os.environ, {"HOME": "/nonexistent-1286/later-home"}):
+            calls = self.act()
+            for _, env in calls:
+                self.assertEqual(env["HOME"], "/nonexistent-1286/later-home")
+
+    def test_the_file_still_runs_directly(self):
+        done = subprocess.run(
+            [sys.executable, str(ROOT / "tests/test_verify_pending_units.py"), "-h"],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(ROOT / "python")},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("usage", done.stdout.lower())
 
 
 if __name__ == "__main__":
