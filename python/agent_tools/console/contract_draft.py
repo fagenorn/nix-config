@@ -536,12 +536,16 @@ def _closing(text: str, index: int, quote: bool) -> int | None:
     """The index after the `)` (or, when `quote`, the `"`) that ends what `text[index:]` opens, else `None`.
 
     Reads one balanced `$( )` quote-aware, so a quoted or nested parenthesis never ends it; a backtick
-    inside, a lone `'` or an unclosed form is `None`.
+    inside, a lone `'`, a `#` that starts a word outside quotes (a shell comment, which would hide the real
+    end) or an unclosed form is `None`.
     """
+    start = index
     while index < len(text):
         char = text[index]
         if char == "\\":
             index += 2
+        elif char == "#" and not quote and (index == start or text[index - 1].isspace()):
+            return None
         elif char == "'" and not quote:
             index = text.find("'", index + 1) + 1 or len(text) + 1
         elif char == "`":

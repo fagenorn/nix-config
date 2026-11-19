@@ -1167,6 +1167,17 @@ class StrandedHookTest(unittest.TestCase):
                 (self.bin / "prek").unlink()
                 self.assertFalse(cd.hook_stranded(text.format(body), str(self.bin)))
 
+    def test_a_comment_inside_a_substitution_leaves_the_hook_unjudged(self):
+        for letter, line in (("after-an-assignment", "HERE=$(PREK=prek #)"),
+                             ("at-the-start", "HERE=$(#)"),
+                             ("quoted", "HERE=\"$(PREK=prek #)\"")):
+            text = f"#!/bin/sh\nPREK=/gone/prek\n{line}\nexec \"$PREK\" hook-impl )\n"
+            with self.subTest(case=letter):
+                self.tool("prek")
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+                (self.bin / "prek").unlink()
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+
     def test_an_exec_inside_an_if_is_unjudged(self):
         text = "#!/bin/sh\nif [ -n \"$X\" ]; then\n  exec /gone/prek hook-impl\nfi\n"
         self.assertFalse(cd.hook_stranded(text, str(self.bin)))
