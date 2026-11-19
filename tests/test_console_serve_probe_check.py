@@ -27,7 +27,8 @@ OTHER_PROBE = "other-probe@example.invalid"
 GOOD = {"admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
         "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
         "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True, "probe": True,
-        "probe_login_arrived": False, "reason": "not_shared"}
+        "probe_login_arrived": False, "reason": "not_shared",
+        "client": "other_device"}
 
 
 def state_of(reading):

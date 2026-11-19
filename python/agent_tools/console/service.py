@@ -130,7 +130,8 @@ With `serve_reader` and `status_reader` (`console --tailscale PATH`, `guest.serv
 `guest.status_reader`) a daemon thread `SERVE_THREAD` (started for either reader) calls `poll_serve` at
 once and then every `serve_seconds` (`SERVE_SECONDS`, 60): it reads this host's Tailscale client's `serve
 status --json` and `status --json` outside the ingest lock, each in its own `try`, keeps the readings
-(the Serve status and the name `guest.self_name` derives) in memory only (never in the log, the name
+(the Serve status, the name `guest.self_name` derives and the own addresses `guest.own_addresses`
+derives, ADR-console-079) in memory only (never in the log, the name and the addresses
 never printed) and publishes, so the owner's `sharing.state` (`guest.serve_state`) says whether Serve
 proxies the read name to `unix:<the bound guest socket>`, and a name that moved or went is a publish
 that ends an open guest stream. A Serve reader that raises is one stderr line `console:
@@ -141,7 +142,10 @@ The guest token is `guest-token` beside `page-token`, made and checked as the pa
 a different token, refused on every owner route, as the page token is on the guest picture read.
 The service keeps the last guest-door request's `guest.reading` (every request the door parses,
 whatever its method) in memory only (never logged, null after a restart) as the owner's
-`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it.
+`sharing.last_request`, publishing only when it changed; a guest's view and stream never carry it. Its
+`client` tells this host's own requests from another device's (ADR-console-079), and `sharing.other_device_seen`
+becomes true on the first reading whose `client` is `other_device` and stays true until the service
+stops (memory only, false after a restart).
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -3384,7 +3388,7 @@ class GuestHandler(ConsoleHandler):
                 headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
-                headers.get_all(guest.PROBE_HEADER) or []))
+                headers.get_all(guest.PROBE_HEADER) or [], own=self.snapshot.policy.addresses))
         return ok
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _guest_request
@@ -3773,6 +3777,8 @@ class ConsoleService:
         self._serve_reader = serve_reader
         self._status_reader = status_reader
         self._tailnet_name: str | None = None
+        self._tailnet_addresses: frozenset = frozenset()
+        self._other_device_seen = False
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
         self._guest_reading: dict | None = None
@@ -4026,9 +4032,11 @@ class ConsoleService:
     def record_guest_request(self, reading: Mapping) -> None:
         """Keep the latest guest-port request's reading for the owner; see the module docstring."""
         with self._ingest:
-            if reading == self._guest_reading:
+            seen = self._other_device_seen or reading.get("client") == guest.OTHER_DEVICE
+            if reading == self._guest_reading and seen == self._other_device_seen:
                 return
             self._guest_reading = dict(reading)
+            self._other_device_seen = seen
             self._publish(guests=False)
 
     def _publish(self, *, guests: bool = True) -> None:
@@ -4076,7 +4084,8 @@ class ConsoleService:
         view = encode_view(derive_view(**inputs, sharing=guest.sharing_entry(
             access, name,
             guest.serve_state(access.shared, name, self._serve_status, self.guest_socket),
-            self._guest_reading, self.guest_socket)))
+            self._guest_reading, self.guest_socket,
+            other_device_seen=self._other_device_seen)))
         found = self._adoptions.get(latest["plan_id"]) if latest is not None else None
         evidence_key = None
         if found is not None and found["step"] == "apply_failed" and found.get("evidence") is not None:
@@ -4104,7 +4113,7 @@ class ConsoleService:
                 self._version += 1
             self._view = view
             self._guest = guest.Snapshot(
-                guest.Policy(access, name), views, seen_pictures, revoked)
+                guest.Policy(access, name, self._tailnet_addresses), views, seen_pictures, revoked)
             self._track_evidence_card(evidence_key)
             self._published.notify_all()
 
@@ -7703,9 +7712,11 @@ class ConsoleService:
             except Exception as error:
                 print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
         name = guest.self_name(status)
+        addresses = guest.own_addresses(status)
         with self._ingest:
             self._serve_status = found
             self._tailnet_name = name
+            self._tailnet_addresses = addresses
             self._publish()
 
     def activate(self, commit: str) -> None:

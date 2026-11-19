@@ -71,7 +71,8 @@ it there is no guest door.
 `--tailscale PATH` (no default) names this host's Tailscale client (#1237): it is read with
 `serve status --json` every minute to show whether Serve proxies the tailnet name to the guest socket,
 and with `status --json` for this host's own tailnet name, the one name the guest door admits
-(#1305, ADR-console-078; `agent_tools.console.guest`). Without it the console never reads Serve, shows
+(#1305, ADR-console-078; `agent_tools.console.guest`), and for its own addresses (`Self.TailscaleIPs`),
+which tell its own requests from another device's (ADR-console-079). Without it the console never reads Serve, shows
 the state as unchecked and its guest door shares with nobody.
 
 It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready

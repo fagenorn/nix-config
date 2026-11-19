@@ -43,6 +43,9 @@ OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 STRANGER = "stranger@example.invalid"
 FORGED = "forged-probe@example.invalid"
+SELF_V4 = "100.64.0.10"
+SELF_V6 = "fd7a:115c:a1e0::a"
+OTHER_DEVICE_ADDRESS = "100.64.0.20"
 JSON = {"Content-Type": "application/json"}
 GOAL = "make the importer resumable"
 PARTS = {"title": "Importer resumes after a crash",
@@ -134,7 +137,7 @@ class GuestCase(unittest.TestCase):
         self.store = self.root / "state/console/events.sqlite3"
         self.registry = self.root / "state/fleet/registry.json"
         self.guest_socket = support.guest_socket_path(self)
-        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [SELF_V4, SELF_V6]}}
 
     def seed(self, shared=True, row=None, colleagues=None):
         colleagues = {COLLEAGUE: ["owner/p01"]} if colleagues is None else colleagues
@@ -194,6 +197,7 @@ class GuestCase(unittest.TestCase):
         """The owner's view with the guest-port reading removed."""
         state = json.loads(raw)
         del state["sharing"]["last_request"]
+        del state["sharing"]["other_device_seen"]
         return state
 
     def unchanged(self, svc, action):
@@ -902,7 +906,8 @@ class AccessWriteTest(GuestCase):
                 "admitted": True, "forwarded_for": False, "forwarded_host": TAILNET,
                 "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
                 "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True,
-                "probe": False, "probe_login_arrived": False, "reason": None}})
+                "probe": False, "probe_login_arrived": False, "reason": None,
+                "client": "unknown"}, "other_device_seen": False})
         status, _, body = self.write(
             svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]})
         self.assertEqual((status, body), (204, b""))
@@ -1037,7 +1042,8 @@ class ReadingServiceTest(GuestCase):
             "admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
             "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
             "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True,
-            "probe": False, "probe_login_arrived": False, "reason": "not_shared"})
+            "probe": False, "probe_login_arrived": False, "reason": "not_shared",
+            "client": "other_device"})
         self.assertNotIn(STRANGER.encode(), svc.view_bytes.lower())
         status, _, _ = self.guest(svc, "GET", "/api/whoami", headers={"X-Console-Probe": FORGED})
         self.assertEqual(status, 200)
@@ -1059,6 +1065,83 @@ class ReadingServiceTest(GuestCase):
             for member in (b"last_request", b"forwarded_host_form", b'"sharing"'):
                 self.assertNotIn(member, seen)
         self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_the_reading_tells_this_host_from_another_device(self):
+        self.seed()
+        svc = self.start()
+        rows = support.log_rows(self.store)
+        table = [
+            ({"X-Forwarded-For": SELF_V4}, "this_host"),
+            ({"X-Forwarded-For": "FD7A:115C:A1E0::A"}, "this_host"),
+            ({"X-Forwarded-For": OTHER_DEVICE_ADDRESS}, "other_device"),
+            ({}, "unknown"),
+            ({"X-Forwarded-For": [SELF_V4, OTHER_DEVICE_ADDRESS]}, "unknown"),
+            ({"X-Forwarded-For": "100.64.0.20, 100.64.0.10"}, "unknown"),
+            ({"X-Forwarded-For": "not-an-address"}, "unknown"),
+            ({"X-Forwarded-For": "fd7a:115c:a1e0::a%eth0"}, "unknown"),
+        ]
+        for headers, expected in table:
+            with self.subTest(headers=headers):
+                self.guest(svc, "GET", "/api/whoami", headers=headers)
+                self.assertEqual(self.reading(svc)["client"], expected)
+                owner = svc.view_bytes.lower()
+                for value in (SELF_V4, SELF_V6, OTHER_DEVICE_ADDRESS, "100.64.0", "fd7a:", "%eth0"):
+                    self.assertNotIn(value.encode(), owner)
+        self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_the_owner_view_says_whether_another_device_came(self):
+        self.seed()
+        svc = self.start()
+
+        def sharing():
+            return json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+
+        def came(address):
+            self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": address})
+
+        self.assertIs(sharing()["other_device_seen"], False)
+        came(SELF_V4)
+        self.assertIs(sharing()["other_device_seen"], False)
+        self.assertEqual(sharing()["last_request"]["client"], "this_host")
+        came("fd7a:115c:a1e0::a%eth0")
+        self.assertIs(sharing()["other_device_seen"], False)
+        self.assertEqual(sharing()["last_request"]["client"], "unknown")
+        came(OTHER_DEVICE_ADDRESS)
+        self.assertIs(sharing()["other_device_seen"], True)
+        came(SELF_V4)
+        self.assertIs(sharing()["other_device_seen"], True)
+        self.assertEqual(sharing()["last_request"]["client"], "this_host")
+        svc.set_sharing(False)
+        self.assertIs(sharing()["other_device_seen"], True)
+        svc.set_sharing(True)
+        body = self.guest(svc, "GET", "/api/state")[2]
+        frame = next_frame(self.open_stream(svc))
+        for seen in (body, frame):
+            for member in (b"other_device_seen", b"client"):
+                self.assertNotIn(member, seen)
+        svc.close()
+        again = self.start()
+        self.assertIs(json.loads(self.owner(again, "GET", "/api/state")[2])[
+            "sharing"]["other_device_seen"], False)
+
+    def test_unreadable_own_addresses_read_every_request_unknown(self):
+        self.seed()
+        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        svc = self.start()
+        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.assertEqual(self.reading(svc)["client"], "unknown")
+        state = json.loads(self.owner(svc, "GET", "/api/state")[2])
+        self.assertIs(state["sharing"]["other_device_seen"], False)
+
+    def test_a_change_of_own_addresses_alone_revokes_nothing(self):
+        self.seed()
+        svc = self.start()
+        before = svc.guest_snapshot.revoked
+        self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [OTHER_DEVICE_ADDRESS]}}
+        svc.poll_serve()
+        self.assertEqual(svc.guest_snapshot.revoked, before)
+        self.assertEqual({str(a) for a in svc.guest_snapshot.policy.addresses},
+                         {OTHER_DEVICE_ADDRESS})
 
     def test_a_new_reading_sends_no_guest_stream_frame(self):
         self.seed()
