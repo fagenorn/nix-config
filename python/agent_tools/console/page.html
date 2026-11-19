@@ -106,7 +106,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 #accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-open { flex: 0 0 auto; }
-.share-name, .share-line, .share-last, .share-none { margin-top: 6px; }
+.share-name, .share-line, .share-outside, .share-last, .share-none { margin-top: 6px; }
 .share-switch, .share-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .share-people { list-style: none; }
 .share-person { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--hair); }
@@ -2995,13 +2995,20 @@ function shareLine(sharing) {
   if (sharing.shared !== true || sharing.state === "off") return "Sharing is off.";
   return (SHARE_LINES.get(sharing.state) || SHARE_LINES.get("unchecked"))(sharing.tailnet);
 }
+function shareOutside(sharing) {
+  if (sharing.shared !== true) return null;
+  return sharing.other_device_seen === true
+    ? "A request from another device has reached the guest door since the console started."
+    : "No request from another device has reached the guest door since the console started; the tailnet's access rules must allow TCP 443 to this host for the people this console is shared with.";
+}
 function shareLast(r) {
   if (r === null || typeof r !== "object") return "No request has come to the guest door yet.";
   const host = r.host !== null ? "Host " + r.host : r.hosts === 0 ? "no Host" : r.hosts > 1 ? r.hosts + " Host headers" : "a Host the console does not keep";
   const forwarded = r.forwarded_host !== null ? "forwarded Host " + r.forwarded_host : r.forwarded_hosts === 0 ? "no forwarded Host" : r.forwarded_hosts > 1 ? r.forwarded_hosts + " forwarded Host headers" : "a forwarded Host the console does not keep";
   const login = r.login_headers === 0 ? "no login header" : r.login_headers === 1 ? "a login header" : r.login_headers + " login headers";
   const why = r.reason === "not_shared" && r.login_headers !== 1 ? "it had not exactly one login header" : SHARE_WHY.get(r.reason);
-  return "Last request on the guest door: " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
+  const from = r.client === "this_host" ? ", from this host" : r.client === "other_device" ? ", from another device" : "";
+  return "Last request on the guest door" + from + ": " + host + ", " + forwarded + ", " + login + ", " + (r.admitted ? "admitted" : why === undefined ? "refused" : "refused because " + why) + ".";
 }
 function shareSwitch(shared) {
   return fetch("/api/share-tailnet", { method: "POST", headers: ownerHeaders(), body: JSON.stringify({ shared }) });
@@ -3060,7 +3067,7 @@ function renderSharing(view) {
     body.replaceChildren();
     return;
   }
-  const sharing = view.sharing || { shared: false, tailnet: null, colleagues: [], state: "off", last_request: null };
+  const sharing = view.sharing || { shared: false, tailnet: null, colleagues: [], state: "off", last_request: null, other_device_seen: false };
   const projects = view.recent_projects || [];
   for (const id of [...sharePicks]) if (!projects.includes(id)) sharePicks.delete(id);
   let kept = null;
@@ -3082,7 +3089,10 @@ function renderSharing(view) {
   }
   const parts = [head];
   if (shareName(sharing) !== null) parts.push(el("p", "share-name", shareName(sharing)));
-  parts.push(el("p", "share-line", shareLine(sharing)), el("p", "share-last", shareLast(sharing.last_request)), row);
+  parts.push(el("p", "share-line", shareLine(sharing)));
+  const outside = shareOutside(sharing);
+  if (outside !== null) parts.push(el("p", "share-outside", outside));
+  parts.push(el("p", "share-last", shareLast(sharing.last_request)), row);
   if (sharing.colleagues.length === 0) parts.push(el("p", "share-none", "No colleague has access."));
   else {
     const list = el("ul", "share-people");

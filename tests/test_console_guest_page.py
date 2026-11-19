@@ -30,6 +30,13 @@ THIRD = "third@example.invalid"
 STRANGER = "stranger@example.invalid"
 NO_REPLY = {"status": 204, "text": ""}
 HEADERS = {"X-Console-Token": "__CONSOLE_TOKEN__", "Content-Type": "application/json"}
+OWN = guest.own_addresses({"Self": {"TailscaleIPs": ["100.64.0.10"]}})
+SELF_ADDRESS = "100.64.0.10"
+OTHER_DEVICE_ADDRESS = "100.64.0.20"
+OUTSIDE_SEEN = "A request from another device has reached the guest door since the console started."
+OUTSIDE_NONE = (
+    "No request from another device has reached the guest door since the console started; "
+    "the tailnet's access rules must allow TCP 443 to this host for the people this console is shared with.")
 
 
 def harness(steps: list, page_bytes: bytes | None = None) -> list:
@@ -77,9 +84,10 @@ def writes(snap: dict) -> list:
     return [(p["url"], p["body"]) for p in snap["posts"] if p["url"] != "/api/looked"]
 
 
-def sharing_frame(state: str, tailnet: str | None, last_request: dict | None, shared: bool = True) -> dict:
+def sharing_frame(state: str, tailnet: str | None, last_request: dict | None, shared: bool = True,
+                  seen: bool = False) -> dict:
     return {**SHARED_FRAME, "sharing": guest.sharing_entry(
-        guest.Access(shared, ACCESS.colleagues), tailnet, state, last_request)}
+        guest.Access(shared, ACCESS.colleagues), tailnet, state, last_request, other_device_seen=seen)}
 
 
 class SharingPanelTest(unittest.TestCase):
@@ -214,6 +222,55 @@ class SharingPanelTest(unittest.TestCase):
                 shown = full(named(snap["sharing_body"], "share-last")[0])
                 self.assertEqual(shown, text)
                 self.assertNotIn("Serve", shown)
+
+    def test_the_outside_line_says_whether_another_device_came(self) -> None:
+        local = ["localhost"]
+        self_probe = guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [SELF_ADDRESS], [], own=OWN)
+        outside = guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [OTHER_DEVICE_ADDRESS], [], own=OWN)
+        rows = [
+            (sharing_frame("serving", TAILNET, None), [OUTSIDE_NONE]),
+            (sharing_frame("serving", TAILNET, self_probe), [OUTSIDE_NONE]),
+            (sharing_frame("serving", TAILNET, outside, seen=True), [OUTSIDE_SEEN]),
+            (sharing_frame("serving", TAILNET, self_probe, seen=True), [OUTSIDE_SEEN]),
+            (sharing_frame("not_proxying", TAILNET, None), [OUTSIDE_NONE]),
+            (sharing_frame("unreadable", None, None), [OUTSIDE_NONE]),
+            (sharing_frame("off", TAILNET, None, shared=False), []),
+            (sharing_frame("off", TAILNET, outside, shared=False, seen=True), []),
+        ]
+        steps = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
+        for frame, _ in rows:
+            steps += [{"frame": frame}, SNAP]
+        self.assertIn("TCP 443", OUTSIDE_NONE)
+        for n, (snap, (_, expected)) in enumerate(zip(harness(steps), rows)):
+            with self.subTest(row=n + 1):
+                body = snap["sharing_body"]
+                self.assertEqual([full(node) for node in named(body, "share-outside")], expected)
+                if expected:
+                    order = [next(i for i, node in enumerate(nodes(body)) if has_class(node, cls))
+                             for cls in ("share-line", "share-outside")]
+                    self.assertEqual(order[1], order[0] + 1)
+                self.assertNotIn("100.64", full(body))
+                for node in named(body, "share-outside") + named(body, "share-last"):
+                    self.assertNotIn("@", full(node))
+                    self.assertNotIn("100.64", full(node))
+
+    def test_the_last_request_line_names_where_it_came_from(self) -> None:
+        local = ["localhost"]
+        tail = f"Host localhost, forwarded Host {TAILNET}, a login header, admitted."
+        rows = [
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [SELF_ADDRESS], [], own=OWN),
+             "Last request on the guest door, from this host: " + tail),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [OTHER_DEVICE_ADDRESS], [], own=OWN),
+             "Last request on the guest door, from another device: " + tail),
+            (guest.reading(ACCESS, TAILNET, local, [TAILNET], [COLLEAGUE], [], []),
+             "Last request on the guest door: " + tail),
+        ]
+        steps = [START, {"frame": SHARED_FRAME}, {"click": "share-open"}]
+        for reading, _ in rows:
+            steps += [{"frame": sharing_frame("serving", TAILNET, reading)}, SNAP]
+        for snap, (_, text) in zip(harness(steps), rows):
+            with self.subTest(text=text):
+                self.assertEqual(full(named(snap["sharing_body"], "share-last")[0]), text)
 
     def test_the_controls_call_the_owner_only_writes(self) -> None:
         (snap,) = harness([
