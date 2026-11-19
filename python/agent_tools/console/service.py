@@ -5,6 +5,17 @@ parameter names a host. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`
 for the port actually bound, else the answer is `403` `text/plain`
 `loopback only`.
 
+Before the `Host` check and before any interim `100 Continue`, on every route and method of the
+owner port, the lookup (`peer_reader`, default `peer.reader_for(sys.platform)`) must find a process
+of `owner_uid` (default the service's own effective uid) holding the connection's client end and no
+holder of another uid, else the answer is `403` `text/plain` `peer.NOT_OWNER_TEXT` or
+`peer.UNREADABLE_TEXT`, `Connection: close`, with nothing read, appended or published, and one
+stderr line `console: peer_refused <other_user|not_found|unreadable>` (ADR-console-076). There is
+one lookup per connection, and at most `PEER_LOOKUPS` lookups run at once: a connection that finds
+no free slot is answered as `unreadable` (fail closed) rather than queued. The guest port is not checked. A request line or header block the
+inherited parser refuses as malformed is answered `400` before this check; it is not a route of the
+port and carries nothing of the console.
+
 Routes (every response carries `Cache-Control: no-store`, except a picture read's 200, which
 carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and every one but the
 stream `Content-Length`):
@@ -873,7 +884,7 @@ refused` and 403 `secret refused`; any other `sprints.Refused` is `console: clos
 `{"at":"<the row's at>"}`. Every refusal is `text/plain`, one line, closes the connection, appends
 nothing and publishes nothing. The secret appears in no stderr line or answer.
 
-A state request reads only `view_bytes`, which is memory: no log access, no
+Once the connection's peer is admitted (one lookup per connection, ADR-console-076), a state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
 subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
@@ -1525,7 +1536,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1553,6 +1564,7 @@ def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
+PEER_LOOKUPS = 8  # concurrent holder lookups on the owner port (#1294)
 DEFAULT_GUEST_PORT = 27185
 CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
        "connect-src 'self'; img-src data: blob:; base-uri 'none'; form-action 'none'; "
@@ -1801,7 +1813,36 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    _peer_admitted = False
+
+    def _owner_peer(self) -> bool:
+        """Whether this connection's peer is the owner's own process; a refusal is already sent."""
+        if self._peer_admitted:
+            return True
+        console = self.server.console
+        reader = console.peer_reader
+        holders = None
+        if reader is not None and console.peer_slots.acquire(blocking=False):
+            try:
+                holders = reader(self.client_address[:2], self.server.server_address[:2])
+            except Exception:
+                holders = None
+            finally:
+                console.peer_slots.release()
+        found = peer.refusal(holders, self.server.console.owner_uid)
+        if found is None:
+            self._peer_admitted = True
+            return True
+        print(f"console: peer_refused {found[0]}", file=sys.stderr)
+        self._refuse(403, found[1])
+        return False
+
+    def handle_expect_100(self) -> bool:
+        return self._owner_peer() and super().handle_expect_100()
+
     def _loopback(self) -> bool:
+        if not self._owner_peer():
+            return False
         port = self.server.server_address[1]
         if self.headers.get("Host") not in (f"{HOST}:{port}", f"localhost:{port}"):
             self.close_connection = True
@@ -3198,6 +3239,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 class GuestHandler(ConsoleHandler):
     """The guest port's one handler (#1237); it never calls the owner's route methods."""
 
+    handle_expect_100 = http.server.BaseHTTPRequestHandler.handle_expect_100
+
     def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
               cache: str = "no-store"):
         self.close_connection = True
@@ -3411,7 +3454,13 @@ class ConsoleService:
                  guest_port: int | None = None,
                  guest_token_path: Path | None = None,
                  serve_reader: Callable[[], object | None] | None = None,
-                 serve_seconds: float = SERVE_SECONDS):
+                 serve_seconds: float = SERVE_SECONDS,
+                 peer_reader: peer.PeerReader | None = peer.reader_for(sys.platform),
+                 owner_uid: int | None = None,
+                 peer_lookups: int = PEER_LOOKUPS):
+        self.peer_reader = peer_reader
+        self.peer_slots = threading.BoundedSemaphore(peer_lookups)
+        self.owner_uid = os.geteuid() if owner_uid is None else owner_uid
         self.registry = Path(registry)
         self._screenshot_dirs = tuple(Path(d) for d in screenshot_dirs)
         self._choice_file = choice_file

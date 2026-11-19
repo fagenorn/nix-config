@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1294: another local account is refused on the console's owner port and the
+# owner's own page loads through an SSH forward that only the owner can use. verify-pending runs it
+# from the repository root at the commit the block names. Exit 0 met, 1 not met, 75 not yet.
+PYTHONPATH=python exec python3 -m agent_tools.console.owner_port_check "$@"

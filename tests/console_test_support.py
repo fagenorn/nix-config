@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from agent_tools.console import manager as console_manager
+from agent_tools.console import peer
 from agent_tools.console import service as console_service
 from agent_tools.console import sessions as console_sessions
 from agent_tools.console import signin
@@ -191,10 +192,16 @@ def sign_in(store, *names):
         log.close()
 
 
+def OWNER_PEER(client, server):
+    """A peer reader stand-in: every connection is held by this process, whose user is the owner."""
+    return (peer.Holder(os.getpid(), os.geteuid(), "python3"),)
+
+
 def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, profile_dirs=(),
             **kwargs):
     kwargs.setdefault("branch_pattern_of", lambda repo: "issue-<num>-<slug>")
     kwargs.setdefault("dispatch", lambda job: job())
+    kwargs.setdefault("peer_reader", OWNER_PEER)
     svc = console_service.ConsoleService(
         store, registry, port=0, session_dirs=lambda: list(session_dirs),
         profile_dirs=lambda: list(profile_dirs), repo_of=repo_of, **kwargs)
