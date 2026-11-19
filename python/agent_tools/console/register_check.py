@@ -15,18 +15,26 @@ yet, 2 usage. In this order:
 1. the view (`/api/state`) does not answer 200: `{"status": "not_running"}`, 75;
 2. the view JSON has no `registration` key (the console predates the write): `{"status":
    "not_deployed"}`, 75;
-3. the token file is unreadable: `{"status": "no_token"}`, 75;
-4. the registry is present but unreadable: `{"status": "registry_unreadable"}`, 75.
+3. the view's registration is open (`register.open_shown`: not null and not a dismissed one, status
+   done with the note `register.LATER_NOTE`, the owner's Not now): `{"status": "busy"}`, 75, building
+   and posting nothing (#1334, ADR-console-084 D3);
+4. the token file is unreadable: `{"status": "no_token"}`, 75;
+5. the registry is present but unreadable: `{"status": "registry_unreadable"}`, 75.
 
 Then it snapshots the registry (`before`), builds the fixture in a fresh `console-register-check-*`
-directory with a throwaway project id `console-check/register-<hex>`, and POSTs `{"path": <root>}` to
-`/api/register-project` with the console's own `Origin`, the token header and a socket timeout of
-`POST_TIMEOUT` (60 s). A fixture that cannot be built is `{"status": "no_fixture", "reason":
-<exception type>}`, 75.
+directory with a throwaway project id `console-check/register-<hex>`. After building the fixture and
+right before posting it reads the view again: no answer or no `registration` member is
+`not_running`, a registration not equal to the first read's (a card that opened, or one the owner
+cancelled) is `busy`; either removes the fixture and reads the console no more (no trust card can be
+the run's). Otherwise it POSTs `{"path": <root>, "unless_open": true}` to `/api/register-project` with
+the console's own `Origin`, the token header and a socket timeout of `POST_TIMEOUT` (60 s). A fixture
+that cannot be built is `{"status": "no_fixture", "reason": <exception type>}`, 75.
 
 - A status from 400 to 499 is a definite refusal: nothing was dispatched. A 409 whose text starts with
-  `a registration is already running` is `{"status": "busy"}`, 75 (another run owns the console); any
-  other is `{"status": "not_met", "reason": "refused <status> <text>"}`, 1.
+  `a registration is already running`, or whose text is `register.OPEN_SHOWN`, is `{"status": "busy"}`,
+  75 (another run owns the console, or the console found a registration open on the page: it decides
+  under its lock, ADR-console-084 D2); a console older than that refuses with 400, which is `not_met`;
+  any other is `{"status": "not_met", "reason": "refused <status> <text>"}`, 1.
 - A 5xx, or any other status but 204, is `not_met` with the same reason, though it may have
   dispatched a run.
 - A 204, or no answer at all, may have dispatched a run. The check polls the view every second until
@@ -70,7 +78,18 @@ the key being the root's real path), plans are deleted, the directory is removed
 equal `before` (by project id) with the directory gone and no matching plan left, else `{"status":
 "not_restored", "leftovers": [<path>, ...]}`, 1 replaces any answer; the leftovers name each trust file
 whose entry could not be removed, each plan or directory that could not be removed and the registry when
-it differs. The settle bound counts from the last POST. Met is `{"status": "met", "project_id": <id>,
+it differs. The settle bound counts from the last POST.
+
+After the restore of a run whose POST may have dispatched, the check polls the view at most
+`SHOWN_SECONDS` (30 s; the deadline is tested before each request, so the bound adds only the one
+request under way at the deadline, a view read of `FETCH_TIMEOUT` or the single Cancel POST of
+`POST_TIMEOUT`) until it answers with a `registration` member and an `entries` list, the project id
+is no longer listed and the registration is the complete entry the first view showed (or both null).
+A done registration of its own root that offers Cancel is cancelled once through `POST
+/api/register-cancel {"root", "restore": true}`, after which the trust cards still open are read again
+(the Cancel drops that root's trust failures). A view that never shows it adds the leftover
+`registration`, and a not-restored answer of a run that was not met carries that run's answer as
+`verdict`. Met is `{"status": "met", "project_id": <id>,
 "root": <root>, "restored": true}`, 0.
 """
 
@@ -98,11 +117,13 @@ CONTRACT_SOURCE = Path("home/common/agent-skills/tests/fixtures/project-contract
 SETTLE_SECONDS = 2 * register.RUN_TIMEOUT + register.GIT_TIMEOUT + 60
 POST_TIMEOUT = 60
 LISTED_SECONDS = 30
+SHOWN_SECONDS = 30
 FETCH_TIMEOUT = 5.0
 NOT_YET = 75
 LOOPBACK = ("127.0.0.1", "localhost")
 REGISTER_PATH = "/api/register-project"
 CONFIRM_PATH = "/api/register-confirm"
+CANCEL_PATH = "/api/register-cancel"
 TRUST_CHECK_PATH = "/api/trust-check"
 STATE_PATH = "/api/state"
 DIGEST = "a1" * 32
@@ -287,6 +308,13 @@ def _asking(document: Mapping, root: str) -> bool:
                and c.get("root") == str(root) for c in cards or ())
 
 
+def _shown_back(document: Mapping, project_id: str, registration_before: object) -> bool:
+    """True when the view shows the registration it showed before the run and no longer lists the project."""
+    return ("registration" in document and isinstance(document.get("entries"), list)
+            and not _listed(document, project_id)
+            and document["registration"] == registration_before)
+
+
 def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
           ready: Callable[[dict], bool]) -> bool:
     end = time.monotonic() + bound
@@ -299,35 +327,40 @@ def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
         time.sleep(poll)
 
 
+def _trust_cards(fetch, base: str, root: Path) -> list[dict] | None:
+    keys = {os.path.realpath(root), str(root)}
+    document = _json_object(fetch(base + STATE_PATH))
+    if document is None:
+        return None
+    inbox = document.get("inbox")
+    found = inbox.get("open") if isinstance(inbox, dict) else None
+    return [card for card in found or ()
+            if isinstance(card, dict) and card.get("reason") == "trust_failed"
+            and card.get("root") in keys]
+
+
+def _trust_left(fetch, base: str, root: Path) -> list[str]:
+    """The Check again cards still open for the root, named; `trust cards unread` when the view fails."""
+    cards = _trust_cards(fetch, base, root)
+    if cards is None:
+        return ["trust cards unread"]
+    return [f"trust card {card.get('profile')}" for card in cards]
+
+
 def _clear_trust_cards(fetch, post, base: str, token: str, root: Path) -> list[str]:
     """Check again each Check again card the fixture's grant left; the cards still open, named.
 
     The cards live in the console's event log, which the check cannot edit: a granted retry is what
     clears one, so this runs before the trust entries are removed.
     """
-    keys = {os.path.realpath(root), str(root)}
-
-    def open_cards() -> list[dict] | None:
-        document = _json_object(fetch(base + STATE_PATH))
-        if document is None:
-            return None
-        inbox = document.get("inbox")
-        found = inbox.get("open") if isinstance(inbox, dict) else None
-        return [card for card in found or ()
-                if isinstance(card, dict) and card.get("reason") == "trust_failed"
-                and card.get("root") in keys]
-
-    cards = open_cards()
+    cards = _trust_cards(fetch, base, root)
     if cards is None:
         return ["trust cards unread"]
     headers = {"Origin": base, write_guard.TOKEN_HEADER: token, "Content-Type": "application/json"}
     for card in cards:
         post(base + TRUST_CHECK_PATH, headers,
              json.dumps({"root": card["root"], "profile": card.get("profile")}).encode("utf-8"))
-    cards = open_cards()
-    if cards is None:
-        return ["trust cards unread"]
-    return [f"trust card {card.get('profile')}" for card in cards]
+    return _trust_left(fetch, base, root)
 
 
 def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
@@ -377,6 +410,35 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
     return leftovers
 
 
+def _restore_view(fetch, post, base: str, token: str, root: Path, project_id: str,
+                  registration_before: object, poll: float, bound: float) -> tuple[list[str], bool]:
+    """Wait for the page to show the registration it showed before the run; the leftovers, whether it cancelled.
+
+    A done registration of the check's own root that offers Cancel is cancelled once, restoring.
+    The deadline is tested before each request, so at most the one request under way overruns it.
+    """
+    end = time.monotonic() + bound
+    cancelled = False
+    while True:
+        if time.monotonic() >= end:
+            return ["registration"], cancelled
+        document = _json_object(fetch(base + STATE_PATH))
+        if document is not None:
+            if _shown_back(document, project_id, registration_before):
+                return [], cancelled
+            if time.monotonic() >= end:
+                return ["registration"], cancelled
+            shown = document.get("registration")
+            if (not cancelled and isinstance(shown, dict) and shown.get("root") == str(root)
+                    and shown.get("status") == "done" and shown.get("cancel") is True):
+                headers = {"Origin": base, write_guard.TOKEN_HEADER: token,
+                           "Content-Type": "application/json"}
+                post(base + CANCEL_PATH, headers,
+                     json.dumps({"root": str(root), "restore": True}).encode("utf-8"))
+                cancelled = True
+        time.sleep(min(poll, max(0.0, end - time.monotonic())))
+
+
 def _text(body: bytes) -> str:
     return body.decode("utf-8", "replace").strip()
 
@@ -388,9 +450,10 @@ def _exercise(args, token: str, fetch, post, root: Path, project_id: str, poll: 
     status, body = post(
         base + REGISTER_PATH,
         {"Origin": base, write_guard.TOKEN_HEADER: token, "Content-Type": "application/json"},
-        json.dumps({"path": str(root)}).encode("utf-8"))
+        json.dumps({"path": str(root), "unless_open": True}).encode("utf-8"))
     if status is not None and 400 <= status <= 499:
-        if status == 409 and _text(body).startswith("a registration is already running"):
+        if status == 409 and (_text(body).startswith("a registration is already running")
+                              or _text(body) == register.OPEN_SHOWN):
             return NOT_YET, {"status": "busy"}
         return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
     reached.append(time.monotonic())
@@ -446,16 +509,17 @@ def _exercise(args, token: str, fetch, post, root: Path, project_id: str, poll: 
 
 
 def main(argv: list[str] | None = None, *, fetch=None, post=None, tmp_root=None,
-         project_id: str | None = None, poll: float = 1.0, settle: float = SETTLE_SECONDS) -> int:
+         project_id: str | None = None, poll: float = 1.0, settle: float = SETTLE_SECONDS,
+         shown: float = SHOWN_SECONDS) -> int:
     args = parser().parse_args(argv)
     fetch = fetch or default_fetch
     post = post or default_post
-    code, result = _decide(args, fetch, post, tmp_root, project_id, poll, settle)
+    code, result = _decide(args, fetch, post, tmp_root, project_id, poll, settle, shown)
     print(json.dumps(result, sort_keys=True))
     return code
 
 
-def _decide(args, fetch, post, tmp_root, project_id, poll, settle) -> tuple[int, dict]:
+def _decide(args, fetch, post, tmp_root, project_id, poll, settle, shown) -> tuple[int, dict]:
     state = f"http://{urlsplit(args.url).netloc}{STATE_PATH}"
     answer = fetch(state)
     if answer[0] != 200:
@@ -463,40 +527,66 @@ def _decide(args, fetch, post, tmp_root, project_id, poll, settle) -> tuple[int,
     document = _json_object(answer)
     if document is None or "registration" not in document:
         return NOT_YET, {"status": "not_deployed"}
+    registration_before = document["registration"]
+    if register.open_shown(registration_before):
+        return NOT_YET, {"status": "busy"}
     token_file = args.token_file or agent_platform.state_root() / "console" / "page-token"
     try:
         token = token_file.read_text("utf-8").strip()
     except (OSError, ValueError):
         return NOT_YET, {"status": "no_token"}
     registry = agent_platform.registry_path()
-    before = service.read_fleet(registry)
-    if before is None and os.path.lexists(registry):
+    registry_before = service.read_fleet(registry)
+    if registry_before is None and os.path.lexists(registry):
         return NOT_YET, {"status": "registry_unreadable"}
-    before = before or []
+    registry_before = registry_before or []
+    base = f"http://{urlsplit(args.url).netloc}"
     tmp = Path(tempfile.mkdtemp(prefix="console-register-check-", dir=tmp_root))
     pid = project_id or "console-check/register-" + secrets.token_hex(4)
     root: Path | None = None
     reached: list[float] = []
+    posted = False
+    trust: list[str] = []
     verdict: tuple[int, dict] = (1, {"status": "not_met"})
     settled = True
+
+    def clear(one: Path) -> list[str]:
+        trust[:] = _clear_trust_cards(fetch, post, base, token, one) if posted else []
+        return []
+
     try:
         try:
             root = adopted_repository(tmp, pid, args.contract)
         except Exception as error:  # noqa: BLE001 -- any builder failure is "no fixture"
             return NOT_YET, {"status": "no_fixture", "reason": type(error).__name__}
-        verdict = _exercise(args, token, fetch, post, root, pid, poll, reached)
+        again = _json_object(fetch(state))
+        if again is None or "registration" not in again:
+            verdict = (NOT_YET, {"status": "not_running"})
+        elif again["registration"] != registration_before:
+            verdict = (NOT_YET, {"status": "busy"})
+        else:
+            posted = True
+            verdict = _exercise(args, token, fetch, post, root, pid, poll, reached)
     finally:
         if reached:
             settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[-1]),
                             lambda d: not _is_running(d, str(root)))
-        leftovers = _restore(
-            tmp, root, pid, before,
-            lambda one: _clear_trust_cards(fetch, post, f"http://{urlsplit(args.url).netloc}",
-                                           token, one)) if settled else []
+        leftovers = _restore(tmp, root, pid, registry_before, clear) if settled else []
+        if settled and reached and root is not None:
+            left, cancelled = _restore_view(fetch, post, base, token, root, pid,
+                                            registration_before, poll, shown)
+            if cancelled and trust:
+                trust[:] = _trust_left(fetch, base, root)
+            leftovers = trust + leftovers + left
+        else:
+            leftovers = trust + leftovers
     if not settled:
         return 1, {"status": "unsettled", "project_id": pid, "root": str(root)}
     if leftovers:
-        return 1, {"status": "not_restored", "leftovers": leftovers}
+        answer = {"status": "not_restored", "leftovers": leftovers}
+        if verdict[0] != 0:
+            answer["verdict"] = verdict[1]
+        return 1, answer
     return verdict
 
 
