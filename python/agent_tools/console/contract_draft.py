@@ -519,13 +519,30 @@ def _runner_found(candidate: str, search_path: str) -> bool:
 
 
 def _assigned_word(value: str) -> str | None:
-    """The one word an assignment's value is, a trailing comment aside; None when it is not exactly one."""
+    """The one word an assignment's value is, a trailing comment aside; None when it is not exactly one.
+
+    A `#` that starts a word (after blanks) begins a comment, which is dropped unread, so an apostrophe
+    in it cannot spoil the split; a `#` inside a word is not a comment, and the value is not judged.
+    """
+    quote = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            quote = None if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif char == "#":
+            if index == 0 or not value[index - 1].isspace():
+                return None
+            value = value[:index]
+            break
     try:
-        words = shlex.split(value, comments=True)
-        raw = shlex.split(value)
+        words = shlex.split(value)
     except ValueError:
-        return None
-    if any("#" in word[1:] for word in raw):
         return None
     return words[0] if len(words) == 1 else None
 
@@ -551,6 +568,8 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
         assignment = _ASSIGNMENT.match(line)
         if assignment:
             assigned.setdefault(assignment.group(1), {})[_assigned_word(assignment.group(2))] = None
+            for name in _ASSIGNED_ANYWHERE.findall(assignment.group(2)):
+                assigned.setdefault(name, {})[None] = None
             continue
         execution = _EXEC.match(line)
         if execution:
