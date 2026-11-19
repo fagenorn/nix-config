@@ -49,13 +49,19 @@ Scan rule for a `.py` source:
    with `<name>.`; a `for` target gets the union of the element kinds of a
    literal Tuple, List or Set iterable, else the iterable's kinds, before the
    body; a `with ... as v` binds `v` to the context expression's kinds; `if`,
-   `while`, `try` (handlers, else, finally) and `match` bodies are walked in
-   order, except an `if`: its body and its else branch are each walked from a
-   copy of the incoming environment, and the environment after the `if` holds,
-   per name, the union of the kinds the two branches else branch being the
-   incoming environment when there is none) end with. A nested def or lambda is walked from a copy of the current
-   environment with its parameters unbound; its assertions belong to the
-   enclosing unit.
+   `while` bodies are walked in order in the same environment. An `if` walks
+   its body and its else branch each from a copy of the incoming environment
+   (the incoming environment standing for a missing else), and the environment
+   after it holds, per name, the union of the kinds the branches end with. A
+   `match` walks each case from a copy of the incoming environment and joins
+   the case ends with the incoming environment. A `try` walks its body from a
+   copy; each handler starts from the join (per-name union) of the incoming
+   environment and the environment after the body, since the body may stop
+   anywhere; else continues from the end of the body; finally starts from the
+   join of the else end, every handler end and that join, and its end is the
+   environment after the `try`. A nested def or lambda is walked from a copy
+   of the current environment with its parameters unbound; its assertions
+   belong to the enclosing unit.
 5. Assertions and findings. An assertion is an `assert` statement, or an
    expression statement whose value is a Call whose func is an Attribute named
    `assert*`. Its operands are the first positional argument for ONE_OPERAND,
@@ -74,9 +80,10 @@ Scan rule for a `.py` source:
 6. A `.sh` source is scanned by line, and only for phrase tests: a line is a
    finding when its first non-blank character is not `#`, it matches
    SHELL_DOC, and it matches SHELL_PHRASE_TEST, or matches SHELL_COMPARE and,
-   once its empty double-quoted literals are removed, still holds a double-quoted
-   literal (a `!= ""` check compares with no phrase). A docstring existence check is
-   no finding in any member kind.
+   has a non-empty quoted literal directly beside the operator, on either side
+   (SHELL_COMPARE_PHRASE; a `!= ""` check compares with no phrase, and a
+   double-quoted `-c` program is no literal beside the operator). A docstring
+   existence check is no finding in any member kind.
 
 A suite member of any kind other than `.py` and `.sh` fails the scan, and a
 source that does not parse fails it too: nothing is skipped.
@@ -116,9 +123,11 @@ SHELL_DOC = re.compile(r"__doc__|get_docstring|getdoc")
 SHELL_PHRASE_TEST = re.compile(
     r"\bgrep\b|\bin\b|startswith|endswith|\bcount\(|\bfind\(|\bindex\(|\bsearch\(|\bmatch\(|\bassert[A-Z]"
 )
-SHELL_COMPARE = re.compile(r"==|!=")
-SHELL_EMPTY_LITERAL = re.compile(r'\\?"\\?"')
-SHELL_LITERAL = re.compile(r'"[^"]+"')
+# A non-empty quoted literal (optionally backslash-escaped quotes) right after or right
+# before ==/!=; a glob star may sit inside a right-hand [[ ]] pattern.
+SHELL_COMPARE_PHRASE = re.compile(
+    r'''(?:==|!=)\s*\*?\\?["'][^"'\\]+|(?:^|[\s(\[])\\?["'][^"'\\]+\\?["']\s*(?:==|!=)'''
+)
 # The count of leading operands (exception, regex) of each assertion that also takes a callable.
 CALLABLE_FORM = {"assertRaises": 1, "assertWarns": 1, "assertRaisesRegex": 2, "assertWarnsRegex": 2}
 
@@ -168,6 +177,14 @@ def _set(env: dict, chain: str, kinds: frozenset[str]) -> None:
         env[chain] = kinds
     else:
         env.pop(chain, None)
+
+
+def _join(*envs: dict) -> dict:
+    joined: dict = {}
+    for env in envs:
+        for chain, kinds in env.items():
+            joined[chain] = joined.get(chain, EMPTY) | kinds
+    return joined
 
 
 def _unbind_parameters(function, env: dict) -> None:
@@ -344,22 +361,35 @@ class _Walk:
             taken, other = dict(env), dict(env)
             self.block(node.body, taken)
             self.block(node.orelse, other)
+            joined = _join(taken, other)
             env.clear()
-            for branch in (taken, other):
-                for chain, kinds in branch.items():
-                    env[chain] = env.get(chain, EMPTY) | kinds
+            env.update(joined)
         elif isinstance(node, ast.While):
             self.block(node.body, env)
             self.block(node.orelse, env)
         elif TRIES and isinstance(node, TRIES):
-            self.block(node.body, env)
+            body = dict(env)
+            self.block(node.body, body)
+            entry = _join(env, body)
+            ends = []
             for handler in node.handlers:
-                self.block(handler.body, env)
-            self.block(node.orelse, env)
-            self.block(node.finalbody, env)
+                handled = dict(entry)
+                self.block(handler.body, handled)
+                ends.append(handled)
+            self.block(node.orelse, body)
+            final = _join(entry, body, *ends)
+            self.block(node.finalbody, final)
+            env.clear()
+            env.update(final)
         elif isinstance(node, ast.Match):
+            ends = [dict(env)]
             for case in node.cases:
-                self.block(case.body, env)
+                branch = dict(env)
+                self.block(case.body, branch)
+                ends.append(branch)
+            joined = _join(*ends)
+            env.clear()
+            env.update(joined)
         elif isinstance(node, FUNCTIONS):
             inner = dict(env)
             _unbind_parameters(node, inner)
@@ -386,7 +416,7 @@ class _Walk:
 def _shell_phrase_test(line: str) -> bool:
     if SHELL_PHRASE_TEST.search(line):
         return True
-    return bool(SHELL_COMPARE.search(line) and SHELL_LITERAL.search(SHELL_EMPTY_LITERAL.sub("", line)))
+    return bool(SHELL_COMPARE_PHRASE.search(line))
 
 
 def docstring_findings(path: str, source: str) -> list[tuple[str, int]]:
@@ -578,6 +608,28 @@ BRANCHES = HEAD + _body(r'''
         self.assertIn("after", text)
 ''')
 
+TRY_HANDLER = HEAD + _body(r'''
+        text = mod.__doc__
+        try:
+            text = run_cli(["--help"]).stdout
+            self.assertIn("usage:", text)
+        except OSError:
+            self.assertIn("phrase", text)
+        else:
+            self.assertIn("ok", text)
+''')
+
+MATCH_CASES = HEAD + _body(r'''
+        text = mod.__doc__
+        match flag:
+            case 1:
+                text = run_cli(["--help"]).stdout
+                self.assertIn("usage:", text)
+            case _:
+                self.assertIn("phrase", text)
+        self.assertIn("after", text)
+''')
+
 REBOUND = HEAD + _body(r'''
         doc = mod.__doc__
         doc = run_cli(["--help"]).stdout
@@ -634,6 +686,12 @@ class DocstringScanTest(unittest.TestCase):
     def test_each_branch_of_an_if_is_scanned_from_the_incoming_bindings(self):
         self.assertEqual(self.found(BRANCHES), [(TEST_ID, 8), (TEST_ID, 9)])
 
+    def test_a_try_handler_is_scanned_from_the_bindings_before_the_body(self):
+        self.assertEqual(self.found(TRY_HANDLER), [(TEST_ID, 8)])
+
+    def test_each_match_case_is_scanned_from_the_incoming_bindings(self):
+        self.assertEqual(self.found(MATCH_CASES), [(TEST_ID, 9), (TEST_ID, 10)])
+
     def test_a_help_usage_check_passes(self):
         self.assertEqual(self.found(HELP_USAGE), [])
 
@@ -662,9 +720,11 @@ class DocstringTreeTest(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "python3 -c 'import m; print(m.__doc__)' | grep -q words\n"
             "python3 -c 'import m; assert \"words\" in m.__doc__'\n"
+            "python3 -c 'import m; assert m.__doc__ == \"words\"'\n"
+            "python3 -c \"import m; assert m.__doc__ == 'words'\"\n"
         )
         found = self.findings({"justfile": JUSTFILE_HEAD + "    tests/x.sh\n", "tests/x.sh": script})
-        self.assertEqual(found, [("tests/x.sh", 2), ("tests/x.sh", 3)])
+        self.assertEqual(found, [("tests/x.sh", 2), ("tests/x.sh", 3), ("tests/x.sh", 4), ("tests/x.sh", 5)])
 
     def test_a_shell_docstring_existence_check_or_comment_passes(self):
         script = (
@@ -672,6 +732,9 @@ class DocstringTreeTest(unittest.TestCase):
             "# grep m.__doc__ for words\n"
             "python3 -c 'import m; assert m.__doc__'\n"
             "python3 -c 'import m; assert (m.__doc__ or \"\") != \"\"'\n"
+            "python3 -c \"import m; assert m.__doc__ != ''\"\n"
+            "python3 -c \"import m; assert len(m.__doc__) != 0\"\n"
+            "[ \"$(python3 -c 'import m; print(m.__doc__)')\" != \"\" ]\n"
         )
         found = self.findings({"justfile": JUSTFILE_HEAD + "    tests/x.sh\n", "tests/x.sh": script})
         self.assertEqual(found, [])
