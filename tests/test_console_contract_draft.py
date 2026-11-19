@@ -22,6 +22,7 @@ from agent_tools import canonical
 from agent_tools.console import contract_draft as cd
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from .console_test_support import PREK_HOOK
 
 ROOT = Path(__file__).resolve().parent.parent
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
@@ -853,12 +854,188 @@ class ContractDraftTest(unittest.TestCase):
         self.assertTrue(cancel.is_set())
         self.assertEqual(reading["hooks"], [])
 
+    def test_read_hooks_names_the_stranded_hook_of_the_hooks_directory(self):
+        root = sample(self.parent, remote=False)
+        bin_dir = self.parent / "bin"
+        bin_dir.mkdir()
+        install_hook(root, text=PREK_HOOK.format(prek="/nonexistent/prek"))
+        install_hook(root, name="commit-msg")
+        self.assertEqual(cd.read_hooks(str(root), search_path=str(bin_dir)),
+                         {"hooks": ["pre-commit", "commit-msg"], "stranded": ["pre-commit"],
+                          "environments": []})
+
+    def test_read_hooks_reads_a_tracked_hook_through_its_link_from_head(self):
+        root = sample(self.parent, remote=True)
+        bin_dir = self.parent / "bin"
+        bin_dir.mkdir()
+        git(root, "config", "core.hooksPath", "githooks")
+        (root / "githooks").mkdir()
+        (root / "githooks" / "real").write_text("#!/bin/sh\nexec hooktool \"$@\"\n")
+        (root / "githooks" / "real").chmod(0o755)
+        (root / "githooks" / "pre-commit").symlink_to("real")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "--no-verify", "-m", "more")
+        (root / "githooks" / "real").write_text("#!/bin/sh\nexit 0\n")
+        self.assertEqual(cd.read_hooks(str(root), search_path=str(bin_dir))["stranded"], ["pre-commit"])
+
+    def test_an_oversized_hook_is_indeterminate_on_both_paths(self):
+        text = "#!/bin/sh\nexec hooktool \"$@\"\n" + "#" * cd.TEXT_LIMIT + "\n"
+        for letter in ("hooks-directory", "tracked-path"):
+            with self.subTest(case=letter):
+                root = sample(self.parent / letter, remote=True)
+                bin_dir = self.parent / letter / "bin"
+                bin_dir.mkdir()
+                calls = []
+                real = cd._git
+
+                def recording(*arguments, **kwargs):
+                    calls.append(arguments)
+                    return real(*arguments, **kwargs)
+
+                if letter == "hooks-directory":
+                    install_hook(root, text=text)
+                else:
+                    git(root, "config", "core.hooksPath", "githooks")
+                    (root / "githooks").mkdir()
+                    (root / "githooks" / "pre-commit").write_text(text)
+                    (root / "githooks" / "pre-commit").chmod(0o755)
+                    git(root, "add", "-A")
+                    git(root, "commit", "-q", "--no-verify", "-m", "more")
+                with unittest.mock.patch.object(cd, "_git", recording):
+                    reading = cd.read_hooks(str(root), search_path=str(bin_dir))
+                self.assertEqual(reading["hooks"], ["pre-commit"])
+                self.assertEqual(reading["stranded"], [])
+                for call in calls:
+                    for index, word in enumerate(call[:-1]):
+                        self.assertFalse(
+                            word == "cat-file" and call[index + 1] == "blob"
+                            and "HEAD:githooks/pre-commit" in call, call)
+
+    def test_a_working_hook_with_a_terminator_proposes_nothing(self):
+        root = self.environment_checkout()
+        install_hook(root, text="#!/bin/sh\nexec hooktool;\n")
+        bin_dir = self.parent / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "hooktool").write_text("#!/bin/sh\n")
+        (bin_dir / "hooktool").chmod(0o755)
+        reading = cd.read_hooks(str(root), search_path=str(bin_dir))
+        self.assertEqual(reading["stranded"], [])
+        self.assertEqual(cd.reconcile_fields(str(root), reading), [])
+
+    def test_read_hooks_never_raises_and_a_set_cancel_reads_nothing(self):
+        root = self.environment_checkout()
+        empty = {"hooks": [], "stranded": [], "environments": []}
+        with unittest.mock.patch.object(cd, "_environments", side_effect=RuntimeError):
+            self.assertEqual(cd.read_hooks(str(root)), empty)
+        cancel = threading.Event()
+        cancel.set()
+        self.assertEqual(cd.read_hooks(str(root), cancel), empty)
+
+    def test_reconcile_fields_proposes_only_for_a_stranded_hook_and_an_environment(self):
+        root = str(self.environment_checkout())
+        reading = {"stranded": ["pre-commit"], "hooks": ["pre-commit"], "environments": ["devenv.nix"]}
+        drafted = cd.draft(root, {**cd.read("/nonexistent"), "hooks": ["pre-commit"],
+                                  "environments": ["devenv.nix"],
+                                  "remotes": [("origin", "https://github.com/o/r.git")]})
+        record = by_field(drafted)["commit-environment"]
+        self.assertEqual(cd.reconcile_fields(root, reading), [record])
+        self.assertEqual(cd.reconcile_fields(root, {**reading, "stranded": []}), [])
+        self.assertEqual(cd.reconcile_fields(root, {**reading, "environments": []}), [])
+
+    def test_a_reconcile_proposal_is_an_amendment_that_reads_shows_and_changes(self):
+        root = str(self.environment_checkout())
+        reading = {"stranded": ["pre-commit"], "hooks": ["pre-commit"], "environments": ["devenv.nix"]}
+        fields = cd.reconcile_fields(root, reading)
+        full = cd.draft(root, cd.read(root))
+        self.assertTrue(cd.amends(fields))
+        self.assertFalse(cd.amends(full))
+        self.assertFalse(cd.amends([]))
+        self.assertFalse(cd.amends(None))
+        self.assertEqual(cd.environment(fields), "devenv shell --")
+        none, error = cd.set_value(fields, "commit-environment", "none", entries=[], root=root)
+        self.assertIsNone(error)
+        self.assertEqual(pair(none, "commit-environment"), ("none", "owner"))
+        self.assertIsNone(cd.environment(none))
+        self.assertIs(cd.carried(fields, {"plan": {"commit_environment": ["devenv", "shell", "--"]}}), fields)
+        self.assertIsNone(cd.carried(fields, {"plan": {}}))
+        self.assertIs(cd.carried(fields, {"error": {}}), fields)
+        self.assertIs(cd.carried(none, {"plan": {}}), none)
+        self.assertIs(cd.carried(full, {"plan": {}}), full)
+        self.assertIsNone(cd.carried(None, {"plan": {}}))
+        line = "commits run in its development shell: devenv shell (found in its files)"
+        entries = cd.shown(fields)
+        self.assertEqual([(e["line"], e["more"]) for e in entries], [(line, False)])
+        self.assertIsNone(cd.more_line(fields))
+        self.assertEqual(cd.proposed_lines(fields), [line])
+        refreshed = cd.refresh(root, fields)
+        self.assertEqual(pair(refreshed, "commit-environment"), ("devenv shell --", "files"))
+        self.assertEqual(cd.open_fields(fields), [])
+        _, refused = cd.set_value(fields, "commit-environment", "devenv shell -- 'x", entries=[], root=root)
+        self.assertEqual(refused, cd.COMMAND_UNREADABLE)
+
     def test_the_draft_id_is_the_canonical_digest(self):
         root, fields = self.remote_fields()
         self.assertEqual(cd.draft_id(root, fields),
                          "draft:" + canonical.telemetry_digest({"root": root, "fields": fields}))
         new = self.settled(fields, root, max_parallel="2")
         self.assertNotEqual(cd.draft_id(root, new), cd.draft_id(root, fields))
+
+
+class StrandedHookTest(unittest.TestCase):
+    def setUp(self):
+        self.bin = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.bin, ignore_errors=True)
+
+    def tool(self, name):
+        path = self.bin / name
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    def test_the_prek_hook_is_stranded_when_neither_its_recorded_path_nor_prek_is_found(self):
+        self.assertTrue(cd.hook_stranded(PREK_HOOK.format(prek="/nonexistent/bin/prek"), str(self.bin)))
+
+    def test_a_hook_whose_runner_is_found_is_not_stranded(self):
+        outside = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        absolute = outside / "tool"
+        absolute.write_text("#!/bin/sh\n")
+        absolute.chmod(0o755)
+        template = (f"INSTALL_PYTHON={absolute}\n"
+                    "exec \"$INSTALL_PYTHON\" -mpre_commit \"${{ARGS[@]}}\"\n"
+                    "exec pre-commit \"${{ARGS[@]}}\"\n")
+        for letter, text, present in (
+                ("prek-on-path", PREK_HOOK.format(prek="/nonexistent/bin/prek"), "prek"),
+                ("recorded-path", PREK_HOOK.format(prek=absolute), None),
+                ("literal", "#!/bin/sh\nexec hooktool \"$@\"\n", "hooktool"),
+                ("template", template, "pre-commit"),
+                ("terminator", "#!/bin/sh\nexec hooktool;\n", "hooktool")):
+            with self.subTest(case=letter):
+                directory = Path(tempfile.mkdtemp(dir=self.bin))
+                if present:
+                    path = directory / present
+                    path.write_text("#!/bin/sh\n")
+                    path.chmod(0o755)
+                self.assertFalse(cd.hook_stranded(text, str(directory)))
+
+    def test_a_literal_runner_missing_from_the_path_is_stranded(self):
+        self.assertTrue(cd.hook_stranded("#!/bin/sh\nexec hooktool \"$@\"\n", str(self.bin)))
+
+    def test_a_hook_the_rule_cannot_read_is_never_stranded(self):
+        for letter, text in (
+                ("no-exec", "#!/bin/sh\nhooktool\n"),
+                ("unassigned", "#!/bin/sh\nexec \"$TOOL\"\n"),
+                ("substitution", "#!/bin/sh\nexec \"$(command -v hooktool)\"\n"),
+                ("relative", "#!/bin/sh\nexec ./hooktool\n"),
+                ("unreadable-exec", "#!/bin/sh\nexec \"hooktool\n"),
+                ("unreadable-assignment", "#!/bin/sh\nTOOL=$(x y)\nexec \"$TOOL\"\n"),
+                ("option", "#!/bin/sh\nexec -a name hooktool\n"),
+                ("comment", "# exec hooktool\n"),
+                ("empty", ""),
+                ("semicolon", "#!/bin/sh\nexec hooktool;\n"),
+                ("pipe", "#!/bin/sh\nexec hooktool|tee\n")):
+            with self.subTest(case=letter):
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
 
 
 if __name__ == "__main__":
