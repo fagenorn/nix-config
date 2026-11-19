@@ -1,4 +1,7 @@
-"""forge-claim land (issue 629): the cross-host land lock against the fake gh and its ref store."""
+"""forge-claim land (issue 629): the cross-host land lock against the fake gh and its ref store.
+
+Logic tests answer the fake gh in this process (`ForgeWorld.answer_in_process`); the concurrent runs,
+the CLI children and the token check keep real child processes."""
 import contextlib
 import io
 import json
@@ -14,7 +17,8 @@ from email.utils import format_datetime
 from agent_tools.claims import forge_claim
 from agent_tools.claims import forge_land_lock as land_lock
 from agent_tools.claims import forge_markers as fm
-from .forge_world import ForgeWorld, host_clock
+from agent_tools.system import forge_api
+from .forge_world import NETWORK_DOWN, ForgeWorld, _InProcessSubprocess, host_clock
 
 SLUG, BRANCH = "octo/widgets", "main"
 OWNER, NAME = SLUG.split("/")
@@ -83,6 +87,8 @@ def finish(proc):
 
 
 class Base(unittest.TestCase):
+    in_process = True  # logic tests answer gh in this process; a real-child test sets False
+
     def setUp(self):
         self.slept = []
         patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
@@ -93,6 +99,8 @@ class Base(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
+        if self.in_process:
+            self.world.answer_in_process(forge_api)
 
     def lock(self, sha=None, **kwargs):
         self.world.ref_store(SLUG, {REF: sha} if sha else {}, **kwargs)
@@ -603,6 +611,8 @@ class TransientRetryTest(Base):
 class ConcurrencyTest(Base):
     """Children of `python -m agent_tools.claims.forge_claim land` racing on one ref store."""
 
+    in_process = False
+
     def test_racing_acquires_leave_one_holder(self):
         self.lock()
         self.pulls(A, pull(11, sha=A))
@@ -633,6 +643,36 @@ class ConcurrencyTest(Base):
         code, out = finish(start_cli(*land("release", A)))
         self.assertEqual((code, out["verdict"]), (3, "not_held"))
         self.assertEqual(self.world.refs(), {REF: B})
+
+
+class InProcessTest(Base):
+    def test_a_land_lock_logic_test_starts_no_child_process(self):
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        with mock.patch.object(subprocess, "Popen", side_effect=RuntimeError("a child process started")):
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertTrue(self.world.argvs("gh"))
+        self.assertTrue(all(not call["token_visible"] for call in self.world.calls()))
+
+
+class TokenTest(Base):
+    in_process = False
+
+    def test_a_github_token_never_reaches_gh_in_a_child_process(self):
+        self.assertIs(forge_api.subprocess, subprocess)
+        self.lock()
+        self.pulls(A, pull(11, sha=A))
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "harness-gh-token"}):
+            with mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as spy:
+                code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"]), (0, "acquired"))
+        self.assertEqual(self.world.refs(), {REF: A})
+        calls = self.world.calls()
+        self.assertTrue(calls)
+        self.assertTrue(all(call["tool"] == "gh" and not call["token_visible"] for call in calls))
+        self.assertEqual([list(c.args[0]) for c in spy.call_args_list], [["gh", *row["argv"]] for row in calls])
 
 
 class ClockTest(Base):
@@ -2262,8 +2302,105 @@ class QueueTest(Base):
         self.assertEqual((land_lock.FAST_POLL, land_lock.FREE_GRACE, land_lock.QUEUE_REFRESH), (20, 60, 60))
 
 
+class InProcessForgeTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def outcome(self, arrange, argv, token=False, in_process=False):
+        self.world.reset()
+        arrange()
+        env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+        if token:
+            env["GITHUB_TOKEN"] = "harness-token"
+        if in_process:
+            done = self.world.answer(["gh", *argv], env=env)
+        else:
+            done = subprocess.run([str(self.world.bin / "gh"), *argv], capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, env=env)
+        state = self.world.state
+        refs = self.world.refs() if (state / "refs.json").exists() else None
+        stored = self.world.stored() if (state / "store.json").exists() else None
+        return done.returncode, done.stdout, done.stderr, self.world.calls(), refs, stored
+
+    def test_the_in_process_gh_answers_as_the_child_does(self):
+        world = self.world
+        create = ["api", "-X", "POST", f"repos/{SLUG}/git/refs", "-f", f"ref={REF}"]
+        cas = ["api", "graphql", "-f", f"query={fm.UPDATE_REFS}", "-f", "repositoryId=R_kgDOtest",
+               "-f", f"name={REF}", "-f", f"before={A}", "-f", f"after={B}"]
+        stored_comment = {"id": 5, "updated_at": T0, "created_at": T0, "body": "held by the parity row"}
+
+        def outage():
+            world.respond("gh", ["api", "x"], stdout="out")
+            world.outage(1)
+
+        rows = [
+            ("registered", lambda: world.respond("gh", ["api", "x"], stdout="out\r\nmore\r\n",
+                                                 stderr="err\r\n", exit=0), ["api", "x"], False, 0),
+            ("unregistered", lambda: None, ["api", "nope"], False, 64),
+            ("ref read", lambda: world.ref_store(SLUG, {REF: A}), LOCK_READ, False, 0),
+            ("ref absent", lambda: world.ref_store(SLUG, {}), LOCK_READ, False, 1),
+            ("create exists", lambda: world.ref_store(SLUG, {REF: A}), [*create, "-f", f"sha={B}"], False, 1),
+            ("cas applied", lambda: world.ref_store(SLUG, {REF: A}), cas, False, 0),
+            ("outage", outage, ["api", "x"], False, 1),
+            ("lost reply", lambda: world.ref_store(SLUG, {}, lose_reply=["create"]),
+             [*create, "-f", f"sha={A}"], False, 1),
+            ("token", lambda: world.respond("gh", ["api", "x"], stdout="out"), ["api", "x"], True, 65),
+            ("comment list", lambda: world.comment_store(SLUG, 7, [stored_comment]),
+             ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/7/comments?per_page=100"], False, 0),
+        ]
+        for name, arrange, argv, token, expected in rows:
+            with self.subTest(name):
+                child = self.outcome(arrange, argv, token=token)
+                answered = self.outcome(arrange, argv, token=token, in_process=True)
+                self.assertEqual(answered, child)
+                self.assertEqual(child[0], expected)
+                if name == "registered":
+                    self.assertEqual(child[1:3], ("out\nmore\n", "err\n"))
+                if name == "outage":
+                    self.assertEqual(child[2], NETWORK_DOWN + "\n")
+                if name == "cas applied":
+                    self.assertEqual(child[4], {REF: B})
+                if name == "lost reply":
+                    self.assertEqual(child[4], {REF: A})
+                if name == "token":
+                    self.assertIs(child[3][-1]["token_visible"], True)
+                if name == "comment list":
+                    self.assertIn("held by the parity row", child[1])
+                    self.assertEqual(child[5], [stored_comment])
+
+        with self.subTest("a missing PATH"):
+            tool = "forge-world-absent-tool"
+            world = ForgeWorld(self, tools=(tool,))
+            env = {"FORGE_WORLD": str(world.state)}
+            with self.assertRaises(FileNotFoundError):
+                subprocess.run([tool], env=env, capture_output=True)
+            with self.assertRaises(FileNotFoundError):
+                _InProcessSubprocess(world).run([tool], env=env, capture_output=True)
+            with self.assertRaises(FileNotFoundError):
+                world.answer([tool], env=env)
+            self.assertEqual(world.calls(), [])
+        with self.subTest("check=True"):
+            self.world.reset()
+            self.world.respond("gh", ["api", "x"], exit=1, stderr="gh: Not Found (HTTP 404)")
+            argv, env = ["api", "x"], self.world.env()
+            with self.assertRaises(subprocess.CalledProcessError) as child:
+                subprocess.run([str(self.world.bin / "gh"), *argv], capture_output=True, text=True,
+                               check=True, env=env)
+            with self.assertRaises(subprocess.CalledProcessError) as answered:
+                _InProcessSubprocess(self.world).run(["gh", *argv], capture_output=True, text=True,
+                                                     check=True, env=env)
+            self.assertEqual((answered.exception.returncode, answered.exception.stderr),
+                             (child.exception.returncode, child.exception.stderr))
+            self.assertEqual(answered.exception.returncode, 1)
+            done = _InProcessSubprocess(self.world).run(["gh", *argv], capture_output=True, env=env)
+            self.assertEqual(done.returncode, 1)
+
+
 class IdleRaceTest(Base):
+    in_process = False
+
     def test_concurrent_idle_stealers_one_wins(self):
+        self.assertIs(forge_api.subprocess, subprocess)
         self.lock(C, schedule=["get", "get", "cas", "cas"])
         self.pulls(A, pull(11, sha=A))
         self.pulls(B, pull(13, sha=B))
