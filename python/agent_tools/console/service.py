@@ -6010,6 +6010,8 @@ class ConsoleService:
         sprint = self._manager_sprint(sprint_id, secret)
         if sprint.stopped_at is not None or sprint.closing is not None:
             raise sprints.Refused(sprints.ENDED)  # a card for it would show and no decision would take it (#1263)
+        if sprint.stop_at is not None:
+            raise sprints.Refused(sprints.ALREADY_STOPPING)  # the page hides it and no decision takes it (#1263)
         checked = sprints.checked_brief(brief)
         for m, member in enumerate(checked.get("pictures", ()), 1):
             self._own_picture(sprint, member["picture"],

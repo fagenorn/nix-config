@@ -704,6 +704,34 @@ class GuestSteerPageTest(unittest.TestCase):
         self.assertEqual(full(h1), "3 things wait on the owner")
         self.assertEqual([full(n) for n in named(snap["statement"], "sub")], ["1 thing waits on you"])
 
+    def test_a_production_question_the_manager_marked_owner_only_waits_with_no_control(self) -> None:
+        frame = steer_frame(tracker=False, rounds=True, asked={**ASKED, "owner_only": True})
+        (asked,) = [item for item in frame["inbox"]["open"] if item["reason"] == "question"]
+        self.assertIs(asked["owner_only"], True)
+        self.assertIs(asked["steer"], False)
+        snap = page_of(GUEST, [START, {"frame": frame}])
+        (row,) = named(snap["inbox"], "guest-item")
+        (wait,) = named(row, "guest-wait")
+        self.assertTrue(full(wait).startswith("Waiting on the owner"))
+        self.assertIn(ASKED["question"], full(row))
+        self.assertEqual(controls_of(row), [])
+        self.assertEqual(snap["posts"], [])
+
+    def test_a_goal_never_goes_to_another_project_when_the_chosen_one_leaves_the_list(self) -> None:
+        both = {**SCOPED, "recent_projects": ["owner/p01", "owner/p02"]}
+        left = {**SCOPED, "recent_projects": ["owner/p01"]}
+        words = "Make the importer resumable"
+        refused, sent = harness([
+            START, {"frame": both}, {"focus_on": "goal-text"},
+            {"type": {"class": "goal-text", "text": words}}, {"click": "goal-project", "nth": 1},
+            {"frame": left}, {"click": "goal-send"}, SNAP,
+            {"click": "goal-project"}, {"click": "goal-send"}, SNAP], GUEST)
+        self.assertEqual(posts_to(refused, "/api/goal"), [])
+        self.assertIn("Could not send: choose a project", full(refused["goal"]))
+        self.assertEqual([n["value"] for n in named(refused["goal"], "goal-text")], [words])
+        (post,) = posts_to(sent, "/api/goal")
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p01", "goal": words})
+
     def test_a_mixed_guest_inbox_keeps_its_waiting_rows_through_an_approval(self) -> None:
         frame = steer_frame()
         steps = [START, {"frame": frame}, {"click": "approve"}, SNAP, {"clock": 5001}, SNAP,

@@ -7,7 +7,9 @@ import io
 import json
 import os
 import socket
+import threading
 import unittest
+from unittest import mock
 
 from agent_tools.console import guest, service, sprints
 
@@ -29,6 +31,30 @@ BAD = {"/api/goal": "bad goal", "/api/approve": "bad approve", "/api/reply": "ba
        "/api/round-answer": "bad round answer", "/api/message": "bad message"}
 QUESTION = {"question": "Which store keeps the checkpoints?", "blocks": "the resume slice",
             "options": ["sqlite", "files"], "recommended": "files"}
+CLOSED = object()  # the connection was closed under the client (broken pipe or reset)
+
+
+def read_answer(sock):
+    """The refusal a client reads: CLOSED, b"" at EOF, else a status line that keeps its first byte."""
+    try:
+        got = sock.recv(1)
+    except (BrokenPipeError, ConnectionResetError):
+        return CLOSED
+    if got == b"":
+        return got
+    try:
+        while not got.endswith(b"\r\n") and len(got) < 64:
+            more = sock.recv(1)
+            if more == b"":
+                break
+            got += more
+    except ConnectionResetError:
+        pass
+    return got
+
+
+def door_refused(got):
+    return got is CLOSED or got == b"" or got.startswith((b"HTTP/1.1 403 ", b"HTTP/1.0 403 "))
 
 
 def walk(node):
@@ -446,6 +472,18 @@ class GuestWriteTableTest(GuestWriteCase):
         self.assertEqual(str(raised.exception), sprints.ENDED)
         self.assertEqual(len(self.rows("brief.sent")), 1)
 
+    def test_a_brief_sent_or_checked_while_a_sprint_is_stopping_is_refused(self):
+        self.seed()
+        svc = self.start()
+        sid = self.waiting(svc, "owner/p01", ACTOR)
+        svc.stop_sprint("owner/p01", sid)
+        for name, call in (("send", svc.send_brief), ("check", svc.check_brief)):
+            with self.subTest(call=name):
+                with self.assertRaises(sprints.Refused) as raised:
+                    call(sid, self.secret(sid), PARTS)
+                self.assertEqual(str(raised.exception), sprints.ALREADY_STOPPING)
+        self.assertEqual(len(self.rows("brief.sent")), 1)
+
     def test_a_single_marked_picture_is_no_look_and_the_colleague_answers_it(self):
         self.seed()
         svc = self.start()
@@ -578,27 +616,95 @@ class GuestDoorWriteTest(GuestWriteCase):
                 self.assertEqual(got, (403, guest.SHARING_OFF_TEXT.encode() + b"\n"))
 
     def test_a_peer_neither_root_nor_the_owner_writes_nothing(self):
-        self.seed()
+        self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})
         captured = io.StringIO()
+        hold = {"event": None}
+        waited = []
+
+        def reader(sock):
+            if hold["event"] is not None:
+                waited.append(hold["event"].wait(5))
+            return os.geteuid() + 1
+
+        closed = threading.Event()
+        original = service.GuestServer.close_request
+
+        def closing(server, request):
+            original(server, request)
+            closed.set()
+
         with contextlib.redirect_stderr(captured):
-            svc = self.start(guest_peer_reader=lambda sock: os.geteuid() + 1)
+            svc = self.start(guest_peer_reader=reader)
             rows = support.log_rows(self.store)
+            for login in (COLLEAGUE, SECOND):
+                self.assertIsNotNone(svc.guest_view_bytes(login))
             body = json.dumps({"project_id": "owner/p01", "goal": GOAL}).encode()
             head = ["POST /api/goal HTTP/1.1", "Host: localhost", f"X-Forwarded-Host: {TAILNET}",
                     f"Tailscale-User-Login: {COLLEAGUE}", "Content-Type: application/json",
                     f"X-Console-Token: {self.guest_token()}", f"Origin: https://{TAILNET}",
                     f"Content-Length: {len(body)}"]
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(5)
-                sock.connect(svc.guest_socket)
-                try:
-                    sock.sendall("\r\n".join(head).encode() + b"\r\n\r\n" + body)
-                    got = sock.recv(1)
-                except ConnectionError:  # the refusal may close the door mid-send (reset or broken pipe)
-                    got = b""
-        self.assertEqual(got, b"")
-        self.assertEqual(support.log_rows(self.store), rows)
-        self.assertEqual(captured.getvalue().splitlines(), ["console: guest_refused not_permitted"])
+            request = "\r\n".join(head).encode() + b"\r\n\r\n" + body
+            with mock.patch.object(service.GuestServer, "close_request", autospec=True,
+                                   side_effect=closing):
+                for ordering in ("send first", "door closes first"):
+                    with self.subTest(ordering=ordering):
+                        closed.clear()
+                        owner = svc.view_bytes
+                        guests = {login: svc.guest_view_bytes(login) for login in (COLLEAGUE, SECOND)}
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                            sock.settimeout(5)
+                            sock.connect(svc.guest_socket)
+                            if ordering == "send first":
+                                sent = threading.Event()
+                                hold["event"] = sent
+                                sock.sendall(request)
+                                sent.set()
+                                got = read_answer(sock)
+                                hold["event"] = None
+                            else:
+                                self.assertTrue(closed.wait(5))
+                                try:
+                                    sock.sendall(request)
+                                    got = read_answer(sock)
+                                except (BrokenPipeError, ConnectionResetError):
+                                    got = CLOSED
+                        svc.settle_guest_readings()
+                        self.assertTrue(door_refused(got), got)
+                        self.assertEqual(support.log_rows(self.store), rows)
+                        self.assertEqual(svc.view_bytes, owner)
+                        for login, view in guests.items():
+                            self.assertEqual(svc.guest_view_bytes(login), view)
+        self.assertEqual(waited, [True])
+        self.assertEqual(captured.getvalue().splitlines(), ["console: guest_refused not_permitted"] * 2)
+
+
+class RefusedAnswerTest(unittest.TestCase):
+    def test_only_a_closed_door_eof_or_a_403_status_line_counts_as_refused(self):
+        for got, refused in ((CLOSED, True), (b"", True), (b"HTTP/1.1 403 Forbidden\r\n", True),
+                             (b"HTTP/1.0 403 Forbidden\r\n", True), (b"H", False),
+                             (b"HTTP/1.1 200 OK\r\n", False), (b"HTTP/1.1 409 Conflict\r\n", False),
+                             (b"HTTP/1.1 4030 \r\n", False)):
+            with self.subTest(got=got):
+                self.assertIs(door_refused(got), refused)
+
+    def test_the_answer_keeps_its_first_byte_and_reads_a_whole_status_line(self):
+        def pair():
+            a, b = socket.socketpair()
+            self.addCleanup(a.close)
+            self.addCleanup(b.close)
+            b.settimeout(5)
+            return a, b
+
+        a, b = pair()
+        a.sendall(b"HTTP/1.1 403 Forbidden\r\nrest")
+        self.assertEqual(read_answer(b), b"HTTP/1.1 403 Forbidden\r\n")
+        a, b = pair()
+        a.close()
+        self.assertEqual(read_answer(b), b"")
+        a, b = pair()
+        a.sendall(b"HTTP/1.1 403")
+        a.close()
+        self.assertEqual(read_answer(b), b"HTTP/1.1 403")
 
 
 class BothPagesTest(GuestWriteCase):

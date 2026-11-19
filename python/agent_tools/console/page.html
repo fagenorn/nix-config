@@ -5220,6 +5220,8 @@ function goalMatches() {
   return recentProjects.filter((id) => id.toLowerCase().includes(needle));
 }
 function chosenProject() {
+  // A choice that left the list is not replaced by the first match: the draft waits for a new choice.
+  if (draft.project !== null && !recentProjects.includes(draft.project)) return null;
   const matches = goalMatches();
   if (draft.project !== null && matches.includes(draft.project)) return draft.project;
   return matches.length > 0 ? matches[0] : null;
