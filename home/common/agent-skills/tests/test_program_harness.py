@@ -49,6 +49,9 @@ if (args.late) { setImmediate(() => log('late')); Promise.resolve().then(() => l
 if (args.timer) { setTimeout(() => { globalThis.lateTimer = 1 }, 30).unref(); return { ok: true } }
 if (args.wait) { await new Promise(r => setTimeout(r, 150)); return { late: typeof lateTimer !== 'undefined' } }
 if (args.chatty) { console.log('debug'); return { ok: true } }
+if (args.setuplike) { console.log(JSON.stringify({ ok: true, host: 'h1' })); return { ok: true } }
+if (args.builtins) { Array.prototype.leak = 7; process.env.RV_LEAK = 'yes'; process.on('SIGUSR2', () => {}); return { ok: true } }
+if (args.probe) return { arr: typeof [].leak, env: process.env.RV_LEAK === undefined ? null : process.env.RV_LEAK, listeners: process.listenerCount('SIGUSR2') }
 if (args.echo) return { echo: args.echo }
 if (args.exit) { process.exitCode = 1; return { ok: true } }
 if (args.noreflect) { delete globalThis.Reflect; return { ok: true } }
@@ -170,6 +173,20 @@ class ReuseMatchesAFreshProcessTest(NodeCase):
                     self.assertEqual(plain2["result"], {"ok": True})
                     self.assertIsNotNone(pid1)
                     self.assertEqual(pid1, pid2)
+
+    def test_a_scenario_that_changes_a_built_in_the_environment_or_a_process_listener_is_answered_then_the_next_runs_in_a_new_process(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                probe = {"args": {"probe": True}}
+                fresh = run_fresh(NODE, harness, self.fixture, probe)
+                s = self.server()
+                first = s.run(harness, self.fixture, {"args": {"builtins": True}})
+                after_first = s.pid
+                out = s.run(harness, self.fixture, probe)
+                self.assertEqual(fresh["result"], {"arr": "undefined", "env": None, "listeners": 0})
+                self.assertEqual(first["result"], {"ok": True})
+                self.assertIsNone(after_first)
+                self.assertEqual(out, fresh)
 
     def test_a_reused_batch_harness_answers_a_per_call_child_list_as_a_fresh_process(self):
         sc = {"args": {"child": True}, "children": {"1": [{"stage": "first"}, {"stage": "second"}]}}
@@ -295,6 +312,19 @@ class FailureShapesTest(NodeCase):
                 pid = s.pid
                 with self.assertRaises(AssertionError) as raised:
                     s.run(harness, self.fixture, {"args": {"chatty": True}})
+                self.assertIn("harness failed: the harness wrote a line that is not a reply", str(raised.exception))
+                self.assertIsNone(s.pid)
+                self.assertEqual(s.run(harness, self.fixture, {"args": {"echo": "next"}})["result"], {"echo": "next"})
+                self.assertNotIn(s.pid, (None, pid))
+
+    def test_a_program_that_prints_a_reply_shaped_object_is_never_answered_by_a_stale_reply(self):
+        for name, harness in HARNESSES.items():
+            with self.subTest(harness=name):
+                s = self.server()
+                s.run(harness, self.fixture, {"args": {}})
+                pid = s.pid
+                with self.assertRaises(AssertionError) as raised:
+                    s.run(harness, self.fixture, {"args": {"setuplike": True}})
                 self.assertIn("harness failed: the harness wrote a line that is not a reply", str(raised.exception))
                 self.assertIsNone(s.pid)
                 self.assertEqual(s.run(harness, self.fixture, {"args": {"echo": "next"}})["result"], {"echo": "next"})

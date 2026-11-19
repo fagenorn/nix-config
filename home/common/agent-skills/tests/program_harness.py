@@ -21,7 +21,8 @@ pipes and a temporary file as stderr, so a program that logs a lot never blocks 
 thread reads stdout lines into a queue (a `None` at EOF) and `run` waits for one line with the timeout.
 On a timeout `run` kills and reaps the process and raises `AssertionError("<failure>: no reply within <t> s")`;
 on EOF or a broken pipe it raises `AssertionError("<failure>: the harness exited with <code>: <stderr>")`;
-on a line that is not a reply object (a program that wrote to stdout) it kills and reaps the process and raises
+on a line that is not a reply (not an object with a boolean `ok` and the `out` or `error` key it needs: a program that wrote to stdout), or a
+reply with another line queued behind it, it kills and reaps the process and raises
 `AssertionError("<failure>: the harness wrote a line that is not a reply: <line>")`;
 on an `ok: false` reply it raises `AssertionError("<failure>: <error>")` followed by the stderr text written
 since the run began, when any. A restart reply closes the process before `run` returns or raises, so `pid` is
@@ -120,8 +121,11 @@ class ProgramServer:
             raise AssertionError(f"{failure}: the harness exited with {code}: {stderr}")
         try:
             reply = json.loads(line)
-            if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool):
+            if not isinstance(reply, dict) or not isinstance(reply.get("ok"), bool) or ("out" if reply["ok"] else "error") not in reply:
                 raise ValueError("not a reply")
+            # A stray line that happens to be a reply-shaped object leaves the real reply queued behind it. A restart reply is followed by EOF, so only a live process is checked.
+            if not reply.get("restart") and not self._lines.empty():
+                raise ValueError("a line follows the reply")
         except ValueError:
             # A program that wrote to stdout put a line ahead of its reply: the stream is out of step, so the process is discarded, never reused.
             stderr = self._stderr_since(offset)

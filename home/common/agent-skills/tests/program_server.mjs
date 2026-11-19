@@ -10,9 +10,12 @@
 //            "the program set process.exitCode to <code>",
 //            "bad request: <message>" (the line is not JSON, lacks a string harness, a string program or an object scenario,
 //            or the harness fails to import or the program to read or compile).
-// "restart": true means the scenario changed globalThis's own properties (a key added or removed, or any descriptor field changed), or left a timer
-// or immediate pending that no longer held the event loop open (an unref()ed one, which a fresh process would have exited without running). The
-// server writes that reply, reads no further request and ends on its own with exit 0, so the next scenario starts from a clean process.
+// "restart": true means the scenario changed state a fresh process would not carry: an own property (a key added or removed, or any descriptor field
+// changed, or the prototype) of globalThis, of any object a global holds (Array, JSON, process, ...), of its `prototype` or of anything on their
+// prototype chains (so Array.prototype, Object.prototype and Function.prototype are covered); process.env; the listener count of any process event;
+// or it left a timer or immediate pending that no longer held the event loop open (an unref()ed one, which a fresh process would have exited
+// without running). The limit: state held in an object no global reaches (a module's private data, a closure) is not seen. The server writes that
+// reply, reads no further request and ends on its own with exit 0, so the next scenario starts from a clean process.
 // A scenario that returns with process.exitCode set to a nonzero value fails, as a one-shot run exits with that code; the server clears it.
 //
 // A request is parsed and its runner loaded (one runner per harness + program, so each program is read and compiled once) while stdin is
@@ -28,9 +31,14 @@ import { pathToFileURL } from 'node:url'
 // check that follows it.
 const ownKeys = Reflect.ownKeys
 const descriptorOf = Object.getOwnPropertyDescriptor
+const protoOf = Object.getPrototypeOf
+const entriesOf = Object.entries
 const same = Object.is
 const MapOf = Map
 const SetOf = Set
+const eventNamesOf = process.eventNames
+const listenerCountOf = process.listenerCount
+const PROTO = Symbol('prototype')
 
 // Every timer and immediate not yet fired or cleared. At `beforeExit` a ref()ed one would still be holding the loop open, so any left is unref()ed.
 const timers = new SetOf()
@@ -48,19 +56,48 @@ let active = null
 const write = line => { process.stdout.write(line + '\n') }
 const fail = (error, restart) => write(JSON.stringify(restart ? { ok: false, error, restart: true } : { ok: false, error }))
 const stackOf = e => String((e && e.stack) || e)
-const snapshot = () => new MapOf(ownKeys(globalThis).map(k => [k, descriptorOf(globalThis, k)]))
+const isObject = v => (typeof v === 'object' && v !== null) || typeof v === 'function'
+// The objects whose own state is watched: globalThis, every object or function a global holds as data (accessors are never called, so no lazy global
+// is installed by looking), its `prototype`, and every prototype chain above those.
+const rootsOf = () => {
+  const roots = new SetOf([globalThis])
+  const add = o => { for (let p = o; p !== null && !roots.has(p); p = protoOf(p)) roots.add(p) }
+  for (const k of ownKeys(globalThis)) {
+    const d = descriptorOf(globalThis, k)
+    if (!('value' in d) || !isObject(d.value) || d.value === globalThis) continue
+    add(d.value)
+    const proto = descriptorOf(d.value, 'prototype')
+    if (proto && 'value' in proto && isObject(proto.value)) add(proto.value)
+  }
+  return roots
+}
+const entryOf = (o, k) => (k === PROTO ? { value: protoOf(o) } : descriptorOf(o, k))
+const keysOf = o => [...ownKeys(o), PROTO]
+const snapshot = () => {
+  const objects = new MapOf()
+  for (const o of rootsOf()) objects.set(o, new MapOf(keysOf(o).map(k => [k, entryOf(o, k)])))
+  const listeners = new MapOf()
+  for (const name of eventNamesOf.call(process)) listeners.set(name, listenerCountOf.call(process, name))
+  return { objects, listeners, env: new MapOf(entriesOf(process.env)) }
+}
 // Taking a snapshot is itself the first use of a lazily installed Node global (it adds one symbol key the first time), so one is taken now and the
 // symbol is in place before any scenario's `before` is.
 snapshot()
 const FIELDS = ['value', 'get', 'set', 'writable', 'enumerable', 'configurable']
 const changed = before => {
-  const keys = ownKeys(globalThis)
-  if (keys.length !== before.size || keys.some(k => !before.has(k))) return true
-  return keys.some(k => {
-    const now = descriptorOf(globalThis, k)
-    const was = before.get(k)
-    return FIELDS.some(f => !same(now[f], was[f]))
-  })
+  for (const [o, was] of before.objects) {
+    const keys = keysOf(o)
+    if (keys.length !== was.size || keys.some(k => !was.has(k))) return true
+    for (const k of keys) {
+      const now = entryOf(o, k)
+      const old = was.get(k)
+      if (FIELDS.some(f => !same(now[f], old[f]))) return true
+    }
+  }
+  const names = eventNamesOf.call(process)
+  if (names.length !== before.listeners.size || names.some(n => listenerCountOf.call(process, n) !== before.listeners.get(n))) return true
+  const env = entriesOf(process.env)
+  return env.length !== before.env.size || env.some(([k, v]) => before.env.get(k) !== v)
 }
 
 async function runnerOf(harness, program) {
@@ -114,10 +151,10 @@ process.on('beforeExit', () => {
   if (!run) return
   active = null
   // An inspection that throws means the scenario broke something it relies on: restart rather than lose the reply.
-  let restart
-  try { restart = changed(run.before) || timers.size > 0 } catch { restart = true }
   const code = process.exitCode
   process.exitCode = undefined
+  let restart
+  try { restart = changed(run.before) || timers.size > 0 } catch { restart = true }
   if (run.error === undefined && code !== undefined && code !== 0 && code !== '0') run.error = `the program set process.exitCode to ${code}`
   if (run.error !== undefined) fail(run.error, restart)
   else if (run.text === undefined) fail('the program never settled', restart)
