@@ -13,8 +13,32 @@ path of a `browser` script in the run's directory, a `#!/bin/sh` script whose on
 first argument and a newline into the `link` FIFO beside it. The console opens that FIFO for reading,
 without blocking, before it starts the client. `valid_link(text)` is true for text that starts with
 `https://`, is at most `MAX_LINK_CHARS` (4096) characters long and has only characters 0x21 to 0x7E.
-The first line that passes is the run's link; a line that does not is dropped, with one stderr line
-`console: signin_link_refused <profile>` and no part of the line.
+The first line of the FIFO that passes is the browser link; a line that does not is dropped, with one
+stderr line `console: signin_link_refused <profile>` and no part of the line.
+
+The client also writes its manual link to its standard output (client 2.1.322, stdin not a terminal:
+`If the browser didn't open, visit: <link>`, the link possibly wrapped in OSC 8 escapes). The runner
+reads that output for the whole run, in lines of at most `MAX_OUTPUT_LINE` (16384) bytes (the rest of
+a longer line is dropped), and `output_links(line)` lists each token of a line that starts at an
+`https://` and runs to the next byte outside 0x21 to 0x7E, the ones that pass `valid_link`. The first
+token whose route is `manual` is the run's manual link.
+
+Route. `link_route(url)` classifies a link by its one `redirect_uri` query member, and never raises:
+`("manual", None)` for an `https` return address on a host that is present and not in
+`LOOPBACK_HOSTS` (`localhost`, `127.0.0.1`, `::1`); `("loopback", port)` for an `http` one on such a
+host, the port being the written one or 80 when none is written, in 1 to 65535; None for any other
+link (no `redirect_uri` or two of them, another scheme or host, an unreadable port, a URL that does
+not parse). A link of the browser hook that is None is handed out as `unknown`.
+`forward_command(port, host)` is `ssh -N -L <port>:localhost:<port> <host>` for a port in 1 to 65535
+and a host of letters, digits and hyphens that starts with a letter or digit, else None.
+`default_host()` is the machine's short host name. `Link(url, route, port, forward)` is what
+`wait_link` hands back: `route` one of `ROUTES` (`manual`, `loopback`, `unknown`), `port` and
+`forward` set only for `loopback` (`forward` only when `forward_command` gives one).
+`answer_members(link)` is `{"link", "route", "port", "forward"}` of a Link, all four None for None.
+A manual link wins when the client offers one: `wait_link` answers as soon as the manual link is
+known, or, when only the browser link arrived, once `manual_grace` (`MANUAL_GRACE`, 2.0) seconds have
+passed since it did. A run has one answer: the first Link `wait_link` returns for it is returned
+again by every later call, whatever the client prints afterwards.
 
 Code input. The client reads the code that the browser shows the owner from its standard input.
 Host finding, anis-desktop, 2026-11-13, client 2.1.322, each run under a throwaway configuration
@@ -25,19 +49,22 @@ directory, nothing it printed shown. Every run saw the link (`link_seen`), `http
 `rejected` true, `exited` false, `tty_complaint` false. Pty control: `alive_at_link` true,
 `alive_after_20s` true, output grew false, `tty_complaint` false. Pty write (the text and a carriage
 return): `alive_before_write` true, `reacted` true, `rejected` true, `exited` false, `tty_complaint`
-false. Both modes read the code, so `CODE_INPUT` is `pipe`, the simpler one: no terminal, no output to
-drain. The pty mode stays in `start_client` for a client that stops reading a pipe: `CODE_END` is the
+false. Both modes read the code, so `CODE_INPUT` is `pipe`, the simpler one: no terminal. The pty
+mode stays in `start_client` for a client that stops reading a pipe: `CODE_END` is the
 line ending a code is submitted with (`\\n` on a pipe, `\\r` on a pty, whose default mode turns it
-into `\\n` for a line reader).
+into `\\n` for a line reader). Client 2.1.322, from its binary: `auth login` writes its manual link
+to stdout and reads `code#state` lines from stdin, so the owner's code box feeds the manual route
+unchanged.
 
 Runs. `SignIns` holds at most one live run per profile. `start(profile)` returns `Started(run, True)`
 for a new client, `Started(run, False)` with the live run's serial when the profile already runs,
 and never waits for the link. A run's serial is a per-`SignIns` count starting at 1, one per client.
 The client is spawned in a new session (its pid is its process-group id), in a fresh
 `console-login-*` directory (mode 0700) holding only the `browser` script (0700) and the `link` FIFO
-(0600); one daemon watcher thread per run reads the FIFO (and a pty master, discarding it) until the
-client exits. `wait_link(profile)` waits at most `link_wait` seconds (`LINK_WAIT`, 15), or until the
-run ends, and returns the link or None. `send_code(profile, code)` and `cancel(profile)` of a profile
+(0600); one daemon watcher thread per run reads the FIFO and the client's output until the client
+exits. `wait_link(profile)` waits at most `link_wait` seconds (`LINK_WAIT`, 15), or until the run
+ends or the Route rule above answers, and returns a `Link` or None. `SignIns` takes `manual_grace`
+(`MANUAL_GRACE`) and `host` (the name `forward_command` names, `default_host()` when None). `send_code(profile, code)` and `cancel(profile)` of a profile
 with no live run raise `NotRunning`; a write the live client's input refuses raises its `OSError`
 unchanged, so the caller can tell it from a missing run. The write never blocks and never holds the
 runner's lock: the client's input is non-blocking, and a code (at most `MAX_CODE_CHARS` plus the line
@@ -79,7 +106,8 @@ a non-empty string, and returns it. `parse_code_request(body)` takes exactly `pr
 
 Secrecy. No return value, exception message or stderr line carries a link or a code, and neither is
 stored or logged: the link lives in memory for the run, the code goes to the client's input and
-nowhere else. `runs_for(platform)` is `SignIns` where `manager.supported(platform)`, else None.
+nowhere else. The client's output is read into memory only: no byte of it is printed or stored, and
+a candidate that does not parse is dropped silently. `runs_for(platform)` is `SignIns` where `manager.supported(platform)`, else None.
 """
 
 from __future__ import annotations
@@ -89,10 +117,12 @@ import errno
 import json
 import os
 import pty
+import re
 import select
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -101,6 +131,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import parse_qs, urlsplit
 
 from agent_tools.console import manager, signin
 from agent_tools.console.event_log import SIGNIN_ACTED, SIGNIN_ENDED, Event
@@ -110,6 +141,10 @@ ENDED = SIGNIN_ENDED
 LOGIN_DEADLINE = 600
 LINK_WAIT = 15
 MAX_LINK_CHARS = 4096
+MAX_OUTPUT_LINE = 16384
+MANUAL_GRACE = 2.0
+ROUTES = ("manual", "loopback", "unknown")
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
 MAX_CODE_CHARS = 512
 ACTIONS = ("start", "code", "cancel")
 START_OUTCOMES = ("started", "running", "failed")
@@ -138,6 +173,61 @@ def _printable(text: str) -> bool:
 
 def valid_link(text: str) -> bool:
     return text.startswith("https://") and len(text) <= MAX_LINK_CHARS and _printable(text)
+
+
+def link_route(url: str) -> tuple[str, int | None] | None:
+    try:
+        values = parse_qs(urlsplit(url).query, keep_blank_values=True).get("redirect_uri")
+        if values is None or len(values) != 1:
+            return None
+        target = urlsplit(values[0])
+        host = target.hostname
+        if target.scheme == "http" and host in LOOPBACK_HOSTS:
+            port = target.port
+            if port is None:
+                port = 80
+            return ("loopback", port) if 1 <= port <= 65535 else None
+        if target.scheme == "https" and host and host not in LOOPBACK_HOSTS:
+            return ("manual", None)
+    except ValueError:
+        return None
+    return None
+
+
+def output_links(line: bytes) -> list[str]:
+    links = []
+    for piece in re.split(rb"[^\x21-\x7e]+", line):
+        start = piece.find(b"https://")
+        if start < 0:
+            continue
+        token = piece[start:].decode("ascii")
+        if valid_link(token):
+            links.append(token)
+    return links
+
+
+def forward_command(port: int, host: str) -> str | None:
+    if 1 <= port <= 65535 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*", host):
+        return f"ssh -N -L {port}:localhost:{port} {host}"
+    return None
+
+
+def default_host() -> str:
+    return socket.gethostname().split(".")[0]
+
+
+@dataclass(frozen=True)
+class Link:
+    url: str
+    route: str
+    port: int | None
+    forward: str | None
+
+
+def answer_members(link: Link | None) -> dict[str, object]:
+    if link is None:
+        return {"link": None, "route": None, "port": None, "forward": None}
+    return {"link": link.url, "route": link.route, "port": link.port, "forward": link.forward}
 
 
 def _object(body: bytes, members: set[str]) -> dict:
@@ -233,7 +323,9 @@ class Client(Protocol):
 
     def kill_group(self) -> None: ...
 
-    def drain(self) -> int | None: ...
+    def output(self) -> int | None: ...
+
+    def close_output(self) -> None: ...
 
 
 class _Client:
@@ -242,6 +334,7 @@ class _Client:
     def __init__(self, process: subprocess.Popen, master: int | None):
         self._process = process
         self._master = master
+        self._output_closed = False
         self._input_lock = threading.Lock()
         self.pid = process.pid
 
@@ -270,14 +363,25 @@ class _Client:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(self.pid, signal.SIGKILL)
 
-    def drain(self) -> int | None:
-        return self._master
+    def output(self) -> int | None:
+        if self._master is not None:
+            return self._master
+        return None if self._process.stdout is None else self._process.stdout.fileno()
+
+    def close_output(self) -> None:
+        with contextlib.suppress(OSError):
+            if self._master is not None:
+                if not self._output_closed:
+                    self._output_closed = True
+                    os.close(self._master)
+            elif self._process.stdout is not None:
+                self._process.stdout.close()
 
 
 def start_client(argv: list[str], *, cwd: str, env: Mapping[str, str]) -> Client:
     if CODE_INPUT == "pipe":
         process = subprocess.Popen(argv, cwd=cwd, env=env, start_new_session=True,
-                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL)
         return _Client(process, None)
     master, slave = pty.openpty()
@@ -302,8 +406,12 @@ class _Run:
         self.holder = holder
         self.client = client
         self.started = started
-        self.link: str | None = None
-        self.linked = threading.Event()
+        self.fifo_link: str | None = None
+        self.fifo_at: float | None = None
+        self.manual: str | None = None
+        self.chosen: Link | None = None
+        self.done = False
+        self.cond = threading.Condition()
         self.exited = threading.Event()
         self.returncode: int | None = None
         self.end: str | None = None
@@ -316,13 +424,16 @@ class SignIns:
     def __init__(self, *, on_end: Callable[[str, int, str, int | None], None],
                  spawn=start_client, environ: Mapping[str, str] = os.environ,
                  clock: Callable[[], float] = time.monotonic, deadline: float = LOGIN_DEADLINE,
-                 link_wait: float = LINK_WAIT):
+                 link_wait: float = LINK_WAIT, manual_grace: float = MANUAL_GRACE,
+                 host: str | None = None):
         self._on_end = on_end
         self._spawn = spawn
         self._environ = environ
         self._clock = clock
         self._deadline = deadline
         self._link_wait = link_wait
+        self._manual_grace = manual_grace
+        self._host = default_host() if host is None else host
         self._lock = threading.Lock()
         self._runs: dict[str, _Run] = {}
         self._serial = 0
@@ -371,13 +482,37 @@ class SignIns:
             run.thread.start()
             return Started(run.serial, True)
 
-    def wait_link(self, profile: str) -> str | None:
+    def wait_link(self, profile: str) -> Link | None:
         with self._lock:
             run = self._runs.get(profile)
         if run is None:
             return None
-        run.linked.wait(self._link_wait)
-        return run.link
+        give_up = time.monotonic() + self._link_wait
+        with run.cond:
+            while run.chosen is None:
+                now = time.monotonic()
+                if run.manual is not None or run.done or now >= give_up:
+                    break
+                wait = give_up - now
+                if run.fifo_link is not None:
+                    wait = min(wait, run.fifo_at + self._manual_grace - now)
+                    if wait <= 0:
+                        break
+                run.cond.wait(wait)
+            if run.chosen is None:
+                run.chosen = self._pick(run)
+            return run.chosen
+
+    def _pick(self, run: _Run) -> Link | None:
+        if run.manual is not None:
+            return Link(run.manual, "manual", None, None)
+        if run.fifo_link is None:
+            return None
+        route = link_route(run.fifo_link)
+        if route is not None and route[0] == "loopback":
+            return Link(run.fifo_link, "loopback", route[1],
+                        forward_command(route[1], self._host))
+        return Link(run.fifo_link, "unknown", None, None)
 
     def send_code(self, profile: str, code: str) -> None:
         with self._lock:
@@ -429,66 +564,128 @@ class SignIns:
         run.exited.set()
 
     def _watch(self, run: _Run) -> None:
-        pending = b""
+        output = run.client.output()
+        try:
+            self._read(run, output)
+        finally:
+            run.client.kill_group()
+            run.waiter.join()
+            run.client.close_output()
+            with self._lock:
+                for fd in (run.reader, run.holder):
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+                shutil.rmtree(run.directory, ignore_errors=True)
+                if self._runs.get(run.profile) is run:
+                    del self._runs[run.profile]
+                end = run.end or "exited"
+                closed = run.closed
+            with run.cond:
+                run.done = True
+                run.cond.notify_all()
+            if not closed:
+                self._on_end(run.profile, run.serial, end, run.returncode)
+
+    def _read(self, run: _Run, output: int | None) -> None:
+        fifo_lines = _Lines(MAX_LINK_CHARS + 1)
+        output_lines = _Lines(MAX_OUTPUT_LINE)
         fds = [run.reader]
-        drain = run.client.drain()
-        if drain is not None:
-            fds.append(drain)
+        if output is not None:
+            fds.append(output)
 
         def take(fd: int) -> None:
-            nonlocal pending
             try:
-                data = os.read(fd, 4096)
+                data = os.read(fd, 65536)
             except BlockingIOError:
                 return
             except OSError:
                 data = b""
+            if fd == run.reader:
+                if data and run.fifo_link is None:
+                    for line in fifo_lines.feed(data):
+                        self._fifo_line(run, line)
+                        if run.fifo_link is not None:
+                            break
+                return
             if not data:
-                if fd in fds and fd != run.reader:
-                    fds.remove(fd)
+                fds.remove(fd)
+                self._output_lines(run, output_lines.rest())
                 return
-            if fd != run.reader or run.link is not None:
-                return
-            pending += data
-            while b"\n" in pending:
-                line, pending = pending.split(b"\n", 1)
-                self._line(run, line[:MAX_LINK_CHARS + 1])
-                if run.link is not None:
-                    pending = b""
-                    return
-            pending = pending[:MAX_LINK_CHARS + 1]
+            self._output_lines(run, output_lines.feed(data))
 
         while not run.exited.is_set():
             ready, _, _ = select.select(fds, [], [], POLL_SECONDS)
+            ready.sort(key=lambda fd: fd == run.reader)
             for fd in ready:
                 take(fd)
-        take(run.reader)
-        run.waiter.join()
-        run.client.kill_group()
-        with self._lock:
-            for fd in (run.reader, run.holder, drain):
-                if fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-            shutil.rmtree(run.directory, ignore_errors=True)
-            if self._runs.get(run.profile) is run:
-                del self._runs[run.profile]
-            end = run.end or "exited"
-            closed = run.closed
-        run.linked.set()
-        if not closed:
-            self._on_end(run.profile, run.serial, end, run.returncode)
+        for _ in range(256):
+            ready, _, _ = select.select(fds, [], [], 0)
+            if not ready:
+                break
+            ready.sort(key=lambda fd: fd == run.reader)
+            for fd in ready:
+                take(fd)
+        if output in fds:
+            self._output_lines(run, output_lines.rest())
 
-    def _line(self, run: _Run, raw: bytes) -> None:
+    def _fifo_line(self, run: _Run, raw: bytes) -> None:
         try:
             text = raw.decode("ascii")
         except UnicodeDecodeError:
             text = ""
-        if valid_link(text):
-            run.link = text
-            run.linked.set()
-        else:
+        if not valid_link(text):
             print(f"console: signin_link_refused {run.profile}", file=sys.stderr)
+            return
+        with run.cond:
+            run.fifo_link = text
+            run.fifo_at = time.monotonic()
+            if run.manual is None and link_route(text) == ("manual", None):
+                run.manual = text
+            run.cond.notify_all()
+
+    def _output_lines(self, run: _Run, lines: list[bytes]) -> None:
+        for line in lines:
+            if run.manual is not None:
+                return
+            try:
+                for token in output_links(line):
+                    if link_route(token) == ("manual", None):
+                        with run.cond:
+                            run.manual = token
+                            run.cond.notify_all()
+                        break
+            except Exception:
+                continue
+
+
+class _Lines:
+    """Split a byte stream into lines of at most `limit` bytes; the rest of a longer line is dropped."""
+
+    def __init__(self, limit: int):
+        self._limit = limit
+        self._tail = b""
+        self._skipping = False
+
+    def feed(self, data: bytes) -> list[bytes]:
+        lines = []
+        while data:
+            head, newline, data = data.partition(b"\n")
+            if self._skipping:
+                self._skipping = not newline
+                continue
+            self._tail += head
+            if len(self._tail) > self._limit:
+                lines.append(self._tail[:self._limit])
+                self._tail = b""
+                self._skipping = not newline
+            elif newline:
+                lines.append(self._tail)
+                self._tail = b""
+        return lines
+
+    def rest(self) -> list[bytes]:
+        tail, self._tail = self._tail, b""
+        return [tail] if tail else []
 
 
 def runs_for(platform: str) -> type[SignIns] | None:
