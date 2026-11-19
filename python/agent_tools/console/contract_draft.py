@@ -18,9 +18,9 @@ texts the tracked build files (`justfile`, `Makefile`, `package.json` and their 
 65536 bytes each. `hooks` are the `COMMIT_HOOKS` names (`pre-commit`, `prepare-commit-msg`,
 `commit-msg`; never `post-commit`, which cannot stop a commit) installed as executable files in the
 repository's own hooks directory (the `core.hooksPath` its own configuration sets, else its
-`hooks` directory; a global or system hooks path never counts, and Git's checkout trust is kept), in
-`COMMIT_HOOKS` order. A relative `core.hooksPath` is resolved in each checkout, so such a hook counts
-only when `HEAD` tracks it as an executable file. `environments` are the `ENVIRONMENTS`
+`hooks` directory; a global, system or command-line hooks path never counts, and Git's checkout trust
+is kept), in `COMMIT_HOOKS` order. A relative `core.hooksPath` is resolved in each checkout, so such a
+hook counts only when `HEAD` tracks it as an executable file or as a link inside the tree to one. `environments` are the `ENVIRONMENTS`
 file names present in the `HEAD` commit as a regular file (the revision Apply's worktree starts from,
 so an untracked, staged-only or directory entry never counts), in `ENVIRONMENTS` order. A set cancel
 reads both as empty, as it reads the rest.
@@ -80,6 +80,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -113,6 +114,7 @@ NO_DRAFT = "that plan has no drafted contract to change"
 REPAIRS = ("adopt.draft.invalid", "adopt.draft.id_taken")
 # The hooks whose exit status can stop `git commit` (githooks(5): post-commit cannot).
 COMMIT_HOOKS: tuple[str, ...] = ("pre-commit", "prepare-commit-msg", "commit-msg")
+MAX_LINKS = 8  # tracked links followed from a relative hooks path before the hook is read as absent
 # A root file that marks a development environment, and the command that proposes: in priority order.
 ENVIRONMENTS: tuple[tuple[str, str], ...] = (("devenv.nix", "devenv shell --"),)
 ENVIRONMENT_FIELD = "commit-environment"
@@ -351,40 +353,56 @@ def _entry(root: str, path: str, cancel: threading.Event | None = None) -> tuple
 
 
 def _repository_hooks_path(root: str, cancel: threading.Event | None = None) -> str | None:
-    """The `core.hooksPath` the repository itself sets (the last one wins), never a global or system one."""
+    """The `core.hooksPath` the repository itself sets (the last one wins), never a global, system or command-line one."""
     value = None
-    for line in _lines(_git(root, "config", "--show-scope", "--get-all", "core.hooksPath",
+    for line in _lines(_git(root, "config", "--type=path", "--show-scope", "--get-all", "core.hooksPath",
                             cancel=cancel)):
         scope, _, setting = line.partition("\t")
-        if scope in ("local", "worktree", "command"):
+        if scope in ("local", "worktree"):
             value = setting
     return value
+
+
+def _tracked_executable(root: str, path: str, cancel: threading.Event | None = None,
+                        depth: int = 0) -> bool:
+    """Whether `HEAD` tracks `path` as an executable file, following a tracked link inside the tree."""
+    entry = _entry(root, path, cancel)
+    if entry == ("100755", "blob"):
+        return True
+    if entry != ("120000", "blob") or depth >= MAX_LINKS:
+        return False
+    target = _git(root, "cat-file", "blob", f"HEAD:{path}", cancel=cancel)
+    text = target.decode("utf-8", "replace") if target else ""
+    if not text or posixpath.isabs(text):
+        return False
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), text))
+    if resolved == ".." or resolved.startswith("../"):
+        return False
+    return _tracked_executable(root, resolved, cancel, depth + 1)
 
 
 def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
     """The `COMMIT_HOOKS` that will run when Apply commits in its fresh worktree of `HEAD`.
 
-    The hooks directory is the repository's own: a global or system `core.hooksPath` never counts,
-    while Git's checkout trust (`safe.directory`) is kept. A relative `core.hooksPath` is resolved
-    in each checkout, so its hook counts only when `HEAD` tracks it as an executable file.
+    The hooks directory is the repository's own: a global, system or command-line `core.hooksPath`
+    never counts, while Git's checkout trust (`safe.directory`) is kept. A relative `core.hooksPath`
+    is resolved in each checkout, so its hook counts only when `HEAD` tracks it as an executable file
+    (or as a link, inside the tree, to one); a path that cannot be verified against `HEAD` has no hooks.
     """
     setting = _repository_hooks_path(root, cancel)
-    probe = ("--git-common-dir",) if setting is None else ("--git-path", "hooks")
-    printed = _git(root, "rev-parse", "--path-format=absolute", *probe, cancel=cancel)
-    if not printed:
-        return []
-    directory = Path(printed.decode("utf-8", "replace").rstrip("\n"))
+    if setting is not None and not posixpath.isabs(setting):
+        relative = posixpath.normpath(setting)
+        if relative == ".." or relative.startswith("../"):
+            return []
+        return [name for name in COMMIT_HOOKS
+                if _tracked_executable(root, posixpath.normpath(posixpath.join(relative, name)), cancel)]
     if setting is None:
-        directory = directory / "hooks"
-    elif not os.path.isabs(setting) and not setting.startswith("~"):
-        top = _git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", cancel=cancel)
-        try:
-            relative = directory.relative_to(top.decode("utf-8", "replace").rstrip("\n")) if top else None
-        except ValueError:
-            relative = None
-        if relative is not None:
-            return [name for name in COMMIT_HOOKS
-                    if _entry(root, (relative / name).as_posix(), cancel) == ("100755", "blob")]
+        printed = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", cancel=cancel)
+        if not printed:
+            return []
+        directory = Path(printed.decode("utf-8", "replace").rstrip("\n")) / "hooks"
+    else:
+        directory = Path(setting)
     if cancel is not None and cancel.is_set():
         return []
     return [name for name in COMMIT_HOOKS

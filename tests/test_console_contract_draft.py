@@ -394,6 +394,73 @@ class ContractDraftTest(unittest.TestCase):
                 fields = cd.draft(str(root), reading)
                 self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
 
+    def test_a_relative_hooks_path_that_leaves_the_checkout_or_cannot_be_verified_has_no_hooks(self):
+        root = sample(self.parent / "outside", remote=True)
+        commit(root, {"devenv.nix": "{ }\n"})
+        outside = self.parent / "outside-hooks"
+        outside.mkdir()
+        (outside / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        (outside / "pre-commit").chmod(0o755)
+        git(root, "config", "core.hooksPath", "../../outside-hooks")
+        self.assertEqual(cd.read(str(root))["hooks"], [])
+        untracked = sample(self.parent / "unprobed", remote=True)
+        commit(untracked, {"devenv.nix": "{ }\n"})
+        git(untracked, "config", "core.hooksPath", "local-hooks")
+        (untracked / "local-hooks").mkdir()
+        (untracked / "local-hooks" / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        (untracked / "local-hooks" / "pre-commit").chmod(0o755)
+        real = cd._git
+
+        def without_toplevel(path, *arguments, **kwargs):
+            return None if "--show-toplevel" in arguments else real(path, *arguments, **kwargs)
+
+        with unittest.mock.patch.object(cd, "_git", without_toplevel):
+            self.assertEqual(cd.read(str(untracked))["hooks"], [])
+        fields = cd.draft(str(untracked), cd.read(str(untracked)))
+        self.assertNotIn("commit-environment", [x["field"] for x in fields])
+
+    def test_a_tracked_hook_link_counts_only_when_it_resolves_to_a_tracked_executable(self):
+        for letter, target, mode, wanted in (
+                ("to-executable", "real-hook", 0o755, ["pre-commit"]),
+                ("to-plain", "real-hook", 0o644, []),
+                ("to-missing", "absent", 0o755, []),
+                ("to-outside", "../../elsewhere", 0o755, []),
+                ("to-absolute", "/bin/true", 0o755, [])):
+            with self.subTest(case=letter):
+                root = sample(self.parent / letter, remote=True)
+                git(root, "config", "core.hooksPath", "local-hooks")
+                (root / "local-hooks").mkdir()
+                (root / "local-hooks" / "real-hook").write_text("#!/bin/sh\nexit 0\n")
+                (root / "local-hooks" / "real-hook").chmod(mode)
+                (root / "local-hooks" / "pre-commit").symlink_to(target)
+                commit(root, {"devenv.nix": "{ }\n"})
+                self.assertEqual(cd.read(str(root))["hooks"], wanted)
+                fields = cd.draft(str(root), cd.read(str(root)))
+                self.assertEqual("commit-environment" in [x["field"] for x in fields], bool(wanted))
+
+    def test_a_looping_tracked_hook_link_has_no_hooks(self):
+        root = sample(self.parent, remote=True)
+        git(root, "config", "core.hooksPath", "local-hooks")
+        (root / "local-hooks").mkdir()
+        (root / "local-hooks" / "pre-commit").symlink_to("pre-commit")
+        commit(root, {"devenv.nix": "{ }\n"})
+        self.assertEqual(cd.read(str(root))["hooks"], [])
+
+    def test_a_command_line_hooks_path_never_counts_as_the_repository_s_hooks(self):
+        root = sample(self.parent / "shared", remote=True)
+        commit(root, {"devenv.nix": "{ }\n"})
+        shared = self.parent / "shared-hooks"
+        shared.mkdir()
+        (shared / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        (shared / "pre-commit").chmod(0o755)
+        self.scoped_environment({
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath",
+            "GIT_CONFIG_VALUE_0": str(shared), "GIT_CONFIG_PARAMETERS": None})
+        reading = cd.read(str(root))
+        self.assertEqual(reading["hooks"], [])
+        fields = cd.draft(str(root), reading)
+        self.assertNotIn("commit-environment", [x["field"] for x in fields])
+
     def scoped_environment(self, values):
         """Set (a string) or remove (None) each named variable until the test ends."""
         for name, value in values.items():
@@ -721,7 +788,7 @@ class ContractDraftTest(unittest.TestCase):
         self.assertFalse(marker.exists(), "a git child started under a set cancel")
         self.assertEqual((reading["hooks"], reading["environments"]), ([], []))
 
-    def test_a_cancel_during_the_hooks_directory_probe_reads_no_hooks(self):
+    def test_a_cancel_during_the_tracked_hook_probe_reads_no_hooks(self):
         root = sample(self.parent, remote=True)
         commit(root, {"devenv.nix": "{ }\n"})
         git(root, "config", "core.hooksPath", "local-hooks")
@@ -731,17 +798,14 @@ class ContractDraftTest(unittest.TestCase):
         real = cd._git
         cancel = threading.Event()
 
-        def without_toplevel(path, *arguments, **kwargs):
-            return None if "--show-toplevel" in arguments else real(path, *arguments, **kwargs)
-
         def probe(path, *arguments, **kwargs):
-            if "--show-toplevel" in arguments:
+            if "ls-tree" in arguments:
                 cancel.set()
                 return None
             return real(path, *arguments, **kwargs)
 
-        with unittest.mock.patch.object(cd, "_git", without_toplevel):
-            self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
+        commit(root, {})
+        self.assertEqual(cd.read(str(root))["hooks"], ["pre-commit"])
         with unittest.mock.patch.object(cd, "_git", probe):
             reading = cd.read(str(root), cancel)
         self.assertTrue(cancel.is_set())
