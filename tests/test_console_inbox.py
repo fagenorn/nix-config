@@ -16,6 +16,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools import canonical
 from agent_tools.console import inbox, pictures
+from agent_tools.console import event_log, view
 from agent_tools.delivery import look_marker
 from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
@@ -1466,6 +1467,137 @@ class ActivityTest(unittest.TestCase):
         for last, local, want in table:
             with self.subTest(last=last, local=local):
                 self.assertIs(inbox.is_active(last, local, now), want)
+
+
+BLOCK, PROMPT, RESULT, END, CLOSE = 7008519004, 7008523711, 7008980881, 7008981257, 7008983081
+BODY_1326 = ac_body("- [ ] [human] AC5 of #1320: the Sharing panel reads plainly (taste: only the owner can judge)")
+CHECK_1326 = {"ac": "AC5", "kind": "human", "host": "any", "reason": "taste",
+              "when": {"not_before": "2026-11-10T00:00:00Z"}, "run": {"ask": "Does the Sharing panel read plainly?"}}
+BLOCK_1326 = {"v": 1, "merge": MERGE, "checks": [CHECK_1326]}
+KEY_1326 = verify_issues.block_key(BLOCK, BLOCK_1326)
+CARD = "octo/widgets#1326/ac1"
+
+
+def comment_1326(cid, body, assoc="OWNER"):
+    return dated_comment(cid, body, CREATED, assoc)
+
+
+def block_comment_1326(*checks, cid=BLOCK):
+    return comment_1326(cid, hold_body(*checks))
+
+
+def prompt_1326(key=KEY_1326):
+    return comment_1326(PROMPT, fm.render(
+        "owner-action", {"reason": "verify-ask", "block": key, "check": "0", "host": "eleven-m5"},
+        "AC5: the owner's answer is needed.",
+        "Does the Sharing panel read plainly?\n\n- [x] Accept\n- [ ] Reject"))
+
+
+def result_1326(state="pass", key=KEY_1326, check="0", cid=RESULT, assoc="OWNER"):
+    return comment_1326(cid, fm.render(
+        "verify-result", {"block": key, "check": check, "ac": "AC5", "state": state, "host": "eleven-m5"},
+        "AC5 pass on eleven-m5."), assoc)
+
+
+def end_1326(of=PROMPT, reason="answered", cid=END):
+    return comment_1326(cid, fm.end_body(of, reason))
+
+
+def closed_1326(fields=None, cid=CLOSE):
+    return comment_1326(cid, fm.render(
+        "verify-closed", {"block": KEY_1326, "outcome": "verified"} if fields is None else fields,
+        "Verified: AC5."))
+
+
+def node_1326(comments, **extra):
+    return {**held_issue(1326, BODY_1326, comments=comments), "repository": {"defaultBranchRef": {"name": "main"}},
+            **extra}
+
+
+def reviews(node):
+    return [i["key"] for i in read(page([]), page([node]), now=lambda: NOW) if i["reason"] == "held-review"]
+
+
+class SettledHoldTest(unittest.TestCase):
+    def test_the_1326_close_raises_no_review_card_at_any_later_step(self):
+        block, prompt, result, end = block_comment_1326(CHECK_1326), prompt_1326(), result_1326(), end_1326()
+        self.assertEqual(reviews(node_1326([block, prompt, end])), [CARD])
+        steps = {"a result": [block, prompt, result], "its end": [block, prompt, result, end],
+                 "the close": [block, prompt, result, end, closed_1326()]}
+        for name, comments in steps.items():
+            with self.subTest(name):
+                self.assertEqual(reviews(node_1326(comments)), [])
+        with self.subTest("a closed issue"):
+            self.assertEqual(reviews(node_1326(steps["the close"], state="CLOSED")), [])
+
+    def test_every_check_passed_settles_the_hold(self):
+        block = block_comment_1326(CHECK_1326)
+        other = {**CHECK_1326, "ac": "AC6"}
+        two = block_comment_1326(CHECK_1326, other)
+        two_key = verify_issues.block_key(BLOCK, {"v": 1, "merge": MERGE, "checks": [CHECK_1326, other]})
+        cases = {
+            "pass": ([block, result_1326("pass")], []),
+            "hit": ([block, result_1326("hit")], []),
+            "fail": ([block, result_1326("fail")], [CARD]),
+            "another block": ([block, result_1326(key="1.0000000000000000")], [CARD]),
+            "untrusted": ([block, result_1326(assoc="CONTRIBUTOR")], [CARD]),
+            "ended": ([block, result_1326(), end_1326(RESULT, "superseded")], [CARD]),
+            "one of two": ([two, result_1326(key=two_key)], [CARD]),
+            "both of two": ([two, result_1326(key=two_key), result_1326(key=two_key, check="1", cid=RESULT + 1)], []),
+        }
+        for name, (comments, want) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(reviews(node_1326(comments)), want)
+
+    def test_a_verify_closed_marker_of_the_held_block_settles_the_hold(self):
+        block = block_comment_1326(CHECK_1326)
+        newer = block_comment_1326({**CHECK_1326, "when": {"not_before": "2026-11-11T00:00:00Z"}}, cid=CLOSE + 1)
+        cases = {
+            "verified": ([block, closed_1326()], []),
+            "expired": ([block, closed_1326({"block": KEY_1326, "outcome": "expired"})], []),
+            "pending": ([block, closed_1326({"block": KEY_1326, "outcome": "pending"})], [CARD]),
+            "no outcome": ([block, closed_1326({"block": KEY_1326})], [CARD]),
+            "another block": ([block, closed_1326({"block": "1.0000000000000000", "outcome": "verified"})],
+                              [CARD]),
+            "a newer block": ([block, closed_1326(), newer], [CARD]),
+        }
+        for name, (comments, want) in cases.items():
+            with self.subTest(name):
+                self.assertEqual(reviews(node_1326(comments)), want)
+
+    def test_a_closed_held_issue_raises_no_review_card(self):
+        def keys(**extra):
+            node = {**held_issue(7, ac_body(HUMAN)), **extra}
+            return [i["key"] for i in inbox.items_from_node(PROJECT, SLUG, node)]
+
+        self.assertEqual(keys(state="CLOSED"), [])
+        self.assertEqual(keys(state="OPEN"), [f"{SLUG}#7/ac1"])
+        self.assertEqual(keys(), [f"{SLUG}#7/ac1"])
+        for state in ("MERGED", 3, None):
+            with self.subTest(state=state), self.assertRaises(ForgeError) as caught:
+                keys(state=state)
+            self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def test_the_issue_query_selects_its_state(self):
+        fragment = inbox.QUERY.split("... on Issue {")[1].split("... on PullRequest")[0]
+        self.assertIn("state", [line.strip() for line in fragment.split("\n")])
+
+    def test_a_raised_review_card_is_gone_after_one_reading_of_its_settled_hold(self):
+        block, prompt, result, end = block_comment_1326(CHECK_1326), prompt_1326(), result_1326(), end_1326()
+        first = read(page([]), page([node_1326([block, prompt, end])]), now=lambda: NOW)
+        records = view.inbox_records([event_log.Event(i + 1, "t1", event_log.INBOX_SEEN, PROJECT, item)
+                                      for i, item in enumerate(first)])
+        self.assertIn((PROJECT, CARD), records)
+        settled = [block, prompt, result, end, closed_1326()]
+        for name, node in {"open": node_1326(settled), "closed": node_1326(settled, state="CLOSED")}.items():
+            with self.subTest(name):
+                second = read(page([]), page([node]), now=lambda: NOW)
+                changes = view.inbox_changes(records, PROJECT, second)
+                self.assertIn((event_log.INBOX_GONE, PROJECT, {"key": CARD}), changes)
+                after = view.inbox_records(
+                    [event_log.Event(100 + i, "t2", kind, project, payload)
+                     for i, (kind, project, payload) in enumerate(changes)], records)
+                self.assertNotIn((PROJECT, CARD), after)
 
 
 if __name__ == "__main__":
