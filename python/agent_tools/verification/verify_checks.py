@@ -188,6 +188,16 @@ whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` i
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
 
+`console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
+issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
+JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
+at the top level or inside the `projects` of an entry of `"type": "quiet_group"`. A project is covered when one of
+its notices with `owner` true names every wanted issue as `#N` not followed by a digit (`#611` does not cover 61 or
+6110); a manager's notice never covers. The report is `{"verdict": "covered" | "missing", "projects": {ID:
+{"notice": ID | null}}}`: `covered` (0) when every wanted project is covered, else `missing` (75), since the owner
+may not have posted yet. A `--notice` that is not `PROJECT=` and comma-separated positive integers, or a project
+given twice, is a usage error (2).
+
 `console-first-screen --port N [--browser PATH]` (`verify_checks.console_first_screen`, issue 1031) reads
 `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object is
 `unreachable`, exit 1), applies `first_screen_state` to it (any code other than 0 is returned as it is and no
@@ -1954,6 +1964,62 @@ def console_failed_start(port: int, *, timeout: float = 5.0) -> tuple[int, dict]
     return failed_start_state(view) if isinstance(view, dict) else unreachable
 
 
+def _notice_names_all(text: object, numbers: Sequence[int]) -> bool:
+    """Issue 1291: the text names every number as `#N` not followed by a digit."""
+    return isinstance(text, str) and all(re.search(rf"#{number}(?!\d)", text) for number in numbers)
+
+
+def _view_projects(view: dict) -> Iterator[dict]:
+    """Issue 1291: the project entries of the view, at the top level or inside a quiet group."""
+    entries = view.get("entries")
+    for entry in entries if isinstance(entries, list) else ():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "project":
+            yield entry
+        elif entry.get("type") == "quiet_group":
+            members = entry.get("projects")
+            for member in members if isinstance(members, list) else ():
+                if isinstance(member, dict) and member.get("type") == "project":
+                    yield member
+
+
+def console_notice_lists(port: int, wanted: Mapping[str, Sequence[int]], *,
+                         timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1291: each wanted project has one owner notice naming all its issues, 0 covered, 75 missing or unreachable."""
+    unreachable = 75, {"verdict": "unreachable"}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status, body = response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return unreachable
+    finally:
+        connection.close()
+    if status != 200:
+        return unreachable
+    try:
+        view = json.loads(body)
+    except ValueError:
+        return unreachable
+    if not isinstance(view, dict):
+        return unreachable
+    notices: dict[object, list[dict]] = {}
+    for entry in _view_projects(view):
+        listed = entry.get("notices")
+        if isinstance(listed, list):
+            notices.setdefault(entry.get("project_id"), []).extend(
+                item for item in listed if isinstance(item, dict))
+    projects: dict[str, dict] = {}
+    for project, numbers in wanted.items():
+        covering = next((item.get("id") for item in notices.get(project, ())
+                         if item.get("owner") is True and _notice_names_all(item.get("text"), numbers)), None)
+        projects[project] = {"notice": covering}
+    covered = all(report["notice"] is not None for report in projects.values())
+    return (0 if covered else 75), {"verdict": "covered" if covered else "missing", "projects": projects}
+
+
 class BrowserError(Exception):
     """Issue 1031: the headless browser failed, closed its pipe or did not answer in time."""
 
@@ -2200,6 +2266,14 @@ def _issue_number(value: str) -> int:
     return number
 
 
+def _notice_spec(value: str) -> tuple[str, tuple[int, ...]]:
+    project, separator, numbers = value.partition("=")
+    parts = numbers.split(",")
+    if not (project and separator and all(part.isascii() and part.isdigit() and int(part) >= 1 for part in parts)):
+        raise argparse.ArgumentTypeError("must be PROJECT=N1,N2,... with positive integers")
+    return project, tuple(int(part) for part in parts)
+
+
 def _merge_sha(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", value):
         raise argparse.ArgumentTypeError("must be a 40-character lowercase hex sha")
@@ -2275,6 +2349,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-failed-start",
         help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
     failed.add_argument("--port", type=_port, required=True)
+    notices = checks.add_parser(
+        "console-notice-lists",
+        help="issue 1291: the owner's notice for each project names every one of its issues")
+    notices.add_argument("--port", type=_port, required=True)
+    notices.add_argument("--notice", type=_notice_spec, action="append", required=True,
+                         metavar="PROJECT=N1,N2,...")
     first = checks.add_parser(
         "console-first-screen",
         help="issue 1031: the live console's first screen shows a long-goal question whole above the fold")
@@ -2320,6 +2400,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.check == "console-failed-start":
         code, report = console_failed_start(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-notice-lists":
+        wanted = [project for project, _ in args.notice]
+        if len(set(wanted)) != len(wanted):
+            parser.error("--notice names a project twice")
+        code, report = console_notice_lists(args.port, dict(args.notice))
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-first-screen":

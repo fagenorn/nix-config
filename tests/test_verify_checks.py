@@ -2283,6 +2283,106 @@ class ConsoleFailedStartTest(unittest.TestCase):
             self.assertIn(needle, verify_checks.__doc__)
 
 
+class ConsoleNoticeListsTest(unittest.TestCase):
+    """`console-notice-lists` (issue 1291): the owner's notices name every issue of a project."""
+
+    def serve(self, status, body):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = loopback_server(Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def serve_view(self, entries):
+        return self.serve(200, json.dumps({"entries": entries}).encode())
+
+    @staticmethod
+    def project(project_id, *notices):
+        return {"type": "project", "project_id": project_id, "notices": list(notices)}
+
+    @staticmethod
+    def notice(number, text, owner=True):
+        return {"id": number, "owner": owner, "kind": "heads-up", "text": text}
+
+    def test_one_owner_notice_naming_every_issue_covers_a_project(self):
+        port = self.serve_view([
+            self.project("jarbird", self.notice(4, "anis-desktop is gone: #611 #711 #712")),
+            {"type": "quiet_group", "label": "1 quiet projects", "count": 1,
+             "projects": [self.project("nodocom", self.notice(9, "anis-desktop is gone: #2600 #2990"))]}])
+        self.assertEqual(
+            verify_checks.console_notice_lists(port, {"jarbird": [611, 711, 712], "nodocom": [2600, 2990]}),
+            (0, {"verdict": "covered", "projects": {"jarbird": {"notice": 4}, "nodocom": {"notice": 9}}}))
+
+    def test_a_split_list_a_manager_notice_or_a_prefix_does_not_cover(self):
+        cases = {
+            "split": [self.notice(1, "gone: #611"), self.notice(2, "gone: #711 #712")],
+            "manager": [self.notice(3, "gone: #611 #711 #712", owner=False)],
+            "prefix": [self.notice(5, "gone: #6110 #711 #712")],
+        }
+        for name, notices in cases.items():
+            with self.subTest(name=name):
+                port = self.serve_view([self.project("jarbird", *notices)])
+                code, report = verify_checks.console_notice_lists(port, {"jarbird": [611, 711, 712]})
+                self.assertEqual(code, 75)
+                self.assertEqual(report["verdict"], "missing")
+                self.assertIsNone(report["projects"]["jarbird"]["notice"])
+
+    def test_an_entry_of_another_type_is_skipped_and_an_absent_project_is_missing(self):
+        port = self.serve_view([
+            {"type": "other", "project_id": "jarbird", "notices": [self.notice(1, "#611")]}])
+        self.assertEqual(verify_checks.console_notice_lists(port, {"jarbird": [611]}),
+                         (75, {"verdict": "missing", "projects": {"jarbird": {"notice": None}}}))
+
+    def test_an_unreachable_console_is_not_yet(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            closed = sock.getsockname()[1]
+        unreachable = (75, {"verdict": "unreachable"})
+        wanted = {"jarbird": [611]}
+        self.assertEqual(verify_checks.console_notice_lists(closed, wanted), unreachable)
+        self.assertEqual(verify_checks.console_notice_lists(self.serve(500, b"{}"), wanted), unreachable)
+        self.assertEqual(verify_checks.console_notice_lists(self.serve(200, b"[]"), wanted), unreachable)
+
+    def test_the_command_prints_one_json_line(self):
+        port = self.serve_view([self.project("jarbird", self.notice(4, "#611 #711"))])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-notice-lists", "--port", str(port),
+                                       "--notice", "jarbird=611,711"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), json.dumps(
+            {"projects": {"jarbird": {"notice": 4}}, "verdict": "covered"}, sort_keys=True) + "\n")
+
+    def test_a_bad_notice_argument_is_a_usage_error(self):
+        bad = (["jarbird"], ["jarbird=a"], ["jarbird=611,"], ["jarbird=0"],
+               ["jarbird=1", "jarbird=1"])
+        for values in bad:
+            with self.subTest(values=values):
+                argv = ["console-notice-lists", "--port", "1"]
+                for value in values:
+                    argv += ["--notice", value]
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_the_wrapper_is_committed_executable_and_documented(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-notice-lists"), "100755")
+        self.assertEqual(run_from_root([str(ROOT / CHECKS / "console-notice-lists")]).returncode, 2)
+        for needle in ("console-notice-lists --port N --notice", "verify_checks.console_notice_lists",
+                       "issue 1291"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+
 class FirstScreenStateTest(unittest.TestCase):
     """`first_screen_state` (issue 1031): a long-goal question is named by title with a short ask."""
 
