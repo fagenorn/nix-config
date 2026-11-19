@@ -29,6 +29,15 @@ below is a figure merged into its entry.
      "held_checks": [{"key", "issue", "reason", "kind", "question", "detail", "waiting_since",
                       "answered", "answered_at", "wait"}]}
 
+Ownership of a path (ADR-console-082 D3). A checkout path can be registered to another project later,
+and the activation rows name a path and the spend view is attributed by today's registry, so neither
+says who owned the path when it was observed. The rows' registrations are folded in `seq` order
+(`project.registered` carries the root, `project.unregistered` ends it): the newest row at which a
+project other than `project_id` stopped owning `root` is its predecessor's end. Activation rows at or
+before that `seq` are not counted, and neither are spend days up to and including that row's UTC date
+(a day shared with a predecessor is not counted, so a figure is never the predecessor's); `days` still
+lists those days, with zero figures. With no such row nothing is dropped.
+
 Scope (ADR-console-082 D3, D4). Every section holds only rows, keys and ids of `project_id`. A `delivery.seen` row counts
 only when its project column is `project_id`. The activation rows have no project column, so one
 counts only when its payload's `root` equals `root`. A sprint counts only when its `project_id` is
@@ -65,16 +74,41 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from agent_tools.console import deliveries, inbox as inbox_module, spend as spend_module, sprints
-from agent_tools.console.event_log import ACTIVATION_FINISHED, ACTIVATION_STARTED, Event
+from agent_tools.console.event_log import (
+    ACTIVATION_FINISHED, ACTIVATION_STARTED, PROJECT_UNREGISTERED, Event)
 
 if TYPE_CHECKING:
     from agent_tools.console.view import InboxRecord
 
+REGISTERED = "project.registered"
 HELD_PREFIX = "verify-"
 SPEND_NOTE = (
     "Tokens sum input, cache writes, cache reads and output; dollars are estimates at API list "
     "prices. A run's spend counts once, under that run; an issue's tokens count only the runs that "
     "delivered that issue alone, and shared_runs lists the runs that delivered it with other issues.")
+
+
+def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Event | None:
+    """The newest row at which a project other than `project_id` stopped owning `root`, else None.
+
+    The rows are folded in `seq` order into each project's registered root: a registration of another
+    project under a different root, or its unregistration, while it held `root` ends its ownership.
+    """
+    roots: dict[str, str] = {}
+    left = None
+    for event in rows:
+        other = event.project
+        if event.kind == REGISTERED and isinstance(other, str):
+            now = event.payload.get("root") if isinstance(event.payload, dict) else None
+            if other != project_id and roots.get(other) == root and now != root:
+                left = event
+            if isinstance(now, str):
+                roots[other] = now
+        elif event.kind == PROJECT_UNREGISTERED and isinstance(other, str):
+            if other != project_id and roots.get(other) == root:
+                left = event
+            roots.pop(other, None)
+    return left
 
 
 def figure(tokens: spend_module.Tokens) -> dict:
@@ -104,12 +138,15 @@ def _item_phases(day: Mapping, project_id: str, kind: str) -> dict:
 
 
 def _spend(project_id: str, view: Mapping, run_issues: Mapping[str, list[int]],
-           sprint_states: Mapping[str, sprints.SprintState]) -> dict:
+           sprint_states: Mapping[str, sprints.SprintState], after_day: str | None = None) -> dict:
     days = view["days"]
+    counted = [after_day is None or day["day"] > after_day for day in days]
     run_phases: dict[str, dict[str, list]] = {}
     run_days: dict[str, dict[str, list]] = {}
     sprint_phases: dict[str, dict[str, list]] = {}
-    for day in days:
+    for day, kept in zip(days, counted):
+        if not kept:
+            continue
         for run, phases in _item_phases(day, project_id, "run").items():
             for phase, tokens in phases.items():
                 run_phases.setdefault(run, {}).setdefault(phase, []).append(tokens)
@@ -154,8 +191,9 @@ def _spend(project_id: str, view: Mapping, run_issues: Mapping[str, list[int]],
         "note": SPEND_NOTE, "first_day": names[0] if names else None,
         "last_day": names[-1] if names else None,
         "days": [{"day": day["day"], **figure(spend_module.Tokens(
-                    **day["project"].get(project_id, spend_module.Tokens().wire())))}
-                 for day in days],
+                    **(day["project"].get(project_id, spend_module.Tokens().wire()) if kept
+                       else spend_module.Tokens().wire())))}
+                 for day, kept in zip(days, counted)],
         "runs": runs,
         "issues": sorted(issues, key=lambda entry: (-entry["tokens"], entry["issue"])),
         "sprints": _ranked(sprint_entries, "sprint_id")}
@@ -200,10 +238,10 @@ def _deliveries(rows: list[Event], live_runs: Collection[tuple[str, str]]) -> li
     return [{k: v for k, v in entry.items() if k != "_seq"} for entry in ordered]
 
 
-def _activations(events: Iterable[Event], root: str) -> list[dict]:
+def _activations(events: Iterable[Event], root: str, after_seq: int = 0) -> list[dict]:
     entries: list[dict] = []
     for event in events:
-        if event.kind not in (ACTIVATION_STARTED, ACTIVATION_FINISHED):
+        if event.kind not in (ACTIVATION_STARTED, ACTIVATION_FINISHED) or event.seq <= after_seq:
             continue
         payload = event.payload
         if not isinstance(payload, dict) or payload.get("root") != root:
@@ -259,6 +297,7 @@ def project_records(
     for event in seen_rows:
         for state in deliveries.delivery_states([event]).values():
             run_issues.setdefault(state.run_id, set()).update(i.issue for i in state.issues)
+    left = _earlier_owner_left(rows, project_id, root)
     own_sprints = sorted((s for s in sprint_states.values() if s.project_id == project_id),
                          key=lambda state: -state.stated_seq)
     held = sorted((_held(record) for key, record in inbox.items()
@@ -268,8 +307,8 @@ def project_records(
         "project_id": project_id, "written_at": written_at,
         "spend": None if spend is None else _spend(
             project_id, spend, {run: sorted(issues) for run, issues in run_issues.items()},
-            sprint_states),
+            sprint_states, None if left is None else left.at[:10]),
         "sprints": [_sprint_entry(state) for state in own_sprints],
         "deliveries": _deliveries(seen_rows, live_runs),
-        "activations": _activations(rows, root),
+        "activations": _activations(rows, root, 0 if left is None else left.seq),
         "held_checks": held}

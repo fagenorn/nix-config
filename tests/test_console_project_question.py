@@ -593,7 +593,7 @@ class HookConfinementTest(unittest.TestCase):
                 self.assertEqual(
                     hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.allowed)
 
-    def test_a_search_does_not_walk_into_an_immutable_tree_reached_through_a_link(self):
+    def test_a_search_walks_a_tree_reached_through_a_link_into_a_store(self):
         store = self.t / "store"
         (store / "closure").mkdir(parents=True)
         (store / "closure" / "back").symlink_to(self.P)
@@ -601,12 +601,85 @@ class HookConfinementTest(unittest.TestCase):
         tool_input = {"pattern": "x"}
         self.assertEqual(
             hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.denied)
-        with mock.patch.object(hook, "IMMUTABLE_ROOTS", (str(store),)):
+        (store / "closure" / "back").unlink()
+        self.assertEqual(
+            hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.allowed)
+        with mock.patch.object(hook, "WALK_LIMIT", 1):
             self.assertEqual(
-                hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.allowed)
-            (self.root / "direct").symlink_to(self.P)
+                hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=1)))
+
+    def test_a_search_denies_a_second_mount_of_the_console_state_by_identity(self):
+        (self.root / "mnt").mkdir()
+        real_stat = os.stat
+        private = real_stat(self.P)
+
+        def stat(path, *args, **kwargs):
+            return private if str(path) == str(self.root / "mnt") else real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(hook.os, "stat", stat):
             self.assertEqual(
-                hook.decide(self.doc("Grep", tool_input), DECLARED, None, self.c), self.denied)
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                self.denied)
+        self.assertEqual(
+            hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.allowed)
+
+    def test_a_search_with_a_directory_it_cannot_list_is_refused(self):
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if str(path) == str(self.root / "sub"):
+                raise PermissionError(errno.EACCES, "denied")
+            return real_scandir(path)
+
+        with mock.patch.object(hook.os, "scandir", scandir):
+            self.assertEqual(
+                hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c),
+                ("deny", hook.SEARCH_UNCHECKED.format(limit=hook.WALK_LIMIT)))
+
+    def test_the_sessions_own_saved_tool_output_is_readable_and_no_other_sessions(self):
+        home = self.t / "home"
+        environ = {"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.t / "accounts"),
+                   "CLAUDE_CONFIG_DIR": str(self.t / "profile")}
+        mine = self.t / "profile" / "projects" / "-srv-p01" / "sess-1" / "tool-results"
+        theirs = self.t / "profile" / "projects" / "-srv-p01" / "sess-2" / "tool-results"
+        for results in (mine, theirs):
+            results.mkdir(parents=True)
+            (results / "b1.txt").write_text("out")
+        transcript = self.t / "profile" / "projects" / "-srv-p01" / "sess-1.jsonl"
+        transcript.write_text("{}")
+        c = hook.parse_confinement(str(self.P), str(self.R), environ)
+        denied = ("deny", hook.RECORDS_DENIED.format(records=c.records))
+
+        def decide(name, tool_input, session="sess-1"):
+            return hook.decide({**self.doc(name, tool_input), "session_id": session}, DECLARED, None, c)
+
+        for name, tool_input in (
+            ("Read", {"file_path": str(mine / "b1.txt")}),
+            ("Grep", {"pattern": "x", "path": str(mine)}),
+            ("Glob", {"pattern": str(mine / "*.txt")}),
+        ):
+            with self.subTest(allowed=name):
+                self.assertEqual(decide(name, tool_input), self.allowed)
+        for name, tool_input, session in (
+            ("Read", {"file_path": str(theirs / "b1.txt")}, "sess-1"),
+            ("Read", {"file_path": str(mine / "b1.txt")}, "sess-2"),
+            ("Read", {"file_path": str(mine / "b1.txt")}, "../sess-1"),
+            ("Read", {"file_path": str(transcript)}, "sess-1"),
+            ("Grep", {"pattern": "x", "path": str(mine.parent)}, "sess-1"),
+            ("Grep", {"pattern": "x", "path": str(self.t / "profile" / "projects")}, "sess-1"),
+        ):
+            with self.subTest(denied=name, tool_input=tool_input, session=session):
+                self.assertEqual(decide(name, tool_input, session), denied)
+        no_session = hook.decide(self.doc("Read", {"file_path": str(mine / "b1.txt")}), DECLARED, None, c)
+        self.assertEqual(no_session, denied)
+        self.assertEqual(
+            hook.decide({**self.command("git show HEAD"), "session_id": "sess-1"}, DECLARED, None, c),
+            self.allowed)
+        self.assertEqual(
+            hook.decide({**self.command("git diff --no-index " + str(mine / "b1.txt") + " flake.nix"),
+                         "session_id": "sess-1"}, DECLARED, None, c),
+            self.allowed)
 
     def test_a_search_that_outruns_its_time_budget_is_refused(self):
         with mock.patch.object(hook, "WALK_SECONDS", -1.0):
@@ -2474,9 +2547,11 @@ class QuestionRequestKeyTest(QuestionCase):
         second = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
         self.assertEqual(first, second)
         self.assertEqual(len(self.asked), 1)
-        asked, answered = self.question_rows()
+        asked, keyed, answered = self.question_rows()
         self.assertEqual((asked[0], asked[2]["request_key"], answered[0]),
                          ("project_question.asked", self.KEY, "project_question.answered"))
+        self.assertEqual((keyed[0], keyed[1], keyed[2]), (
+            "project_question.keyed", WHY, {"request_key": self.KEY, "question_id": first}))
         shown = {p["project_id"]: p for p in _project_entries(json.loads(svc.view_bytes))}[WHY]
         (question,) = [q for t in shown["questions"]["threads"] for q in t["questions"]
                        if q["id"] == first]
@@ -2503,6 +2578,33 @@ class QuestionRequestKeyTest(QuestionCase):
         two = svc.ask_project_question("owner/p01", "q?", request_key=self.KEY)
         self.assertNotEqual(one, two)
         self.assertEqual(len(self.asked), 2)
+
+    def test_a_key_still_finds_its_question_after_retention_removed_the_asked_row(self):
+        now = [T0]
+        svc = self.start(**_clocks(now))
+        first = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        now[0] = T0 + 91 * 86400
+        self.assertGreaterEqual(svc.retain(), 2)
+        self.assertEqual([row[0] for row in self.question_rows()], ["project_question.keyed"])
+        self.assertEqual(svc._project_questions, {})
+        again = svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        self.assertEqual(again, first)
+        self.assertEqual(len(self.asked), 1)
+        svc.close()
+        restarted = self.start(**_clocks(now))
+        self.assertEqual(restarted.ask_project_question(WHY, "q?", request_key=self.KEY), first)
+        other = restarted.ask_project_question("owner/p00", "q?", request_key=self.KEY)
+        self.assertNotEqual(other, first)
+        self.assertEqual(len(self.asked), 2)
+
+    def test_the_receipt_does_not_move_its_project_in_the_desk(self):
+        svc = self.start()
+        before = svc._states[WHY].last_seq
+        svc.ask_project_question(WHY, "q?", request_key=self.KEY)
+        rows = support.log_rows(self.store)
+        keyed = [row for row in rows if row[2] == "project_question.keyed"]
+        self.assertEqual(len(keyed), 1)
+        self.assertEqual(svc._states[WHY].last_seq, before)
 
     def test_the_route_passes_the_request_key(self):
         svc = self.start()

@@ -12,8 +12,9 @@ import threading
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import event_log, project_question, question_check, view
+from agent_tools.console import event_log, manager_check, project_question, question_check, view
 from agent_tools.verification import verify_exec
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -317,7 +318,10 @@ class QuestionCheckTest(unittest.TestCase):
     def test_a_malformed_state_file_is_a_setup_error_that_posts_nothing(self):
         for text in ('{"projects": {"owner/p01": {"revision": "1', "", "[]", '{"projects": []}',
                      json.dumps({"projects": {PROJECT: {"revision": REV, "keys": []}}}),
-                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: 7}}}})):
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: 7}}}}),
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: ""}}}}),
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {
+                         T1: KEYS[0], T2: KEYS[0], T3: KEYS[2]}}}})):
             with self.subTest(text=text):
                 h = Harness(self)
                 h.state_file.parent.mkdir(parents=True)
@@ -365,6 +369,22 @@ class QuestionCheckTest(unittest.TestCase):
             workers[0].join(30)
         self.assertEqual(h.new_keys, 3)
         self.assertEqual({document["request_key"] for document in h.documents()}, set(KEYS))
+
+    def test_two_writers_of_one_result_file_never_share_a_temporary(self):
+        h = Harness(self)
+        first, second = {"writer": "first"}, {"writer": "second"}
+        real_dump = json.dump
+
+        def dump(document, stream, **options):
+            if document is first:
+                manager_check._write_json(h.result_file, second)
+            real_dump(document, stream, **options)
+
+        with mock.patch.object(manager_check.json, "dump", dump):
+            manager_check._write_json(h.result_file, first)
+        self.assertEqual(json.loads(h.result_file.read_text(encoding="utf-8")), first)
+        self.assertEqual([path.name for path in h.result_file.parent.iterdir()], [h.result_file.name])
+        self.assertEqual(h.result_file.stat().st_mode & 0o777, 0o600)
 
     def test_no_revision_no_console_no_project_or_no_token_posts_nothing(self):
         cases = [("no_revision", 2), ("not_running", 75), ("not_registered", 75), ("no_token", 75)]

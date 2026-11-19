@@ -20,7 +20,11 @@ every profile of `$CLAUDE_ACCOUNTS_DIR`, default `~/.claude-accounts`), read fro
 environment: the profiles share one transcript store, and a transcript holds every tool result of a
 session, so another question's records would stay readable there after their file is removed.
 Containment is judged by filesystem identity as well as by spelling, so a case alias on a case-insensitive
-volume is the directory it opens, and an identity that cannot be read is a denial.
+volume is the directory it opens, and an identity that cannot be read is a denial. One part of a store is
+admitted: the session's own saved tool output, `<store>/<slug>/<session id>/tool-results/`, where the client
+puts a command's output that is too large to show inline and tells the model to Read it. The session id is
+the hook document's `session_id` when it is a plain name (`[A-Za-z0-9][A-Za-z0-9_.-]*`), so another
+session's results stay confined, and a path inside the private directory is never admitted this way.
 
 Decision. `decide(document, allowed, repo)` returns `("allow", ALLOWED)` or `("deny", <sentence>)`, in
 this order:
@@ -70,8 +74,8 @@ this order:
 The confinement (#1271, ADR-console-082 D2). With a confinement the only file under its private
 directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
 (symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
-directory or a transcript store, lies inside one, or is an ancestor of one; a reach is
-`RECORDS_DENIED`. It applies to:
+directory or a transcript store, lies inside one, or is an ancestor of one, and is not inside the
+session's own `tool-results` directory of a store (`_own_results`); a reach is `RECORDS_DENIED`. It applies to:
 
 - `Read`: `file_path`.
 - `Grep`: `path` (the client's directory when absent), then the traversal rule below on it; a `glob`
@@ -93,14 +97,17 @@ directory or a transcript store, lies inside one, or is an ancestor of one; a re
 
 The traversal rule (`_tree_reaches`) covers the client's search meeting the console's state later. The
 client's behaviour about symlinks while searching is not established, so the walk assumes it follows
-them: it lists with `os.scandir`, descends each real directory once (a symlinked directory too), and
-checks every symlink it meets by the path rule on the link's real path. It does not descend a symlinked
-directory lying under `IMMUTABLE_ROOTS` (`/nix/store`): a store path is read-only, so a console link
-cannot be added to it, and a devenv or nix checkout's `result` and `.devenv/profile` links lead into a
-closure of millions of entries that no search could be listed within the hook's timeout. Each entry
-listed counts toward `WALK_LIMIT` and the walk has `WALK_SECONDS` of time; past either the call is
-`SEARCH_UNCHECKED`, because a search that cannot be checked is not allowed. A non-symlink descendant of a directory that does not reach cannot lie inside the private
-directory, so only symlinks are checked.
+them: it lists with `os.scandir` and descends each real directory once, by filesystem identity
+(`st_dev`, `st_ino`) and not by spelling, so a symlinked directory and a second mount of one are one
+directory. Every directory it enters is compared by identity with the private directory and each
+transcript store, so a bind-mounted alias of one is `RECORDS_DENIED`, and every symlink it meets is
+checked by the path rule on the link's real path. It trusts no subtree: a link into `/nix/store` is
+walked like any other, since a store path can hold a link back into the console's state. Each entry
+listed counts toward `WALK_LIMIT` and the walk has `WALK_SECONDS` of time; past either, and when a
+directory or an identity cannot be read (any `OSError` but a path that vanished), the call is
+`SEARCH_UNCHECKED`, because a search that cannot be fully checked is not allowed. A non-symlink
+descendant of a directory that does not reach cannot lie inside the private directory unless it is
+a mount of it, which the identity check names, so only symlinks and directory identities are checked.
 
 Output. Stdout is exactly one line, `json.dumps(output(decision, reason))`, the client's PreToolUse
 wire format. Exactly two arguments (`<allowed> <repo>`) or exactly four (`<allowed> <repo> <private dir> <records
@@ -123,7 +130,7 @@ import shlex
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 READ_TOOLS: tuple[str, ...] = ("Read", "Grep", "Glob")
 WRITE_TOOLS: tuple[str, ...] = ("Edit", "Write", "NotebookEdit")
@@ -189,7 +196,8 @@ RECORDS_DENIED = (
 )
 SEARCH_UNCHECKED = (
     "This search is too large to check against the console's own files (over {limit} files and "
-    "directories, or too slow to list), so it was refused: search a narrower path."
+    "directories, too slow to list or not fully listable), so it was refused: search a narrower "
+    "path."
 )
 BRACES_UNCHECKED = (
     "This pattern names more than {limit} brace alternatives, too many to check against the "
@@ -198,7 +206,6 @@ BRACES_UNCHECKED = (
 WALK_LIMIT = 100_000
 WALK_SECONDS = 5.0
 BRACE_LIMIT = 64
-IMMUTABLE_ROOTS: tuple[str, ...] = ("/nix/store",)
 WILDCARDS = "*?[{"
 
 
@@ -209,6 +216,7 @@ class Confinement:
     private: str
     records: str
     transcripts: tuple[str, ...] = ()
+    session: str | None = None
 
 
 def _identity(path: str) -> tuple[int, int] | None:
@@ -250,6 +258,25 @@ def _same_file(path: str, other: str) -> bool:
         return True
     first, second = _identity(path), _identity(other)
     return first is not None and first == second
+
+
+SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+RESULTS_DIR = "tool-results"
+
+
+def _own_results(path: str, c: Confinement) -> bool:
+    """Whether `path` is inside the session's own saved tool output, `<store>/<slug>/<session>/tool-results`."""
+    if c.session is None or _inside(path, c.private):
+        return False
+    for store in c.transcripts:
+        try:
+            with os.scandir(store) as scan:
+                slugs = [entry.path for entry in scan if entry.is_dir()]
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if any(_inside(path, os.path.join(slug, c.session, RESULTS_DIR)) for slug in slugs):
+            return True
+    return False
 
 
 def transcript_dirs(environ: Mapping[str, str]) -> tuple[str, ...]:
@@ -428,7 +455,7 @@ def _reaches(text: str, base: str, c: Confinement) -> bool:
     if not text:
         return False
     path = _resolve(text, base)
-    if _same_file(path, c.records):
+    if _same_file(path, c.records) or _own_results(path, c):
         return False
     return any(_inside(path, held) or _inside(held, path) for held in (c.private, *c.transcripts))
 
@@ -450,27 +477,47 @@ def _word_targets(word: str) -> list[str]:
 def _tree_reaches(root: str, c: Confinement) -> str | None:
     """The deny sentence when a search of `root` could meet the console's state, else None.
 
-    The walk follows symlinks because the client may; only symlinks can lead into the private directory.
-    It lists with `os.scandir` (no realpath per directory), descends a symlinked directory once, never
-    into one under `IMMUTABLE_ROOTS` (a store path cannot be given a new link), and gives up past
-    `WALK_LIMIT` entries or `WALK_SECONDS` seconds, which keeps it inside the hook's own timeout.
+    The walk follows symlinks because the client may. It lists with `os.scandir`, enters each
+    directory once by `(st_dev, st_ino)`, compares every directory it enters with the identity of the
+    private directory and the transcript stores, checks each symlink by the path rule, trusts no
+    subtree, and gives up past `WALK_LIMIT` entries or `WALK_SECONDS` seconds or when a directory
+    or identity cannot be read, which keeps it inside the hook's own timeout and its answer complete.
     """
     root = os.path.realpath(root)
     if not os.path.isdir(root):
         return None
+    denied = RECORDS_DENIED.format(records=c.records)
     unchecked = SEARCH_UNCHECKED.format(limit=WALK_LIMIT)
+    held = {identity for identity in map(_identity, (c.private, *c.transcripts)) if identity is not None}
     deadline = time.monotonic() + WALK_SECONDS
-    visited = {root}
-    pending = [root]
+    visited: set[tuple[int, int]] = set()
+    pending: list[str] = []
     listed = 0
-    while pending:
+
+    def enter(real: str) -> str | None:
+        try:
+            status = os.stat(real)
+        except OSError:
+            return unchecked
+        identity = (status.st_dev, status.st_ino)
+        if identity in held:
+            return denied
+        if identity not in visited:
+            visited.add(identity)
+            pending.append(real)
+        return None
+
+    found = enter(root)
+    while found is None and pending:
         if time.monotonic() > deadline:
             return unchecked
         try:
             with os.scandir(pending.pop()) as scan:
                 entries = list(scan)
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError:
+            return unchecked
         listed += len(entries)
         if listed > WALK_LIMIT:
             return unchecked
@@ -478,14 +525,14 @@ def _tree_reaches(root: str, c: Confinement) -> str | None:
             if entry.is_symlink():
                 real = os.path.realpath(entry.path)
                 if _reaches(real, "/", c):
-                    return RECORDS_DENIED.format(records=c.records)
-                walk = os.path.isdir(real) and not any(_inside(real, top) for top in IMMUTABLE_ROOTS)
+                    return denied
+                walk = os.path.isdir(real)
             else:
                 real, walk = entry.path, entry.is_dir(follow_symlinks=False)
-            if walk and real not in visited:
-                visited.add(real)
-                pending.append(real)
-    return None
+            found = enter(real) if walk else None
+            if found is not None:
+                break
+    return found
 
 
 def _brace_expansions(pattern: str) -> list[str] | None:
@@ -599,6 +646,9 @@ def decide(
         tool_input = document.get("tool_input")
         if not isinstance(tool_input, dict):
             return "deny", MALFORMED
+        session = document.get("session_id")
+        if isinstance(session, str) and SESSION_NAME.fullmatch(session):
+            confinement = replace(confinement, session=session)
         try:
             found = _confined(name, tool_input, base, confinement)
         except (OSError, ValueError):
@@ -614,6 +664,9 @@ def decide(
     decision = _decide_bash(tool_input["command"], allowed, repo)
     if confinement is None or decision[0] != "allow":
         return decision
+    session = document.get("session_id")
+    if isinstance(session, str) and SESSION_NAME.fullmatch(session):
+        confinement = replace(confinement, session=session)
     try:
         found = _confined_command(tool_input["command"], base, confinement)
     except (OSError, ValueError):

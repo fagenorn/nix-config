@@ -151,7 +151,7 @@ from pathlib import Path
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager
 from agent_tools.console.event_log import (
-    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, Event)
+    PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, Event)
 from agent_tools.console.project_question_hook import (
     GH_READ_GROUPS, GH_READ_VERBS, GIT_READS, PLAIN_WORD, REPO_SLUG)
 from agent_tools.project_contract import resolve_project
@@ -722,6 +722,23 @@ def asked_questions(events: Iterable[Event],
             if index is not None and items[index].state == WORKING:
                 items[index] = _answered(items[index], event)
     return {project: tuple(items) for project, items in found.items() if items}
+
+
+def question_keys(events: Iterable[Event],
+                  known: Mapping[tuple[str, str], str] | None = None) -> dict[tuple[str, str], str]:
+    """`(project, request key)` to the id of the question asked under it, from the receipt rows (ADR-console-082 D9).
+
+    A receipt is kept whatever its age, so this outlives the asked row `asked_questions` folds; the first receipt of a key wins.
+    """
+    found = dict(known or {})
+    for event in events:
+        if event.kind != PROJECT_QUESTION_KEYED or not isinstance(event.project, str):
+            continue
+        key, question_id = event.payload.get("request_key"), event.payload.get("question_id")
+        if (isinstance(key, str) and REQUEST_KEY.fullmatch(key)
+                and isinstance(question_id, str) and question_id):
+            found.setdefault((event.project, key), question_id)
+    return found
 
 
 def threads(questions: Sequence[AskedQuestion]) -> tuple[tuple[AskedQuestion, ...], ...]:

@@ -89,6 +89,7 @@ The default `restart`, `owner`, `registry`, `stop` and `remove` and the `clock` 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import http.client
 import json
@@ -97,6 +98,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -214,12 +216,17 @@ class Console:
 
 
 def _write_json(path: Path, document: dict) -> None:
+    """Write `document` to `path` 0600 through a temporary file of its own, so two writers at once never share one."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump(document, stream, sort_keys=True)
-    os.replace(temporary, path)
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(document, stream, sort_keys=True)
+        os.replace(name, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise
 
 
 def _project_sprints(view: dict, project: str) -> dict[str, dict]:

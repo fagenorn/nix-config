@@ -1559,7 +1559,7 @@ whose last question is not answered, a thread too long to carry), and no account
 start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
 accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
-`thread_id` and `request_key` it was given) and counts itself open in that same section. A follow-up's session gets
+`thread_id` and `request_key` it was given) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
@@ -1613,7 +1613,7 @@ from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
-    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
+    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
@@ -3760,6 +3760,7 @@ class ConsoleService:
         self._project_question_dispatch = (
             self._on_project_question_thread if project_question_dispatch is None
             else project_question_dispatch)
+        self._question_keys: dict[tuple[str, str], str] = {}
         self._project_questions_open = 0  # accepted questions whose answered row is not yet written
         self._project_question_workers: list[threading.Thread] = []
         self._probe_thread: threading.Thread | None = None
@@ -3952,6 +3953,7 @@ class ConsoleService:
             self._withdrawn = sprints.withdrawn_ids(events)
             self._owner_notices = sprints.owner_notices(events)
             self._project_questions = project_question.asked_questions(events)
+            self._question_keys = project_question.question_keys(events)
             self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
             self._access = guest.access_list(events)
@@ -4525,7 +4527,7 @@ class ConsoleService:
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
         turns go to the job. A `request_key` already on a folded question of the project returns
-        that question's id and appends, counts and dispatches nothing (ADR-console-082 D9); the
+        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-082 D9); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing.
         """
@@ -4538,9 +4540,9 @@ class ConsoleService:
                 raise project_question.Refused(project_question.UNREGISTERED)
             text = project_question.checked_question(text)
             if request_key is not None:
-                known = next((item.question_id
-                              for item in self._project_questions.get(project_id, ())
-                              if item.request_key == request_key), None)
+                known = self._question_keys.get((project_id, request_key)) or next(
+                    (item.question_id for item in self._project_questions.get(project_id, ())
+                     if item.request_key == request_key), None)
                 if known is not None:
                     return known
             thread = () if thread_id is None else project_question.follow_up(
@@ -4557,7 +4559,11 @@ class ConsoleService:
                 payload["thread_id"] = thread_id
             if request_key is not None:
                 payload["request_key"] = request_key
-            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, payload)])
+            rows = [(PROJECT_QUESTION_ASKED, project_id, payload)]
+            if request_key is not None:
+                rows.append((PROJECT_QUESTION_KEYED, project_id,
+                             {"request_key": request_key, "question_id": question_id}))
+            appended = self.log.append(rows)
             self._apply(appended)
             self._project_questions_open += 1
         try:
@@ -7805,6 +7811,7 @@ class ConsoleService:
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
+        self._question_keys = project_question.question_keys(appended, self._question_keys)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
         for event in appended:
@@ -7841,6 +7848,7 @@ class ConsoleService:
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._project_questions = project_question.asked_questions(events)
+                self._question_keys = project_question.question_keys(events)
                 self._derive_digest(events)
                 self._publish()
             self._sweep_pictures(events)

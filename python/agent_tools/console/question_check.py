@@ -24,7 +24,8 @@ result file is `{"project", "revision", "checked_at", "status", "questions": [{"
 "request_key", "verdict", "post", "shown"}]}`: `post` is None when this run sent nothing for the
 question, `"posted"`, or `"refused: <status>: <text>"` (the console's refusal text included);
 `shown` is the view question exactly as `/api/state` gave it, every answer section included, or None
-when the view holds no question with its key. Each file is written 0600 in a 0700 directory.
+when the view holds no question with its key. Each file is written 0600 in a 0700 directory, through a temporary file of its own that is then renamed over it,
+so two checks at once never share a temporary.
 
 Order of one run:
 
@@ -41,7 +42,8 @@ Order of one run:
    only way a retry finds the question it already asked). Reading the state, choosing the keys and
    writing it are one section under an exclusive `flock` on `<state file>.lock`, so two runs at
    once share one set of keys and cannot start six paid sessions. A state file that exists but is
-   not the shape above (truncated, not JSON, a wrong type) is status `bad_state`, exit 2, nothing
+   not the shape above (truncated, not JSON, a wrong type, an empty key, or one key saved for two
+   texts of a project, since two lookups of one key would judge one answer for two questions) is status `bad_state`, exit 2, nothing
    posted and the file left as it was: a fresh empty state would generate new keys and could ask
    every paid question again. A missing file is an empty state.
 5. A question is found by its own key only (P6): the view question of ID whose `request_key` is the
@@ -187,7 +189,9 @@ def _valid_state(document: object) -> bool:
     return isinstance(projects, dict) and all(
         isinstance(kept, dict) and isinstance(kept.get("revision"), str)
         and isinstance(kept.get("keys"), dict)
-        and all(isinstance(text, str) and isinstance(key, str) for text, key in kept["keys"].items())
+        and all(isinstance(text, str) and isinstance(key, str) and key
+                for text, key in kept["keys"].items())
+        and len(set(kept["keys"].values())) == len(kept["keys"])
         for kept in projects.values())
 
 

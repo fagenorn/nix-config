@@ -185,6 +185,46 @@ class ProjectRecordsTest(unittest.TestCase):
             "commit": "c" * 40, "state": "failed", "started_at": at(4), "finished_at": at(5),
             "reason": "it exited 1: error: build failed", "next_step": NEXT_STEP}])
 
+    def test_a_path_registered_to_another_project_before_keeps_that_projects_records_out(self):
+        old = "owner/old"
+
+        def registry(seq, kind, project, payload, when):
+            return Event(seq, f"{when}T12:00:00+00:00", kind, project, payload)
+
+        for ending in (
+            registry(101, event_log.PROJECT_UNREGISTERED, old, {}, DAY1),
+            registry(101, "project.registered", old, {"root": "/srv/elsewhere"}, DAY1),
+        ):
+            with self.subTest(ending=ending.kind):
+                events = [registry(100, "project.registered", old, {"root": P_ROOT}, DAY1)] + EVENTS + [
+                    ending, registry(102, "project.registered", P, {"root": P_ROOT}, DAY2),
+                    activation(103, event_log.ACTIVATION_FINISHED,
+                               {"root": P_ROOT, "commit": "e" * 40, "ok": True, "reason": None,
+                                "next_step": None})]
+                r = records(events=sorted(events, key=lambda event: event.seq))
+                self.assertEqual([a["commit"] for a in r["activations"]], ["e" * 40])
+                self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [0, 60])
+                self.assertEqual([(x["run_id"], x["tokens"]) for x in r["spend"]["runs"]],
+                                 [("wf_b", 30), ("wf_a", 20)])
+                self.assertEqual(
+                    [x["sprint_id"] for x in r["spend"]["sprints"]], [P_SPRINT])
+
+    def test_the_projects_own_registrations_and_unrelated_ones_drop_nothing(self):
+        def registry(seq, kind, project, payload):
+            return Event(seq, f"{DAY2}T12:00:00+00:00", kind, project, payload)
+
+        events = sorted([
+            registry(100, "project.registered", P, {"root": P_ROOT}),
+            registry(101, "project.registered", O, {"root": O_ROOT}),
+            *EVENTS,
+            registry(102, event_log.PROJECT_UNREGISTERED, P, {}),
+            registry(103, "project.registered", P, {"root": P_ROOT}),
+            registry(104, event_log.PROJECT_UNREGISTERED, O, {})], key=lambda event: event.seq)
+        r = records(events=events)
+        self.assertEqual([a["commit"] for a in r["activations"]], ["c" * 40])
+        self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [100, 60])
+        self.assertEqual(r, records())
+
     def test_no_spend_view_is_null_spend_and_the_rest_is_still_written(self):
         r = records(spend=None)
         self.assertIsNone(r["spend"])

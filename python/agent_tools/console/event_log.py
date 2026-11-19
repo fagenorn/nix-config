@@ -62,6 +62,13 @@ any other row; the spend fold reads the asked row's `session_id` and `profile`
 (`spend.question_sessions`), and `project_question.asked_questions` folds both into the desk
 view's questions (#1177); the schema version is unchanged.
 
+One kind is kept whole (#1271): `PROJECT_QUESTION_KEYED` (`project_question.keyed`, payload `request_key`
+and `question_id`, the project in its project column) is the receipt of a question asked under a request
+key, appended in the same transaction as its asked row (ADR-console-082 D9). It is not in `KEPT_KINDS`, but the
+retention pass never removes it, whatever its age, so a key the console has asked still finds its question
+after the asked row is gone and a retry of that key starts no second session. The question's own rows go
+at 90 days as before; the receipt is two short strings.
+
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
@@ -193,6 +200,7 @@ NOTICE_POSTED = "notice.posted"
 NOTICE_WITHDRAWN = "notice.withdrawn"
 NOTICE_NUDGED = "notice.nudged"
 PROJECT_QUESTION_ASKED = "project_question.asked"
+PROJECT_QUESTION_KEYED = "project_question.keyed"
 PROJECT_QUESTION_ANSWERED = "project_question.answered"
 SPRINT_CLOSED = "sprint.closed"
 SPRINT_STOP_REQUESTED = "sprint.stop_requested"
@@ -418,7 +426,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force, and every question key receipt; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -480,13 +488,15 @@ class EventLog:
                     "WHERE newer.kind = events.kind)) "
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind IN (?, ?) AND "
-                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login')))",
+                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login'))) "
+                    "AND kind <> ?",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED, SHARING_TAILNET,
-                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED)).rowcount
+                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED,
+                     PROJECT_QUESTION_KEYED)).rowcount
 
             return self._transaction(remove)
 
