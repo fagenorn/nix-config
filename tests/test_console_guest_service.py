@@ -1410,20 +1410,24 @@ class ReadNameTest(GuestCase):
 
 
 class HeldCheckServiceTest(GuestCase):
+    def check(self, svc):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = serve_probe_check.main(["--port", str(svc.address[1])])
+        self.assertNotIn("@", out.getvalue())
+        return code, json.loads(out.getvalue())["status"]
+
+    def probe(self, svc):
+        self.guest(svc, "GET", "/api/whoami",
+                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+
     def test_the_held_check_reads_the_running_service(self):
         self.seed()
         svc = self.start()
-
-        def check():
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                code = serve_probe_check.main(["--port", str(svc.address[1])])
-            self.assertNotIn("@", out.getvalue())
-            return code, json.loads(out.getvalue())["status"]
+        check = lambda: self.check(svc)  # noqa: E731
 
         self.assertEqual(check(), (75, "no_request"))
-        self.guest(svc, "GET", "/api/whoami",
-                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
+        self.probe(svc)
         self.assertEqual(check(), (0, "met"))
         self.status = {"Self": {"DNSName": OTHER_HOST + "."}}
         svc.poll_serve()
@@ -1437,6 +1441,23 @@ class HeldCheckServiceTest(GuestCase):
         self.guest(svc, "GET", "/api/whoami", host=TAILNET,
                    headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
         self.assertEqual(check(), (1, "not_met"))
+        self.status = None
+        svc.poll_serve()
+        self.assertEqual(check(), (75, "name_unread"))
+        self.status = {"Self": {"DNSName": TAILNET + "."}}
+        svc.poll_serve()
+        svc.set_sharing(False)
+        self.assertEqual(check(), (75, "sharing_off"))
+
+    def test_a_probe_taken_while_sharing_was_off_is_stale(self):
+        self.seed()
+        svc = self.start()
+        svc.set_sharing(False)
+        self.probe(svc)
+        svc.set_sharing(True)
+        self.assertEqual(self.check(svc), (75, "stale"))
+        self.probe(svc)
+        self.assertEqual(self.check(svc), (0, "met"))
 
 
 if __name__ == "__main__":
