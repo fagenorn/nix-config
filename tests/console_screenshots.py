@@ -392,7 +392,10 @@ class StyleCheck:
     fixture answer, so a real-answer run skips it. The whole-page kinds (`none_peach`, `palette`,
     `tokens`, `distinct`, `sizes_shared`) read the elements under `selector` (the probe's, for a
     probe row) and the painted colours of each, normalised, or the CSSOM `:root` token list;
-    `fills` reads each match against its parent's content width.
+    `fills` reads each match against its parent's content width, `right_edge` that its right edge
+    stands at its parent's content edge, `hugs` that its content box is no wider than its text, and
+    `largest_type` (`value` is `<px>|<selector list>`) that no element under `selector` has a
+    `font-size` of `<px>` or more unless it matches the list.
     """
     name: str
     states: tuple[str, ...]
@@ -416,7 +419,8 @@ class StyleCheck:
 # The selectors clicked, in order, after a state's picture and before its style reading.
 STYLE_STEPS: dict[str, tuple[str, ...]] = {}
 WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt",
-                   "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills"})
+                   "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills",
+                   "largest_type", "right_edge", "hugs"})
 PALETTE = {
     "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
     "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
@@ -527,6 +531,310 @@ STYLE_CHECKS: tuple[StyleCheck, ...] = (
                ".nav { width: 200px !important }"),
     StyleCheck("nav-min-width", ("nothing-running",), _BOTH, ".nav", "min-width", "equals", "auto",
                ".nav { min-width: 0 !important }"),
+)
+_DESK_STATES = tuple(state for state in _EVERY_STATE if state != "spend-page")
+_RGB = "rgb(1, 2, 3)"
+
+
+def _row(name, states, selector, prop, want, value, bad, widths=_BOTH, **kw):
+    """A row reading `selector`'s `prop`, broken by a rule that sets the property to `bad`."""
+    states = (states,) if isinstance(states, str) else tuple(states)
+    return StyleCheck(name, states, tuple(widths), selector, prop, want, value,
+                      f"{selector}{kw.get('pseudo', '')} {{ {prop}: {bad} !important }}", **kw)
+
+
+def _group(prefix, states, selector, reads, widths=_BOTH, **kw):
+    """The rows `<prefix>-<prop>` of one selector, one per `(prop, want, value, bad)` read."""
+    return tuple(_row(f"{prefix}-{prop}", states, selector, prop, want, value, bad, widths, **kw)
+                 for prop, want, value, bad in reads)
+
+
+_NOTHING = "nothing-running"
+_OPEN_GOAL = ".goal-bar.open .goal-count"
+_PLAIN_BACKGROUND = "rgba(0, 0, 0, 0)"
+_INLINE_BLOCK = (("display", "equals", "inline-block", "block"),
+                 ("max-width", "equals", "100%", "none"),
+                 ("overflow", "equals", "hidden", "visible"),
+                 ("text-overflow", "equals", "ellipsis", "clip"),
+                 ("white-space", "equals", "nowrap", "normal"),
+                 ("vertical-align", "equals", "bottom", "top"))
+_SEC_UI = '<span class="sec-ui" style="font-family: var(--ui)" data-style-probe></span>'
+_DISPLAY_LEAD = (".statement h1, .statement h1 *, .card .q, .card .q *, .reading-question, "
+                 ".reading-question *")
+_SEC_H = (("font-style", "equals", "normal", "italic"),
+          ("font-weight", "equals", "600", "400"),
+          ("font-size", "equals", "15px", "30px"),
+          ("line-height", "equals", "21px", "40px"),
+          ("color", "equals", PALETTE["--text"], _RGB))
+
+
+def _sec_h(prefix, selector, **kw):
+    return (*_group(prefix, _NOTHING, selector, _SEC_H, **kw),
+            _row(f"{prefix}-font-family", _NOTHING, selector, "font-family", "same_as", ".sec-ui",
+                 "serif", compare_probe=_SEC_UI, compare_host="#digest", **kw))
+
+
+STYLE_CHECKS += (
+    *_group("top-wrap", _NOTHING, ".top-in", (("flex-wrap", "equals", "wrap", "nowrap"),)),
+    *_group("top-wrap", _NOTHING, ".top-in", (
+        ("row-gap", "equals", "10px", "1px"), ("column-gap", "equals", "28px", "1px"),
+        ("gap", "equals", "10px 28px", "1px")), widths=(1440,)),
+    _row("statement-narrow-font-size", _NOTHING, ".statement h1", "font-size", "max", "37.9",
+         "3rem", widths=(480,),
+         probe='<div class="statement" data-style-probe><h1>x</h1></div>', host="body"),
+    *_group("goal-box", "goal-open", ".goal-box", (
+        ("max-height", "max", "900", "none"), ("overflow-y", "equals", "auto", "visible"))),
+    _row("goal-box-width-1440", "goal-open", ".goal-box", "width", "max", "600", "700px",
+         widths=(1440,)),
+    _row("goal-box-width-480", "goal-open", ".goal-box", "width", "max", "448", "700px",
+         widths=(480,)),
+    *_group("goal-projects", "goal-open", ".goal-projects", (
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"),
+        ("overflow-y", "equals", "auto", "visible"), ("flex", "equals", "0 1 auto", "1 1 auto"),
+        ("min-height", "equals", "0px", "50px"))),
+    *_group("goal-projects-li", "goal-open", ".goal-projects li", (
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"))),
+    *_group("goal-project", "goal-open", ".goal-project", (
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"),
+        ("overflow-wrap", "equals", "anywhere", "normal"))),
+    _row("goal-filter-min-width", "goal-open", ".goal-filter", "min-width", "equals", "0px",
+         "50px"),
+    _row("goal-act-flex", "goal-open", ".goal-act", "flex", "equals", "0 0 auto", "1 1 auto"),
+    _row("goal-bar-flex-480", _NOTHING, ".goal-bar", "flex", "equals", "1 0 100%", "1 1 10px",
+         widths=(480,)),
+    _row("goal-bar-max-width-480", _NOTHING, ".goal-bar", "max-width", "equals", "none", "300px",
+         widths=(480,)),
+    _row("goal-bar-flex-1440", _NOTHING, ".goal-bar", "flex", "equals", "1 1 192px", "0 0 10px",
+         widths=(1440,)),
+    _row("goal-bar-min-width-1440", _NOTHING, ".goal-bar", "min-width", "equals", "192px", "10px",
+         widths=(1440,)),
+    _row("goal-bar-max-width-1440", _NOTHING, ".goal-bar", "max-width", "equals", "440px", "300px",
+         widths=(1440,)),
+    *_group("placeholder", _NOTHING, ".goal-in .goal-text", (
+        ("white-space", "equals", "nowrap", "normal"), ("overflow", "equals", "hidden", "visible"),
+        ("text-overflow", "equals", "ellipsis", "clip")), pseudo="::placeholder"),
+    _row("placeholder-host-text-overflow", _NOTHING, ".goal-in .goal-text", "text-overflow",
+         "equals", "ellipsis", "clip"),
+    _row("goal-focus-border-color", _NOTHING, ".goal-in", "border-color", "equals",
+         PALETTE["--lav"], _RGB, forced=("focus-within",)),
+    _row("goal-focus-outline", _NOTHING, ".goal-in .field-bare", "outline", "equals",
+         "rgb(202, 211, 245) none 0px", "2px solid " + _RGB,
+         forced=("focus-visible",)),
+    _row("goal-count-closed-display", _NOTHING, ".goal-count", "display", "equals", "none", "block",
+         probe='<span class="goal-count" data-style-probe></span>', host="#goal"),
+    *_group("goal-count", "goal-open", _OPEN_GOAL, (
+        ("display", "equals", "block", "none"), ("position", "equals", "absolute", "static"),
+        ("color", "equals", PALETTE["--ov2"], _RGB), ("white-space", "equals", "normal", "nowrap"),
+        ("flex-basis", "equals", "auto", "300px"), ("min-width", "in", "auto|0px", "300px"))),
+    _row("goal-count-width", "goal-open", _OPEN_GOAL, "width", "hugs", "", "300px"),
+    _row("goal-count-near-color", "goal-near", _OPEN_GOAL, "color", "equals", PALETTE["--ov2"],
+         _RGB),
+    *_group("goal-count-over", "goal-over", ".goal-count.over", (
+        ("color", "equals", PALETTE["--red"], _RGB), ("white-space", "equals", "normal", "nowrap"),
+        ("flex-basis", "equals", "auto", "300px"), ("min-width", "in", "auto|0px", "300px"))),
+    _row("goal-count-over-width", "goal-over", ".goal-count.over", "width", "hugs", "", "300px"),
+    *_group("goal-status", "goal-open", ".goal-status", (
+        ("display", "not", "none", "none"), ("visibility", "equals", "visible", "hidden")),
+        probe='<p class="goal-status" data-style-probe>Could not send: this project is not '
+              'registered</p>', host="#goal .goal-box"),
+    _row("goal-status-empty-display", "goal-open", ".goal-status:empty", "display", "equals",
+         "none", "block", probe='<p class="goal-status" data-style-probe></p>',
+         host="#goal .goal-box"),
+    *_group("fail-shown", _NOTHING, ".fail", (
+        ("display", "not", "none", "none"), ("visibility", "equals", "visible", "hidden")),
+        probe='<p class="fail" data-style-probe>x</p>', host="#inbox"),
+    *_group("cap", "accounts-panel", ".cap", (
+        ("flex", "equals", "0 0 auto", "1 1 auto"), ("overflow", "equals", "hidden", "visible"),
+        ("min-width", "equals", "0px", "50px"), ("max-width", "equals", "100%", "none"),
+        ("white-space", "equals", "nowrap", "normal"), ("flex-wrap", "equals", "nowrap", "wrap"),
+        ("font-size", "equals", "13px", "20px"), ("color", "equals", PALETTE["--sub0"], _RGB),
+        ("cursor", "equals", "pointer", "default"), ("text-align", "equals", "left", "right"),
+        ("padding", "equals", "0px", "9px"), ("font-style", "equals", "normal", "italic"),
+        ("font-weight", "equals", "400", "700"), ("line-height", "equals", "19.5px", "40px"),
+        ("background-image", "equals", "none", "linear-gradient(red, red)"))),
+    _row("cap-font-family", "accounts-panel", ".cap", "font-family", "same_as", "body", "serif"),
+    _row("cap-background-color", _NOTHING, ".cap", "background-color", "equals", _PLAIN_BACKGROUND,
+         _RGB),
+    _row("cap-child-flex", "accounts-panel", ".cap > *", "flex", "equals", "0 0 auto", "1 1 auto",
+         every=True),
+    _row("cap-acct-max-width", "accounts-panel", ".cap-acct", "max-width", "equals", "100%",
+         "none"),
+    _row("cap-acct-white-space", "accounts-panel", ".cap-acct", "white-space", "equals", "nowrap",
+         "normal"),
+    *_group("cap-acct-name", "accounts-panel", ".cap-acct b", (
+        ("overflow", "equals", "hidden", "visible"), ("text-overflow", "equals", "ellipsis", "clip"),
+        ("white-space", "equals", "nowrap", "normal"), ("max-width", "max", "160", "none"))),
+    _colour("cap-excl-color", "accounts-panel", ".cap-excl", "--ov2", host="#capacity",
+            probe='<span class="cap-excl" data-style-probe>x</span>'),
+    _colour("cap-pin-mark-color", "accounts-panel", ".cap-pin-mark", "--ov2", host="#capacity",
+            probe='<span class="cap-pin-mark" data-style-probe>x</span>'),
+    _row("cap-extra-display", "accounts-panel", ".cap-extra", "display", "equals", "none", "block",
+         widths=(480,), probe='<span class="cap-extra" data-style-probe>x</span>',
+         host="#capacity"),
+    _row("brand-white-space", _NOTHING, ".brand", "white-space", "equals", "nowrap", "normal"),
+    _row("top-fit-width", _NOTHING, ".top-in > *", "width", "max", "448", "600px", widths=(480,),
+         every=True),
+    _row("top-fit-min-width", _NOTHING, ".goal-bar, .cap", "min-width", "max", "448", "600px",
+         widths=(480,), every=True),
+    _row("top-fit-flex-basis", _NOTHING, ".goal-bar", "flex-basis", "max", "448", "600px",
+         widths=(480,)),
+    _row("meter-fill-background-color", _NOTHING, ".meter i", "background-color", "equals",
+         PALETTE["--sub0"], _RGB, probe='<span class="meter" data-style-probe><i></i></span>',
+         host="#capacity"),
+    _row("meter-fill-background-image", _NOTHING, ".meter i", "background-image", "equals", "none",
+         "linear-gradient(red, red)",
+         probe='<span class="meter" data-style-probe><i></i></span>', host="#capacity"),
+    _row("meter-excluded-background-color", _NOTHING, ".cap-excluded .meter i", "background-color",
+         "equals", PALETTE["--s2"], _RGB,
+         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
+               '</span></span>', host="#capacity"),
+    _row("meter-excluded-background-image", _NOTHING, ".cap-excluded .meter i",
+         "background-image", "equals", "none", "linear-gradient(red, red)",
+         probe='<span class="cap-acct cap-excluded" data-style-probe><span class="meter"><i></i>'
+               '</span></span>', host="#capacity"),
+    StyleCheck("lead-type-font-size", _DESK_STATES, _BOTH, "body", "font-size", "largest_type",
+               "24|" + _DISPLAY_LEAD, ".brand { font-size: 30px !important }", fixture=True),
+    _row("lead-type-card-font-size", "inbox-card", ".card .q", "font-size", "equals", "24px",
+         "20px"),
+    _row("lead-type-card-font", "inbox-card", ".card .q", "font", "starts", "600 24px / 31.2px ",
+         "20px serif"),
+    _row("lead-type-reading-font-size", "question-read", ".reading-question", "font-size",
+         "equals", "24px", "20px", fixture=True),
+    _row("lead-type-reading-font", "question-read", ".reading-question", "font", "starts",
+         "600 24px / 31.2px ", "20px serif", fixture=True),
+    *_group("lead-narrow", "inbox-card", ".card.lead", (
+        ("padding-left", "max", "16", "40px"), ("padding-right", "max", "16", "40px"),
+        ("padding", "equals", "20px 16px", "9px")), widths=(480,)),
+    _row("q-full-width-text-wrap", "inbox-card", ".card .q", "text-wrap", "equals", "pretty",
+         "balance"),
+    _row("q-full-width-reg-text-wrap", "inbox-card", ".card .q.reg", "text-wrap", "not", "balance",
+         "balance",
+         probe='<div class="card" data-style-probe><p class="q reg">x</p></div>'),
+    _row("q-full-width-rest-text-wrap", "inbox-card", ".rest .q.reg", "text-wrap", "not",
+         "balance", "balance",
+         probe='<div class="rest" data-style-probe><p class="q reg">x</p></div>'),
+    _row("reg-ask-font-size-1440", "inbox-card", ".card .q.reg", "font-size", "equals", "20px",
+         "30px", widths=(1440,),
+         probe='<div class="card" data-style-probe><p class="q reg">x</p></div>'),
+    _row("reg-ask-font-size-480", "inbox-card", ".card .q.reg", "font-size", "max", "16", "30px",
+         widths=(480,), probe='<div class="card" data-style-probe><p class="q reg">x</p></div>'),
+    *_group("reg-ask-rest", "inbox-card", ".rest .q.reg", (
+        ("font-weight", "equals", "600", "400"), ("font-size", "equals", "16px", "30px"),
+        ("line-height", "equals", "22.4px", "40px"),
+        ("font", "starts", "600 16px / 22.4px ", "20px serif")),
+        probe='<div class="rest" data-style-probe><p class="q reg">x</p></div>'),
+    *_group("seg", "inbox-card", ".seg", (
+        ("display", "equals", "inline-block", "inline"), ("max-width", "equals", "100%", "none"),
+        ("overflow-wrap", "equals", "anywhere", "normal")),
+        probe='<span class="seg" data-style-probe>x</span>', host="#inbox"),
+    *_group("held-blocks", "inbox-card", ".held.blocks", (
+        ("white-space", "equals", "nowrap", "normal"), ("overflow", "equals", "hidden", "visible"),
+        ("text-overflow", "equals", "ellipsis", "clip")),
+        probe='<p class="held blocks" data-style-probe>x</p>', host="#inbox"),
+    _row("notice-margin-top", "notices-fold", ".notice + .notice", "margin-top", "equals", "12px",
+         "0px"),
+    _row("notice-head-display", "notices-fold", ".notice-head", "display", "equals", "flex",
+         "block"),
+    _row("notice-head-flex-wrap", "notices-fold", ".notice-head", "flex-wrap", "equals", "nowrap",
+         "wrap"),
+    _row("notice-who-flex", "notices-fold", ".notice-who", "flex", "equals", "1 1 auto",
+         "0 0 auto"),
+    _row("notice-who-min-width", "notices-fold", ".notice-who", "min-width", "equals", "0px",
+         "50px"),
+    _row("notice-who-display", "notices-fold", ".notice-who", "display", "equals", "block",
+         "flex"),
+    _row("notice-label-display", "notices-fold", ".notice-label", "display", "equals", "inline",
+         "inline-block"),
+    _row("notice-from-display", "notices-fold", ".notice-from", "display", "equals", "inline",
+         "inline-block"),
+    StyleCheck("notice-age-right", ("notices-fold",), _BOTH, ".notice-head .notice-age", "right",
+               "right_edge", "", ".notice-head .notice-age { margin-right: 40px !important }"),
+    _row("notice-age-margin-left", "notices-fold", ".notice-head .notice-age", "margin-left",
+         "min", "0", "-5px"),
+    _row("notice-age-flex", "notices-fold", ".notice-head .notice-age", "flex", "equals",
+         "0 0 auto", "1 1 auto"),
+    _colour("notice-age-color", "notices-fold", ".notice-head .notice-age", "--ov2",
+            widths=_BOTH),
+    _colour("notice-words-color", "notices-fold", ".notice-words", "--text", widths=_BOTH),
+    *_group("notice-code", "notices-fold", ".notice code", (
+        ("background-color", "equals", PALETTE["--mantle"], _RGB),
+        ("background-image", "equals", "none", "linear-gradient(red, red)"),
+        *_INLINE_BLOCK), probe='<p class="notice" data-style-probe><code>x</code></p>'),
+    *_group("notice-child", "notices-fold", ".notice > *", (
+        ("overflow-wrap", "equals", "anywhere", "normal"), ("min-width", "equals", "0px", "50px")),
+        every=True),
+    *_group("notices-project", "notices-fold", ".notices-project", (
+        ("overflow-wrap", "equals", "anywhere", "normal"), ("margin-left", "equals", "10px",
+                                                           "0px"))),
+    *_group("notice-long", "notices-fold", ".notice .notice-long", _INLINE_BLOCK,
+            probe='<p class="notice" data-style-probe><span class="notice-long">x</span></p>'),
+    _row("notice-gap-open", "notices-fold", ".notice-list + .notice-open", "margin-top", "min",
+         "12", "4px",
+         probe='<div data-style-probe><ul class="notice-list"></ul><p class="notice-open">x</p>'
+               '</div>'),
+    _row("notice-gap-post", "notice-post-open", ".notice-list + .notice-post", "margin-top", "min",
+         "12", "4px",
+         probe='<div data-style-probe><ul class="notice-list"></ul><p class="notice-post">x</p>'
+               '</div>'),
+    *(_row(f"disclosure-{name}-{prop}", state, selector, prop, want, value, bad)
+      for name, state, selector in (("notices", "notices-fold", ".line.notices summary"),
+                                    ("finished", "finished-list", ".finished-list > summary"),
+                                    ("sprint", "live-several", ".sprint-detail summary"))
+      for prop, want, value, bad in (
+          ("display", "equals", "list-item", "block"),
+          ("list-style-type", "in", "disclosure-closed|disclosure-open", "none"))),
+    _row("thread-open-display", "questions-open", ".thread-open", "display", "equals", "flex",
+         "block"),
+    _row("thread-summary-display", "questions-open", ".line.questions > details > summary",
+         "display", "equals", "list-item", "block"),
+    _row("thread-summary-list-style-type", "questions-open", ".line.questions > details > summary",
+         "list-style-type", "in", "disclosure-closed|disclosure-open", "none"),
+    *_group("thread-first", "questions-open", ".thread-first", (
+        ("text-overflow", "equals", "ellipsis", "clip"), ("white-space", "equals", "nowrap",
+                                                          "normal"),
+        ("flex", "equals", "1 1 auto", "0 0 auto"))),
+    _row("reading-weight-panel", "question-read", "#reading", "font-weight", "equals", "400",
+         "700"),
+    _row("reading-weight-call-out", "question-read", "p.reading", "font-weight", "equals", "600",
+         "400", probe='<p class="reading" data-style-probe>x</p>', host="#reading"),
+    _row("answer-type-white-space", "question-read", ".ask-answer p", "white-space", "equals",
+         "pre-line", "normal", fixture=True),
+    _row("answer-type-font-size", "question-read", ".ask-answer", "font-size", "same_as", ".opt .ot",
+         "30px", fixture=True,
+         compare_probe='<div class="opt" data-style-probe><span class="ot">x</span></div>',
+         compare_host="#reading"),
+    _row("answer-type-p-font-size", "question-read", ".ask-answer p", "font-size", "same_as",
+         ".ask-answer", "30px", fixture=True),
+    _row("answer-type-li-font-size", "question-read", ".ask-answer li", "font-size", "same_as",
+         ".ask-answer", "30px", fixture=True),
+    _row("answer-type-list-font-size", "question-read", ".ask-answer .md-list", "font-size",
+         "same_as", ".ask-answer", "30px", fixture=True),
+    _row("answer-type-font", "question-read", ".ask-answer p", "font", "same_as", ".ask-answer",
+         "20px serif", fixture=True),
+    _row("answer-type-li-font", "question-read", ".ask-answer li", "font", "same_as", ".ask-answer",
+         "20px serif", fixture=True),
+    _row("answer-type-list-font", "question-read", ".ask-answer .md-list", "font", "same_as",
+         ".ask-answer", "20px serif", fixture=True),
+    *(_row(f"digest-lines-{name}-{prop}", _NOTHING, f"{list_} li", prop, want, value, bad,
+           probe='<div data-style-probe><ul class="digest"><li><time class="at">x</time>'
+                 '<span class="said">y</span></li></ul><ul class="earlier-list"><li>'
+                 '<time class="at">x</time><span class="said">y</span></li>'
+                 '<li class="more-n">and 2 more</li></ul></div>', host="#digest")
+      for name, list_ in (("digest", ".digest"), ("earlier", ".earlier-list"))
+      for prop, want, value, bad in (
+          ("display", "equals", "grid", "block"),
+          ("grid-template-columns", "starts", "88px ", "1fr"),
+          ("flex-wrap", "equals", "nowrap", "wrap"))),
+    *_group("digest-lines-more", _NOTHING, ".earlier-list .more-n", (
+        ("display", "equals", "block", "grid"), ("grid-column", "equals", "auto", "1 / 3")),
+        probe='<div data-style-probe><ul class="earlier-list"><li class="more-n">and 2 more</li>'
+              '</ul></div>', host="#digest"),
+    *_sec_h("sec-h-work", "#projects h2"),
+    *_sec_h("sec-h-digest", ".digest-head",
+            probe='<h2 class="sec-h digest-head" data-style-probe>Since you last looked, '
+                  '<time>x</time></h2>', host="#digest"),
+    *_sec_h("sec-h-promoted", "#promoted h2",
+            probe='<h2 class="sec-h" data-style-probe>Capacity</h2>', host="#promoted"),
 )
 STYLE_PLACE = r"""((rows) => {
   let placed = 0;
@@ -648,6 +956,15 @@ STYLE_READING = r"""((rows) => {
           if (!allowed.has(parse(colour))) found.push(`${row.name}: ${label(node)} ${prop} is ${colour}`);
         }
       }
+    } else if (row.want === 'largest_type') {
+      const [px, ...rest] = row.value.split('|');
+      const allowed = rest.join('|');
+      for (const node of nodes) {
+        const size = getComputedStyle(node).fontSize;
+        if (parseFloat(size) >= parseFloat(px) && !node.matches(allowed)) {
+          found.push(`${row.name}: ${label(node)} font-size is ${size}`);
+        }
+      }
     } else if (row.want === 'sizes_shared') {
       const inside = new Set(nodes);
       const sizes = new Set(Array.from(document.querySelectorAll('body *')).filter(
@@ -716,7 +1033,7 @@ STYLE_READING = r"""((rows) => {
   };
   const misses = [];
   for (const row of rows) {
-    if (row.want === 'none_peach' || row.want === 'palette' || row.want === 'sizes_shared') {
+    if (['none_peach', 'palette', 'sizes_shared', 'largest_type'].includes(row.want)) {
       misses.push(...wholePage(row));
       continue;
     }
@@ -748,6 +1065,19 @@ STYLE_READING = r"""((rows) => {
         const width = node.getBoundingClientRect().width;
         got = Math.round(width * 100) / 100 + 'px';
         ok = width >= parent.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - 1;
+      } else if (row.want === 'right_edge') {
+        const parent = node.parentElement;
+        const cs = getComputedStyle(parent);
+        const right = node.getBoundingClientRect().right;
+        got = Math.round(right * 100) / 100 + 'px';
+        ok = right >= parent.getBoundingClientRect().right - parseFloat(cs.paddingRight) - 1;
+      } else if (row.want === 'hugs') {
+        const cs = getComputedStyle(node);
+        const width = node.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        got = Math.round(width * 100) / 100 + 'px';
+        ok = width <= range.getBoundingClientRect().width + 1;
       } else if (row.want === 'equals') ok = same(got, row.value);
       else if (row.want === 'in') ok = row.value.split('|').some((member) => same(got, member));
       else if (row.want === 'not') ok = !same(got, row.value);

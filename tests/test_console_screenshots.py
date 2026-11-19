@@ -287,6 +287,277 @@ MOVED: tuple[Moved, ...] = (
           "test_the_spend_page_uses_no_peach_and_only_the_desk_palette",
           ":root", "--*", (1440,), ("tokens-spend",)),
 )
+GOAL = "tests/test_console_goal_box.py"
+NARROW = (480,)
+WIDE = (1440,)
+
+
+def moved(test, selector, prop, widths, *rows, via=""):
+    return Moved(test, selector, prop, widths, rows, via)
+
+
+def _each(test, selector, widths, reads, via=""):
+    """One entry per `(prop, rows...)` read of a selector."""
+    return tuple(moved(test, selector, prop, widths, *rows, via=via) for prop, *rows in reads)
+
+
+SEC_H_FONT = ("font-style", "font-weight", "font-size", "line-height", "font-family")
+
+
+def _sec_h(test, selector, group, via=""):
+    names = [f"{group}-{prop}" for prop in SEC_H_FONT]
+    return (moved(test, selector, "font", BOTH, *names, via=via),
+            moved(test, selector, "font-size", BOTH, f"{group}-font-size", via=via),
+            moved(test, selector, "font-weight", BOTH, f"{group}-font-weight", via=via),
+            moved(test, selector, "color", BOTH, f"{group}-color", via=via))
+
+
+_NARROW_RULE = f"{PAGE}::PageTest::test_the_page_has_a_narrow_rule_for_480_wide"
+_CHOOSER = f"{PAGE}::PageTest::test_the_open_chooser_stays_inside_the_viewport_and_the_panel"
+_LEAD_TYPE = f"{PAGE}::PageTest::test_the_lead_headline_is_the_largest_type_after_the_statement"
+_TOP_BAR = f"{PAGE}::PageTest::test_the_top_bar_fits_480_wide"
+_NOTICE_BLOCKS = (f"{PAGE}::PageNoticeTest::"
+                  "test_notice_blocks_stand_apart_with_the_age_at_the_end_of_the_first_line")
+_NOTICE_GAP = f"{PAGE}::PageNoticeTest::test_the_post_control_stands_a_notice_gap_below_the_last_notice"
+_CUT_WORD = f"{PAGE}::PageNoticeTest::test_a_cut_word_stays_on_one_line_with_an_ellipsis"
+_NOTICE_WRAP = f"{PAGE}::PageNoticeTest::test_notice_words_wrap_within_the_column"
+_ARROW = (f"{PAGE}::PageNoticeTest::"
+          "test_the_closed_notices_fold_shows_the_reports_disclosure_arrow")
+_THREAD = (f"{PAGE}::PageAskTest::"
+           "test_a_thread_line_is_a_flex_row_with_an_ellipsised_first_question")
+_READING_BOLD = (f"{PAGE}::PageReadingTest::"
+                 "test_the_decision_readings_bold_rule_does_not_reach_the_reading_panel")
+_ANSWER_SIZE = (f"{PAGE}::PageReadingFormatTest::"
+                "test_the_answer_reads_at_the_size_of_a_cards_option_text")
+_BREAKS = f"{PAGE}::PageReadingFormatTest::test_a_paragraph_keeps_its_line_breaks"
+_BLOCKS = f"{PAGE}::PageQuestionTest::test_the_blocks_line_stays_one_line"
+_HEADINGS = f"{PAGE}::PageDigestTest::test_section_headings_share_one_style"
+_DIGEST = f"{PAGE}::PageDigestTest::test_each_digest_line_is_its_age_then_its_sentence"
+_STRIP_NEVER = (f"{PAGE}::StripPageTest::"
+                "test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line")
+_STRIP_THREE = f"{PAGE}::StripPageTest::test_three_accounts_fit_one_line_at_1440"
+_STRIP_480 = (f"{PAGE}::StripPageTest::"
+              "test_at_480_only_the_summary_word_and_the_tightest_account_show")
+_STRIP_DIM = f"{PAGE}::StripPageTest::test_an_excluded_accounts_bar_is_dimmed"
+_FOCUS = f"{PAGE}::PageStandingRulesTest::test_the_goal_field_shows_one_border_in_focus"
+_LEAD_CARD = f"{PAGE}::PageStandingRulesTest::test_the_lead_card_narrows_under_900"
+_REG = f"{PAGE}::RegisterCardKeysPageTest::test_register_asks_are_set_small_enough_to_read_at_480"
+_SEG = f"{PAGE}::PathWrapPageTest::test_a_segment_is_an_atomic_inline_block"
+_FULL = f"{PAGE}::PathWrapPageTest::test_every_card_ask_uses_the_full_width"
+_COUNT = f"{GOAL}::GoalCountTest::test_the_count_is_a_quiet_corner_label_that_takes_no_room"
+_REFUSAL = (f"{GOAL}::GoalRefusalStyleTest::"
+            "test_no_rule_hides_a_refusal_the_page_has_put_in_the_status_line")
+PLACEHOLDER_VIA = "the placeholder is read through its ::placeholder pseudo-element"
+INLINE_BLOCK_PROPS = ("display", "max-width", "overflow", "text-overflow", "white-space",
+                      "vertical-align")
+_FIT = "top-fit-width", "top-fit-min-width", "top-fit-flex-basis"
+
+MOVED += (
+    # The 480 rule of the top bar and the statement.
+    *_each(_NARROW_RULE, ".top-in", NARROW, (("flex-wrap", "top-wrap-flex-wrap"),)),
+    moved(_NARROW_RULE, ".statement h1", "font-size", NARROW, "statement-narrow-font-size"),
+    # The open chooser.
+    *_each(_CHOOSER, ".goal-box", BOTH, (("max-height", "goal-box-max-height"),
+                                         ("overflow-y", "goal-box-overflow-y"))),
+    *_each(_CHOOSER, ".goal-projects", BOTH, (
+        ("min-width", "goal-projects-min-width"), ("max-width", "goal-projects-max-width"),
+        ("overflow-y", "goal-projects-overflow-y"), ("flex", "goal-projects-flex"),
+        ("min-height", "goal-projects-min-height"))),
+    *_each(_CHOOSER, ".goal-projects li", BOTH, (
+        ("min-width", "goal-projects-li-min-width"), ("max-width", "goal-projects-li-max-width"))),
+    *_each(_CHOOSER, ".goal-project", BOTH, (
+        ("min-width", "goal-project-min-width"), ("max-width", "goal-project-max-width"),
+        ("overflow-wrap", "goal-project-overflow-wrap"))),
+    moved(_CHOOSER, ".goal-filter", "min-width", BOTH, "goal-filter-min-width"),
+    moved(_CHOOSER, ".goal-act", "flex", BOTH, "goal-act-flex"),
+    # The lead type.
+    moved(_LEAD_TYPE, ".card .q", "font-size", BOTH, "lead-type-card-font-size"),
+    moved(_LEAD_TYPE, ".card .q", "font", BOTH, "lead-type-card-font"),
+    moved(_LEAD_TYPE, ".reading-question", "font-size", BOTH, "lead-type-reading-font-size"),
+    moved(_LEAD_TYPE, ".reading-question", "font", BOTH, "lead-type-reading-font"),
+    moved(_LEAD_TYPE, ".statement h1", "font-size", BOTH, "lead-type-font-size",
+          via="every rendered element's font-size is read against the lead question's 24px"),
+    # The top bar at 480.
+    moved(_TOP_BAR, ".top-in", "flex-wrap", NARROW, "top-wrap-flex-wrap"),
+    moved(_TOP_BAR, ".goal-bar", "flex", NARROW, "goal-bar-flex-480"),
+    moved(_TOP_BAR, ".goal-box", "width", BOTH, "goal-box-width-1440", "goal-box-width-480"),
+    moved(_TOP_BAR, ".cap-acct b", "overflow", BOTH, "cap-acct-name-overflow"),
+    moved(_TOP_BAR, ".cap-acct b", "text-overflow", BOTH, "cap-acct-name-text-overflow"),
+    moved(_TOP_BAR, ".cap-acct b", "white-space", BOTH, "cap-acct-name-white-space"),
+    moved(_TOP_BAR, ".cap-acct b", "max-width", BOTH, "cap-acct-name-max-width"),
+    moved(_TOP_BAR, ".cap", "min-width", BOTH, "cap-min-width"),
+    moved(_TOP_BAR, ".cap", "max-width", BOTH, "cap-max-width"),
+    moved(_TOP_BAR, ".cap", "white-space", BOTH, "cap-white-space"),
+    moved(_TOP_BAR, ".cap-acct", "max-width", BOTH, "cap-acct-max-width"),
+    moved(_TOP_BAR, ".cap-acct", "white-space", BOTH, "cap-acct-white-space"),
+    moved(_TOP_BAR, ".brand", "white-space", BOTH, "brand-white-space"),
+    moved(_TOP_BAR, ".goal-in .goal-text::placeholder", "white-space", BOTH,
+          "placeholder-white-space", via=PLACEHOLDER_VIA),
+    moved(_TOP_BAR, ".nav", "white-space", BOTH, "nav-nowrap"),
+    *(moved(_TOP_BAR, selector, prop, NARROW, *_FIT,
+            via="no top bar rule asks for more than the 480 column: its widths are read rendered")
+      for selector in (".top", ".conn", ".meter", ".cap", ".goal-bar", ".nav", ".brand")
+      for prop in ("width", "min-width", "flex-basis")),
+    # The notices.
+    moved(_NOTICE_BLOCKS, ".notice + .notice", "margin-top", BOTH, "notice-margin-top"),
+    moved(_NOTICE_BLOCKS, ".notice-head", "display", BOTH, "notice-head-display"),
+    moved(_NOTICE_BLOCKS, ".notice-head", "flex-wrap", BOTH, "notice-head-flex-wrap"),
+    moved(_NOTICE_BLOCKS, ".notice-who", "flex", BOTH, "notice-who-flex"),
+    moved(_NOTICE_BLOCKS, ".notice-who", "min-width", BOTH, "notice-who-min-width"),
+    moved(_NOTICE_BLOCKS, ".notice-who", "display", BOTH, "notice-who-display"),
+    moved(_NOTICE_BLOCKS, ".notice-label", "display", BOTH, "notice-label-display"),
+    moved(_NOTICE_BLOCKS, ".notice-from", "display", BOTH, "notice-from-display"),
+    moved(_NOTICE_BLOCKS, ".notice-head .notice-age", "margin-left", BOTH,
+          "notice-age-margin-left", "notice-age-right"),
+    moved(_NOTICE_BLOCKS, ".notice-head .notice-age", "flex", BOTH, "notice-age-flex"),
+    moved(_NOTICE_BLOCKS, ".notice-head .notice-age", "color", BOTH, "notice-age-color"),
+    moved(_NOTICE_BLOCKS, ".notice-words", "color", BOTH, "notice-words-color"),
+    moved(_NOTICE_BLOCKS, ".notice code", "background", BOTH, "notice-code-background-color",
+          "notice-code-background-image"),
+    moved(_NOTICE_BLOCKS, ".notice code", "white-space", BOTH, "notice-code-white-space"),
+    moved(_NOTICE_GAP, ".notice-open", "margin-top", BOTH, "notice-gap-open",
+          via="the control is read where the page draws it, beside the last notice"),
+    moved(_NOTICE_GAP, ".notice-post", "margin-top", BOTH, "notice-gap-post",
+          via="the control is read where the page draws it, beside the last notice"),
+    moved(_NOTICE_GAP, ".notice", "margin-top", BOTH, "notice-margin-top",
+          via="the gap above the post control is read as at least the 12px between notices"),
+    moved(_NOTICE_GAP, ".notice + .notice", "margin-top", BOTH, "notice-margin-top"),
+    *(moved(_CUT_WORD, selector, prop, BOTH, f"{group}-{prop}")
+      for selector, group in ((".notice .notice-long", "notice-long"), (".notice code", "notice-code"))
+      for prop in INLINE_BLOCK_PROPS),
+    moved(_NOTICE_WRAP, ".notice > *", "overflow-wrap", BOTH, "notice-child-overflow-wrap"),
+    moved(_NOTICE_WRAP, ".notice > *", "min-width", BOTH, "notice-child-min-width"),
+    moved(_NOTICE_WRAP, ".notices-project", "overflow-wrap", BOTH, "notices-project-overflow-wrap"),
+    # The disclosure arrows, the threads and the readings.
+    *(moved(_ARROW, selector, prop, BOTH, f"disclosure-{name}-{read}")
+      for name, selector in (("notices", ".line.notices summary"),
+                             ("finished", ".finished-list > summary"),
+                             ("sprint", ".sprint-detail summary"))
+      for prop, read in (("display", "display"), ("list-style", "list-style-type"),
+                         ("list-style-type", "list-style-type"))),
+    moved(_ARROW, ".line.notices summary::-webkit-details-marker", "display", BOTH,
+          "disclosure-notices-display",
+          via="the marker is the summary's own arrow, read as the summary's list-item display"),
+    moved(_ARROW, ".notices-project", "margin-left", BOTH, "notices-project-margin-left"),
+    moved(_THREAD, ".thread-open", "display", BOTH, "thread-open-display"),
+    moved(_THREAD, ".thread-first", "flex", BOTH, "thread-first-flex"),
+    moved(_THREAD, ".line.questions > details > summary", "display", BOTH,
+          "thread-summary-display"),
+    moved(_THREAD, ".line.questions > details > summary", "list-style", BOTH,
+          "thread-summary-list-style-type"),
+    moved(_THREAD, ".thread-first", "text-overflow", BOTH, "thread-first-text-overflow"),
+    moved(_THREAD, ".thread-first", "white-space", BOTH, "thread-first-white-space"),
+    moved(_READING_BOLD, "p.reading", "font-weight", BOTH, "reading-weight-call-out"),
+    moved(_READING_BOLD, ".reading", "font-weight", BOTH, "reading-weight-panel",
+          via="the reading panel's own weight is read, not the shared class"),
+    # The answer's type and line breaks.
+    moved(_ANSWER_SIZE, ".opt .ot", "font-size", BOTH, "answer-type-font-size",
+          via="the answer is read against a probe wearing the card's option text"),
+    moved(_ANSWER_SIZE, ".ask-answer", "font-size", BOTH, "answer-type-font-size"),
+    moved(_ANSWER_SIZE, ".ask-answer p", "font-size", BOTH, "answer-type-p-font-size"),
+    moved(_ANSWER_SIZE, ".ask-answer p", "font", BOTH, "answer-type-font"),
+    moved(_ANSWER_SIZE, ".ask-answer li", "font-size", BOTH, "answer-type-li-font-size"),
+    moved(_ANSWER_SIZE, ".ask-answer li", "font", BOTH, "answer-type-li-font"),
+    *(moved(_ANSWER_SIZE, selector, prop, BOTH, row,
+            via="" if selector.endswith(" .md-list") else "the list kinds inherit like the list")
+      for selector in (".ask-answer .md-list", ".ask-answer ul.md-list", ".ask-answer ol.md-list")
+      for prop, row in (("font-size", "answer-type-list-font-size"),
+                        ("font", "answer-type-list-font"))),
+    moved(_BREAKS, ".ask-answer p", "white-space", BOTH, "answer-type-white-space"),
+    moved(_BLOCKS, ".held.blocks", "white-space", BOTH, "held-blocks-white-space"),
+    moved(_BLOCKS, ".held.blocks", "overflow", BOTH, "held-blocks-overflow"),
+    moved(_BLOCKS, ".held.blocks", "text-overflow", BOTH, "held-blocks-text-overflow"),
+    # The digest and the headings.
+    *(moved(_DIGEST, f"{list_} li", prop, BOTH, f"digest-lines-{name}-{prop}")
+      for list_, name in ((".digest", "digest"), (".earlier-list", "earlier"))
+      for prop in ("display", "grid-template-columns", "flex-wrap")),
+    moved(_DIGEST, ".earlier-list .more-n", "display", BOTH, "digest-lines-more-display"),
+    moved(_DIGEST, ".earlier-list .more-n", "grid-column", BOTH, "digest-lines-more-grid-column"),
+    *_sec_h(_HEADINGS, ".sec-h", "sec-h-work",
+            via="the Work, digest and Capacity headings are each read against the one style"),
+    *_sec_h(_HEADINGS, ".digest-head", "sec-h-digest"),
+    *_sec_h(_HEADINGS, ".side h2", "sec-h-work", via="the Work heading is the side column's"),
+    *_sec_h(_HEADINGS, "#promoted h2", "sec-h-promoted"),
+    # The goal field, the lead card, the asks and the segment.
+    moved(_FOCUS, ".goal-in:focus-within", "border-color", BOTH, "goal-focus-border-color",
+          via="focus is forced on the goal field and its border read"),
+    moved(_FOCUS, ".field-bare:focus-visible", "outline", BOTH, "goal-focus-outline",
+          via="keyboard focus is forced on the goal field's text and its outline read"),
+    moved(_LEAD_CARD, ".card.lead", "padding", NARROW, "lead-narrow-padding"),
+    moved(_LEAD_CARD, ".card.lead", "padding-left", NARROW, "lead-narrow-padding-left"),
+    moved(_LEAD_CARD, ".card.lead", "padding-right", NARROW, "lead-narrow-padding-right"),
+    moved(_REG, ".card .q.reg", "font-size", NARROW, "reg-ask-font-size-480"),
+    moved(_REG, ".card .q.reg", "font-size", WIDE, "reg-ask-font-size-1440"),
+    moved(_REG, ".rest .q.reg", "font", BOTH, "reg-ask-rest-font", "reg-ask-rest-font-weight",
+          "reg-ask-rest-font-size", "reg-ask-rest-line-height"),
+    moved(_SEG, ".seg", "display", BOTH, "seg-display"),
+    moved(_SEG, ".seg", "max-width", BOTH, "seg-max-width"),
+    moved(_SEG, ".seg", "overflow-wrap", BOTH, "seg-overflow-wrap"),
+    moved(_FULL, ".card .q", "text-wrap", BOTH, "q-full-width-text-wrap"),
+    moved(_FULL, ".card .q.reg", "text-wrap", BOTH, "q-full-width-reg-text-wrap"),
+    moved(_FULL, ".rest .q.reg", "text-wrap", BOTH, "q-full-width-rest-text-wrap"),
+    # The goal count and the status line.
+    moved(_COUNT, ".goal-count", "display", BOTH, "goal-count-closed-display"),
+    moved(_COUNT, ".goal-bar.open .goal-count", "display", BOTH, "goal-count-display"),
+    moved(_COUNT, ".goal-count", "position", BOTH, "goal-count-position",
+          via="the count is read where it is drawn, in the open box"),
+    moved(_COUNT, ".goal-count", "color", BOTH, "goal-count-color",
+          via="the count is read where it is drawn, in the open box"),
+    moved(_COUNT, ".goal-count.over", "color", BOTH, "goal-count-over-color"),
+    moved(_COUNT, ".goal-count.near", "color", BOTH, "goal-count-near-color",
+          via="there is no near colour: the near count reads the quiet one"),
+    *(moved(_COUNT, selector, prop, BOTH, *rows, via=via)
+      for selector, rows_for, via in (
+          (".goal-count", "goal-count", "the count is read where it is drawn, in the open box"),
+          (".goal-bar.open .goal-count", "goal-count", ""),
+          (".goal-count.over", "goal-count-over", ""))
+      for prop, rows in (("width", (f"{rows_for}-width",)),
+                         ("min-width", (f"{rows_for}-min-width",)),
+                         ("flex-basis", (f"{rows_for}-flex-basis",)),
+                         ("white-space", (f"{rows_for}-white-space",)))),
+    moved(_REFUSAL, ".goal-status:empty", "display", BOTH, "goal-status-empty-display"),
+    moved(_REFUSAL, ".goal-status", "display", BOTH, "goal-status-display"),
+    moved(_REFUSAL, ".goal-status", "visibility", BOTH, "goal-status-visibility"),
+    moved(_REFUSAL, ".fail", "display", BOTH, "fail-shown-display"),
+    moved(_REFUSAL, ".fail", "visibility", BOTH, "fail-shown-visibility"),
+    # The strip.
+    *(moved(_STRIP_NEVER, selector, prop, WIDE, row,
+            via=PLACEHOLDER_VIA if "::" in selector else "")
+      for selector, prop, row in (
+          (".cap", "flex", "cap-flex"), (".cap", "overflow", "cap-overflow"),
+          (".cap", "min-width", "cap-min-width"), (".cap", "max-width", "cap-max-width"),
+          (".cap", "white-space", "cap-white-space"), (".cap", "flex-wrap", "cap-flex-wrap"),
+          (".goal-bar", "flex", "goal-bar-flex-1440"),
+          (".goal-bar", "min-width", "goal-bar-min-width-1440"),
+          (".goal-bar", "max-width", "goal-bar-max-width-1440"),
+          (".top-in", "flex-wrap", "top-wrap-flex-wrap"), (".top-in", "gap", "top-wrap-gap"),
+          (".goal-in .goal-text::placeholder", "white-space", "placeholder-white-space"),
+          (".goal-in .goal-text::placeholder", "overflow", "placeholder-overflow"),
+          (".goal-in .goal-text::placeholder", "text-overflow", "placeholder-text-overflow"),
+          (".goal-in .goal-text", "text-overflow", "placeholder-host-text-overflow"))),
+    moved(_STRIP_NEVER, ".top-in", "gap", WIDE, "top-wrap-gap", "top-wrap-row-gap",
+          "top-wrap-column-gap"),
+    moved(_STRIP_NEVER, ".goal-bar", "flex", NARROW, "goal-bar-flex-480"),
+    moved(_STRIP_NEVER, ".goal-bar", "max-width", NARROW, "goal-bar-max-width-480"),
+    *(moved(_STRIP_THREE, ".cap", prop, WIDE, *rows)
+      for prop, rows in (
+          ("flex-wrap", ("cap-flex-wrap",)), ("white-space", ("cap-white-space",)),
+          ("overflow", ("cap-overflow",)), ("min-width", ("cap-min-width",)),
+          ("max-width", ("cap-max-width",)), ("padding", ("cap-padding",)),
+          ("text-align", ("cap-text-align",)), ("cursor", ("cap-cursor",)),
+          ("font-size", ("cap-font-size",)), ("color", ("cap-color",)),
+          ("font", ("cap-font-style", "cap-font-weight", "cap-font-size", "cap-line-height",
+                    "cap-font-family")),
+          ("background", ("cap-background-color", "cap-background-image")))),
+    moved(_STRIP_THREE, ".cap > *", "flex", WIDE, "cap-child-flex"),
+    moved(_STRIP_THREE, ".cap-excl", "color", WIDE, "cap-excl-color"),
+    moved(_STRIP_THREE, ".cap-pin-mark", "color", WIDE, "cap-pin-mark-color"),
+    moved(_STRIP_480, ".cap-extra", "display", NARROW, "cap-extra-display"),
+    moved(_STRIP_DIM, ".cap-excluded .meter i", "background", BOTH, "meter-excluded-background-color",
+          "meter-excluded-background-image"),
+    moved(_STRIP_DIM, ".meter i", "background", BOTH, "meter-fill-background-color",
+          "meter-fill-background-image"),
+)
 STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
     f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
@@ -296,6 +567,7 @@ STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PanelSigninPageTest::test_the_panel_never_draws_peach",
     f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
     "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
+    _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE, _STRIP_480, _STRIP_DIM,
 })
 RENAMED: dict[str, str] = {
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled":
@@ -1831,6 +2103,29 @@ class ScreenshotStyleTest(unittest.TestCase):
         self.assertEqual(self.styled(page % "", [row]), ())
         self.assertEqual(self.styled(page % "width: 200px", [row]), ("r: p.o width is 200px",))
 
+    def test_largest_type_names_a_large_element_outside_the_allowed(self) -> None:
+        row = style_row("r", selector="body", prop="font-size", want="largest_type",
+                        value="24|.card .q, .card .q *")
+        self.assertEqual(self.styled('<h2 class="x" style="font-size: 30px">t</h2>', [row]),
+                         ("r: h2.x font-size is 30px",))
+        self.assertEqual(self.styled(
+            '<div class="card"><p class="q" style="font-size: 30px">t<b>u</b></p></div>', [row]), ())
+        self.assertEqual(self.styled('<h2 class="x" style="font-size: 23px">t</h2>', [row]), ())
+
+    def test_right_edge_names_an_element_short_of_its_line_end(self) -> None:
+        row = style_row("r", selector=".last", prop="right", want="right_edge")
+        page = ('<div style="display: flex; width: 400px; padding: 0 20px; box-sizing: content-box">'
+                '<span style="display: block; width: 50px">a</span>'
+                '<span class="last" style="display: block; width: 50px; %s">b</span></div>')
+        self.assertEqual(self.styled(page % "margin-left: auto", [row]), ())
+        self.assertEqual(self.styled(page % "", [row]), ("r: .last right is 128px",))
+
+    def test_hugs_names_a_label_wider_than_its_text(self) -> None:
+        row = style_row("r", selector=".l", prop="width", want="hugs")
+        page = '<span class="l" style="position: absolute; %s">a label</span>'
+        self.assertEqual(self.styled(page % "", [row]), ())
+        self.assertEqual(self.styled(page % "width: 300px", [row]), ("r: .l width is 300px",))
+
     def sandboxed_capture(self, **kw):
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -1861,7 +2156,9 @@ class ScreenshotStyleTest(unittest.TestCase):
             states=("question-read",), read=("Q?", "Answer: plain\nQuestion for you: none"))
         fixture = {r.name for r in shots.STYLE_CHECKS if r.fixture}
         self.assertEqual([s for s in taken if s.style], [])
-        self.assertEqual({name for s in taken for name in s.checked} & fixture, set())
+        read = {name for s in taken for name in s.checked}
+        self.assertEqual(read & fixture, set())
+        self.assertLessEqual({"reading-weight-panel", "reading-weight-call-out"}, read)
 
 
 class ScreenshotCaptureTest(unittest.TestCase):

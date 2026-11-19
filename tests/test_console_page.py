@@ -166,54 +166,6 @@ class PageTest(unittest.TestCase):
         # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
         self.assertLess(len(gzip.compress(self.data, 9)), 62464)
 
-    def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
-        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
-        blocks = []
-        for found in re.finditer(r"@media \(max-width: (\d+)px\) \{", style):
-            depth, at = 1, found.end()
-            while depth:
-                depth += {"{": 1, "}": -1}.get(style[at], 0)
-                at += 1
-            blocks.append((int(found.group(1)), style[found.end():at - 1]))
-        (narrow,) = [body for width, body in blocks if 480 <= width < 900]
-        (top,) = re.findall(r"\.top-in \{([^}]*)\}", narrow)
-        self.assertIn("flex-wrap: wrap", top)
-        (statement,) = re.findall(r"\.statement h1 \{([^}]*)\}", narrow)
-        (size,) = re.findall(r"font-size: ([\d.]+)rem", statement)
-        self.assertLess(float(size), 2.375)
-
-    def test_the_open_chooser_stays_inside_the_viewport_and_the_panel(self) -> None:
-        # A long unbroken project id must wrap inside the 480px panel, and a long project list
-        # must scroll inside a panel bounded to the viewport so Send and Cancel stay reachable.
-        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
-        base = style_rules(style[:style.index("@media")])
-
-        def rule(selector: str) -> dict:
-            found = {}
-            for s, d in base:
-                if s == selector:
-                    found.update(d)
-            return found
-
-        box = rule(".goal-box")
-        self.assertRegex(box.get("max-height", ""), r"^calc\(100d?vh - [\d.]+rem\)$")
-        self.assertEqual(box.get("overflow-y"), "auto")
-        projects = rule(".goal-projects")
-        self.assertEqual(projects.get("min-width"), "0")
-        self.assertEqual(projects.get("max-width"), "100%")
-        self.assertEqual(projects.get("overflow-y"), "auto")
-        self.assertEqual(projects.get("flex"), "0 1 auto")
-        self.assertEqual(projects.get("min-height"), "0")
-        self.assertEqual(rule(".goal-projects li").get("min-width"), "0")
-        self.assertEqual(rule(".goal-projects li").get("max-width"), "100%")
-        for name in ("min-width", "max-width", "overflow-wrap"):
-            with self.subTest(name=name):
-                self.assertEqual(
-                    rule(".goal-project").get(name), {"min-width": "0", "max-width": "100%", "overflow-wrap": "anywhere"}[name]
-                )
-        self.assertEqual(rule(".goal-filter").get("min-width"), "0")
-        self.assertEqual(rule(".goal-act").get("flex"), "none")
-
     def test_the_top_bar_carries_one_spend_link(self) -> None:
         header = self.text[self.text.index('<header class="top">'):self.text.index("</header>")]
         self.assertEqual(self.text.count('href="/spend"'), 1)
@@ -228,63 +180,6 @@ class PageTest(unittest.TestCase):
         )
 
     def test_the_top_bar_fits_480_wide(self) -> None:
-        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
-        base, at = "", 0
-        for found in re.finditer(r"@media [^{]+\{", style):
-            if found.start() < at:
-                continue
-            base += style[at:found.start()]
-            depth, at = 1, found.end()
-            while depth:
-                depth += {"{": 1, "}": -1}.get(style[at], 0)
-                at += 1
-        base += style[at:]
-        phone = style_rules(media_block(style, "(max-width: 480px)"))
-        narrow = style_rules(media_block(style, "(max-width: 900px)")) + phone
-        rules = style_rules(base) + narrow
-        self.assertTrue(any(s == ".top-in" and d.get("flex-wrap") == "wrap" for s, d in phone))
-        self.assertTrue(any(s == ".goal-bar" and d.get("flex") == "1 0 100%" for s, d in narrow))
-        self.assertTrue(any(
-            s == ".goal-box" and d.get("width") == "min(600px, calc(100vw - 32px))"
-            for s, d in style_rules(base)
-        ))
-
-        def fits(value: str) -> bool:
-            if value in ("auto", "0") or value.endswith("%") or "100vw" in value:
-                return True
-            found = re.fullmatch(r"([\d.]+)(px|rem)", value)
-            return bool(found) and float(found.group(1)) * (16 if found.group(2) == "rem" else 1) <= 448
-
-        for selector, decls in rules:
-            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter", ".nav")):
-                continue
-            values = [decls[n] for n in ("width", "min-width", "flex-basis") if n in decls]
-            parts = decls.get("flex", "").split()
-            if len(parts) == 3:
-                values.append(parts[2])
-            for value in values:
-                self.assertTrue(fits(value), selector + " sets " + value)
-
-        name = [d for s, d in style_rules(base) if s == ".cap-acct b"]
-        self.assertEqual(len(name), 1)
-        self.assertEqual(name[0].get("overflow"), "hidden")
-        self.assertEqual(name[0].get("text-overflow"), "ellipsis")
-        self.assertEqual(name[0].get("white-space"), "nowrap")
-        cut = re.fullmatch(r"([\d.]+)(px|rem)", name[0].get("max-width", ""))
-        self.assertTrue(cut)
-        self.assertLessEqual(float(cut.group(1)) * (16 if cut.group(2) == "rem" else 1), 160)
-        (cap,) = [d for s, d in style_rules(base) if s == ".cap"]
-        self.assertEqual(cap.get("min-width"), "0")
-        self.assertEqual(cap.get("max-width"), "100%")
-        (acct,) = [d for s, d in style_rules(base) if s == ".cap-acct"]
-        self.assertEqual(acct.get("max-width"), "100%")
-        unwrapped = {
-            selector for selector, decls in style_rules(base)
-            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter", ".nav"))
-            and decls.get("white-space") == "nowrap"
-        }
-        self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b",
-                                    ".goal-in .goal-text::placeholder", ".nav"})
         (long_name,) = render([
             START,
             {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
@@ -461,31 +356,6 @@ class PageTest(unittest.TestCase):
         (snap,) = render([START, {"frame": frame([ANSWERABLE])}, {"snapshot": True}])
         self.assertEqual(
             [n for n in nodes(snap["inbox"]) if n["tag"] in ("input", "textarea")], [])
-
-    def test_the_lead_headline_is_the_largest_type_after_the_statement(self) -> None:
-        sizes = {}
-        for body in re.findall(r"(?s)<style>(.*?)</style>", self.text):
-            css = re.sub(r"(?s)/\*.*?\*/", "", body)
-            for selectors, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-                selector = " ".join(selectors.split())
-                for decl in rule.split(";"):
-                    name, _, value = decl.partition(":")
-                    name, value = name.strip(), value.strip()
-                    if name == "font-size":
-                        size = re.fullmatch(r"([\d.]+)rem", value)
-                    elif name == "font":
-                        size = re.search(r"(?:^|\s)([\d.]+)rem(?:/|\s)", value)
-                    else:
-                        continue
-                    if size:
-                        sizes.setdefault(selector, []).append(float(size.group(1)))
-        self.assertEqual(sizes.get(".card .q"), [1.5])
-        self.assertEqual(sizes.get(".reading-question"), [1.5])  # the open thread's heading takes the lead question type (#1226, D11)
-        for selector, found in sizes.items():
-            if ".statement h1" in selector or selector in (".card .q", ".reading-question"):
-                continue
-            for size in found:
-                self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_sign_in_and_spend_links_are_the_only_hrefs(self) -> None:
         self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 6)
@@ -1121,23 +991,6 @@ def folds(tree: dict) -> list:
     return [n for n in nodes(tree) if (n["key"] or "").startswith("notices:")]
 
 
-def css_rules(text: str) -> list:
-    rules = []
-    for body in re.findall(r"(?s)<style>(.*?)</style>", text):
-        css = re.sub(r"(?s)/\*.*?\*/", "", body)
-        rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
-    return rules
-
-
-def css_decls(selector: str) -> list:
-    return [
-        {p.strip(): v.strip() for p, _, v in (d.partition(":") for d in body.split(";"))
-         if p.strip()}
-        for sel, body in css_rules(PAGE_TEXT)
-        if selector in [x.strip() for x in sel.split(",")]
-    ]
-
-
 class PageNoticeTest(unittest.TestCase):
     begin = {"start": {"focused": False, "clock": NOW_MS}}
 
@@ -1256,31 +1109,6 @@ class PageNoticeTest(unittest.TestCase):
         for b in (for_sprint, for_you, heads_up):
             self.assertFalse([n for n in nodes(b) if has_class(n, "needs")])
 
-    def test_notice_blocks_stand_apart_with_the_age_at_the_end_of_the_first_line(self) -> None:
-        def some(selector: str, **want: str) -> bool:
-            return any(all(d.get(k) == v for k, v in want.items()) for d in css_decls(selector))
-
-        self.assertTrue(some(".notice + .notice", **{"margin-top": "12px"}))
-        self.assertTrue(some(".notice-head", display="flex"))
-        self.assertFalse([d for d in css_decls(".notice-head") if d.get("flex-wrap") == "wrap"])
-        self.assertTrue(some(".notice-who", flex="1 1 auto", **{"min-width": "0"}))
-        for selector in (".notice-who", ".notice-label", ".notice-from"):
-            self.assertFalse([d for d in css_decls(selector) if "display" in d], selector)
-        self.assertTrue(some(".notice-head .notice-age", **{"margin-left": "auto"}, flex="none",
-                             color="var(--ov2)"))
-        self.assertTrue(some(".notice-words", color="var(--text)"))
-        self.assertTrue(some(".notice code", background="var(--mantle)",
-                             **{"white-space": "nowrap"}))
-
-    def test_the_post_control_stands_a_notice_gap_below_the_last_notice(self) -> None:
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE_TEXT)
-        for width in (1440, 480):
-            between = margin_top_at(style, width, ".notice", ".notice + .notice")
-            for control in (".notice-open", ".notice-post"):
-                gap = margin_top_at(style, width, control, ".notice-list + " + control)
-                self.assertGreaterEqual(gap, 12, (width, control))
-                self.assertGreaterEqual(gap, between, (width, control))
-
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
         (snap,) = render([self.begin, {"frame": view([p0])}, {"snapshot": True}])
@@ -1336,15 +1164,6 @@ class PageNoticeTest(unittest.TestCase):
         (cut,) = [n for n in nodes(until) if has_class(n, "notice-long")]
         self.assertEqual((full(cut), cut["title"]), ("c" * 30, "c" * 30))
 
-    def test_a_cut_word_stays_on_one_line_with_an_ellipsis(self) -> None:
-        rules = css_rules(PAGE_TEXT)
-        self.assertTrue([s for s, _ in rules if {".notice .notice-long", ".notice code"}
-                         <= {x.strip() for x in s.split(",")}])
-        want = {"display": "inline-block", "max-width": "100%", "overflow": "hidden",
-                "text-overflow": "ellipsis", "white-space": "nowrap", "vertical-align": "bottom"}
-        self.assertTrue([d for d in css_decls(".notice .notice-long")
-                         if all(d.get(k) == v for k, v in want.items())])
-
     def test_the_notices_fold_uses_no_peach_and_no_new_colour(self) -> None:
         link = "see https://example.com/notes/2026/11/the-importer-moves-to-the-new-reader"
         p0 = with_notices(project(0, []), {**HANDOFF_W, "text": link}, CLAIM_W)
@@ -1367,38 +1186,6 @@ class PageNoticeTest(unittest.TestCase):
         summary = fold["children"][0]
         self.assertEqual(summary["tag"], "summary")
         self.assertEqual([n for n in nodes(summary) if n["tag"] == "svg"], [])
-        for sel in (".sprint-detail summary", ".finished-list > summary"):
-            with self.subTest(selector=sel):
-                found = css_decls(sel)
-                self.assertTrue(found)
-                for d in found:
-                    for prop in ("display", "list-style", "list-style-type"):
-                        self.assertNotIn(prop, d)
-        selectors = [x.strip() for s, _ in css_rules(PAGE_TEXT) for x in s.split(",")]
-        for sel in (".sprint-detail summary::-webkit-details-marker",
-                    ".finished-list > summary::-webkit-details-marker"):
-            self.assertFalse([x for x in selectors if sel in x])
-        self.assertTrue([d for d in css_decls(".line.notices summary")
-                         if d.get("display") == "revert" and d.get("list-style") == "revert"])
-        self.assertTrue([d for d in css_decls(".line.notices summary::-webkit-details-marker")
-                         if d.get("display") == "revert"])
-        self.assertTrue([d for d in css_decls(".notices-project")
-                         if d.get("margin-left") == "10px"])
-
-    def test_notice_words_wrap_within_the_column(self) -> None:
-        rules = css_rules(PAGE_TEXT)
-
-        def decls(sel: str) -> list:
-            return [
-                {p.strip(): v.strip() for p, _, v in (d.partition(":") for d in body.split(";"))
-                 if p.strip()}
-                for s, body in rules if sel in [x.strip() for x in s.split(",")]
-            ]
-
-        self.assertTrue([d for d in decls(".notice > *")
-                         if d.get("overflow-wrap") == "anywhere" and d.get("min-width") == "0"])
-        self.assertTrue([d for d in decls(".notices-project")
-                         if d.get("overflow-wrap") == "anywhere"])
 
 
 OWNER_W = {
@@ -1635,13 +1422,6 @@ class PageAskTest(unittest.TestCase):
         (acts,) = [c for c in line["children"] if has_class(c, "line-acts")]
         self.assertEqual([role(c["cls"]) for c in acts["children"]], ["give-goal", "ask-open"])
         self.assertEqual([n for n in nodes(snap["projects"]) if has_class(n, "asks")], [])
-
-    def test_a_thread_line_is_a_flex_row_with_an_ellipsised_first_question(self) -> None:
-        self.assertTrue([d for d in css_decls(".thread-open") if d.get("display") == "flex"])
-        self.assertTrue([d for d in css_decls(".line.questions > details > summary")
-                         if d.get("display") == "revert" and d.get("list-style") == "revert"])
-        self.assertTrue([d for d in css_decls(".thread-first")
-                         if d.get("text-overflow") == "ellipsis" and d.get("white-space") == "nowrap"])
 
     def test_the_questions_fold_is_closed_and_counts_its_threads(self) -> None:
         first = ask(id="q8")
@@ -1909,12 +1689,6 @@ class PageReadingTest(unittest.TestCase):
     def found(tree: dict, cls: str) -> list:
         return [n for n in nodes(tree) if has_class(n, cls)]
 
-    def test_the_decision_readings_bold_rule_does_not_reach_the_reading_panel(self) -> None:
-        # `#reading` shares the class `reading` with a decision item's "Reading:" line (a `p`); a bare `.reading` rule
-        # would give the whole panel weight 600 (D11: only the call-out label is emphasised).
-        self.assertEqual(css_decls(".reading"), [])
-        self.assertEqual([d.get("font-weight") for d in css_decls("p.reading")], ["600"])
-
     def test_enter_on_the_reading_heading_does_not_approve_an_outstanding_brief(self) -> None:
         # The heading takes focus on open; the inbox answer keys (here Enter, which would schedule the lead brief's
         # recommended answer) must stay out of the reading panel (#1226).
@@ -2166,14 +1940,6 @@ class PageReadingFormatTest(unittest.TestCase):
         answer = self.answer_of("first line\nsecond line")
         (para,) = answer["children"]
         self.assertEqual((para["tag"], full(para)), ("p", "first line\nsecond line"))
-        self.assertTrue([d for d in css_decls(".ask-answer p") if d.get("white-space") == "pre-line"])
-
-    def test_the_answer_reads_at_the_size_of_a_cards_option_text(self) -> None:
-        (option,) = [d for d in css_decls(".opt .ot") if "font-size" in d]
-        (answer,) = [d for d in css_decls(".ask-answer") if "font-size" in d]
-        self.assertEqual(answer["font-size"], option["font-size"])
-        for selector in (".ask-answer p", ".ask-answer li", ".ask-answer .md-list", ".ask-answer ul.md-list", ".ask-answer ol.md-list"):
-            self.assertEqual([d for d in css_decls(selector) if "font-size" in d or "font" in d], [], selector)
 
     def test_the_call_out_question_takes_the_inline_subset(self) -> None:
         answer_snap = render([*PageReadingTest.opened(thread(ask(
@@ -2954,14 +2720,6 @@ class PageQuestionTest(unittest.TestCase):
         (held,) = [n for n in nodes(snap["inbox"]) if has_class(n, "held")]
         self.assertTrue(has_class(held, "blocks"))
         self.assertEqual(full(held), "Blocks: the resume slice")
-        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
-        merged: dict = {}
-        for selector, decls in style_rules(style):
-            if selector == ".held.blocks":
-                merged.update(decls)
-        self.assertEqual(merged.get("white-space"), "nowrap")
-        self.assertEqual(merged.get("overflow"), "hidden")
-        self.assertEqual(merged.get("text-overflow"), "ellipsis")
 
     def test_an_open_question_row_sets_its_context_under_its_ask(self) -> None:
         asked = question(1, "May the reader change?", ["yes", "no"], "no",
@@ -4432,22 +4190,6 @@ class PageDigestTest(unittest.TestCase):
         (fold,) = [n for n in nodes(snap["digest"]) if n["tag"] == "details"]
         self.assertTrue(fold["open"])
 
-    @staticmethod
-    def base_rules() -> list:
-        text = PAGE.read_text(encoding="utf-8")
-        style = text[text.index("<style>"):text.index("</style>")]
-        base, at = "", 0
-        for found in re.finditer(r"@media [^{]+\{", style):
-            if found.start() < at:
-                continue
-            base += style[at:found.start()]
-            depth, at = 1, found.end()
-            while depth:
-                depth += {"{": 1, "}": -1}.get(style[at], 0)
-                at += 1
-        base += style[at:]
-        return style_rules(base)
-
     def test_each_digest_line_is_its_age_then_its_sentence(self) -> None:
         frame = with_digest({
             "since": "2026-11-11T08:00:00+00:00", "first_visit": False,
@@ -4471,19 +4213,6 @@ class PageDigestTest(unittest.TestCase):
         (more,) = [li for li in lines if has_class(li, "more-n")]
         self.assertEqual(text(more).strip(), "and 2 more")
         self.assertEqual(more["children"], [])
-        rules = self.base_rules()
-        for selector in (".digest li", ".earlier-list li"):
-            with self.subTest(selector=selector):
-                decls = {}
-                for s, d in rules:
-                    if s == selector:
-                        decls.update(d)
-                self.assertEqual(decls.get("display"), "grid")
-                self.assertEqual(decls.get("grid-template-columns"), "5.5rem minmax(0, 1fr)")
-                self.assertNotIn("flex-wrap", decls)
-        (tail,) = [d for s, d in rules if s == ".earlier-list .more-n"]
-        self.assertEqual(tail.get("display"), "block")
-        self.assertNotIn("grid-column", tail)
 
     def test_section_headings_share_one_style(self) -> None:
         frame = {
@@ -4499,14 +4228,6 @@ class PageDigestTest(unittest.TestCase):
             with self.subTest(section=section):
                 (head,) = [n for n in nodes(snap[section]) if n["tag"] == "h2"]
                 self.assertTrue(has_class(head, "sec-h"))
-        rules = self.base_rules()
-        (shared,) = [d for s, d in rules if s == ".sec-h"]
-        self.assertEqual(shared.get("font"), "600 .9375rem/1.4 var(--ui)")
-        self.assertEqual(shared.get("color"), "var(--text)")
-        for selector, decls in rules:
-            if selector in (".digest-head", ".side h2", "#promoted h2"):
-                for name in ("font", "font-size", "font-weight", "color"):
-                    self.assertNotIn(name, decls, selector)
 
 
 GOAL_FRAME = {**view([]), "recent_projects": ["owner/zeta", "owner/alpha", "owner/beta"]}
@@ -7611,28 +7332,6 @@ def media_block(style: str, query: str) -> str:
     return style[start:at - 1]
 
 
-def margin_top_at(style: str, width: int, *selectors: str) -> float:
-    """The px margin-top the page's cascade gives an element matched by `selectors` at a viewport width.
-
-    Top-level rules apply at every width; a max-width media block applies only at or below its width.
-    The highest specificity (class count) wins, the later rule on a tie.
-    """
-    top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-    layers = [style_rules(top)]
-    for limit in re.findall(r"@media \(max-width: (\d+)px\) \{", style):
-        if width <= int(limit):
-            layers.append(style_rules(media_block(style, f"(max-width: {limit}px)")))
-    best = None
-    for layer in layers:
-        for selector, decls in layer:
-            if selector in selectors and "margin-top" in decls:
-                rank = selector.count(".")
-                if best is None or rank >= best[0]:
-                    best = (rank, decls["margin-top"])
-    assert best is not None, (width, selectors)
-    return float(re.fullmatch(r"([\d.]+)px", best[1]).group(1))
-
-
 class PageAnsweredRowTest(unittest.TestCase):
     def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
@@ -7756,33 +7455,6 @@ class PageStandingRulesTest(unittest.TestCase):
         block = media_block(self.style, "(prefers-reduced-motion: reduce)")
         declared = {name for _, decls in style_rules(block) for name in decls}
         self.assertLessEqual({"transition-duration", "animation-duration"}, declared)
-
-    def test_the_goal_field_shows_one_border_in_focus(self) -> None:
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", self.style)
-        rules = style_rules(top)
-        self.assertTrue([
-            d for s, d in rules
-            if s == ".field-bare:focus-visible" and d.get("outline") in ("none", "0")])
-        self.assertTrue([
-            d for s, d in rules
-            if s == ".goal-in:focus-within" and d.get("border-color") == "var(--lav)"])
-
-    def test_the_lead_card_narrows_under_900(self) -> None:
-        horizontal = []
-        for selector, decls in style_rules(media_block(self.style, "(max-width: 900px)")):
-            if selector != ".card.lead":
-                continue
-            parts = decls.get("padding", "").split()
-            if len(parts) == 4:
-                horizontal += [parts[1], parts[3]]
-            elif parts:
-                horizontal.append(parts[0] if len(parts) == 1 else parts[1])
-            for name in ("padding-left", "padding-right", "padding-inline"):
-                horizontal += decls.get(name, "").split()
-        self.assertTrue(horizontal)
-        for value in horizontal:
-            self.assertRegex(value, r"^\d+(\.\d+)?px$")
-            self.assertLessEqual(float(value[:-2]), 16)
 
 
 def si(state: str, days, ask: bool = False, ever=None) -> dict:
@@ -8221,19 +7893,6 @@ class AccountNamePageTest(unittest.TestCase):
 
 
 class StripPageTest(unittest.TestCase):
-    @staticmethod
-    def base_rules() -> list:
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-        base, at = "", 0
-        for found in re.finditer(r"@media [^{]+\{", style):
-            if found.start() < at:
-                continue
-            base += style[at:found.start()]
-            depth, at = 1, found.end()
-            while depth:
-                depth += {"{": 1, "}": -1}.get(style[at], 0)
-                at += 1
-        return style_rules(base + style[at:])
 
     @staticmethod
     def shown(cap: dict) -> dict:
@@ -8291,21 +7950,6 @@ class StripPageTest(unittest.TestCase):
         self.assertEqual(full(part(snap, "cap-none")), cap["no_reading"])
 
     def test_three_accounts_fit_one_line_at_1440(self) -> None:
-        rules = self.base_rules()
-        (cap,) = [d for s, d in rules if s == ".cap"]
-        for name, value in {
-            "flex-wrap": "nowrap", "white-space": "nowrap", "overflow": "hidden",
-            "min-width": "0", "max-width": "100%", "font": "inherit", "background": "none",
-            "padding": "0", "text-align": "left", "cursor": "pointer",
-            "font-size": ".8125rem", "color": "var(--sub0)",
-        }.items():
-            self.assertEqual(cap.get(name), value, name)
-        (kids,) = [d for s, d in rules if s == ".cap > *"]
-        self.assertEqual(kids.get("flex"), "none")
-        for selector in (".cap-excl", ".cap-pin-mark"):
-            (quiet,) = [d for s, d in rules if s == selector]
-            self.assertEqual(quiet.get("color"), "var(--ov2)", selector)
-
         worst = real_capacity(NOW_S, [
             {"name": "work-main", "week": .35, "week_reset": NOW_S + 4 * 86400,
              "signin": ("signed_in", NOW_S + 2 * 86400)},
@@ -8386,11 +8030,6 @@ class StripPageTest(unittest.TestCase):
         self.assertTrue(got["beside"], got)
 
     def test_an_excluded_accounts_bar_is_dimmed(self) -> None:
-        rules = self.base_rules()
-        (dim,) = [d for s, d in rules if s == ".cap-excluded .meter i"]
-        self.assertEqual(dim.get("background"), "var(--s2)")
-        (fill,) = [d for s, d in rules if s == ".meter i"]
-        self.assertEqual(fill.get("background"), "var(--sub0)")
         snap = self.shown(real_capacity(NOW_S, [
             {"name": "a", "week": .35}, {"name": "b", "week": .7}], excluded=("b",)))
         _, b = [n for n in strip(snap) if has_class(n, "cap-acct")]
@@ -8445,37 +8084,6 @@ class StripPageTest(unittest.TestCase):
         self.assertEqual(got["word"], "excluded", got)
         self.assertNotEqual(got["display"], "none", got)
 
-    def test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line(self) -> None:
-        rules = self.base_rules()
-
-        def rule(selector: str) -> dict:
-            merged: dict = {}
-            for found, decls in rules:
-                if found == selector:
-                    merged.update(decls)
-            return merged
-
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-        narrow = style_rules(media_block(style, "(max-width: 900px)"))
-        groups = {
-            "cap": (rule(".cap"), {
-                "flex": "0 0 auto", "overflow": "hidden", "min-width": "0", "max-width": "100%",
-                "white-space": "nowrap", "flex-wrap": "nowrap"}),
-            "goal-bar": (rule(".goal-bar"), {
-                "flex": "1 1 12rem", "min-width": "12rem", "max-width": "440px"}),
-            "top-in": (rule(".top-in"), {"flex-wrap": "wrap", "gap": "10px 28px"}),
-            "placeholder": (rule(".goal-in .goal-text::placeholder"), {
-                "white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis"}),
-            "placeholder host": (rule(".goal-in .goal-text"), {"text-overflow": "ellipsis"}),
-            "narrow goal-bar": (
-                {k: v for s, d in narrow if s == ".goal-bar" for k, v in d.items()},
-                {"flex": "1 0 100%", "max-width": "none"}),
-        }
-        for name, (declared, wanted) in groups.items():
-            with self.subTest(rule=name):
-                for prop, value in wanted.items():
-                    self.assertEqual(declared.get(prop), value, prop)
-
     def test_at_480_only_the_summary_word_and_the_tightest_account_show(self) -> None:
         def rows_(*extra) -> list:
             return [{"name": "a", "week": .35, "week_reset": NOW_S + 86400},
@@ -8494,10 +8102,6 @@ class StripPageTest(unittest.TestCase):
         none = self.shown(real_capacity(NOW_S, [{"name": "a"}, {"name": "b"}]))
         self.assertEqual(
             [n for n in nodes(none["capacity"]) if has_class(n, "cap-extra") or has_class(n, "cap-tightest")], [])
-        text_ = PAGE.read_text(encoding="utf-8")
-        style = text_[text_.index("<style>"):text_.index("</style>")]
-        (extra,) = [d for s, d in style_rules(media_block(style, "(max-width: 480px)")) if s == ".cap-extra"]
-        self.assertEqual(extra.get("display"), "none")
 
     def test_an_empty_strip_still_opens_the_panel(self) -> None:
         snap = opened({**view([]), "capacity": console_capacity.EMPTY})
@@ -11016,16 +10620,6 @@ class RegisterCardKeysPageTest(unittest.TestCase):
                 self.assertEqual(found, sorted(set(found)))
                 self.assertEqual(full(order[title]), "Register r")
 
-    def test_register_asks_are_set_small_enough_to_read_at_480(self) -> None:
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
-        small = [d for s, d in style_rules(media_block(style, "(max-width: 480px)")) if s == ".card .q.reg"]
-        self.assertTrue(small)
-        self.assertLessEqual(float(small[-1]["font-size"].removesuffix("rem")), 1.0)
-        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-        self.assertEqual([d["font-size"] for s, d in style_rules(top) if s == ".card .q.reg" and "font-size" in d],
-                         ["1.25rem"])
-        self.assertTrue([d for s, d in style_rules(top) if s == ".rest .q.reg" and d.get("font", "").startswith("600 1rem/1.4 ")])
-
     def test_at_480_a_typical_ask_takes_at_most_three_lines(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
@@ -11362,27 +10956,6 @@ class PathWrapPageTest(unittest.TestCase):
                          ["Keep them under .agents/artifacts/plans", "Not kept anywhere"])
         self.assertEqual(self.segs(options[0]), [".agents/", "artifacts/", "plans"])
         self.assertEqual(self.segs(options[1]), [])
-
-    def test_a_segment_is_an_atomic_inline_block(self) -> None:
-        style = PAGE.read_text(encoding="utf-8")
-        style = style[style.index("<style>"):style.index("</style>")]
-        base = style_rules(style[:style.index("@media")])
-        seg = {}
-        for selector, decls in base:
-            if selector == ".seg":
-                seg.update(decls)
-        self.assertEqual({k: seg.get(k) for k in ("display", "max-width", "overflow-wrap")},
-                         {"display": "inline-block", "max-width": "100%", "overflow-wrap": "anywhere"})
-
-    def test_every_card_ask_uses_the_full_width(self) -> None:
-        style = PAGE.read_text(encoding="utf-8")
-        style = style[style.index("<style>"):style.index("</style>")]
-        base = style_rules(style[:style.index("@media")])
-        for selector in (".card .q", ".card .q.reg", ".rest .q.reg"):
-            with self.subTest(selector=selector):
-                wraps = [d.get("text-wrap") for s, d in base if s == selector and "text-wrap" in d]
-                self.assertNotIn("balance", wraps)
-        self.assertIn("pretty", [d.get("text-wrap") for s, d in base if s == ".card .q"])
 
     def test_at_480_no_path_or_id_breaks_inside_a_segment(self) -> None:
         try:

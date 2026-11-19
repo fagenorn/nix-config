@@ -7,8 +7,8 @@ import unittest
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_controls import CONSOLE_URL, PAGE_STUBS, SETTLE, served
 from .test_console_page import (
-    FILLED, GOAL_ASK_FRAME, GOAL_FRAME, NOW_MS, PAGE, START, box_open, full, goal_fail, goal_named,
-    goals, has_class, nodes, render, style_rules)
+    FILLED, GOAL_ASK_FRAME, GOAL_FRAME, NOW_MS, START, box_open, full, goal_fail, goal_named,
+    goals, has_class, nodes, render)
 
 MANY_FRAME = {**GOAL_FRAME, "recent_projects": [f"owner/project-{i:02d}" for i in range(25)]}
 
@@ -183,24 +183,6 @@ class GoalCountTest(unittest.TestCase):
                          [None, "true", None, None, None])
         self.assertIs(box_open(snaps[5]), False)
 
-    def test_the_count_is_a_quiet_corner_label_that_takes_no_room(self):
-        page = PAGE.read_text()
-        style = page[page.index("<style>"):page.index("</style>")]
-        rules = {}
-        for selector, decls in style_rules(style[:style.index("@media")]):
-            rules.setdefault(selector, {}).update(decls)
-        count = rules[".goal-count"]
-        self.assertEqual(count["position"], "absolute")
-        self.assertEqual(count["display"], "none")
-        self.assertEqual(rules[".goal-bar.open .goal-count"]["display"], "block")
-        self.assertEqual(count["color"], "var(--ov2)")
-        self.assertEqual(rules[".goal-count.over"]["color"], "var(--red)")
-        self.assertNotIn(".goal-count.near", rules)
-        for selector, decls in rules.items():
-            if selector.startswith(".goal-count"):
-                for prop in ("width", "min-width", "flex-basis", "white-space"):
-                    self.assertNotIn(prop, decls, selector)
-
     def test_an_over_long_paste_keeps_the_text_and_the_box(self):
         pasted, sent = render(typed("x" * 2100) + [
             {"snapshot": True}, {"click": "goal-send"}, {"snapshot": True}])
@@ -211,19 +193,6 @@ class GoalCountTest(unittest.TestCase):
         (text,) = goal_named(sent, "goal-text")
         self.assertEqual(text["value"], "x" * 2100)
         self.assertTrue(box_open(sent))
-
-
-class GoalRefusalStyleTest(unittest.TestCase):
-    def test_no_rule_hides_a_refusal_the_page_has_put_in_the_status_line(self):
-        page = PAGE.read_text()
-        style = page[page.index("<style>"):page.index("</style>")]
-        hiding = []
-        for selector, decls in style_rules(style):
-            if not re.search(r"\.goal-status\b|\.fail\b", selector):
-                continue
-            if decls.get("display") == "none" or decls.get("visibility") == "hidden":
-                hiding.append(selector)
-        self.assertEqual(hiding, [".goal-status:empty"])
 
 
 class GoalRefusalChromiumTest(unittest.TestCase):
