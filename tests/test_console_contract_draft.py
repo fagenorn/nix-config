@@ -1208,6 +1208,15 @@ class StrandedHookTest(unittest.TestCase):
                 (self.bin / "git").unlink()
                 self.assertFalse(cd.hook_stranded(text, str(self.bin)))
 
+    def test_a_zsh_path_assignment_leaves_the_hook_unjudged(self):
+        for shebang in ("#!/bin/zsh", "#!/usr/bin/env zsh", "#!/bin/sh"):
+            text = f"{shebang}\npath=/usr/bin\nexec git --version\n"
+            with self.subTest(shebang=shebang):
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+                self.tool("git")
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+                (self.bin / "git").unlink()
+
     def test_a_runner_assigned_only_inside_an_if_is_unjudged(self):
         text = ("#!/bin/sh\nif [ -z \"$RUNNER\" ]; then\n  RUNNER=prek\nfi\nexec \"$RUNNER\" hook-impl\n")
         self.assertFalse(cd.hook_stranded(text, str(self.bin)))
