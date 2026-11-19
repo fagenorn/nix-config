@@ -24,11 +24,17 @@ Scan rule for a `.py` source:
 3. Kinds of an expression E. A Name, or an attribute chain of Names such as
    `self.text`, has the kinds its environment gives it, but a name holding TEXT
    never holds PHRASE. ADR: E's subtree holds a string
-   constant ADR_PATH matches, an f-string or a `/` chain of path segments
-   whose literal text, with `_` for each formatted value or other segment and
-   `/` between chain segments, ADR_PATH matches, a Name with ADR, or
-   `<AREAS> / "adr"` (or `"adr/..."`). AREAS: a string constant, f-string or
-   `/` chain whose text AREAS_ROOT matches, or a Name with AREAS. TEXT: a call named in READ_CALLS or in the readers whose receiver or
+   constant ADR_PATH matches, a path expression whose literal text ADR_PATH
+   matches, a Name with ADR, or a path expression with a part holding AREAS
+   and another part whose text has an `adr` segment. A path expression is a
+   string, an f-string, a `+` concatenation, a `/` chain, a call of Path,
+   PurePath, joinpath or os.path.join, or `"/".join` of a list or tuple; its
+   literal text puts `_` for each formatted value or other segment, nothing
+   between the operands of `+` and `/` between the segments of the others. Its
+   parts are the operands of `/`, the receiver (of joinpath) and the arguments
+   of a joining call, and the receiver plus the first argument of a glob or
+   rglob call. AREAS: a path expression whose text AREAS_ROOT matches, or a
+   Name with AREAS. TEXT: a call named in READ_CALLS or in the readers whose receiver or
    any argument has ADR, or a Name with TEXT. PHRASE: E is not TEXT and its
    subtree holds a string constant, an f-string or a Name with PHRASE. MATCH:
    E itself (through `not` and each operand of `and`/`or`) is a wording
@@ -72,11 +78,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ADR_PATH = re.compile(r"docs/areas/[^/\s'\"\x60]+/adr(?:/|$)")
+ADR_SEGMENT = re.compile(r"(?:^|/)adr(?:/|$)")
 AREAS_ROOT = re.compile(r"(?:^|/)docs/areas/?$")
 CREDENTIAL_WORDS = re.compile(r"token|credential|secret|password|keychain", re.IGNORECASE)
 GUARD_FILES = frozenset({"tests/test_claude_permission_guard.py", "tests/test_guard_policy.py"})
 SUITE_RECIPE = "agent-workflow-tests *args:"
 SUITE_GLOBS = ("tests/*.py", "home/common/agent-skills/tests/*.py")
+PATH_BUILDERS = frozenset({"Path", "PurePath", "PurePosixPath", "PureWindowsPath", "joinpath"})
+GLOB_CALLS = frozenset({"glob", "rglob"})
 READ_CALLS = frozenset({"read_text", "read_bytes", "read", "readlines", "open"})
 MATCH_CALLS = frozenset({"startswith", "endswith", "search", "match", "fullmatch"})
 ONE_OPERAND = frozenset({"assertTrue", "assertFalse", "assertIsNone", "assertIsNotNone"})
@@ -163,8 +172,33 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
+def _text(node: ast.AST) -> str:
+    static = _static_text(node)
+    return "_" if static is None else static
+
+
+def _joining_parts(node: ast.AST) -> list[ast.AST] | None:
+    """The parts a path expression joins with `/`, or None when it is not a joining call."""
+    if not isinstance(node, ast.Call):
+        return None
+    name = _call_name(node)
+    receiver = node.func.value if isinstance(node.func, ast.Attribute) else None
+    if name in PATH_BUILDERS:
+        return ([receiver] if name == "joinpath" and receiver is not None else []) + list(node.args)
+    if name == "join" and isinstance(node.func, ast.Name):
+        return list(node.args)
+    if name == "join" and receiver is not None:
+        if isinstance(receiver, ast.Constant) and receiver.value == "/":
+            if node.args and isinstance(node.args[0], (ast.Tuple, ast.List)):
+                return list(node.args[0].elts)
+            return None
+        if _key(receiver) is not None and _key(receiver).split(".")[-1] in {"path", "posixpath", "ntpath"}:
+            return list(node.args)
+    return None
+
+
 def _static_text(node: ast.AST) -> str | None:
-    """The literal text of a string, f-string or `/` chain; `_` stands for the rest."""
+    """The literal text of a path expression; `_` stands for the rest."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
@@ -172,8 +206,14 @@ def _static_text(node: ast.AST) -> str | None:
             v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else "_"
             for v in node.values
         )
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-        return f"{_static_text(node.left) or '_'}/{_static_text(node.right) or '_'}"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+        left, right = _static_text(node.left), _static_text(node.right)
+        if isinstance(node.op, ast.Add):
+            return None if left is None and right is None else _text(node.left) + _text(node.right)
+        return f"{_text(node.left)}/{_text(node.right)}"
+    parts = _joining_parts(node)
+    if parts is not None:
+        return "/".join(_text(part) for part in parts)
     return None
 
 
@@ -287,7 +327,7 @@ class _Scan:
         for sub, scope in self.walk(node, env):
             static = _static_text(sub)
             if static is not None:
-                if not isinstance(sub, ast.BinOp):
+                if isinstance(sub, (ast.Constant, ast.JoinedStr)):
                     found.add("PHRASE")
                 if ADR_PATH.search(static):
                     found.add("ADR")
@@ -302,15 +342,16 @@ class _Scan:
                 operands += sub.args + [k.value for k in sub.keywords]
                 if any("ADR" in self.facts(o, scope) for o in operands):
                     found.add("TEXT")
-            elif isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Div):
-                right = sub.right
-                if (
-                    isinstance(right, ast.Constant)
-                    and isinstance(right.value, str)
-                    and (right.value == "adr" or right.value.startswith("adr/"))
-                    and "AREAS" in self.facts(sub.left, scope)
-                ):
-                    found.add("ADR")
+            if isinstance(sub, ast.BinOp) and isinstance(sub.op, ast.Div):
+                parts = [sub.left, sub.right]
+            elif isinstance(sub, ast.Call) and _call_name(sub) in GLOB_CALLS and isinstance(sub.func, ast.Attribute):
+                parts = [sub.func.value, *sub.args[:1]]
+            else:
+                parts = _joining_parts(sub) or []
+            if len(parts) > 1 and any(ADR_SEGMENT.search(_text(part)) for part in parts) and any(
+                "AREAS" in self.facts(part, scope) for part in parts
+            ):
+                found.add("ADR")
         if "TEXT" in found:
             found.discard("PHRASE")
         return frozenset(found)
@@ -823,6 +864,51 @@ KEYWORD_OPERANDS = _fixture(r'''
             self.assertIn("more words", text, msg="diagnostic")
 ''')
 
+def _read_of(expression):
+    return (
+        "class T(unittest.TestCase):\n    def test_x(self):\n        a = 'a'\n"
+        f"        text = {expression}\n        self.assertIn('words', text)\n"
+    )
+
+
+def _glob_of(expression):
+    return (
+        "class T(unittest.TestCase):\n    def test_x(self):\n"
+        f"        for p in {expression}:\n            self.assertIn('words', p.read_text())\n"
+    )
+
+
+RECORD_READS = {
+    "a + concatenation": 'Path("docs/areas/" + a + "/adr/001-x.md").read_text()',
+    "a + concatenation in a chain": '(ROOT / ("docs/areas/" + a) / "adr").joinpath("001-x.md").read_text()',
+    "Path with segment arguments": 'Path("docs", "areas", "a", "adr", "001-x.md").read_text()',
+    "joinpath with segment arguments": 'ROOT.joinpath("docs", "areas", "a", "adr", "001-x.md").read_text()',
+    "joinpath on an areas root": '(ROOT / "docs/areas").joinpath("a", "adr", "001-x.md").read_text()',
+    "Path of an areas root": 'Path(ROOT / "docs/areas", a, "adr", "001-x.md").read_text()',
+    "os.path.join": 'open(os.path.join("docs", "areas", "a", "adr", "001-x.md")).read()',
+    "os.path.join of a variable root": 'open(os.path.join(ROOT, "docs/areas", a, "adr", "001-x.md")).read()',
+    "a separator join": 'Path("/".join(["docs", "areas", a, "adr", "001-x.md"])).read_text()',
+    "a joined areas root": 'Path("/".join(("docs", "areas"))).joinpath(a, "adr", "001-x.md").read_text()',
+}
+RECORD_GLOBS = {
+    "glob over the areas root": '(ROOT / "docs/areas").glob("*/adr/*.md")',
+    "rglob over the areas root": '(ROOT / "docs" / "areas").rglob("adr/*.md")',
+    "glob over a segmented areas root": 'Path("docs", "areas").glob("*/adr/*.md")',
+    "glob of the root with a full pattern": 'ROOT.glob("docs/areas/*/adr/*.md")',
+    "glob of the root with a + pattern": 'ROOT.glob("docs/areas/" + "*/adr/*.md")',
+}
+NOT_RECORD_READS = {
+    "a CONTEXT.md by + concatenation": 'Path("docs/areas/" + a + "/CONTEXT.md").read_text()',
+    "a CONTEXT.md by segments": 'Path("docs", "areas", "a", "CONTEXT.md").read_text()',
+    "a CONTEXT.md by os.path.join": 'open(os.path.join("docs", "areas", a, "CONTEXT.md")).read()',
+    "an archive by joinpath": 'ROOT.joinpath("docs", "archive", "x.md").read_text()',
+    "a sum": "str(1 + 2)",
+}
+NOT_RECORD_GLOBS = {
+    "a CONTEXT.md glob over the areas root": '(ROOT / "docs/areas").glob("*/CONTEXT.md")',
+    "a glob of the tests": 'ROOT.glob("tests/*.py")',
+}
+
 TEST_ID = "tests/test_f.py::T.test_x"
 
 JUSTFILE_HEAD = (
@@ -861,6 +947,20 @@ class WordingScanTest(unittest.TestCase):
             self.assertEqual(self.found(SEGMENTED_PATH_WITH_VARIABLE), [(TEST_ID, 5)])
         with self.subTest("segments naming a CONTEXT.md, not a record"):
             self.assertEqual(self.found(SEGMENTED_CONTEXT), [])
+
+    def test_a_record_path_built_by_concatenation_arguments_or_a_glob_is_scanned(self):
+        for label, expression in RECORD_READS.items():
+            with self.subTest(label):
+                self.assertEqual(self.found(_read_of(expression)), [(TEST_ID, 5)])
+        for label, expression in RECORD_GLOBS.items():
+            with self.subTest(label):
+                self.assertEqual(self.found(_glob_of(expression)), [(TEST_ID, 4)])
+        for label, expression in NOT_RECORD_READS.items():
+            with self.subTest(label):
+                self.assertEqual(self.found(_read_of(expression)), [])
+        for label, expression in NOT_RECORD_GLOBS.items():
+            with self.subTest(label):
+                self.assertEqual(self.found(_glob_of(expression)), [])
 
     def test_record_text_kept_on_an_instance_attribute_is_found(self):
         with self.subTest("read then asserted through the attribute"):
