@@ -444,10 +444,14 @@ class _Pass:
         return mapped or None
 
     def obsolete(self, marker: Marker) -> bool:
-        """Whether `marker` is a runner prompt of this block that names a retired host or a check no host can take."""
+        """Whether `marker` is a runner prompt of this block that waits on a retired host or a check no host can take.
+
+        An approve or stale prompt names the check's host in `host`; an ask or act prompt names the host
+        that posted it, which says nothing about who can answer, so only `bound` decides those."""
         if not verify_answer.is_runner_prompt(marker) or marker.fields.get("block") != self.block_key:
             return False
-        if any(name in self.retired for name in marker.fields.get("host", "").split("+")):
+        if marker.fields.get("reason") in (verify_owner.APPROVE, verify_owner.STALE) \
+                and any(name in self.retired for name in marker.fields.get("host", "").split("+")):
             return True
         try:
             check = self.block["checks"][int(marker.fields["check"])]

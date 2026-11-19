@@ -836,6 +836,19 @@ class RetiredPromptTest(OwnerBase):
         self.assertEqual(len(self.ended(ask.comment_id)), 1)
         self.assertEqual(self.world.issue()["state"], "open")
 
+    def test_an_ask_a_retired_host_posted_for_a_check_others_can_answer_stays_live(self):
+        for host in ("any", ["old-box", "mbp"]):
+            with self.subTest(host=host):
+                self.world.comment_store(SLUG, ISSUE, [stored_comment(10, hold(block(ask_check(host=host))))],
+                                         labels=["needs-verification"])
+                self.run_pass("old-box", retired={})
+                ask, = self.prompts("verify-ask")
+                self.assertEqual(ask.fields["host"], "old-box")
+                for _ in range(2):
+                    self.assertEqual(self.run_pass("mbp", retired=RETIRED), [line(0, "AC1", "pending", "owner_waiting")])
+                self.assertEqual(self.ended(ask.comment_id), [])
+                self.assertEqual([p.comment_id for p in self.live_prompts()], [ask.comment_id])
+
     def test_a_retired_check_that_failed_gets_no_decision_prompt(self):
         c = ok_check(host="old-box", effects="live", on_fail="ask")
         self.hold(c, extra=[stored_comment(11, result(bkey(c), 0, "fail", host="old-box"))])
