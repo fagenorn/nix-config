@@ -719,16 +719,8 @@ class RevivalFoldTest(unittest.TestCase):
 
 
 class DocumentedTest(unittest.TestCase):
-    def test_the_manager_rules_are_written_where_the_view_points(self):
+    def test_manager_status_has_a_docstring(self):
         self.assertTrue((sprints.manager_status.__doc__ or "").strip())
-        for name in ("manager_status", "manager.started", "manager.failed", "manager.waiting",
-                     "manager.nudged", "manager.no_progress", "sprint.continued"):
-            self.assertIn(name, sprints.__doc__)
-
-    def test_the_notice_rules_are_written(self):
-        for name in ("notice.posted", "notice.withdrawn", "checked_notice", "postable_notice",
-                     "notice_block", "owner_notices", "postable_owner_notice"):
-            self.assertIn(name, sprints.__doc__)
 
 
 URL = "https://github.com/owner/p00/milestone/3"

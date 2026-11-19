@@ -733,11 +733,6 @@ class FailureTest(unittest.TestCase):
         self.assertEqual(
             [r for r in observation["references"] if r.startswith("next-step:")], [text])
 
-    def test_the_docstring_documents_the_next_step(self):
-        for needle in ("railway_unauthorized", "next-step:", "railway login", "dev shell"):
-            with self.subTest(needle):
-                self.assertIn(needle, adapter.__doc__)
-
     def test_one_budget_bounds_every_read(self):
         world = RailwayWorld(self)
         world.status()

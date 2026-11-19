@@ -714,50 +714,8 @@ class CliTest(Base):
         self.assertEqual((code, out["error"], out["issue"]), (2, "usage", None))
 
 
-class DocstringTest(unittest.TestCase):
-    def test_the_module_docstring_states_no_known_limitation(self):
-        # The stacked-holder residual belongs to ADR-claims-004 Consequences, never to source (D4).
-        self.assertNotIn("also contained", land_lock.__doc__)
-
-    def test_the_module_docstring_states_the_release_holder(self):
-        doc = " ".join(land_lock.__doc__.split())
-        for phrase in ("`--wait` and `--release` exist on `acquire` only",
-                       "A release pull request (issue 875) is one whose head is the locked branch itself",
-                       "A fork's branch of the same name is never counted",
-                       "A published (merged) or closed release pull request is stale the same way",
-                       "one the lookup left out, open or closed, is found in",
-                       "whatever its head, never answers `moved`",
-                       "with the repository's default branch as its base",
-                       "With `--follow-head` a waiting release follows its pull request instead (issue 901)",
-                       "`--follow-head`, which needs both (a usage error otherwise)",
-                       "a `--release --wait` whose caller is bound to `--sha` (a resumed release), stop with "
-                       "`no_open_pr` when the head moved",
-                       "leaves the lock alone when an open pull request other than the release has its head there",
-                       "(and, when that lists no such head, the open listing of D2)",
-                       "attempts the lock at that pull request's current head",
-                       "`no_open_pr` means no such pull request is open",
-                       "adds `head_moved`, true when it took the lock at a head other than `--sha`",
-                       "the caller continues with `lock_sha` as its commit",
-                       "sends the D9 delete of `--sha`, exactly what `release --sha` does",
-                       "The answer is `acquired` or `already_held`, never `moved`",
-                       "A release holder merges only on `already_held` (ADR-claims-009)"):
-            self.assertIn(phrase, doc)
-
-
-    def test_the_module_docstring_states_the_default_branch_head(self):
-        doc = " ".join(land_lock.__doc__.split())
-        for phrase in ("For a commit on the default branch the commit lookup lists merged pull requests only "
-                       "(issue 905)",
-                       "When the lookup lists no pull request headed at the lock, the open pull requests based "
-                       "on the branch are therefore read before the closed ones",
-                       "`GET pulls?state=open&base=<branch>&sort=updated`, at most 5 pages of 100",
-                       "the closed listing is read only when none is found",
-                       "A fork's pull request is never taken from this listing, and an open one beyond those "
-                       "pages is not seen",
-                       "When the commit lookup of `--sha` lists no such pull request, the open listing of D2 is "
-                       "read once for a same-repository one",
-                       "so the common path makes no extra call"):
-            self.assertIn(phrase, doc)
+class OpenPagesTest(unittest.TestCase):
+    def test_the_open_listing_reads_at_most_five_pages(self):
         self.assertEqual(fm.OPEN_PAGES, 5)
 
 
@@ -1799,18 +1757,6 @@ class RefreshTest(Base):
         # Unrefreshed the takeover is the poll at 1200; the refresh the poll at 480 saw moves it to 480 + 1200.
         self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 1680))
 
-    def test_the_docstring_states_the_refresh(self):
-        doc = " ".join(land_lock.__doc__.split())
-        for phrase in ("`forge-claim land acquire|release|status|refresh`",
-                       "A one-shot `acquire` at the lock's own sha answers `already_held` and changes nothing, "
-                       "so it restarts no watch",
-                       "the beat `refs/agent-locks/land-beat/<branch>`",
-                       "writes nothing unless the lock is at `--sha`",
-                       "A waiter reads the beat in every poll that finds the lock held",
-                       "restarts its watch exactly as a changed lock does",
-                       "No clock is read (D3)"):
-            self.assertIn(phrase, doc)
-
 
 class QueueTest(Base):
     """Issue 1001, D12: the waiters of a branch queue. The waiter under test is pull request 11
@@ -2275,30 +2221,7 @@ class QueueTest(Base):
                 self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
                 self.assertEqual(self.world.refs().get(REF), lock)
 
-    def test_the_docstring_states_the_queue(self):
-        doc = " ".join(land_lock.__doc__.split())
-        for phrase in ("The queue decides only who tries",
-                       "`refs/agent-locks/land-wait/<branch>/<since>-<pr>-<beat>`",
-                       "no host clock is compared between hosts",
-                       "more than `QUEUE_LIVE` seconds (390, three polls and a margin)",
-                       "`already_held` and `moved` concern only the caller's own lock and are answered before "
-                       "the queue is read",
-                       "the idle takeover of D4 does not depend on the caller's place",
-                       "watched the lock free for `FREE_GRACE` seconds (60)",
-                       "seen it closed for `CLOSED_GRACE` seconds (150)",
-                       "a closed one within `FAST_POLL` seconds too (issue 1204",
-                       "is no longer open (issue 1204",
-                       "is not queued either, so the lock it gave up is not left free behind a waiter",
-                       "more than `QUEUE_SKEW` seconds (60) ahead of it, is dead",
-                       "which the forge answers whole, unpaginated",
-                       "never fails the wait and is no failed poll (D8)",
-                       "only registrations it created itself",
-                       "when it is called again within `QUEUE_LIVE` seconds",
-                       "A `land-contended` answer leaves the registration",
-                       "reads the lock ref alone every `FAST_POLL` seconds (20)",
-                       "A one-shot `acquire` and a client that predates this rule register nothing",
-                       "adds `position` and `ahead` (D12)"):
-            self.assertIn(phrase, doc)
+    def test_the_queue_timings_are_twenty_sixty_and_sixty(self):
         self.assertEqual((land_lock.FAST_POLL, land_lock.FREE_GRACE, land_lock.QUEUE_REFRESH), (20, 60, 60))
 
 

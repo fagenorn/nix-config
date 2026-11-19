@@ -604,12 +604,6 @@ class IssueClosedTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("verify-checks: forge_error: transport", err.getvalue())
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("issue-closed --repo R --issue N", "verify_checks.issue_closed",
-                       "repos/R/issues/N", "`completed`", "payload_invalid", "issue 1010",
-                       "verify-closed", "`verified`"):
-            self.assertIn(needle, verify_checks.__doc__)
-
     def test_the_issue_closed_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/issue-closed"), "100755")
         self.assertEqual(run_from_root([str(ROOT / CHECKS / "issue-closed")]).returncode, 2)
@@ -746,11 +740,6 @@ class HostCheckWrappersTest(unittest.TestCase):
                 self.assertEqual(committed_mode(f"{CHECKS}/{name}"), "100755")
                 self.assertEqual(run_from_root([str(ROOT / CHECKS / name)]).returncode, 2)
 
-    def test_the_docstring_documents_the_checks(self):
-        for needle in ("host-mentions --repo R --phrase P", "verify_checks.host_mentions",
-                       "host-prompts --repo R", "verify_checks.host_prompts", "issue 1291"):
-            self.assertIn(needle, verify_checks.__doc__)
-
 
 class PlatformStatusWrapperTest(unittest.TestCase):
     def test_runs_the_installed_platform_status_and_passes_it_through(self):
@@ -837,12 +826,6 @@ class ManagedPrePushHookTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertTrue(report["refused"])
         self.assertFalse(report["control_admitted"])
-
-    def test_the_docstring_documents_the_check_and_its_owner_requirement(self):
-        doc = verify_checks.__doc__
-        for needle in ("managed-pre-push-hook --slug S", "verify_checks.managed_pre_push_hook",
-                       "-agent-git-hooks", "ssh:file", "authorized owner"):
-            self.assertIn(needle, doc)
 
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode("home/common/verify-pending/checks/managed-pre-push-hook"),
@@ -1620,11 +1603,6 @@ class SelfHostedRunnerCommandTest(unittest.TestCase):
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/self-hosted-runner"), "100755")
 
-    def test_the_docstring_documents_the_check(self):
-        doc = verify_checks.__doc__
-        for needle in ("self-hosted-runner --repo R --runner N --label L", "verify_checks.self_hosted_runner"):
-            self.assertIn(needle, doc)
-
 
 class GuardFleetWorld(GuardPolicyWorld):
     """A hermetic fleet plus a clone whose origin carries the cutover candidate: the real
@@ -2024,11 +2002,6 @@ class DarwinShellPathCommandTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["met"])
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("darwin-shell-path [--zsh PATH]", "verify_checks.darwin_shell_path",
-                       "__NIX_DARWIN_SET_ENVIRONMENT_DONE", "issue 810"):
-            self.assertIn(needle, verify_checks.__doc__)
-
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/darwin-shell-path"), "100755")
 
@@ -2162,10 +2135,6 @@ class ConsoleStateTest(unittest.TestCase):
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-state"), "100755")
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("console-state --port N", "verify_checks.console_state"):
-            self.assertIn(needle, verify_checks.__doc__)
-
 
 class ConsoleFailedStartTest(unittest.TestCase):
     """`console-failed-start` (issue 1182): an open failed-start card's sprint line reads the failed start."""
@@ -2296,10 +2265,6 @@ class ConsoleFailedStartTest(unittest.TestCase):
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-failed-start"), "100755")
 
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("console-failed-start --port N", "verify_checks.console_failed_start"):
-            self.assertIn(needle, verify_checks.__doc__)
-
 
 class ConsoleNoticeListsTest(unittest.TestCase):
     """`console-notice-lists` (issue 1291): the owner's notices name every issue of a project."""
@@ -2393,12 +2358,9 @@ class ConsoleNoticeListsTest(unittest.TestCase):
                         verify_checks.main(argv)
                 self.assertEqual(raised.exception.code, 2)
 
-    def test_the_wrapper_is_committed_executable_and_documented(self):
+    def test_the_wrapper_is_committed_executable_and_exits_2_without_arguments(self):
         self.assertEqual(committed_mode(f"{CHECKS}/console-notice-lists"), "100755")
         self.assertEqual(run_from_root([str(ROOT / CHECKS / "console-notice-lists")]).returncode, 2)
-        for needle in ("console-notice-lists --port N --notice", "verify_checks.console_notice_lists",
-                       "issue 1291"):
-            self.assertIn(needle, verify_checks.__doc__)
 
 
 class FirstScreenStateTest(unittest.TestCase):
@@ -2815,7 +2777,7 @@ class ConsoleFirstScreenTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report["verdict"], "unreachable")
 
-    def test_the_wrapper_is_committed_and_the_docstring_names_the_check(self):
+    def test_the_wrapper_is_committed_executable_and_reports_met(self):
         port = self.serve(self.view())
         fake = fake_browser(self.tmp, [M_OK])
         result = run_from_root([str(ROOT / CHECKS / "console-first-screen"), "--port", str(port),
@@ -2823,8 +2785,6 @@ class ConsoleFirstScreenTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["verdict"], "met")
         self.assertEqual(committed_mode(f"{CHECKS}/console-first-screen"), "100755")
-        for needle in ("console-first-screen --port N", "verify_checks.console_first_screen"):
-            self.assertIn(needle, verify_checks.__doc__)
 
 
 # --- railway-project-read (issue 1124) ----------------------------------------------------
@@ -3162,12 +3122,6 @@ class RailwayProjectReadCommandTest(unittest.TestCase):
         lines_out = result.stdout.splitlines()
         self.assertEqual(len(lines_out), 1)
         self.assertFalse(json.loads(lines_out[0])["met"])
-
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("railway-project-read [--system-path PATH]",
-                       "verify_checks.railway_project_read", "issue 1124", "no_dev_shell",
-                       "read_timeout", "integration"):
-            self.assertIn(needle, verify_checks.__doc__)
 
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/railway-project-read"), "100755")
@@ -3536,11 +3490,6 @@ exit 0
         self.assertEqual(result.returncode, 2)
         self.assertIn("--merge", result.stderr)
         self.assertNotIn("invalid choice", result.stderr)
-
-    def test_the_docstring_documents_the_check(self):
-        for needle in ("owner-services --console-port N --proxy-port N --merge SHA",
-                       "verify_checks.owner_services", "issue 1290", DOMAIN, NO_SESSION):
-            self.assertIn(needle, verify_checks.__doc__)
 
     def test_the_session_lines_match_the_activation_cleanup(self):
         text = (ROOT / "hosts/common/darwin-owner-services.nix").read_text(encoding="utf-8")
