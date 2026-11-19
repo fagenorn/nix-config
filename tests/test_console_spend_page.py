@@ -15,7 +15,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .test_console_page import media_block, style_rules
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
@@ -571,34 +570,6 @@ class SpendStaticTest(unittest.TestCase):
 
     def test_the_spend_page_is_small(self) -> None:
         self.assertLess(len(gzip.compress(self.data, 9)), 20480)
-
-    def test_the_spend_page_fits_480_wide(self) -> None:
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", self.text)
-        narrow = media_block(style, "(max-width: 480px)")
-        base = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
-        narrow_rules = style_rules(narrow)
-        self.assertEqual(
-            [d.get("flex-wrap") for s, d in narrow_rules if s == ".top-in"], ["wrap"])
-        rules = style_rules(base) + narrow_rules
-        measured = 0
-        for selector, decls in rules:
-            for prop in ("width", "min-width", "flex-basis"):
-                if prop not in decls:
-                    continue
-                measured += 1
-                value = decls[prop]
-                px = re.fullmatch(r"(\d+(?:\.\d+)?)px", value)
-                self.assertTrue(
-                    value in ("auto", "0") or re.fullmatch(r"\d+(?:\.\d+)?%", value)
-                    or "100vw" in value or (px and float(px.group(1)) <= 448),
-                    f"{selector} {prop}: {value}")
-        self.assertGreater(measured, 0)
-        merged = {}
-        for selector, decls in rules:
-            merged.setdefault(selector, {}).update(decls)
-        self.assertEqual(
-            merged.get(".trend-day", merged.get(".trend li", {})).get("min-width"), "0")
-        self.assertEqual(merged.get(".row-name", {}).get("overflow-wrap"), "anywhere")
 
 
 if __name__ == "__main__":

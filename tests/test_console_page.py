@@ -3347,7 +3347,6 @@ class PageViewerTest(unittest.TestCase):
             self.assertEqual(round_posts(snap), [])
 
 
-
 def checks(snap: dict) -> list:
     return [p for p in snap["posts"] if p["url"] == "/api/check-answer"]
 
@@ -3867,47 +3866,6 @@ class PageCardTest(unittest.TestCase):
         articles = [n for n in nodes(snap["inbox"]) if n["tag"] == "article"]
         self.assertTrue(articles)
         self.assertTrue(all(has_class(n, "brief") for n in articles))
-
-    def test_the_primary_style_outranks_the_button_base_rules(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-        lines = style.splitlines()
-        shared = lines.index("/* controls */")
-        end = lines.index("/* end controls */")
-        desk, desk_end = lines.index("/* controls: desk */"), lines.index("/* end controls: desk */")
-        self.assertEqual(desk, end + 1)
-
-        def rules_in(block: list) -> list:
-            return [(s, d) for s, d in style_rules("\n".join(block))]
-
-        def spec(selector: str) -> tuple:
-            selector = re.sub(r"::[\w-]+", "", selector)
-            b = len(re.findall(r"\[[^\]]*\]", selector))
-            rest = re.sub(r"\[[^\]]*\]", "", selector)
-            a = len(re.findall(r"#[\w-]+", rest))
-            rest = re.sub(r"#[\w-]+", "", rest)
-            b += len(re.findall(r"\.[\w-]+", rest)) + len(re.findall(r":[\w-]+", rest))
-            c = sum(1 for t in re.split(r"[\s>+~]+", rest) if t[:1].isalpha())
-            return (a, b, c)
-
-        self.assertEqual(spec(".btn-primary"), (0, 1, 0))
-        block, addendum = rules_in(lines[shared + 1:end]), rules_in(lines[desk + 1:desk_end])
-        hover = ':hover:not(:disabled):not([aria-disabled="true"])'
-        wanted = {"": ("background", "color", "border-color"), hover: ("background", "border-color"),
-                  ":disabled": ("background", "color", "border-color")}
-        for state, props in wanted.items():
-            with self.subTest(state=state):
-                mine = [s for s, d in addendum if s.endswith(".btn-primary" + state) and "background" in d]
-                rivals = [s for s, _ in block if s.endswith(".btn-primary" + state)]
-                self.assertTrue(mine)
-                if state != hover:
-                    self.assertTrue(rivals)
-                if rivals:
-                    self.assertGreaterEqual(min(spec(s) for s in mine), max(spec(s) for s in rivals))
-                declared = [d for s, d in addendum if s in mine]
-                for prop in props:
-                    self.assertTrue(any(prop in d for d in declared), prop)
-        self.assertEqual(re.findall(r"[^{}]*\.primary(?![\w-])[^{}]*\{", style), [])
 
 
 class PageRowTest(unittest.TestCase):
@@ -7065,33 +7023,6 @@ class PageBriefRowTest(unittest.TestCase):
         self.assertFalse(has_any(row, ROW_BODY))
 
 
-def style_rules(block: str) -> list:
-    """(selector, {property: value}) for every rule in a block of CSS without nested blocks."""
-    css = re.sub(r"(?s)/\*.*?\*/", "", block)
-    rules = []
-    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-        decls = {}
-        for decl in body.split(";"):
-            name, _, value = decl.partition(":")
-            if name.strip():
-                decls[name.strip()] = value.strip()
-        for selector in selectors.split(","):
-            rules.append((" ".join(selector.split()), decls))
-    return rules
-
-
-def media_block(style: str, query: str) -> str:
-    opener = "@media " + query + " {"
-    if opener not in style:
-        return ""
-    start = style.index(opener) + len(opener)
-    depth, at = 1, start
-    while depth:
-        depth += {"{": 1, "}": -1}.get(style[at], 0)
-        at += 1
-    return style[start:at - 1]
-
-
 class PageAnsweredRowTest(unittest.TestCase):
     def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
         done = item("Z", answered=True, headline="Which database?",
@@ -7165,17 +7096,6 @@ class PageKeyStripTest(unittest.TestCase):
                 self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"], expected)
                 for word in words:
                     self.assertIn(word, full(strip))
-
-
-class PageStandingRulesTest(unittest.TestCase):
-    def setUp(self) -> None:
-        text = PAGE.read_text(encoding="utf-8")
-        (self.style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
-
-    def test_motion_is_off_under_reduced_motion(self) -> None:
-        block = media_block(self.style, "(prefers-reduced-motion: reduce)")
-        declared = {name for _, decls in style_rules(block) for name in decls}
-        self.assertLessEqual({"transition-duration", "animation-duration"}, declared)
 
 
 def si(state: str, days, ask: bool = False, ever=None) -> dict:
@@ -8377,7 +8297,6 @@ class SigninLaterPageTest(unittest.TestCase):
         self.assertEqual(of_class(card, "button", "signin-start"), [])
 
 
-
 class SigninRecoveredPageTest(unittest.TestCase):
     def test_a_running_sign_in_with_no_inbox_item_is_recovered_from_the_runs(self) -> None:
         run = {"work": {"state": "running", "at": None, "attempt": 7}}
@@ -9213,7 +9132,6 @@ class PageReviewTest(unittest.TestCase):
         self.assertIn("Note sent.", full(snap["inbox"]))
         (not_yet,) = with_class(snap["inbox"], "ans-note")
         self.assertEqual(full(not_yet), "Not yet")
-
 
 
 def captioned(lines: list) -> dict:

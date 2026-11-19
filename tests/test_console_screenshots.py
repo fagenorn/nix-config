@@ -731,6 +731,207 @@ MOVED += (
     moved(_VIEWER_BAR, ".viewer-stage", "overflow", BOTH, "viewer-stage-overflow-y"),
     moved(_VIEWER_BAR, ".viewer-bar button", "min-height", NARROW, "viewer-bar-button-min-height-480"),
 )
+CONTROLS = "tests/test_console_controls.py"
+SPEND_PAGE = "tests/test_console_spend_page.py"
+_DECLARED = f"{CONTROLS}::ControlStyleTest::test_the_kinds_are_declared_once_in_the_controls_block"
+_SHARED = f"{CONTROLS}::ControlStyleTest::test_both_pages_share_one_controls_block"
+_REDUCED = f"{CONTROLS}::ControlStyleTest::test_both_pages_turn_motion_off_under_reduced_motion"
+_OWNS = f"{CONTROLS}::ControlStyleTest::test_kind_rules_own_the_control_look"
+_FLOOR = f"{CONTROLS}::ControlStyleTest::test_no_rule_shrinks_a_control_below_32_px"
+_FLOOR_SPEND = f"{CONTROLS}::ControlStyleTest::test_the_height_floor_gate_sees_a_later_spend_rule"
+_DISABLED = (f"{CONTROLS}::ControlStateTest::"
+             "test_disabled_and_busy_carry_an_attribute_and_a_non_colour_cue")
+_HOVER = f"{CONTROLS}::ControlStateTest::test_hover_is_shared_by_both_pages"
+_RING = f"{CONTROLS}::ControlStateTest::test_every_kind_shows_the_lavender_ring_on_keyboard_focus"
+_PRESSED = f"{CONTROLS}::ControlStateTest::test_pressed_is_an_attribute_with_a_non_colour_cue"
+_PLACEHOLDERS = (f"{CONTROLS}::ControlLabelTest::"
+                 "test_placeholders_meet_4_5_to_1_against_their_field")
+_WCAG = f"{CONTROLS}::ControlLabelTest::test_contrast_matches_the_wcag_formula"
+_PRIMARY = f"{PAGE}::PageCardTest::test_the_primary_style_outranks_the_button_base_rules"
+_PAGE_MOTION = f"{PAGE}::PageStandingRulesTest::test_motion_is_off_under_reduced_motion"
+_SPEND_FIT = f"{SPEND_PAGE}::SpendStaticTest::test_the_spend_page_fits_480_wide"
+_BTNS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option")
+_FIELDS = ("field-line", "field-area", "field-code")
+_SPLIT = {("btn-primary", "background-color"), ("btn-primary", "border-color"),
+          ("btn-primary", "color"), ("btn-danger", "color")}
+_LOOK_GROUPS = {
+    "font": ("font-style", "font-weight", "font-size", "line-height", "font-family"),
+    "background": ("background-color", "background-image"),
+    "border": ("border-width", "border-style", "border-color"),
+    "transition": ("transition-property", "transition-duration"),
+    "text-decoration": ("text-decoration-line",),
+}
+
+
+def kind_rows(kind, *props):
+    """The kind rows reading `props` of `kind`; a prop the desk page holds differently has two."""
+    names = []
+    for prop in props:
+        if (kind, prop) in _SPLIT:
+            names += [f"kind-{kind}-{prop}-desk", f"kind-{kind}-{prop}-spend"]
+        else:
+            names.append(f"kind-{kind}-{prop}")
+    return tuple(names)
+
+
+def kind_entries(test, kind, props):
+    """One entry per declared property of a kind, a group read by its longhands."""
+    return tuple(
+        moved(test, f".{kind}", prop, BOTH, *kind_rows(kind, *_LOOK_GROUPS.get(prop, (prop,))))
+        for prop in props)
+
+
+_BUTTON_PROPS = ("display", "align-items", "gap", "min-height", "padding", "font", "text-align",
+                 "text-decoration", "color", "background", "border", "border-radius", "cursor",
+                 "transition")
+_FIELD_PROPS = ("min-height", "padding", "font", "color", "background", "border", "border-radius")
+_HOVER_ROWS = tuple(f"hover-{kind}-{prop}" for kind in ("btn-quiet", "btn-danger", "btn-option")
+                    for prop in ("background-color", "border-color", "background-image"))
+_RING_PROPS = ("outline-style", "outline-width", "outline-color", "outline-offset", "border-radius")
+_MOTION_ROWS = {prop: tuple(f"motion-{mode}-{prop}{where}" for mode in ("reduced", "normal")
+                            for where in ("", "-before", "-after"))
+                for prop in ("transition-duration", "animation-duration")}
+_FORCED_FOCUS = "keyboard focus is forced on a specimen of the kind and its ring read"
+_PLACEHOLDER_VIA = "the placeholder is read through its ::placeholder pseudo-element"
+
+MOVED += (
+    # The kinds, each declared once in the shared controls block.
+    *kind_entries(_DECLARED, "btn-primary", _BUTTON_PROPS + ("font-weight",)),
+    *kind_entries(_DECLARED, "btn-quiet", _BUTTON_PROPS),
+    *kind_entries(_DECLARED, "btn-danger", _BUTTON_PROPS),
+    *kind_entries(_DECLARED, "btn-option", _BUTTON_PROPS + ("column-gap", "width", "border-color")),
+    moved(_DECLARED, ".btn-option", "grid-template-columns", BOTH, "kind-btn-option-grid",
+          "kind-btn-option-grid-tracks"),
+    moved(_DECLARED, ".btn-option", "transition", BOTH, *kind_rows("btn-option",
+                                                              "transition-property",
+                                                              "transition-duration")),
+    *kind_entries(_DECLARED, "field-line", _FIELD_PROPS),
+    *kind_entries(_DECLARED, "field-area", _FIELD_PROPS + ("display", "width", "resize")),
+    *kind_entries(_DECLARED, "field-code", _FIELD_PROPS + ("letter-spacing", "font-family")),
+    moved(_DECLARED, ".btn-bare", "padding", BOTH, "bare-btn-quiet-padding",
+          via="the bare modifier is read on a bare quiet button"),
+    moved(_DECLARED, ".field-bare", "padding-left", BOTH, "bare-field-line-padding-left",
+          via="the bare modifier is read on a bare line field"),
+    *(moved(_DECLARED, ".btn-bare", prop, BOTH, f"bare-btn-quiet-{prop}",
+            via="the bare modifier is read on a bare quiet button")
+      for prop in ("border-color", "background-color")),
+    *(moved(_DECLARED, ".field-bare", prop, BOTH, f"bare-field-line-{prop}",
+            via="the bare modifier is read on a bare line field")
+      for prop in ("padding-right", "background-color", "border-color")),
+    moved(_DECLARED, ":root", "--*", WIDE, "tokens-desk",
+          via="the --hover token is read by the page tokens check"),
+    moved(_DECLARED, ".btn-primary", "min-height", BOTH, "kind-look",
+          via="every control on the page is compared with a bare element of its kind"),
+    # The two pages share one controls block, and the spend page has no desk addendum.
+    *(moved(_SHARED, f".{kind}", prop, BOTH, *kind_rows(kind, prop))
+      for kind in _BTNS + _FIELDS for prop in ("min-height", "padding", "border-radius")),
+    *(moved(_SHARED, ".btn-primary", prop, BOTH, f"kind-btn-primary-{prop}-spend")
+      for prop in ("background-color", "border-color", "color")),
+    moved(_SHARED, ":root", "--*", WIDE, "tokens-spend",
+          via="the spend page's --hover token is read by the page tokens check"),
+    # Motion is off under reduced motion on both pages.
+    *(moved(_REDUCED, selector, prop, WIDE, *_MOTION_ROWS[prop],
+            via="the rules are read on a specimen that moves without them")
+      for selector in ("*", "*::before", "*::after")
+      for prop in ("transition-duration", "animation-duration")),
+    *(moved(_PAGE_MOTION, "*", prop, WIDE, *_MOTION_ROWS[prop],
+            via="the rules are read on a specimen that moves without them")
+      for prop in ("transition-duration", "animation-duration")),
+    # A kind rule owns the control look: every control is read against a bare element of its kind.
+    moved(_OWNS, ".picked", "min-height", BOTH, "kind-look",
+          via="a control in the picked state is skipped, and the pressed rows read it"),
+    moved(_OWNS, ".btn-primary", "min-height", BOTH, "kind-look",
+          via="every control on the page is compared with a bare element of its kind"),
+    moved(_OWNS, ".btn-primary", "height", BOTH, "kind-height-floor",
+          via="a control under 32px is read on the page, not in a rule"),
+    # No rule shrinks a control below 32px.
+    *(moved(_FLOOR, f".{kind}", "min-height", BOTH, *kind_rows(kind, "min-height"), "kind-look")
+      for kind in _BTNS + _FIELDS),
+    moved(_FLOOR, ".btn-quiet", "height", BOTH, "kind-height-floor",
+          via="every control of every state is read for a height under 32px"),
+    moved(_FLOOR_SPEND, ".span", "min-height", BOTH, "kind-btn-quiet-min-height", "kind-look",
+          via="the kind rows read the spend page, and the desk controls are read for 32px"),
+    # Disabled and busy.
+    *(moved(_DISABLED, f".{kind}", prop, BOTH, *(
+        f"disabled-{kind}-{prop}-desk", f"disabled-{kind}-{prop}-spend")
+              if kind == "btn-primary" and prop == "border-color" else (f"disabled-{kind}-{prop}",))
+      for kind in _BTNS + _FIELDS for prop in ("border-width", "border-style", "border-color",
+                                                "cursor", "opacity")),
+    *(moved(_DISABLED, f".{kind}", prop, BOTH, f"busy-{kind}-{prop}")
+      for kind in _BTNS + _FIELDS for prop in ("border-width", "border-style", "cursor")),
+    *(moved(_DISABLED, f".{kind}", "content", BOTH, f"busy-{kind}-content",
+            via="the ::after of a busy control is read through its pseudo-element")
+      for kind in ("btn-primary", "btn-quiet", "btn-danger")),
+    *(moved(_DISABLED, ".btn-primary", prop, WIDE + NARROW, f"disabled-btn-primary-{prop}-desk",
+            via="the desk addendum's disabled primary is read on a disabled primary")
+      for prop in ("background-color", "color")),
+    # Hover is shared by both pages.
+    *(moved(_HOVER, f".{kind}", "background", BOTH, f"hover-{kind}-background-color",
+            f"hover-{kind}-background-image") for kind in ("btn-quiet", "btn-danger", "btn-option")),
+    *(moved(_HOVER, f".{kind}", "border-color", BOTH, f"hover-{kind}-border-color")
+      for kind in ("btn-quiet", "btn-danger", "btn-option")),
+    moved(_HOVER, ".btn-quiet.btn-bare", "border-color", BOTH, "hover-btn-quiet-bare-border-color"),
+    moved(_HOVER, ".btn-primary", "background", BOTH, "hover-btn-primary-background-color-desk",
+          "kind-btn-primary-background-image", via="the desk addendum's primary hover is forced"),
+    moved(_HOVER, ".btn-primary", "border-color", BOTH, "hover-btn-primary-border-color-desk",
+          via="the desk addendum's primary hover is forced"),
+    moved(_HOVER, ":root", "--*", WIDE, "tokens-desk", "tokens-spend",
+          via="the --hover token is read by the page tokens check"),
+    *(moved(_HOVER, ".btn-quiet", prop, BOTH, f"hover-disabled-btn-quiet-{prop}",
+            via=f"a disabled control is forced to hover and its {prop} read")
+      for prop in ("background-color", "border-style")),
+    # The lavender ring on keyboard focus.
+    *(moved(_RING, f".{kind}:focus-visible", "outline", BOTH,
+            *(f"ring-{kind}-{prop}" for prop in _RING_PROPS[:3]), via=_FORCED_FOCUS)
+      for kind in _BTNS + _FIELDS),
+    *(moved(_RING, f".{kind}:focus-visible", prop, BOTH, f"ring-{kind}-{prop}", via=_FORCED_FOCUS)
+      for kind in _BTNS + _FIELDS for prop in _RING_PROPS[3:]),
+    moved(_RING, ".field-bare:focus-visible", "outline-style", BOTH, "ring-field-bare-outline-style",
+          via=_FORCED_FOCUS),
+    moved(_RING, ":focus-visible", "outline-style", BOTH, "ring-every-outline-style",
+          via="every control is forced to keyboard focus and its outline read"),
+    moved(_RING, ".viewer", "outline-style", BOTH, "ring-every-outline-style",
+          via="every control but a bare field and the viewer is forced to keyboard focus"),
+    # Pressed is an attribute with a non-colour cue.
+    *(moved(_PRESSED, f".{kind}:active", "transform", BOTH, f"pressed-{kind}-transform",
+            via="the press is forced on a specimen of the kind and its transform read")
+      for kind in _BTNS),
+    moved(_PRESSED, ".btn-option", "background-color", BOTH, "pressed-btn-option-background-color-desk",
+          via="the desk addendum's pressed option tint is read on a pressed option"),
+    *(moved(_PRESSED, f".{kind}", prop, BOTH, f"pressed-{kind}-{prop}")
+      for kind in _BTNS for prop in ("border-color", "font-weight")),
+    # The placeholder meets 4.5 to 1, and the formula.
+    *(moved(_PLACEHOLDERS, f".{kind}::placeholder", prop, BOTH,
+            f"placeholder-{kind}-{'color' if prop == 'color' else prop}", via=_PLACEHOLDER_VIA)
+      for kind in _FIELDS for prop in ("opacity", "color")),
+    *(moved(_PLACEHOLDERS, f".{kind}", "background", BOTH, f"placeholder-{kind}-contrast",
+            *kind_rows(kind, "background-color", "background-image"),
+            via="the contrast is read against the field's painted background")
+      for kind in _FIELDS),
+    moved(_PLACEHOLDERS, ".goal-bar.open .goal-in", "background", BOTH, "placeholder-goal-contrast",
+          "placeholder-goal-background-color", "placeholder-goal-background-image",
+          via="the contrast is read against the goal field's painted background"),
+    moved(_WCAG, ".field-line::placeholder", "color", BOTH, "placeholder-field-line-contrast",
+          via="the formula is pinned by the contrast want kind's Chromium test"),
+    # The primary style outranks the button base rules.
+    moved(_PRIMARY, ".btn-primary", "color", BOTH, "kind-btn-primary-color-desk",
+          "primary-real-color", via="the primary is read as painted on the card"),
+    moved(_PRIMARY, ".btn-primary", "background", BOTH, "kind-btn-primary-background-color-desk",
+          "kind-btn-primary-background-image", "primary-real-background-color",
+          via="the primary is read as painted on the card"),
+    moved(_PRIMARY, ".btn-primary", "border-color", BOTH, "kind-btn-primary-border-color-desk",
+          "primary-real-border-color", via="the primary is read as painted on the card"),
+    # The spend page fits 480 wide.
+    moved(_SPEND_FIT, ".top-in", "flex-wrap", NARROW, "spend-fit-top-wrap"),
+    moved(_SPEND_FIT, ".trend-day", "min-width", NARROW, "spend-fit-trend-min-width"),
+    moved(_SPEND_FIT, ".row-name", "overflow-wrap", NARROW, "spend-fit-row-name-wrap"),
+    moved(_SPEND_FIT, "#summary", "width", NARROW, "spend-fit-width",
+          via="every width the page declares is read as drawn at 480"),
+    moved(_SPEND_FIT, ".figure", "min-width", NARROW, "spend-fit-min-width",
+          via="every min-width the page declares is read as drawn at 480"),
+    moved(_SPEND_FIT, ".trend-day", "flex-basis", NARROW, "spend-fit-flex-basis",
+          via="every flex-basis the page declares is read as drawn at 480"),
+)
 STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
     f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",
@@ -741,7 +942,7 @@ STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageSpendFigureTest::test_the_figure_is_quiet_overlay_2_and_never_peach",
     "tests/test_console_controls.py::ControlStateTest::test_peach_is_only_on_the_primary_kind",
     _TOP_BAR, _ARROW, _BREAKS, _BLOCKS, _HEADINGS, _DIGEST, _STRIP_THREE, _STRIP_480, _STRIP_DIM,
-    _NOW_CLAMP, _PIPS, _WAIT, _PROJECT, _ANSWERED, _VIEWER_ARROWS, _VIEWER_BAR,
+    _NOW_CLAMP, _PIPS, _WAIT, _PROJECT, _ANSWERED, _VIEWER_ARROWS, _VIEWER_BAR, _PRESSED,
 })
 RENAMED: dict[str, str] = {
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled":
@@ -2395,6 +2596,70 @@ class ScreenshotStyleTest(unittest.TestCase):
                          ("r: .i height is 50px",))
         broken = '<img class="i" src="data:image/png;base64,AAAA" style="width: 100px; height: 20px">'
         self.assertEqual(self.styled(broken, [row]), ("r: .i height is 20px (not loaded)",))
+
+    @staticmethod
+    def controls_page(body):
+        """The page's own controls block, with its tokens, around `body`."""
+        text = (Path(shots.__file__).resolve().parents[1]
+                / "python/agent_tools/console/page.html").read_text(encoding="utf-8")
+        style = re.search(r"(?s)<style>(.*?)</style>", text).group(1)
+        root = re.search(r"(?s):root \{.*?\n\}|:root \{[^}]*\}", style).group(0)
+        block = re.search(r"(?s)/\* controls \*/\n(.*?)/\* end controls \*/", style).group(1)
+        return f"<style>{root}\n{block}\n.x .btn-quiet {{ border-radius: 2px }}</style>{body}"
+
+    def test_kind_look_names_a_control_whose_kind_property_was_overridden(self) -> None:
+        row = style_row("r", selector="body", prop="min-height", want="kind_look",
+                        value=",".join(shots.LOOK))
+        page = self.controls_page('<div class="x"><button class="btn-quiet">x</button></div>')
+        self.assertEqual(self.styled(page, [row]), tuple(
+            f"r: button.btn-quiet border-{corner}-radius is 2px"
+            for corner in ("top-left", "top-right", "bottom-right", "bottom-left")))
+        self.assertEqual(self.last_leftover, 0)
+        short = self.controls_page('<button class="btn-quiet" style="min-height: 20px">x</button>')
+        self.assertEqual(self.styled(short, [row]), ("r: button.btn-quiet min-height is 20px",))
+        self.assertEqual(self.styled(self.controls_page("<p>x</p>"), [row]), ("r: body is absent",))
+
+    def test_kind_look_skips_a_control_in_a_state(self) -> None:
+        row = style_row("r", selector="body", prop="min-height", want="kind_look",
+                        value=",".join(shots.LOOK))
+        states = ('<button class="btn-quiet" disabled>x</button>'
+                  '<button class="btn-option" aria-pressed="true">x</button>'
+                  '<button class="btn-quiet" aria-busy="true">x</button>'
+                  '<button class="btn-option picked">x</button>'
+                  '<button class="btn-quiet btn-bare" style="padding: 0; color: rgb(1, 2, 3)">x</button>'
+                  '<button class="cap btn-quiet" style="padding: 0">x</button>'
+                  '<div data-style-probe><button class="btn-quiet" style="border-radius: 2px">x'
+                  '</button></div>')
+        # The states are the controls block's own rules, so each is given a look the kind refuses.
+        refused = "".join(
+            f'<button class="{cls}" {attrs} style="border-radius: 2px; padding: 1px">x</button>'
+            for cls, attrs in (("btn-quiet", "disabled"), ("btn-option", 'aria-pressed="true"'),
+                               ("btn-quiet", 'aria-busy="true"'), ("btn-option picked", "")))
+        self.assertEqual(self.styled(self.controls_page(states + refused), [row]), ())
+        bare = '<button class="btn-quiet btn-bare" style="border-color: rgb(1, 2, 3)">x</button>'
+        self.assertEqual(self.styled(self.controls_page(bare), [row]), tuple(
+            f"r: button.btn-quiet border-{side}-color is rgb(1, 2, 3)"
+            for side in ("top", "right", "bottom", "left")))
+
+    def test_contrast_keeps_the_wcag_pins_and_names_a_faint_placeholder(self) -> None:
+        def page(fg, bg):
+            return f'<p class="t" style="color: {fg}; background: {bg}">x</p>'
+
+        def row(value, **kw):
+            return style_row("c", **{"selector": ".t", "prop": "color", "want": "contrast",
+                                     "value": value, **kw})
+
+        self.assertEqual(self.styled(page("#939ab7", "#1e2030"), [row("4.5")]), ())
+        self.assertEqual(self.styled(page("#939ab7", "#1e2030"), [row("99")]),
+                         ("c: .t contrast is 5.79",))
+        self.assertEqual(self.styled(page("#181926", "#f5a97f"), [row("99")]),
+                         ("c: .t contrast is 9.01",))
+        self.assertEqual(self.styled(page("#494d64", "#1e2030"), [row("4.5")]),
+                         ("c: .t contrast is 1.94",))
+        faint = ('<style>.f::placeholder { color: #494d64; opacity: 1 }</style><div style="background:'
+                 ' #1e2030"><input class="f" placeholder="x" style="background: none"></div>')
+        self.assertEqual(self.styled(faint, [row("4.5", selector=".f", pseudo="::placeholder")]),
+                         ("c: .f::placeholder contrast is 1.94",))
 
     def sandboxed_capture(self, **kw):
         try:

@@ -402,7 +402,12 @@ class StyleCheck:
     is a count) that the grid has exactly that many top-level tracks. `alpha_max` wants the colour
     to be clear or to have an alpha of at most `value`, `opaque` that it is one palette colour at
     alpha 1, and `follows_shape` that a loaded `img` is as tall as its own shape makes it at its
-    width, within its `min-height` and `max-height`.
+    width, within its `min-height` and `max-height`. `kind_look` (`value` is the comma-separated
+    list of properties) compares every rendered control of the seven kinds outside a state
+    (disabled, busy, pressed, picked, hovered, active or focused) with a bare scratch element of
+    its kind on those properties, only the borders for a bare control, and wants each to be at
+    least 32px tall; `contrast` wants the WCAG ratio of the colour (of `pseudo`) against the first
+    opaque background behind it to be at least `value`.
     """
     name: str
     states: tuple[str, ...]
@@ -429,7 +434,7 @@ STYLE_STEPS: dict[str, tuple[str, ...]] = {"look-card": ("button.pic-thumb",)}
 WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt",
                    "none_peach", "palette", "tokens", "distinct", "sizes_shared", "fills",
                    "largest_type", "right_edge", "hugs", "track_max", "tracks", "alpha_max",
-                   "opaque", "follows_shape"})
+                   "opaque", "follows_shape", "kind_look", "contrast"})
 PALETTE = {
     "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
     "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
@@ -1067,6 +1072,286 @@ STYLE_CHECKS += (
     _narrow("viewer-pair-direction", _LOOK, ".viewer-pair", "flex-direction", "equals", "column",
             "row"),
 )
+CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
+KINDS = ("btn-primary", "btn-quiet", "btn-danger", "btn-option", "field-line", "field-area",
+         "field-code")
+BUTTON_KINDS = KINDS[:4]
+FIELD_KINDS = KINDS[4:]
+LOOK = ("padding-top", "padding-right", "padding-bottom", "padding-left",
+        *(f"border-{side}-{part}" for side in ("top", "right", "bottom", "left")
+          for part in ("width", "style", "color")),
+        *(f"border-{corner}-radius" for corner in ("top-left", "top-right", "bottom-right",
+                                                   "bottom-left")),
+        "font-family", "font-size", "font-style", "font-weight", "line-height", "color",
+        "background-color", "background-image", "cursor", "outline-style", "outline-width",
+        "outline-color", "opacity")
+_SPEND = ("spend-page",)
+_PAGES = (_NOTHING, "spend-page")
+_UI = '<span class="k-ui" style="font-family: var(--ui)" data-style-probe></span>'
+_GRADIENT = "linear-gradient(red, red)"
+# A value each property of a kind row must refuse, for the `broken` rule of its row.
+_REFUSED = {
+    "display": "block", "align-items": "flex-start", "gap": "1px", "column-gap": "1px",
+    "min-height": "1px", "padding": "1px", "font-style": "italic", "font-weight": "300",
+    "font-size": "30px", "line-height": "40px", "font-family": "serif", "text-align": "right",
+    "text-decoration-line": "underline", "color": _RGB, "background-color": _RGB,
+    "background-image": _GRADIENT, "border-width": "3px", "border-style": "double",
+    "border-color": _RGB, "border-radius": "1px", "cursor": "default",
+    "transition-property": "none", "transition-duration": "5s", "letter-spacing": "5px",
+    "resize": "none", "width": "50%", "opacity": "1", "outline-style": "none",
+    "outline-width": "5px", "outline-color": _RGB, "outline-offset": "9px", "transform": "none",
+}
+_SHARED_BUTTON = (
+    ("display", "equals", "inline-flex"), ("align-items", "equals", "center"),
+    ("gap", "equals", "8px"), ("min-height", "equals", "32px"), ("padding", "equals", "5px 12px"),
+    ("font-style", "equals", "normal"), ("font-weight", "equals", "500"),
+    ("font-size", "equals", "14px"), ("line-height", "equals", "19.6px"),
+    ("font-family", "same_as", ".k-ui"), ("text-align", "equals", "left"),
+    ("text-decoration-line", "equals", "none"), ("color", "equals", PALETTE["--sub1"]),
+    ("background-color", "equals", _CLEAR), ("background-image", "equals", "none"),
+    ("border-width", "equals", "1px"), ("border-style", "equals", "solid"),
+    ("border-color", "equals", PALETTE["--s1"]), ("border-radius", "equals", "8px"),
+    ("cursor", "equals", "pointer"),
+    ("transition-property", "equals", "background-color, border-color"),
+    ("transition-duration", "equals", "0.16s, 0.16s"))
+_SHARED_FIELD = (
+    ("min-height", "equals", "32px"), ("padding", "equals", "5px 10px"),
+    ("font-style", "equals", "normal"), ("font-weight", "equals", "400"),
+    ("font-size", "equals", "14px"), ("line-height", "equals", "19.6px"),
+    ("color", "equals", PALETTE["--text"]), ("background-color", "equals", PALETTE["--mantle"]),
+    ("background-image", "equals", "none"), ("border-width", "equals", "1px"), ("border-style", "equals", "solid"),
+    ("border-color", "equals", PALETTE["--s1"]), ("border-radius", "equals", "8px"))
+# What each kind holds differently from the shared look, and what only the desk page changes.
+_KIND_OWN = {
+    "btn-primary": {"min-height": "40px", "padding": "0px 16px", "font-weight": "600"},
+    "btn-option": {"display": "grid", "gap": "8px 14px", "width": ("fills", ""),
+                   "min-height": "44px", "padding": "9px 14px", "color": PALETTE["--text"],
+                   "border-color": _CLEAR},
+    "field-line": {"font-family": ("same_as", ".k-ui")},
+    "field-area": {"font-family": ("same_as", ".k-ui"), "display": "block",
+                   "width": ("fills", ""), "min-height": "72px", "resize": "vertical"},
+    "field-code": {"font-family": ("starts", "ui-monospace"), "letter-spacing": "0.84px"},
+}
+_KIND_DESK = {
+    "btn-primary": {"background-color": PALETTE["--peach"], "border-color": PALETTE["--peach"],
+                    "color": PALETTE["--crust"]},
+    "btn-danger": {"color": PALETTE["--red"]},
+}
+
+
+def _specimen(classes, attrs="", mark=True):
+    """One control of the page's own markup, `classes` first the kind: a button, an input or a
+    textarea, with a placeholder when it is a field."""
+    tag = "textarea" if classes.startswith("field-area") else (
+        "input" if classes.startswith("field-") else "button")
+    head = f'<{tag} class="{classes}"' + ("" if tag == "button" else ' placeholder="x"')
+    head += (f" {attrs}" if attrs else "") + (" data-style-probe" if mark else "")
+    return head + {"button": ">x</button>", "input": ">", "textarea": "></textarea>"}[tag]
+
+
+def _pair(kind, *states):
+    """One probe holding a `kind` control for each of `states`, read together (`every`)."""
+    return ('<span data-style-probe>' + "".join(_specimen(kind, state, mark=False) for state in states)
+            + "</span>")
+
+
+def _look(kind):
+    """The (prop, want, value) reads of a kind: the shared look with the kind's own values."""
+    base = _SHARED_BUTTON if kind in BUTTON_KINDS else _SHARED_FIELD
+    own = _KIND_OWN.get(kind, {})
+    reads = [(prop, *(own.get(prop) if isinstance(own.get(prop), tuple) else (want, own.get(prop, value))))
+             for prop, want, value in base]
+    reads += [(prop, *(v if isinstance(v, tuple) else ("equals", v)))
+              for prop, v in own.items() if prop not in {read[0] for read in reads}]
+    return reads
+
+
+def _kind_rows():
+    rows = []
+    for kind in KINDS:
+        spec = {"probe": _specimen(kind), "compare_probe": _UI}
+        for prop, want, value in _look(kind):
+            extra = dict(spec) if want in ("same_as",) else {"probe": spec["probe"]}
+            desk = _KIND_DESK.get(kind, {}).get(prop)
+            if desk is None:
+                rows.append(_row(f"kind-{kind}-{prop}", _PAGES, f".{kind}", prop, want, value,
+                                 "inline-block" if value == "block" else _REFUSED[prop], **extra))
+                continue
+            for suffix, states, value in (("desk", _NOTHING, desk), ("spend", _SPEND, value)):
+                rows.append(_row(f"kind-{kind}-{prop}-{suffix}", states, f".{kind}", prop, want,
+                                 value, _REFUSED[prop], **extra))
+    option = {"probe": _specimen("btn-option")}
+    rows += [
+        _row("kind-btn-option-column-gap", _PAGES, ".btn-option", "column-gap", "equals", "14px",
+             "1px", **option),
+        _row("kind-btn-option-grid", _PAGES, ".btn-option", "grid-template-columns", "starts",
+             "22px ", "50px 1fr auto", **option),
+        _row("kind-btn-option-grid-tracks", _PAGES, ".btn-option", "grid-template-columns",
+             "tracks", "3", "1fr 1fr", **option)]
+    return rows
+
+
+def _bare_rows():
+    button = {"probe": _specimen("btn-quiet btn-bare")}
+    field = {"probe": _specimen("field-line field-bare")}
+    return [
+        *(_row(f"bare-btn-quiet-{prop}", _PAGES, ".btn-quiet.btn-bare", prop, "equals", value,
+               _REFUSED[prop], **button)
+          for prop, value in (("padding", "0px"), ("border-color", _CLEAR),
+                              ("background-color", _CLEAR))),
+        *(_row(f"bare-field-line-{prop}", _PAGES, ".field-line.field-bare", prop, "equals", value,
+               _REFUSED.get(prop, "1px"), **field)
+          for prop, value in (("padding-left", "0px"), ("padding-right", "0px"),
+                              ("background-color", _CLEAR), ("border-color", _CLEAR)))]
+
+
+def _state_rows():
+    rows = []
+    dashed = (("border-width", "1px"), ("border-style", "dashed"), ("cursor", "not-allowed"),
+              ("opacity", "0.55"))
+    dotted = (("border-width", "1px"), ("border-style", "dotted"), ("cursor", "progress"))
+    refused = {"border-style": "solid", "cursor": "default", "border-width": "3px",
+               "opacity": "1"}
+    for kind in KINDS:
+        both = {"every": True, "probe": _pair(kind, "disabled", 'aria-disabled="true"')}
+        for prop, value in dashed:
+            rows.append(_row(f"disabled-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             refused[prop], **both))
+        reads = (("border-color", PALETTE["--s1"]),)
+        if kind == "btn-primary":
+            rows += [_row(f"disabled-{kind}-{prop}-desk", _NOTHING, f".{kind}", prop, "equals",
+                          PALETTE[token], _RGB, **both)
+                     for prop, token in (("border-color", "--s2"), ("background-color", "--s1"),
+                                         ("color", "--sub0"))]
+            rows.append(_row(f"disabled-{kind}-border-color-spend", _SPEND, f".{kind}",
+                             "border-color", "equals", PALETTE["--s1"], _RGB, **both))
+        else:
+            rows += [_row(f"disabled-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                          _RGB, **both) for prop, value in reads]
+        busy = {"every": True,
+                "probe": _pair(kind, 'aria-busy="true"', 'aria-busy="true" disabled')}
+        for prop, value in dotted:
+            rows.append(_row(f"busy-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             {"border-style": "solid", "cursor": "default",
+                              "border-width": "3px"}[prop], **busy))
+        if kind in ("btn-primary", "btn-quiet", "btn-danger"):
+            rows.append(_row(f"busy-{kind}-content", _PAGES, f".{kind}", "content", "equals",
+                             '"…"', "none", pseudo="::after", **busy))
+    for kind in ("btn-quiet", "btn-danger", "btn-option"):
+        probe = {"probe": _specimen(kind), "forced": ("hover",)}
+        for prop, value in (("background-color", _HOVER), ("border-color", PALETTE["--s2"]),
+                            ("background-image", "none")):
+            rows.append(_row(f"hover-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             _REFUSED[prop], **probe))
+    rows += [
+        _row("hover-btn-quiet-bare-border-color", _PAGES, ".btn-quiet.btn-bare", "border-color",
+             "equals", _CLEAR, _RGB, probe=_specimen("btn-quiet btn-bare"), forced=("hover",)),
+        *(_row(f"hover-btn-primary-{prop}-desk", _NOTHING, ".btn-primary", prop, "equals",
+               "rgb(248, 187, 152)", _RGB, probe=_specimen("btn-primary"), forced=("hover",))
+          for prop in ("background-color", "border-color")),
+        *(_row(f"hover-disabled-btn-quiet-{prop}", _PAGES, ".btn-quiet", prop, "equals", value,
+               bad, probe=_specimen("btn-quiet", "disabled"), forced=("hover",))
+          for prop, value, bad in (("background-color", _CLEAR, _RGB),
+                                   ("border-style", "dashed", "solid")))]
+    for kind in KINDS:
+        probe = {"probe": _specimen(kind), "forced": ("focus-visible",)}
+        for prop, value in (("outline-style", "solid"), ("outline-width", "2px"),
+                            ("outline-color", PALETTE["--lav"]), ("outline-offset", "2px"),
+                            ("border-radius", "8px")):
+            rows.append(_row(f"ring-{kind}-{prop}", _PAGES, f".{kind}", prop, "equals", value,
+                             _REFUSED[prop], **probe))
+    rows += [
+        _row("ring-field-bare-outline-style", _PAGES, ".field-line.field-bare", "outline-style",
+             "equals", "none", "solid", probe=_specimen("field-line field-bare"),
+             forced=("focus-visible",)),
+        _row("ring-every-outline-style", _EVERY_STATE, f":is({CONTROL_SELECTOR}):not(.field-bare, "
+             ".viewer)", "outline-style", "not", "none", "none", every=True,
+             forced=("focus-visible",))]
+    for kind in BUTTON_KINDS:
+        rows += [
+            _row(f"pressed-{kind}-transform", _PAGES, f".{kind}", "transform", "equals",
+                 "matrix(1, 0, 0, 1, 0, 1)", "none", probe=_specimen(kind), forced=("active",)),
+            _row(f"pressed-{kind}-border-color", _PAGES, f".{kind}", "border-color", "equals",
+                 PALETTE["--lav"], _RGB, probe=_specimen(kind, 'aria-pressed="true"')),
+            _row(f"pressed-{kind}-font-weight", _PAGES, f".{kind}", "font-weight", "equals", "600",
+                 "300", probe=_specimen(kind, 'aria-pressed="true"'))]
+    rows.append(_row("pressed-btn-option-background-color-desk", _NOTHING, ".btn-option",
+                     "background-color", "equals", "rgba(183, 189, 248, 0.1)", _RGB,
+                     probe=_specimen("btn-option", 'aria-pressed="true"')))
+    return rows
+
+
+def _placeholder_rows():
+    rows = []
+    dark = "rgb(30, 32, 48)"
+    for kind in FIELD_KINDS:
+        probe = {"probe": _specimen(kind), "pseudo": "::placeholder"}
+        rows += [
+            _row(f"placeholder-{kind}-opacity", _PAGES, f".{kind}", "opacity", "equals", "1", "0.5",
+                 **probe),
+            _row(f"placeholder-{kind}-color", _PAGES, f".{kind}", "color", "equals",
+                 PALETTE["--ov2"], _RGB, **probe),
+            _row(f"placeholder-{kind}-contrast", _PAGES, f".{kind}", "color", "contrast", "4.5",
+                 dark, **probe)]
+    rows.append(_row("placeholder-goal-contrast", "goal-open", ".goal-bar.open .goal-in .goal-text",
+                     "color", "contrast", "4.5", "rgb(36, 39, 58)", pseudo="::placeholder"))
+    rows += [_row(f"placeholder-goal-{prop}", "goal-open", ".goal-bar.open .goal-in", prop, "equals",
+                  value, bad) for prop, value, bad in (("background-color", PALETTE["--base"], _RGB),
+                                                       ("background-image", "none", _GRADIENT))]
+    return rows
+
+
+_MOTION_RULE = ".style-motion i, .style-motion i::before, .style-motion i::after"
+_MOTION = ('<span class="style-motion" data-style-probe><style>' + _MOTION_RULE
+           + ' { content: ""; transition: opacity 1s; animation: none 1s }</style><i></i></span>')
+
+
+def _motion_rows():
+    rows = []
+    for prop in ("transition-duration", "animation-duration"):
+        for pseudo, where in (("", ""), ("::before", "-before"), ("::after", "-after")):
+            still = f"{_MOTION_RULE} {{ transition-duration: 0s !important; animation-duration: 0s !important }}"
+            rows.append(StyleCheck(
+                f"motion-reduced-{prop}{where}", _PAGES, (1440,), ".style-motion i", prop, "max",
+                "0.000001", "@media (prefers-reduced-motion: reduce) { " + _MOTION_RULE
+                + " { transition-duration: 1s !important; animation-duration: 1s !important } }",
+                probe=_MOTION, pseudo=pseudo, reduced_motion=True))
+            rows.append(StyleCheck(
+                f"motion-normal-{prop}{where}", _PAGES, (1440,), ".style-motion i", prop, "min",
+                "0.5", still, probe=_MOTION, pseudo=pseudo))
+    return rows
+
+
+STYLE_CHECKS += (
+    StyleCheck("kind-look", _DESK_STATES, _BOTH, "body", "min-height", "kind_look", ",".join(LOOK),
+               ":is(.btn-primary, .btn-quiet, .btn-danger, .btn-option, .field-line, .field-area, "
+               ".field-code):not([data-style-probe]) { border-top-left-radius: 2px !important }"),
+    StyleCheck("kind-height-floor", _EVERY_STATE, _BOTH, ", ".join(f".{kind}" for kind in KINDS),
+               "height", "min", "32",
+               ", ".join(f".{kind}" for kind in KINDS) + " { height: 10px !important; "
+               "min-height: 0 !important }", every=True),
+    *_kind_rows(),
+    *_bare_rows(),
+    *_state_rows(),
+    *(_row(f"primary-real-{prop}", "inbox-card", ".card.lead .btn-primary:not(:disabled)"
+                                                 ':not([aria-disabled="true"])', prop, "equals",
+           PALETTE[token], _RGB, every=True)
+      for prop, token in (("background-color", "--peach"), ("border-color", "--peach"),
+                          ("color", "--crust"))),
+    *_placeholder_rows(),
+    *_motion_rows(),
+    _row("spend-fit-top-wrap", _SPEND, ".top-in", "flex-wrap", "equals", "wrap", "nowrap",
+         widths=(480,)),
+    _row("spend-fit-trend-min-width", _SPEND, ".trend-day", "min-width", "equals", "0px", "50px",
+         widths=(480,), every=True),
+    _row("spend-fit-min-width", _SPEND, ".figure, .row-name", "min-width", "equals", "0px", "50px",
+         widths=(480,), every=True),
+    _row("spend-fit-width", _SPEND, "#summary", "width", "max", "448", "900px", widths=(480,)),
+    _row("spend-fit-flex-basis", _SPEND, ".trend-day", "flex-basis", "equals", "0px", "900px",
+         widths=(480,), every=True),
+    _row("spend-fit-row-name-wrap", _SPEND, ".row-name", "overflow-wrap", "equals", "anywhere",
+         "normal", widths=(480,), every=True),
+)
 STYLE_PLACE = r"""((rows) => {
   let placed = 0;
   const put = (html, host, name) => {
@@ -1269,8 +1554,67 @@ STYLE_READING = r"""((rows) => {
     }
     return found;
   };
+  const KIND_TAGS = {'btn-primary': 'button', 'btn-quiet': 'button', 'btn-danger': 'button',
+    'btn-option': 'button', 'field-line': 'input', 'field-area': 'textarea', 'field-code': 'input'};
+  const BARE_ROLES = ['cap', 'pic-thumb', 'sprint-check', 'draft-pick', 'thread-open', 'goal-text'];
+  const IN_A_STATE = ':disabled, [aria-disabled="true"], [aria-busy="true"], [aria-pressed="true"], '
+    + '.picked, :hover, :active, :focus-visible';
+  const kindLook = (row) => {
+    const look = row.value.split(',').map((name) => name.trim()).filter(Boolean);
+    const found = [];
+    const scratch = {};
+    const bareOf = (kind, bare) => {
+      const key = kind + ' ' + bare;
+      if (!scratch[key]) {
+        const node = document.createElement(KIND_TAGS[kind]);
+        node.className = bare ? key : kind;
+        node.setAttribute('data-style-probe', row.name + ':' + kind);
+        document.body.appendChild(node);
+        scratch[key] = node;
+      }
+      return scratch[key];
+    };
+    let seen = 0;
+    for (const kind of Object.keys(KIND_TAGS)) {
+      for (const node of onPage('.' + kind)) {
+        if (!rendered(node) || node.matches(IN_A_STATE)) continue;
+        seen++;
+        const first = (node.getAttribute('class') || '').split(/\s+/)[0];
+        const bare = node.classList.contains('btn-bare') ? 'btn-bare'
+          : node.classList.contains('field-bare') ? 'field-bare' : '';
+        let props = kind === 'btn-option' ? [...look, 'display', 'align-items', 'row-gap', 'column-gap'] : look;
+        if (bare || BARE_ROLES.includes(first)) props = props.filter((name) => name.startsWith('border'));
+        const own = getComputedStyle(node);
+        const base = getComputedStyle(bareOf(kind, bare));
+        for (const name of props) {
+          const got = own.getPropertyValue(name);
+          if (!same(got, base.getPropertyValue(name))) found.push(`${row.name}: ${label(node)} ${name} is ${got}`);
+        }
+        if (parseFloat(own.minHeight) < 32) found.push(`${row.name}: ${label(node)} min-height is ${own.minHeight}`);
+      }
+    }
+    for (const node of Object.values(scratch)) node.remove();
+    return seen ? found : [`${row.name}: ${row.selector} is absent`];
+  };
+  const channelOf = (value) => {
+    const unit = value / 255;
+    return unit <= 0.03928 ? unit / 12.92 : Math.pow((unit + 0.055) / 1.055, 2.4);
+  };
+  const luminance = (rgb) => 0.2126 * channelOf(rgb[0]) + 0.7152 * channelOf(rgb[1]) + 0.0722 * channelOf(rgb[2]);
+  const rgbOf = (text) => {
+    const found = parse(text);
+    return found === null ? null : found.split(',').map(Number);
+  };
+  const backdrop = (node) => {
+    for (let at = node; at; at = at.parentElement) {
+      const colour = rgbOf(getComputedStyle(at).backgroundColor);
+      if (colour && colour[3] === 1) return colour;
+    }
+    return [255, 255, 255, 1];
+  };
   const misses = [];
   for (const row of rows) {
+    if (row.want === 'kind_look') { misses.push(...kindLook(row)); continue; }
     if (['none_peach', 'palette', 'sizes_shared', 'largest_type'].includes(row.want)) {
       misses.push(...wholePage(row));
       continue;
@@ -1356,6 +1700,11 @@ STYLE_READING = r"""((rows) => {
         range.selectNodeContents(node);
         got = Math.round(width * 100) / 100 + 'px';
         ok = width <= range.getBoundingClientRect().width + 1;
+      } else if (row.want === 'contrast') {
+        const lights = [luminance(rgbOf(getComputedStyle(node, pseudo).color)), luminance(backdrop(node))];
+        const ratio = (Math.max(...lights) + 0.05) / (Math.min(...lights) + 0.05);
+        got = ratio.toFixed(2);
+        ok = ratio >= parseFloat(row.value);
       } else if (row.want === 'equals') ok = same(got, row.value);
       else if (row.want === 'in') ok = row.value.split('|').some((member) => same(got, member));
       else if (row.want === 'not') ok = !same(got, row.value);
@@ -1366,7 +1715,7 @@ STYLE_READING = r"""((rows) => {
       else if (row.want === 'gt') ok = parseFloat(got) > parseFloat(other);
       if (!ok) {
         misses.push(`${row.name}: ${row.every ? label(node) : row.selector + row.pseudo} `
-                    + `${row.prop} is ${got}`);
+                    + `${row.want === 'contrast' ? 'contrast' : row.prop} is ${got}`);
       }
     }
   }
@@ -2229,7 +2578,6 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
-CONTROL_SELECTOR = 'button, input, textarea, select, a[class*="btn-"], summary[class*="btn-"]'
 SHORT_CONTROLS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
   (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
   (n) => [n, n.getBoundingClientRect().height]).filter(([n, h]) => h < 32).map(
