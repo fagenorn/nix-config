@@ -26,6 +26,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1227,6 +1228,8 @@ def documented_plan_id(doc: object) -> str:
     }
     if "contract_draft" in doc["plan"]:
         source["contract_draft"] = doc["plan"]["contract_draft"]
+    if "commit_environment" in doc["plan"]:
+        source["commit_environment"] = doc["plan"]["commit_environment"]
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
@@ -1543,6 +1546,209 @@ class ContractDraftTest(AdoptTestCase):
                                    self.draft_file())
         self.assertEqual(code, 0, err)
         self.assertEqual(doc["plan"]["state"], "ready")
+
+
+class CommitEnvironmentPlanTest(AdoptTestCase):
+    """`plan --commit-environment` adds the environment to a contract that
+    names none (ADR-project-contract-009)."""
+
+    COMMAND = "devenv shell --"
+    ARGV = ["devenv", "shell", "--"]
+
+    def stored_plans(self) -> list[str]:
+        directory = self.home / ".agents/state/adopt/plans"
+        return sorted(path.name for path in directory.glob("*")) \
+            if directory.exists() else []
+
+    def authored(self, mutate, **kwargs) -> Path:
+        """An adopted checkout whose committed contract `mutate` rewrote, its
+        projections re-rendered so that it still plans `no_change`."""
+        root = adopted_repo(self.home, **kwargs)
+        contract = json.loads((root / ".agents/project.json").read_text("utf-8"))
+        mutate(contract)
+        # `apply` commits and runs every verification command, so the commit
+        # asks for no signature and each command is one any host has.
+        contract["bindings"]["vcs"]["commit"]["signed"] = False
+        for command_id in contract["bindings"]["workflow"]["verification"]:
+            contract["bindings"]["commands"][command_id]["argv"] = ["true"]
+        scaffold(root, contract, self.home)
+        # Git keeps no empty directory, and a cold export of the commit, which
+        # `apply` resolves in, needs every declared standards path.
+        for standards in contract["bindings"]["paths"]["standards"]:
+            write(root, f"{standards}/bar.md", "# the bar\n")
+        commit(root, "author the contract")
+        return root
+
+    def contract_after(self, root: Path, doc: dict) -> dict:
+        """The contract the plan's one write of `.agents/project.json` makes."""
+        writes = [change for change in doc["changes"]
+                  if change["targets"] == [".agents/project.json"]]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0]["op"], "write-file")
+        return writes[0]
+
+    def expected(self, root: Path, *, id: str = "commit-environment",
+                 argv: list[str] | None = None, add_command: bool = True):
+        contract = json.loads((root / ".agents/project.json").read_text("utf-8"))
+        contract.setdefault("platform", adopt_planning.derived_interval(
+            json.loads(MANIFEST.read_text())["platform_version"]))
+        contract["bindings"]["vcs"]["commit"]["environment"] = id
+        if add_command:
+            contract["bindings"]["commands"][id] = {
+                "argv": self.ARGV if argv is None else argv,
+                "cwd": ".", "env": []}
+        return contract
+
+    def test_a_contract_naming_no_environment_plans_the_command_and_its_binding(
+            self):
+        root = adopted_repo(self.home)
+        _, plain, _ = self.plan(root)
+        code, doc, err = self.plan(root, "--commit-environment", self.COMMAND)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(plain["plan"]["outcome"], "no_change")
+        self.assertEqual(doc["plan"]["outcome"], "reconcile")
+        self.assertEqual(doc["plan"]["state"], "ready")
+        self.assertEqual(doc["plan"]["commit_environment"], self.ARGV)
+        self.assertEqual(doc["plan"]["plan_id"], documented_plan_id(doc))
+        self.assertNotEqual(doc["plan"]["plan_id"], plain["plan"]["plan_id"])
+        write = self.contract_after(root, doc)
+        self.assertEqual(write["after"], sha256_hash(
+            adopt_inspection.authored_bytes(self.expected(root))))
+
+    def test_a_contract_naming_its_own_environment_is_left_alone(self):
+        def own(contract):
+            contract["bindings"]["commands"]["dev-shell"] = {
+                "argv": ["true"], "cwd": ".", "env": []}
+            contract["bindings"]["vcs"]["commit"]["environment"] = "dev-shell"
+
+        arrangements = {
+            "bound": lambda: self.authored(own),
+            "no contract": lambda: bootstrap_repo(self.home),
+            "schema 1": lambda: adopted_repo(self.home, schema=1),
+        }
+        for name, arrange in arrangements.items():
+            with self.subTest(name):
+                root = arrange()
+                code, plain, err = self.plan(root)
+                self.assertEqual(code, 0, err)
+                code, doc, err = self.plan(
+                    root, "--commit-environment", self.COMMAND)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(doc["plan"]["plan_id"],
+                                 plain["plan"]["plan_id"])
+                self.assertEqual(doc["changes"], plain["changes"])
+                self.assertEqual(doc["plan"]["outcome"],
+                                 plain["plan"]["outcome"])
+                self.assertNotIn("commit_environment", doc["plan"])
+
+    def test_an_unreadable_command_is_refused_and_stores_nothing(self):
+        root = adopted_repo(self.home)
+        for command in ("devenv 'shell", "", "''"):
+            with self.subTest(command):
+                before = self.stored_plans()
+                code, doc, err = self.plan(
+                    root, "--commit-environment", command)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(doc["error"]["repair_id"],
+                                 "adopt.environment.unreadable")
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_a_drafted_contract_takes_no_commit_environment(self):
+        root = bootstrap_repo(self.home)
+        scratch = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        path = scratch / "draft.json"
+        path.write_text(json.dumps(drafted_contract()), encoding="utf-8")
+        before = self.stored_plans()
+        code, doc, err = self.plan(root, "--contract-draft", str(path),
+                                   "--commit-environment", self.COMMAND)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(doc["error"]["repair_id"],
+                         "adopt.environment.drafted")
+        self.assertEqual(self.stored_plans(), before)
+
+    def tampered_apply(self, value: object) -> dict:
+        # A home of its own: a stored plan binds its id to one checkout.
+        home = make_home()
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        root = adopted_repo(home)
+        _, doc, _ = self.plan(root, "--commit-environment", self.COMMAND,
+                              home=home)
+        plan_id = doc["plan"]["plan_id"]
+        digest = plan_id.split(":", 1)[1]
+        path = home / ".agents/state/adopt/plans" / (digest + ".json")
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["plan"]["commit_environment"] = value
+        path.write_text(json.dumps(document), encoding="utf-8")
+        code, out, err = run("apply", "--plan-id", plan_id,
+                             "--acknowledge-deletions", home=home)
+        self.assertEqual(code, 2, err)
+        return json.loads(out)["error"]
+
+    def test_apply_rederives_with_the_stored_command_and_refuses_a_changed_one(
+            self):
+        error = self.tampered_apply(["other", "shell"])
+        self.assertEqual(error["repair_id"], "adopt.plan.inputs_changed")
+
+    def test_apply_refuses_a_malformed_stored_commit_environment(self):
+        for value in ("devenv shell --", [], ["devenv", ""]):
+            with self.subTest(value):
+                error = self.tampered_apply(value)
+                self.assertEqual(error["repair_id"], "adopt.plan.malformed")
+                self.assertEqual(error["violations"][0]["pointer"],
+                                 "/plan/commit_environment")
+
+    def test_an_authored_but_unbound_command_equal_to_the_proposal_is_bound_and_apply_commits_through_it(
+            self):
+        scratch = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, scratch, ignore_errors=True)
+        marker = scratch / "marker"
+        argv = ["sh", "-c",
+                f"printf 'ran\\n' >> {shlex.quote(str(marker))} && exec \"$@\"",
+                "commit-environment"]
+        entry = {"argv": argv, "cwd": ".", "env": []}
+
+        def author(contract):
+            contract["bindings"]["commands"]["commit-environment"] = entry
+
+        root = self.authored(author)
+        code, doc, err = self.plan(root, "--commit-environment",
+                                   shlex.join(argv))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["commit_environment"], argv)
+        write = self.contract_after(root, doc)
+        self.assertEqual(write["after"], sha256_hash(
+            adopt_inspection.authored_bytes(self.expected(
+                root, argv=argv, add_command=False))))
+        code, out, err = run("apply", "--plan-id", doc["plan"]["plan_id"],
+                             "--acknowledge-deletions", home=self.home)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "ran\n")
+        branch = json.loads(out)["branch"]
+        committed = json.loads(git(root, "show", f"{branch}:.agents/project.json"))
+        self.assertEqual(
+            committed["bindings"]["vcs"]["commit"]["environment"],
+            "commit-environment")
+        self.assertEqual(committed["bindings"]["commands"]["commit-environment"],
+                         entry)
+
+    def test_a_different_authored_commit_environment_command_is_kept_and_the_proposal_takes_a_free_id(
+            self):
+        authored = {"argv": ["true"], "cwd": ".", "env": []}
+
+        def author(contract):
+            contract["bindings"]["commands"]["commit-environment"] = authored
+
+        root = self.authored(author)
+        code, doc, err = self.plan(root, "--commit-environment", self.COMMAND)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["commit_environment"], self.ARGV)
+        expected = self.expected(root, id="commit-environment-2")
+        self.assertEqual(expected["bindings"]["commands"]["commit-environment"],
+                         authored)
+        write = self.contract_after(root, doc)
+        self.assertEqual(write["after"], sha256_hash(
+            adopt_inspection.authored_bytes(expected)))
 
 
 class InspectionBoundaryTest(AdoptTestCase):

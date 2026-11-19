@@ -113,6 +113,26 @@ lies in the checkout), `adopt.draft.invalid` (the resolver's own
 project id is registered for another checkout). A plan without the flag is
 unchanged, in its document and its `plan_id`.
 
+`plan --commit-environment COMMAND` adds the command the adoption commit runs
+through to a contract that names none (#1333, ADR-project-contract-009).
+COMMAND is read as shell words. Whether the contract names one is decided by
+the binding `bindings.vcs.commit.environment` alone, the only member `apply`
+reads, never by a command id. When it is absent in a contract of the current
+schema, the planned `.agents/project.json` gains that binding and, unless an
+authored command already equals it, the command `{argv, cwd: ".", env: []}`,
+under the first of `commit-environment`, `commit-environment-2`, ... that is
+free or equal, so an authored command that differs is kept. The argv is the
+plan's `commit_environment` member and the twelfth input of `plan_id`, so
+`apply` re-derives with the stored argv, refuses one that is not a non-empty
+list of non-empty strings as `adopt.plan.malformed`, and refuses a changed one
+as `plan_stale` (`adopt.plan.inputs_changed`). The write is substantive work,
+so a checkout that plans `no_change` plans `reconcile`. A contract that
+already names an environment, has no contract file, is of another schema or is
+not shaped for the binding is planned exactly as without the flag, with no
+member. The flag with `--contract-draft` is refused
+`adopt.environment.drafted`, and a COMMAND that cannot be read as a command
+`adopt.environment.unreadable`, each exit 2 with nothing stored.
+
 A schema-1 contract is routed as `migration_required` with the
 `bindings-deploy.retire` step (issue 579 P11); `resolve_project` states the
 schema that refuses it.
@@ -307,7 +327,8 @@ class Composition:
 
 
 def compose_plan(root: Path, manifest: dict, answered: list[dict],
-                 draft: dict | None = None) -> Composition:
+                 draft: dict | None = None,
+                 environment: list[str] | None = None) -> Composition:
     """The one derivation both `plan` and `apply` read a repository through.
 
     `apply` re-runs exactly this to recompute the input digest and regenerate
@@ -318,8 +339,14 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
     declarations, applied before anything else is derived, so they enter
     `plan_id`. `draft` is a contract drafted for a checkout that has none: it
     stands where the checkout's own contract would, is resolved as the file the
-    plan writes, and enters `plan_id`.
+    plan writes, and enters `plan_id`. `environment` is the argv the operator
+    asks the adoption commit to run through: it is added to a contract that
+    names none, enters `plan_id` when it is, and is refused with a draft.
     """
+    if draft is not None and environment is not None:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.environment.drafted", "",
+            "a drafted contract names its own commit environment")
     if draft is not None:
         contract_path = root / adopt_inspection.CONTRACT_FILENAME
         if (adopt_inspection.read_bytes_bounded(contract_path) is not None
@@ -431,17 +458,21 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
         "project_schema_versions": list(manifest["project_schema_versions"]),
         "resolved_schema_version": manifest["resolved_schema_version"],
     }
+    amendment = adopt_planning.commit_environment_amendment(
+        None if draft is not None else contract_source, environment,
+        manifest["project_schema_versions"][-1])
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
         decisions["answered"], links.summary, path_references,
-        reference_policies, reference_formatting, draft)
+        reference_policies, reference_formatting, draft,
+        amendment[1] if amendment else None)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
         decisions, links.summary)
     head, tail, contents = adopt_planning.build_operations(
         root, found, manifest, contract_source, plan_id, links,
-        reference_files, drafted=draft is not None)
+        reference_files, drafted=draft is not None, environment=amendment)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -534,6 +565,8 @@ def compose_plan(root: Path, manifest: dict, answered: list[dict],
 
     if draft is not None:
         document["plan"]["contract_draft"] = draft
+    if amendment is not None:
+        document["plan"]["commit_environment"] = amendment[1]
 
     return Composition(document, contents, adopt_inspection.dirty_targets(
         found))
@@ -546,7 +579,11 @@ def command_plan(args: argparse.Namespace) -> int:
                for question, subject, value in args.answer]
     draft = (load_contract_draft(args.contract_draft, root)
              if args.contract_draft is not None else None)
-    document = compose_plan(root, manifest, answers, draft).document
+    environment = (adopt_planning.parse_commit_environment(
+        args.commit_environment) if args.commit_environment is not None
+        else None)
+    document = compose_plan(
+        root, manifest, answers, draft, environment).document
     # Before the write, never after: storing is what binds this id to this
     # checkout, and the binding a stored document already carries is never
     # re-pointed at a second one (D15, D16).
@@ -738,6 +775,7 @@ def command_apply(args: argparse.Namespace) -> int:
     document = adopt_apply.load_stored_plan(digest)
     answers = adopt_apply.stored_answers(document)
     draft = adopt_apply.stored_draft(document)
+    environment = adopt_apply.stored_environment(document)
     stored_plan = document["plan"]
     if stored_plan["state"] != "ready":
         raise adopt_inspection.refuse(
@@ -772,7 +810,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "a retained worktree for this plan still exists and is never "
             "deleted without an acknowledged cleanup")
 
-    composed = compose_plan(root, manifest, answers, draft)
+    composed = compose_plan(root, manifest, answers, draft, environment)
     if composed.document["plan"]["plan_id"] != stored_plan["plan_id"]:
         raise adopt_inspection.refuse(
             "plan_stale", "adopt.plan.inputs_changed", "/plan/input_digest",
@@ -1031,6 +1069,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="plan the adoption of a checkout with no contract "
                            "using the contract drafted in FILE, one JSON "
                            "object in a file outside the checkout")
+    plan.add_argument("--commit-environment", metavar="COMMAND", default=None,
+                      help="add COMMAND as the command the adoption commit "
+                           "runs through to a contract that names none")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan
