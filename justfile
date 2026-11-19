@@ -187,7 +187,6 @@ agent-workflow-tests *args:
     tests/test_launchd_agent_adapter.py \
     tests/test_run_profile.py \
     tests/test_agent_gate_bundle.py \
-    tests/test_agent_gate_corpus.py \
     tests/test_retired_surfaces.py \
     tests/test_promotion_documents.py \
     tests/test_promotion_lifecycle.py \

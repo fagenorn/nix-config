@@ -191,7 +191,6 @@
  "home/common/agent-skills/tests/test_adopt_links.py": 0.1,
  "tests/test_agent_tools_canonical.py": 0.1,
  "tests/test_release_evidence.py": 0.1,
- "tests/test_agent_gate_corpus.py": 0.1,
  "tests/test_devenv_cache_ignored.py": 0.1,
  "tests/test_console_signin.py": 0.1,
  "tests/test_console_plan_questions.py": 0.1,
