@@ -198,6 +198,7 @@ RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_
            "drafting", "behind")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
 UNAVAILABLE = "registering a project is not available on this host"
+STOPPING = "the console is stopping"
 EMPTY = "type the path of a repository"
 RELATIVE = "type the full path of the repository, starting with / or ~"
 OUTCOME_TEXT = {

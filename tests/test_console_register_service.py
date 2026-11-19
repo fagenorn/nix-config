@@ -22,7 +22,8 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from agent_tools.console import checkout_remote, event_log, folder_trust, register, register_check
+from agent_tools.console import (
+    checkout_remote, event_log, folder_trust, register, register_check, sprints)
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -189,6 +190,66 @@ class Fake:
         if self.discard_result is not None:
             return self.discard_result
         return {"plan_id": plan_id, "discarded": True}
+
+
+class Held(Fake):
+    """A `Fake` whose chosen verb waits for `release` and ignores `cancel`, as a child the stop does not end at once."""
+
+    def __init__(self, *args, hold, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hold = hold
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.cancelled = None
+
+    def _wait(self, cancel):
+        self.entered.set()
+        self.release.wait(30)
+        self.cancelled = cancel is not None and cancel.is_set()
+
+    def _run(self, verb, root, cancel):
+        super()._run(verb, root, cancel)
+        if ((verb == "plan" and (self.hold == "plan" or (self.hold == "answers" and self.answers[-1])))
+                or (verb == "register" and self.hold == "register")):
+            self._wait(cancel)
+
+    def discard(self, plan_id, cancel=None):
+        found = super().discard(plan_id, cancel)
+        if self.hold == "discard":
+            self._wait(cancel)
+        return found
+
+
+def closing(svc) -> tuple[threading.Thread, list]:
+    """Start `svc.close()` on a daemon thread; the thread and the exceptions it raised, once the stop is set."""
+    errors = []
+
+    def run():
+        try:
+            svc.close()
+        except BaseException as error:
+            errors.append(error)
+
+    closer = threading.Thread(target=run, daemon=True)
+    closer.start()
+    end = time.monotonic() + 10
+    while not svc._stop.is_set():
+        if time.monotonic() > end:
+            raise AssertionError("close never set the stop")
+        time.sleep(0.01)
+    return closer, errors
+
+
+def assert_held(test, closer):
+    """2 s is past the server's 0.5 s shutdown poll, so only the drain can still hold the close."""
+    closer.join(2)
+    test.assertTrue(closer.is_alive())
+
+
+def assert_freed(test, closer, errors):
+    closer.join(10)
+    test.assertFalse(closer.is_alive())
+    test.assertEqual(errors, [])
 
 
 class Case(unittest.TestCase):
@@ -384,9 +445,9 @@ class RegisterRefusalTest(Case):
 class RegisterRunTest(Case):
     def test_the_write_answers_while_the_plan_runs_and_the_view_says_running(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=PLANNED, block=gate)
         svc = self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         status, _, body = self.post({"path": str(repo)})
         self.assertEqual((status, body), (204, b""))
@@ -404,9 +465,9 @@ class RegisterRunTest(Case):
 
     def test_a_second_registration_while_one_runs_is_refused(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=PLANNED, block=gate)
         self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         first = git_repo(self.parent / "r")
         second = git_repo(self.parent / "r2")
         self.assertEqual(self.post({"path": str(first)})[0], 204)
@@ -911,9 +972,9 @@ class RegisterCancelTest(CancelChecks, Case):
 
     def test_cancel_is_refused_while_a_run_is_under_way(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=[DRAFT, READY])
         self.start(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         self.registered(repo)
         fake.block = gate
@@ -1045,9 +1106,9 @@ class PlanAnswerRefusalTest(Case):
 
     def test_an_answer_while_a_run_is_under_way_is_refused(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=DRAFT, block=gate)
         self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
         self.refused(answer_of(PID_A, A1), f"a registration is already running for {repo.name}")
@@ -1118,9 +1179,9 @@ class PlanAnswerRunTest(Case):
 
     def test_the_answer_run_shows_its_own_running_headline(self):
         gate = threading.Event()
-        self.addCleanup(gate.set)
         fake = Fake(plan=[DRAFT, READY])
         self.begin(fake, dispatch=None)
+        self.addCleanup(gate.set)
         repo = git_repo(self.parent / "r")
         other = git_repo(self.parent / "r2")
         self.registered(repo)
@@ -1901,6 +1962,109 @@ class PlanAnswerSecretTest(Case):
         self.assertEqual(reg["state"], "draft")
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(real_home_state(), before)
+
+
+class RegisterCloseTest(Case):
+    """Close drains every run that starts an adoption child (#1330, ADR-console-081 D3)."""
+
+    def held_run(self, held):
+        self.begin(held, dispatch=None)
+        self.addCleanup(held.release.set)
+
+    def release_and_free(self, held, closer, errors):
+        assert_held(self, closer)
+        held.release.set()
+        assert_freed(self, closer, errors)
+
+    def test_close_waits_for_a_registration_run_and_cancels_it_first(self):
+        held = Held(plan=PLANNED, hold="plan")
+        self.held_run(held)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        self.release_and_free(held, closer, errors)
+        self.assertIs(held.cancelled, True)
+
+    def test_close_waits_for_a_confirmed_registration(self):
+        held = Held(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"},
+                    hold="register")
+        profile = self.parent / "accounts" / "profiles" / "work"
+        profile.mkdir(parents=True)
+        (profile / ".claude.json").write_text(json.dumps({"oauthAccount": {"a": 1}}), "utf-8")
+        self.begin(held, dispatch=None, profile_dirs=[profile], trust_home=self.home)
+        self.addCleanup(held.release.set)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        self.release_and_free(held, closer, errors)
+
+    def test_close_waits_for_a_plan_answer_run(self):
+        held = Held(plan=[DRAFT, READY], hold="answers")
+        self.held_run(held)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.wait_done(repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        self.assertTrue(held.entered.wait(10))
+        closer, errors = closing(self.svc)
+        self.release_and_free(held, closer, errors)
+
+    def test_a_registration_accepted_before_the_stop_holds_close_and_starts_nothing(self):
+        queued = []
+        fake = Fake(plan=PLANNED)
+        self.begin(fake, dispatch=queued.append)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(len(queued), 1)
+        closer, errors = closing(self.svc)
+        assert_held(self, closer)
+        queued[0]()
+        assert_freed(self, closer, errors)
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(self.svc._registering)
+
+    def test_a_registration_asked_after_the_stop_is_refused_and_reserves_nothing(self):
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.svc._stop.set()
+        with self.assertRaises(sprints.Refused) as caught:
+            self.svc.register_project(str(repo))
+        self.assertEqual(str(caught.exception), register.STOPPING)
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(self.svc._registering)
+
+    def test_a_dispatch_that_refuses_leaves_close_free(self):
+        def dispatch(job):
+            raise RuntimeError("no thread")
+
+        self.begin(Fake(plan=PLANNED), dispatch=dispatch)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 500)
+        closer, errors = closing(self.svc)
+        closer.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIsNone(self.svc._registering)
+
+    def test_an_inline_job_that_raises_after_it_ran_leaves_close_free(self):
+        def dispatch(job):
+            job()
+            raise RuntimeError("after")
+
+        self.begin(Fake(plan=PLANNED), dispatch=dispatch)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 500)
+        closer, errors = closing(self.svc)
+        closer.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIsNone(self.svc._registering)
+        self.assertEqual(self.rows("registration.ended")[-1][1]["result"], "planned")
 
 
 class SnapshotTest(unittest.TestCase):

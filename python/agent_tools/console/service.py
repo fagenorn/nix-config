@@ -1630,6 +1630,7 @@ GUEST_PAGE: bytes = PAGE.replace(DOOR_OWNER, DOOR_GUEST)
 SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
+DRAIN_POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 SPEND_PAGE_PATH = "/spend"
@@ -3824,6 +3825,7 @@ class ConsoleService:
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
         self._project_questions_done = threading.Condition(self._ingest)
+        self._runs_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
         self._published = threading.Condition()
         self._view = b""
@@ -4364,6 +4366,17 @@ class ConsoleService:
             self._dispatch_launch(sprint_id)
         return sprint_id
 
+    def _admit_run(self, root: str) -> None:
+        """Reserve the run of `root`, or refuse once the console stops (ADR-console-081 D3); `_ingest` held."""
+        if self._stop.is_set():
+            raise sprints.Refused(register.STOPPING)
+        self._registering = root
+
+    def _end_run(self) -> None:
+        """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
+        self._registering = None
+        self._runs_done.notify_all()
+
     def _on_new_thread(self, job: Callable[[], None]) -> None:
         threading.Thread(target=job, name=MANAGER_THREAD, daemon=True).start()
 
@@ -4377,9 +4390,11 @@ class ConsoleService:
     def _on_approval_thread(self, job: Callable[[], None]) -> None:
         worker = threading.Thread(target=job, name=APPROVAL_THREAD, daemon=True)
         with self._ingest:
+            # Started inside the lock and listed only once started: the list never holds an
+            # unstarted thread, which `close` could not join (and a failed start lists nothing).
             self._approval_workers = [w for w in self._approval_workers if w.is_alive()]
+            worker.start()
             self._approval_workers.append(worker)
-        worker.start()
 
     def _on_project_question_thread(self, job: Callable[[], None]) -> None:
         """Run a question's job on a tracked daemon thread; `close` joins every one it started."""
@@ -4803,13 +4818,13 @@ class ConsoleService:
         with self._ingest:
             if self._registering is not None:
                 raise sprints.Refused(register.running(register.name_of(self._registering)))
-            self._registering = str(root)
+            self._admit_run(str(root))
             self._publish()
         try:
             self._dispatch(lambda: self._run_registration(str(root), entries))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._publish()
             raise
 
@@ -4835,7 +4850,7 @@ class ConsoleService:
         with self._ingest:
             if self._check_answerable(root, choice)["at"] != latest["at"]:
                 raise sprints.Refused(register.NOT_WAITING)
-            self._registering = root
+            self._admit_run(root)
             self._publish()
 
         remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
@@ -4855,7 +4870,7 @@ class ConsoleService:
             self._dispatch(run)
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._publish()
             raise
 
@@ -4873,7 +4888,7 @@ class ConsoleService:
             with self._ingest:
                 if self._cancellable(root) is not latest:
                     raise sprints.Refused(register.NOT_WAITING)
-                self._registering = root
+                self._admit_run(root)
                 self._publish()
             try:
                 if self._adopter is None:
@@ -4885,11 +4900,11 @@ class ConsoleService:
                 refused = True
             except BaseException:
                 with self._ingest:
-                    self._registering = None
+                    self._end_run()
                     self._publish()
                 raise
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 if refused:
                     self._publish()
             if refused:
@@ -5013,7 +5028,7 @@ class ConsoleService:
         with self._ingest:
             if not self._closed:
                 self._fold(self.log.append([register.ended(payload)]))
-            self._registering = None
+            self._end_run()
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5067,7 +5082,7 @@ class ConsoleService:
             asked = {"id": question, "subject": subject}
             draft = latest["draft"]
             remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
-            self._registering = root
+            self._admit_run(root)
             self._answering = True
             self._answer_refusal = None
             self._publish()
@@ -5075,7 +5090,7 @@ class ConsoleService:
             self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed, remote))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._answering = False
                 self._publish()
             raise
@@ -5201,7 +5216,7 @@ class ConsoleService:
                 self._answer_refusal = {
                     "plan_id": plan_id, "text": text,
                     "id": asked["id"], "subject": asked["subject"]}
-            self._registering = None
+            self._end_run()
             self._answering = False
             if not self._closed:
                 self._publish()
@@ -5235,14 +5250,14 @@ class ConsoleService:
             root = latest["root"]
             shown = dict(latest)
             adoption = None if found is None else dict(found)
-            self._registering = root
+            self._admit_run(root)
             self._approving = True
             self._publish()
         try:
             self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._approving = False
                 self._publish()
             raise
@@ -5367,7 +5382,7 @@ class ConsoleService:
             if final is not None and not self._closed:
                 self._fold(self.log.append([approve.step_row(final)]))
                 appended = True
-            self._registering = None
+            self._end_run()
             self._approving = False
             if not self._closed:
                 self._publish()
@@ -8054,6 +8069,8 @@ class ConsoleService:
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         with self._ingest:
+            if self._stop.is_set():
+                raise sprints.Refused(register.STOPPING)
             found = self._adoptions.get(plan_id)
             if plan_id in self._enrolling:
                 name = register.name_of(found["root"]) if found is not None else plan_id
@@ -8344,6 +8361,8 @@ class ConsoleService:
         for worker in workers:
             worker.join()
         with self._ingest:
+            while self._registering is not None or self._enrolling:
+                self._runs_done.wait(DRAIN_POLL_SECONDS)
             workers = list(self._approval_workers)
         for worker in workers:
             worker.join()
