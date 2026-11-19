@@ -188,6 +188,15 @@ whose `ball` is the owner's and whose `retry` is true, and whose `last_reason` i
 (`line`, `ball`, `retry`, `reason`) otherwise. It reads only that endpoint and its report never names a
 project, root, title or reason, since the repository is public.
 
+`console-no-card --port N --key K [--key K ...]` (`verify_checks.console_no_card`, issue 1327) reads
+`GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not JSON is `unreachable`,
+exit 75) and applies `no_card_state` to it: it is `absent` (0) only when the inbox is readable and no entry of
+`inbox.open` or `inbox.answered` has a `key` among the given keys; it is `listed` (75, never 1) with the number of
+distinct given keys listed. A view that is not an object, an `inbox` that is not an object, an `open` or `answered`
+that is not a list, or an entry that is not an object or whose `key` is missing or not a string is `unreachable`
+(75), never met. The report holds only `verdict` and `listed`, never a key, since the repository is public. It
+reads only that endpoint.
+
 `console-notice-lists --port N --notice PROJECT=N1,N2,... [--notice ...]` (`verify_checks.console_notice_lists`,
 issue 1291) reads `GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a
 JSON object is `unreachable`, exit 75) and looks up each wanted project among the entries of `"type": "project"`,
@@ -297,7 +306,7 @@ from urllib.parse import quote
 
 from agent_tools.delivery.agent_gate_bundle import BundleIntegrityError, verify_bundle
 from agent_tools.project_contract.agent_platform import DEPRECATION_MEMBERS, validate_manifest, validate_registry
-from agent_tools.canonical import parse_rfc3339_utc
+from agent_tools.canonical import parse_rfc3339_utc, reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers, forge_owner_action
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote, siblings
@@ -1973,6 +1982,47 @@ def console_failed_start(port: int, *, timeout: float = 5.0) -> tuple[int, dict]
     return failed_start_state(view) if isinstance(view, dict) else unreachable
 
 
+def no_card_state(view: object, keys: Sequence[str]) -> tuple[int, dict]:
+    """Issue 1327: 0 absent when the readable inbox lists none of the keys, 75 listed or unreachable, never 1."""
+    unreadable = 75, {"verdict": "unreachable", "listed": 0}
+    inbox = view.get("inbox") if isinstance(view, dict) else None
+    if not isinstance(inbox, dict):
+        return unreadable
+    listed: set[str] = set()
+    for name in ("open", "answered"):
+        entries = inbox.get(name)
+        if not isinstance(entries, list):
+            return unreadable
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("key"), str):
+                return unreadable
+            listed.add(entry["key"])
+    count = len(set(keys) & listed)
+    if count:
+        return 75, {"verdict": "listed", "listed": count}
+    return 0, {"verdict": "absent", "listed": 0}
+
+
+def console_no_card(port: int, keys: Sequence[str], *, timeout: float = 5.0) -> tuple[int, dict]:
+    """Issue 1327: `no_card_state` of the live console's view; an unreachable console is not yet (75)."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status, body = response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return 75, {"verdict": "unreachable", "listed": 0}
+    finally:
+        connection.close()
+    if status != 200:
+        return 75, {"verdict": "unreachable", "listed": 0}
+    try:
+        view = json.loads(body, object_pairs_hook=reject_duplicate_keys, parse_constant=reject_nonfinite_literal)
+    except (ValueError, RecursionError):
+        return 75, {"verdict": "unreachable", "listed": 0}
+    return no_card_state(view, keys)
+
+
 def _notice_names_all(text: object, numbers: Sequence[int]) -> bool:
     """Issue 1291: the text names every number as `#N` not followed by a digit."""
     return isinstance(text, str) and all(re.search(rf"#{number}(?!\d)", text) for number in numbers)
@@ -2358,6 +2408,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-failed-start",
         help="issue 1182: an open failed-start card's sprint line reads the failed start, with Retry")
     failed.add_argument("--port", type=_port, required=True)
+    no_card = checks.add_parser(
+        "console-no-card",
+        help="issue 1327: the console lists no inbox card with any of the given keys")
+    no_card.add_argument("--port", type=_port, required=True)
+    no_card.add_argument("--key", type=_nonempty, action="append", required=True)
     notices = checks.add_parser(
         "console-notice-lists",
         help="issue 1291: the owner's notice for each project names every one of its issues")
@@ -2409,6 +2464,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return code
     if args.check == "console-failed-start":
         code, report = console_failed_start(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-no-card":
+        code, report = console_no_card(args.port, args.key)
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "console-notice-lists":
