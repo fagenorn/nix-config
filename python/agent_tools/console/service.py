@@ -3937,7 +3937,8 @@ class ConsoleService:
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
             self._trust_failures = folder_trust.failures(events)
-            self._registration = register.latest(events)
+            self._registration_fold = register.fold(events)
+            self._registration = self._registration_fold.latest
             self._adoptions = approve.adoptions(events)
             self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
@@ -7751,7 +7752,8 @@ class ConsoleService:
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
         self._trust_failures = folder_trust.failures(appended, self._trust_failures)
-        self._registration = register.latest(appended, self._registration)
+        self._registration_fold = register.fold(appended, self._registration_fold)
+        self._registration = self._registration_fold.latest
         self._adoptions = approve.adoptions(appended, self._adoptions)
         self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
@@ -7792,7 +7794,8 @@ class ConsoleService:
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
                 self._trust_failures = folder_trust.failures(events)
-                self._registration = register.latest(events)
+                self._registration_fold = register.fold(events)
+                self._registration = self._registration_fold.latest
                 self._adoptions = approve.adoptions(events)
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)

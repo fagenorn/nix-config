@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import stat
@@ -660,6 +661,137 @@ class CancelFoldTest(unittest.TestCase):
             register.CANCEL_DISCARD_FAILED,
             "The copy that the failed attempt left on this computer could not be removed, so the "
             "registration was not cancelled. Choose Cancel registration to try again.")
+
+
+class UnregisteredFoldTest(unittest.TestCase):
+    """A registration whose project is unregistered gives way to the one shown before it (#1334)."""
+
+    y = register.dismissed(register.failed("/x/y", "failed"))
+    r_wait = {**register.failed("/x/r", "failed"), "project_id": "c/r", "result": "not_registered",
+              "outcome": "no_change", "note": register.CONFIRM_NOTE}
+    r_done = {**r_wait, "result": "registered", "note": None}
+
+    @staticmethod
+    def ended(seq, row):
+        return Event(seq, f"t{seq}", register.ENDED, None, row)
+
+    @staticmethod
+    def reg(seq, project, root):
+        return Event(seq, f"t{seq}", "project.registered", project, {"root": root})
+
+    @staticmethod
+    def gone(seq, payload, project="c/r"):
+        return Event(seq, f"t{seq}", "project.unregistered", project, payload)
+
+    def a_events(self):
+        return [self.ended(1, self.y), self.ended(2, self.r_wait), self.reg(3, "c/r", "/x/r"),
+                self.ended(4, self.r_done), self.gone(5, {"root": "/x/r"})]
+
+    def test_an_unregistered_root_gives_way_to_the_registration_shown_before_it(self):
+        events = self.a_events()
+        folded = register.fold(events)
+        self.assertEqual(folded.latest["root"], "/x/y")
+        self.assertEqual(folded.latest["at"], "t1")
+        self.assertEqual(folded.latest["note"], register.LATER_NOTE)
+        self.assertEqual(folded.before, ())
+        self.assertEqual(dict(folded.roots), {})
+        self.assertEqual(register.latest(events)["at"], "t1")
+        run = register.fold(events[:4])
+        self.assertEqual(run.latest["at"], "t4")
+        self.assertEqual([e["root"] for e in run.before], ["/x/y"])
+
+    def test_with_nothing_before_it_the_registration_folds_to_none(self):
+        folded = register.fold([self.ended(1, self.r_wait), self.ended(2, self.r_done),
+                                self.gone(3, {"root": "/x/r"})])
+        self.assertIsNone(folded.latest)
+        self.assertEqual(folded.before, ())
+
+    def test_a_rootless_row_takes_its_root_from_the_registered_row(self):
+        folded = register.fold(self.a_events()[:4] + [self.gone(5, {})])
+        self.assertEqual(folded.latest["root"], "/x/y")
+
+    def test_a_rootless_row_of_an_unknown_or_other_root_changes_nothing(self):
+        card2 = {**self.r_wait, "root": "/x/r2"}
+        cases = {
+            "other root": ([self.ended(1, self.y), self.reg(2, "c/r", "/x/r1"),
+                            self.ended(3, card2), self.gone(4, {})], "t3"),
+            "unknown": ([self.ended(1, self.y), self.ended(2, card2), self.gone(3, {})], "t2"),
+        }
+        for name, (events, at) in cases.items():
+            with self.subTest(name=name):
+                folded = register.fold(events)
+                self.assertEqual(folded.latest["root"], "/x/r2")
+                self.assertEqual(folded.latest["at"], at)
+
+    def test_an_unregistered_row_of_another_registration_changes_nothing(self):
+        for other in (self.gone(4, {"root": "/x/other"}, "c/other"), self.gone(4, {}, "c/other"),
+                      self.gone(4, {"root": "/x/other"}, "c/r")):
+            with self.subTest(other=other):
+                folded = register.fold([self.ended(1, self.y), self.ended(2, self.r_wait),
+                                        self.ended(3, self.r_done), other])
+                self.assertEqual(folded.latest["root"], "/x/r")
+                self.assertEqual(folded.latest["at"], "t3")
+
+    def test_a_removed_root_never_returns_from_the_chain(self):
+        a1 = register.dismissed(register.failed("/x/a", "failed"))
+        b = register.failed("/x/b", "failed")
+        a2 = register.failed("/x/a", "failed")
+        events = [self.ended(1, a1), self.ended(2, b), self.ended(3, a2),
+                  self.gone(4, {"root": "/x/b"}, "c/b"), self.gone(5, {"root": "/x/a"}, "c/a")]
+        three = register.fold(events[:3])
+        final = register.fold(events)
+        self.assertEqual(three.latest["at"], "t3")
+        self.assertEqual([(e["root"], e["at"]) for e in three.before], [("/x/b", "t2")])
+        self.assertIsNone(final.latest)
+        self.assertEqual(final.before, ())
+
+    def with_check(self):
+        a = register.dismissed(register.failed("/x/a", "failed"))
+        b_done = {**register.failed("/x/b", "failed"), "project_id": "o/b", "result": "registered",
+                  "note": None}
+        c_wait = {**self.r_wait, "root": "/x/c", "project_id": "c/c"}
+        c_done = {**c_wait, "result": "registered", "note": None}
+        owner = [("ended", a), ("reg", "o/b", "/x/b"), ("ended", b_done)]
+        check = [("ended", c_wait), ("reg", "c/c", "/x/c"), ("ended", c_done),
+                 ("gone", {"root": "/x/c"}, "c/c")]
+        tail = [("gone", {"root": "/x/b"}, "o/b")]
+
+        def build(spec):
+            events = []
+            for seq, (kind, *args) in enumerate(spec, 1):
+                events.append({"ended": self.ended, "reg": self.reg, "gone": self.gone}[kind](
+                    seq, *args))
+            return events
+
+        return build(owner + tail), build(owner + check + tail)
+
+    def test_a_check_in_between_leaves_a_later_removal_unchanged(self):
+        without, with_check = self.with_check()
+        for events in (without, with_check):
+            folded = register.fold(events)
+            self.assertEqual(folded.latest["root"], "/x/a")
+            self.assertEqual(folded.latest["at"], "t1")
+
+    def test_an_owner_cancel_clears_the_chain(self):
+        f = register.failed("/x/f", "failed")
+        row = register.cancelled_row("/x/f", None)
+        cancel = Event(3, "t3", row[0], None, row[2])
+        events = [self.ended(1, self.y), self.ended(2, f), cancel, self.ended(4, self.r_done),
+                  self.gone(5, {"root": "/x/r"})]
+        cleared = register.fold(events[:3])
+        self.assertIsNone(cleared.latest)
+        self.assertEqual(cleared.before, ())
+        self.assertIsNone(register.fold(events).latest)
+
+    def test_an_incremental_fold_equals_the_whole_fold(self):
+        _, with_check = self.with_check()
+        whole = register.fold(with_check)
+        for i in range(len(with_check) + 1):
+            with self.subTest(split=i):
+                first = register.fold(with_check[:i])
+                kept = copy.deepcopy(first)
+                self.assertEqual(register.fold(with_check[i:], first), whole)
+                self.assertEqual(first, kept)
 
 
 class RowTest(unittest.TestCase):

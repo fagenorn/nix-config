@@ -127,8 +127,9 @@ sentence that the remote could not be read and the checkout was used as it is; i
 
 Cancel (#1088, ADR-console-037). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
 plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
-None when a valid cancel row names the folded row's root and plan id (a cancel naming another, or
-malformed, changes nothing; a later `registration.ended` row starts a new registration).
+None, and clears the chain of earlier registrations (see Row), when a valid cancel row names the folded
+row's root and plan id (a cancel naming another, or malformed, changes nothing; a later
+`registration.ended` row starts a new registration).
 `parse_cancel_request(body)` is exactly `{"root"}`, a non-empty string with no character below 0x20 and
 no 0x7F (`ValueError` otherwise). `cancellable(latest, adoption)` is true when `latest` is not None,
 its `result` is not `registered` and the plan's folded adoption is None or `apply_failed`.
@@ -155,7 +156,15 @@ also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEY
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
 `contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
-never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service.
+`fold(events, state=None)` is the `Fold` `(latest, before, roots)`: `before` the registrations shown
+before the current one, oldest first, one per root (an ended row naming another root pushes the
+current one and drops the new root's older entry), `roots` each registered project's root; a
+`project.unregistered` row's root is its payload `root`, else the root its project was registered
+with, else it names nothing; it drops that root from `before` and, when it is the shown
+registration's, folds back to the last entry of `before`, so a registration whose project left the
+registry gives the page back what it replaced (ADR-console-084 D1); a matching cancel folds to none
+and clears `before`; `latest(events, state)` is `fold(events, Fold(state, (), {})).latest`. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
 approve=None)` is that member, always the same twenty-two keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
@@ -185,6 +194,7 @@ import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_tools.console import contract_draft, event_log, folder_trust, manager, plan_questions
 from agent_tools.system import siblings
@@ -592,28 +602,73 @@ def ended(payload: Mapping) -> tuple[str, None, dict]:
     return (ENDED, None, dict(payload))
 
 
-def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
-    found = state
+PROJECT_REGISTERED = "project.registered"  # view.REGISTERED, which this module cannot import
+
+
+class Fold(NamedTuple):
+    """The folded registration, the ones shown before it and each registered project's root (#1334)."""
+
+    latest: dict | None
+    before: tuple[dict, ...]
+    roots: Mapping[str, str]
+
+
+def _root_of(payload: object) -> str | None:
+    root = payload.get("root") if isinstance(payload, Mapping) else None
+    return root if isinstance(root, str) and root else None
+
+
+def _row_of(event: event_log.Event) -> dict | None:
+    try:
+        _, _, payload = ended(event.payload)
+    except ValueError:
+        return None
+    found = {**DEFAULTS, **payload, "at": event.at}
+    if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
+        found["note"] = LEGACY_NOTES[found["note"]]
+    if isinstance(found["draft"], list) and isinstance(found["root"], str):
+        found["draft"] = contract_draft.refresh(found["root"], found["draft"])
+        if found["result"] == "drafting":
+            found["questions"] = contract_draft.questions(found["draft"])
+    return found
+
+
+def fold(events: Iterable[event_log.Event], state: Fold | None = None) -> Fold:
+    found, before, known = state or Fold(None, (), {})
+    roots = dict(known)
     for event in events:
         cancelled = event_log.cancelled_registration(event)
         if cancelled is not None:
             if found is not None and cancelled == (found["root"], found["plan_id"]):
-                found = None
+                found, before = None, ()
+            continue
+        if event.kind == PROJECT_REGISTERED:
+            root = _root_of(event.payload)
+            if event.project is not None and root is not None:
+                roots[event.project] = root
+            continue
+        if event.kind == event_log.PROJECT_UNREGISTERED:
+            root = _root_of(event.payload) or roots.get(event.project)
+            roots.pop(event.project, None)
+            if root is None:
+                continue
+            before = tuple(e for e in before if e["root"] != root)
+            if found is not None and found["root"] == root:
+                found, before = (before[-1], before[:-1]) if before else (None, ())
             continue
         if event.kind != ENDED:
             continue
-        try:
-            _, _, payload = ended(event.payload)
-        except ValueError:
+        row = _row_of(event)
+        if row is None:
             continue
-        found = {**DEFAULTS, **payload, "at": event.at}
-        if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
-            found["note"] = LEGACY_NOTES[found["note"]]
-        if isinstance(found["draft"], list) and isinstance(found["root"], str):
-            found["draft"] = contract_draft.refresh(found["root"], found["draft"])
-            if found["result"] == "drafting":
-                found["questions"] = contract_draft.questions(found["draft"])
-    return found
+        if found is not None and found["root"] != row["root"]:
+            before = tuple(e for e in before if e["root"] != row["root"]) + (found,)
+        found = row
+    return Fold(found, before, roots)
+
+
+def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
+    return fold(events, Fold(state, (), {})).latest
 
 
 def waiting(latest: Mapping | None) -> bool:
