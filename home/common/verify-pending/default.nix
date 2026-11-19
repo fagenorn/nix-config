@@ -151,7 +151,7 @@ in
       systemd.user.services.verify-pending = {
         Unit = {
           Description = "verify-pending: this host's due read-only verification checks (issue 632)";
-          # A pass can outlast sd-switch's two-minute wait (each check may run ten minutes).
+          # A pass can outlast sd-switch's two-minute wait (each check may run eleven minutes).
           # Without keep-old, reloadSystemd restarts this oneshot on a changed store path and
           # waits for it, failing activation before the kick; keep-old leaves a running pass
           # alone, and the next timer or kick run uses the new script.

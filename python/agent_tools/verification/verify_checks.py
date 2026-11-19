@@ -277,11 +277,25 @@ cannot be attributed and is listed in `unattributed`, never passed. Exit 0 when 
 line; a malformed payload is a `payload_invalid` forge error. A bad `--repo`, an empty `--workflow`,
 `--job` or `--branch`, a `--merge` that is not 40 lowercase hex characters, or an `--n` that is not a
 positive integer is a usage error (2).
+
+`suite-wall-time --limit SECONDS` (`verify_checks.suite_wall_time`, issue 1314) runs `just
+agent-workflow-tests` at the repository root and is met (0) only when the suite exits 0 in strictly under
+SECONDS of wall time; a suite that exits non-zero is not met (1, verdict `failed`) and so is one that takes
+SECONDS or longer (verdict `slow`). At SECONDS the suite is killed with its whole process group and every
+process found by parentage or by an environment mark the run's id puts in
+every process it starts, in whatever session and whoever now parents it (a test fixture's daemon, orphaned to init, included), and a killed run
+reads as not met (1, verdict `deadline`). `wall_seconds` is the unrounded value the verdict was judged on. SECONDS may not exceed the runner's `verify_exec.TIMEOUT` less
+`SUITE_REPORT_MARGIN`, so the check always reports before the runner kills it; a missing, non-numeric,
+non-positive or larger SECONDS is a usage error (2) before any suite starts. The suite runs with
+`GITHUB_TOKEN` and `GH_TOKEN` removed and its output kept in a temp file, scanned in chunks for the summary, and off stdout, which is one JSON line `{"check",
+"verdict", "wall_seconds", "limit", "suite_exit", "summary"}` (`summary` is the suite's last
+`suite-runner: summary` line, else null).
 """
 from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import fcntl
 import functools
 import http.client
@@ -299,7 +313,9 @@ import sys
 import tarfile
 import tempfile
 import time
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
+from typing import IO
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -2315,6 +2331,137 @@ def _port(value: str) -> int:
     return port
 
 
+SUITE_ARGV = ("just", "agent-workflow-tests")
+SUITE_REPORT_MARGIN = 30  # seconds the wrapper keeps after the suite's window to kill, read and report
+
+
+def suite_wall_verdict(suite_exit: int | None, wall_seconds: float, limit: float,
+                       summary: str | None = None) -> tuple[int, dict]:
+    """The verdict of one timed suite run: met only for exit 0 strictly under `limit` seconds."""
+    if suite_exit is None:
+        verdict = "deadline"
+    elif suite_exit != 0:
+        verdict = "failed"
+    elif wall_seconds >= limit:
+        verdict = "slow"
+    else:
+        verdict = "met"
+    report = {"check": "suite-wall-time", "verdict": verdict, "wall_seconds": wall_seconds,
+              "limit": limit, "suite_exit": suite_exit, "summary": summary}
+    return (0 if verdict == "met" else 1), report
+
+
+SUMMARY_PREFIX = b"suite-runner: summary"
+LOG_CHUNK = 1 << 16  # bytes read at a time from the suite's log
+LOG_LINE_CAP = 1 << 12  # bytes kept of one log line: a summary line is far shorter
+
+
+def _last_summary(log: IO[bytes], chunk: int = LOG_CHUNK) -> str | None:
+    """The last `suite-runner: summary` line of `log`, read `chunk` bytes at a time with at most
+    `LOG_LINE_CAP` bytes of any one line held, so a huge log costs time and never memory."""
+    summary: bytes | None = None
+    line = b""
+    while True:
+        block = log.read(chunk)
+        if not block:
+            break
+        parts = (line + block).split(b"\n")
+        for done in parts[:-1]:
+            if done.startswith(SUMMARY_PREFIX):
+                summary = done
+        line = parts[-1][:LOG_LINE_CAP]
+    if line.startswith(SUMMARY_PREFIX):
+        summary = line
+    return None if summary is None else summary.decode("utf-8", "replace")
+
+
+SUITE_MARK = "AGENT_SUITE_WALL_TIME_RUN"  # env var carrying the run's id into every process it starts
+
+
+def _process_table() -> list[tuple[int, int, str]]:
+    """Every live process as (pid, ppid, command and environment), from one `ps` listing (empty when
+    `ps` cannot be read): the environment is what finds a daemon that was orphaned to init."""
+    flags = ["-E"] if sys.platform == "darwin" else ["e"]
+    try:
+        listing = subprocess.run(["ps", "-A", *flags, "-ww", "-o", "pid=,ppid=,command="],
+                                 capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    table: list[tuple[int, int, str]] = []
+    for row in listing.splitlines():
+        fields = row.split(None, 2)
+        if len(fields) >= 2 and fields[0].isdigit() and fields[1].isdigit():
+            table.append((int(fields[0]), int(fields[1]), fields[2] if len(fields) > 2 else ""))
+    return table
+
+
+def _freeze_suite_processes(root_pid: int, mark: str) -> set[int]:
+    """Stop every process of the suite run and return them: the descendants of `root_pid` by parentage
+    and every process whose environment carries `mark`, in whatever session and whoever now parents
+    it. A stopped process forks nothing, so repeating until a listing shows nothing new reaches all."""
+    seen: set[int] = set()
+    for _ in range(10):
+        table = _process_table()
+        children: dict[int, list[int]] = {}
+        for pid, ppid, _ in table:
+            children.setdefault(ppid, []).append(pid)
+        found = {pid for pid, _, rest in table if mark in rest and pid != os.getpid()}
+        queue = [root_pid, *found]
+        while queue:
+            for child in children.get(queue.pop(), ()):
+                if child not in found:
+                    found.add(child)
+                    queue.append(child)
+        found -= seen
+        if not found:
+            break
+        for pid in found:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGSTOP)
+        seen |= found
+    return seen
+
+
+def suite_wall_time(limit: float, *, root: Path = Path("."),
+                    argv: Sequence[str] = SUITE_ARGV) -> tuple[int, dict]:
+    """Run `argv` at `root`, kill everything it started at `limit` seconds and judge the wall time."""
+    with tempfile.TemporaryFile("w+b") as output:  # a file, never a pipe: the output is never read live
+        started = time.monotonic()
+        mark = f"{SUITE_MARK}={uuid.uuid4().hex}"
+        proc = subprocess.Popen(list(argv), cwd=root, stdin=subprocess.DEVNULL, stdout=output,
+                                stderr=subprocess.STDOUT, start_new_session=True,
+                                env=verify_exec.child_env(**dict([mark.split("=")])))
+        try:
+            suite_exit: int | None = proc.wait(timeout=limit)
+        except subprocess.TimeoutExpired:
+            # A fixture's daemon in its own session is outside the process group, its launcher is
+            # long gone (it is parented to init) and its test is killed before it can reap it, so
+            # the run's processes are found by parentage and by the run's environment mark.
+            descendants = _freeze_suite_processes(proc.pid, mark)
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            for pid in descendants:
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+            proc.wait()
+            suite_exit = None
+        wall_seconds = time.monotonic() - started
+        output.seek(0)
+        summary = _last_summary(output)
+    return suite_wall_verdict(suite_exit, wall_seconds, limit, summary)
+
+
+def _suite_limit(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError:
+        seconds = 0.0
+    cap = verify_exec.TIMEOUT - SUITE_REPORT_MARGIN
+    if not 0 < seconds <= cap:
+        raise argparse.ArgumentTypeError(f"must be a number above 0 and at most {cap}")
+    return seconds
+
+
 def _issue_number(value: str) -> int:
     try:
         number = int(value)
@@ -2450,6 +2597,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     regress.add_argument("--branch", type=_nonempty, required=True)
     regress.add_argument("--merge", type=_merge_sha, required=True)
     regress.add_argument("--n", type=_issue_number, required=True)  # a positive integer
+    wall = checks.add_parser(
+        "suite-wall-time",
+        help="issue 1314: a full agent workflow suite run at this commit passes in under --limit seconds")
+    wall.add_argument("--limit", type=_suite_limit, required=True)
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
@@ -2547,6 +2698,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             code, report = managed_pre_push_hook(args.slug, git_bin=git_bin, environ=os.environ)
         except FixtureError as error:
             print(f"verify-checks: fixture_error: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "suite-wall-time":
+        try:
+            code, report = suite_wall_time(args.limit, argv=SUITE_ARGV)
+        except OSError as error:
+            print(f"verify-checks: suite_unrunnable: {error}", file=sys.stderr)
             return 2
         print(json.dumps(report, sort_keys=True))
         return code
