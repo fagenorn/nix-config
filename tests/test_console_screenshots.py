@@ -119,8 +119,8 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_forty_four_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 44)
+    def test_the_set_is_forty_six_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 46)
         self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors"))
@@ -133,13 +133,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES.index("failed-start"),
                          shots.STATES.index("desk-spend") + 1)
-        self.assertEqual(shots.STATES[-26:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[shots.STATES.index("register-draft") + 1:][:2],
+                         ("register-reconcile-apply", "register-reconcile-draft"))
+        self.assertEqual(shots.STATES[-28:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
                                               "questions-open", "ask-goal", "question-read",
                                               "activation-tooling", "activation-host",
-                                              "register-apply", "register-draft"))
+                                              "register-apply", "register-draft",
+                                              "register-reconcile-apply",
+                                              "register-reconcile-draft"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -363,11 +367,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
         line = "commits run in its development shell: devenv shell (found in its files)"
         self.assertEqual(shots.REGISTER_SHOWN, {"register-apply": (line, None, False),
-                                                "register-draft": (None, line, True)})
+                                                "register-draft": (None, line, True),
+                                                "register-reconcile-apply": (line, None, False),
+                                                "register-reconcile-draft": (None, line, True)})
         phrase = "does not show the proposed commit environment"
         self.assertIs(shots.proposes_environment(), True)
+        self.assertIs(shots.proposes_reconcile(), True)
+        counterpart = {"register-apply": "register-draft", "register-draft": "register-apply",
+                       "register-reconcile-apply": "register-reconcile-draft",
+                       "register-reconcile-draft": "register-reconcile-apply"}
         for state, shown_ in shots.REGISTER_SHOWN.items():
-            other = next(v for k, v in shots.REGISTER_SHOWN.items() if k != state)
+            other = shots.REGISTER_SHOWN[counterpart[state]]
             for reading in (other, (None, None, False), (shown_[0], shown_[1], not shown_[2]),
                             (line + " now", shown_[1], shown_[2])):
                 with self.subTest(state=state, reading=reading):
@@ -377,7 +387,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
             self.assertEqual(run(state, shown_)[0], 0)
             self.assertNotIn(phrase, run(state, shown_)[1])
             self.assertEqual(run(state, shots.REGISTER_BASE[state])[0], 1)
-            with mock.patch.object(shots, "proposes_environment", return_value=False):
+            with mock.patch.object(shots, "proposes", return_value=False):
                 code, text = run(state, shots.REGISTER_BASE[state])
                 self.assertEqual(code, 0)
                 self.assertNotIn(phrase, text)
@@ -385,7 +395,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(run("live-several", (None, None, False))[0], 0)
 
     def test_the_register_shots_read_the_card_and_the_draft_only_in_their_own_states(self) -> None:
-        for state, reads in (("register-apply", 1), ("register-draft", 1), ("live-several", 0)):
+        for state, reads in (("register-apply", 1), ("register-draft", 1),
+                             ("register-reconcile-apply", 1), ("register-reconcile-draft", 1),
+                             ("live-several", 0)):
             with self.subTest(state), tempfile.TemporaryDirectory() as tmp:
                 browser, page = fake_browser(set())
                 shot = shots._shoot(browser, "http://console.test/", state, 480, Path(tmp))
@@ -1202,14 +1214,23 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     registration = view["registration"]
                     self.assertEqual(registration["name"], "sample-app")
                     self.assertEqual(running, [])
-                    if state == "register-apply":
+                    reconcile = state.startswith("register-reconcile")
+                    proposes = shots.proposes_reconcile() if reconcile else shots.proposes_environment()
+                    if state.endswith("-apply"):
                         (card,) = view["inbox"]["open"]
                         self.assertEqual(card["reason"], "register_apply")
                         self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
                         self.assertEqual(card["lines"][-2:], shots.REGISTER_PLAN_LINES)
-                        self.assertEqual(card["lines"][:-2],
-                                         [shots.PROPOSAL_LINE] if shots.proposes_environment() else [])
+                        self.assertEqual(card["lines"][:-2], [shots.PROPOSAL_LINE] if proposes else [])
                         self.assertIsNone(registration["draft"])
+                    elif reconcile:
+                        self.assertEqual(view["inbox"]["open"], [])
+                        if proposes:
+                            (row,) = registration["draft"]
+                            self.assertEqual(row["field"], "commit-environment")
+                            self.assertEqual(row["line"], shots.PROPOSAL_LINE)
+                        else:
+                            self.assertIsNone(registration["draft"])
                     else:
                         self.assertEqual(view["inbox"]["open"], [])
                         rows = {row["field"]: row["line"] for row in registration["draft"]}

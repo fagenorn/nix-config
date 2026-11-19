@@ -10,8 +10,8 @@ judges only what it must to stay total (the project id's shape, the registry, a 
 
 Reading. `read(root)` returns `{"remotes": [(name, url)], "default_branch", "branches", "files",
 "texts", "hooks", "environments"}` and never raises and never writes. Every git child has no shell, `stdin` and `stderr` to
-`DEVNULL`, `GIT_TIMEOUT` (10 seconds) and `GIT_TERMINAL_PROMPT=0`; an `OSError`, a timeout or a
-non-zero exit reads as empty or None. Remotes are the authored URLs (`config --get-regexp`, before
+`DEVNULL`, `GIT_TIMEOUT` (10 seconds), `GIT_TERMINAL_PROMPT=0` and `GIT_NO_LAZY_FETCH=1`; an `OSError`,
+a timeout or a non-zero exit reads as empty or None. Remotes are the authored URLs (`config --get-regexp`, before
 `insteadOf`), sorted by name, one URL per name. The default branch is asked of the remote only when
 there is exactly one (`ls-remote --symref`). Branches are the local heads, files the tracked paths,
 texts the tracked build files (`justfile`, `Makefile`, `package.json` and their spellings), at most
@@ -24,6 +24,35 @@ hook counts only when `HEAD` tracks it as an executable file or as a link inside
 file names present in the `HEAD` commit as a regular file (the revision Apply's worktree starts from,
 so an untracked, staged-only or directory entry never counts), in `ENVIRONMENTS` order. A set cancel
 reads both as empty, as it reads the rest.
+
+`read_hooks(root, cancel, *, search_path=None)` reads the same `hooks` and `environments` and adds
+`stranded`, as `{"hooks", "stranded", "environments"}`; it never raises and never writes. `stranded`
+is the sublist, in `COMMIT_HOOKS` order, of the hooks whose text `hook_stranded(text, search_path)`
+judges stranded: a hook that execs a runner found neither at its recorded absolute path nor on the
+plain `PATH` (`search_path`, else the console's own), so it fails in the commit Apply runs outside a
+development shell (#1333). A hook's text is its file's bytes in the hooks directory, or the `HEAD`
+blob a relative `core.hooksPath` resolves to after following links, decoded as UTF-8 with `replace`;
+a hook above `TEXT_LIMIT` bytes is never read past that bound and reads as `""`, and so does an
+unreadable one. `hook_stranded` judges a hook only when every non-comment line is one of a fixed
+allowlist of shapes, and every other hook is unjudged and never stranded, so its plan stays as it is
+today (#1333). The shapes are: a blank line; a first-line shebang whose interpreter is `sh`, `bash`,
+`dash` or `zsh` (directly or through `env`); `NAME=value` or `NAME="value"` for any `NAME` but `PATH`, `path` (zsh ties it to `PATH`) and `IFS`
+(a trailing `#` comment aside; the value is one literal word with no unquoted `;`, `&`, `|`, `<`, `>`,
+parenthesis or backtick, or is wholly one balanced `$( )` or backtick substitution, which is never a
+runner candidate, so a line holding several commands is never of this shape); `if [ ... ]; then`, `else` and `fi` lines, the test holding no `;`,
+`&`, `|`, `<`, `>`, backtick, parenthesis or brace; and exactly one line-leading `exec` of a word or of
+`"$NAME"` (`$NAME`, `${NAME}`), outside any `if`, followed by any arguments. A runner variable's
+candidates are only its literal assigned values, and it is judged only when a line outside any `if`
+assigns it before the `exec` (an assignment only inside an `if`, or only after the `exec`, may leave an inherited value) and, when written without
+quotes, only when no assigned value holds a blank or one of `*?[`. A line of any other shape (a `PATH`, `path` or `IFS` assignment, an
+`export`, `+=`, an array or nameref, a default expansion, `read`, `for`, `eval`, `source`, a second
+`exec`, or a command run on any line but the `exec`) leaves the hook unjudged. A runner is found when it
+is absolute and an executable file, or has no `/` and is on `search_path`; a `search_path` with an entry
+that is not absolute (relative to a working directory the commit does not share) leaves every hook
+unjudged, and so does a set `cancel`. A judged hook is stranded exactly when none of its candidates is found.
+A runner that is unassigned, empty, relative, an option, or carries `$`, a backtick or a shell operator is
+unjudged too. Reading a hook never fetches a missing blob (`GIT_NO_LAZY_FETCH=1`), and reads a tracked hook by the
+blob id it first resolved, so the size bound and the content are one blob.
 
 Fields. `FIELDS` lists the 29 field ids in order; each is a record with exactly the keys
 `FIELD_KEYS`: `field`, `label`, `value` (a str or None), `source` (a key of `SOURCES` or None),
@@ -54,6 +83,14 @@ choice with the one option `none`, never open. Its shown line leaves a trailing 
 the `shown` line of each `PROPOSED` field present in a draft list, in `PROPOSED` order, `[]` for a
 non-list or a draft without one; the ready Apply card shows them first.
 
+A reconcile plan proposes the same field alone (#1333). `reconcile_fields(root, reading)` is `[]`
+unless `reading["stranded"]` is not empty and an `ENVIRONMENTS` file is in `reading["environments"]`;
+otherwise it is the one `commit-environment` record `draft` would add, built by the same helper.
+`amends(fields)` is true for a non-empty list whose every record is a `PROPOSED` field, which no
+`draft` list is. `environment(fields)` is that record's value, None when it is None or `none`.
+`carried(fields, plan)` keeps `fields` for a plan, except an amendment that names an environment
+which the plan's document does not carry, which is None. The drafted path's `_proposal` is unchanged.
+
 Answers. `set_value(fields, field, value, entries=, root=)` returns `(new_fields, None)` or `(None,
 text)`, refusing in order with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `ID_RULE`
 (two names joined by one slash), `taken(<id>)`, `COMMAND_UNREADABLE` (a command `shlex` cannot read) and
@@ -83,6 +120,7 @@ import os
 import posixpath
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 from collections.abc import Iterable, Mapping
@@ -90,6 +128,7 @@ from pathlib import Path
 
 from agent_tools import canonical
 from agent_tools.console import manager
+from agent_tools.project_contract import adopt_planning
 from agent_tools.project_contract.adopt_planning import normalize_remote_url
 
 QUESTION_ID = "contract-draft"
@@ -119,7 +158,7 @@ MAX_LINKS = 8  # tracked links followed from a relative hooks path before the ho
 ENVIRONMENTS: tuple[tuple[str, str], ...] = (("devenv.nix", "devenv shell --"),)
 ENVIRONMENT_FIELD = "commit-environment"
 PROPOSED: tuple[str, ...] = (ENVIRONMENT_FIELD,)
-ENVIRONMENT_COMMAND = "commit-environment"
+ENVIRONMENT_COMMAND = adopt_planning.COMMIT_ENVIRONMENT_ID
 ID_PATTERN = re.compile(r"^[^\s/]+/[^\s/]+$")
 DIGITS = re.compile(r"^[0-9]+$")
 
@@ -310,7 +349,7 @@ def _git(root: str, *arguments: str, extra_env: Mapping[str, str] | None = None,
         done = manager.run_in_own_group(
             ["git", "-C", root, *arguments], timeout=GIT_TIMEOUT, cancel=cancel,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", **(extra_env or {})},
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1", **(extra_env or {})},
             start_new_session=True)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -367,8 +406,10 @@ def _repository_hooks_path(root: str, cancel: threading.Event | None = None) -> 
     return value
 
 
-def _tracked_executable(root: str, path: str, cancel: threading.Event | None = None) -> bool:
-    """Whether `HEAD` tracks `path` as an executable file, following tracked links on every component.
+def _tracked_target(root: str, path: str, cancel: threading.Event | None = None) -> str | None:
+    """The in-tree path of the executable file `HEAD` tracks at `path`, None when it is not one.
+
+    Tracked links are followed on every component.
 
     Each component is looked up in the `HEAD` tree, as the checkout's filesystem would resolve it: a
     link, whether it ends the path or sits on a directory component, is read and its target spliced in
@@ -378,37 +419,41 @@ def _tracked_executable(root: str, path: str, cancel: threading.Event | None = N
     current = ""
     links = 0
     entry: tuple[str, str] | None = None
+    target: str | None = None
     while pending:
         part = pending.pop(0)
         if part in ("", "."):
             continue
         if part == "..":
             if not current:
-                return False
+                return None
             current, entry = posixpath.dirname(current), ("040000", "tree")
             continue
         candidate = posixpath.join(current, part)
         entry = _entry(root, candidate, cancel)
+        target = candidate
         if entry is None:
-            return False
+            return None
         if entry == ("120000", "blob"):
             links += 1
             if links > MAX_LINKS:
-                return False
-            target = _git(root, "cat-file", "blob", f"HEAD:{candidate}", cancel=cancel)
-            text = target.decode("utf-8", "replace") if target else ""
+                return None
+            linked = _git(root, "cat-file", "blob", f"HEAD:{candidate}", cancel=cancel)
+            text = linked.decode("utf-8", "replace") if linked else ""
             if not text or posixpath.isabs(text):
-                return False
+                return None
             pending[:0] = text.split("/")
         elif entry[1] == "tree":
             current = candidate
         elif pending:
-            return False
-    return entry == ("100755", "blob")
+            return None
+    return target if entry == ("100755", "blob") else None
 
 
-def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
-    """The `COMMIT_HOOKS` that will run when Apply commits in its fresh worktree of `HEAD`.
+def _hook_sources(root: str, cancel: threading.Event | None = None) -> list[tuple[str, Path | str]]:
+    """The name and source of each `COMMIT_HOOKS` hook that will run when Apply commits in its fresh worktree.
+
+    A source is the hook's `Path` in the hooks directory, or the in-tree path `HEAD` tracks it at.
 
     The hooks directory is the repository's own: a global, system or command-line `core.hooksPath`
     never counts, while Git's checkout trust (`safe.directory`) is kept. A relative `core.hooksPath`
@@ -417,8 +462,8 @@ def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
     """
     setting = _repository_hooks_path(root, cancel)
     if setting is not None and not posixpath.isabs(setting):
-        return [name for name in COMMIT_HOOKS
-                if _tracked_executable(root, f"{setting}/{name}", cancel)]
+        tracked = [(name, _tracked_target(root, f"{setting}/{name}", cancel)) for name in COMMIT_HOOKS]
+        return [(name, target) for name, target in tracked if target is not None]
     if setting is None:
         printed = _git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", cancel=cancel)
         if not printed:
@@ -428,8 +473,13 @@ def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
         directory = Path(setting)
     if cancel is not None and cancel.is_set():
         return []
-    return [name for name in COMMIT_HOOKS
+    return [(name, directory / name) for name in COMMIT_HOOKS
             if (directory / name).is_file() and os.access(directory / name, os.X_OK)]
+
+
+def _hooks(root: str, cancel: threading.Event | None = None) -> list[str]:
+    """The `COMMIT_HOOKS` that will run when Apply commits in its fresh worktree of `HEAD`."""
+    return [name for name, _ in _hook_sources(root, cancel)]
 
 
 def _environments(root: str, cancel: threading.Event | None = None) -> list[str]:
@@ -461,6 +511,229 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
     except Exception:  # read never raises: an unreadable repository reads as empty
         return {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {},
                 "hooks": [], "environments": []}
+
+
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+_EXEC = re.compile(r"^exec\s+(.*)$")
+_IF = re.compile(r"^if \[ [^;&|<>`(){}]* \]; then$")
+_VARIABLE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+_SHELL_SYNTAX = set("$`;&|<>()")
+_SHELLS = ("sh", "bash", "dash", "zsh")
+
+
+def _runner_found(candidate: str, search_path: str) -> bool:
+    if candidate.startswith("/"):
+        return os.path.isfile(candidate) and os.access(candidate, os.X_OK)
+    return shutil.which(candidate, path=search_path) is not None
+
+
+def _shell_shebang(line: str) -> bool:
+    words = line[2:].split()
+    if words and posixpath.basename(words[0]) == "env":
+        words = words[1:]
+    return bool(words) and posixpath.basename(words[0]) in _SHELLS
+
+
+def _closing(text: str, index: int, quote: bool) -> int | None:
+    """The index after the `)` (or, when `quote`, the `"`) that ends what `text[index:]` opens, else `None`.
+
+    Reads one balanced `$( )` quote-aware, so a quoted or nested parenthesis never ends it; a backtick
+    inside, a lone `'`, a `#` that starts a word outside quotes (after a blank or one of `;&|<>()`: a shell
+    comment, which would hide the real end) or an unclosed form is `None`.
+    """
+    start = index
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+        elif char == "#" and not quote and (
+                index == start or text[index - 1].isspace() or text[index - 1] in ";&|<>()"):
+            return None
+        elif char == "'" and not quote:
+            index = text.find("'", index + 1) + 1 or len(text) + 1
+        elif char == "`":
+            return None
+        elif text.startswith("$(", index):
+            index = _closing(text, index + 2, False)
+            if index is None:
+                return None
+        elif char == '"':
+            if quote:
+                return index + 1
+            index = _closing(text, index + 1, True)
+            if index is None:
+                return None
+        elif char == "(" and not quote:
+            index = _closing(text, index + 1, False)
+            if index is None:
+                return None
+        elif char == ")" and not quote:
+            return index + 1
+        else:
+            index += 1
+    return None
+
+
+def _comment_only(rest: str) -> bool:
+    return not rest.strip() or (rest[0].isspace() and rest.lstrip().startswith("#"))
+
+
+def _assigned_word(value: str) -> tuple[bool, str | None]:
+    """`(True, word)` for an assignment of exactly one literal word, `(True, None)` for one substitution.
+
+    The value is one literal word (an unquoted `;`, `&`, `|`, `<`, `>`, parenthesis or backtick, or a `$(`
+    or backtick inside double quotes, makes it `(False, None)`), or wholly one balanced `$( )` or backtick
+    substitution, quoted or not. Only blanks then a `#` comment may follow; a `#` that starts a word after
+    blanks begins a comment, dropped unread, so an apostrophe in it cannot spoil the read, and a `#` inside
+    a word is not a comment and the value is not judged.
+    """
+    for opener, quote in (('"$(', True), ("$(", False)):
+        if value.startswith(opener):
+            end = _closing(value, len(opener), False)
+            if end is not None and quote:
+                end = end + 1 if value[end:end + 1] == '"' else None
+            return (True, None) if end is not None and _comment_only(value[end:]) else (False, None)
+    if value.startswith("`"):
+        end = value.find("`", 1) + 1
+        return (True, None) if end and "\\" not in value[:end] and _comment_only(value[end:]) \
+            else (False, None)
+    quote = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+            elif quote == '"' and (char == "`" or value.startswith("$(", index)):
+                return False, None
+        elif char in "'\"":
+            quote = char
+        elif char in ";&|<>()`" or value.startswith("$(", index):
+            return False, None
+        elif char == "#":
+            if index == 0 or not value[index - 1].isspace():
+                return False, None
+            value = value[:index]
+            break
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        return False, None
+    return (True, words[0]) if len(words) == 1 and words[0] else (False, None)
+
+
+def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = None) -> bool:
+    """Whether a hook execs a runner that is found neither at its recorded path nor on `search_path`.
+
+    A hook is judged only when every non-comment line has one of the allowlisted shapes (blank; a shell
+    shebang; `NAME=value` as above, `PATH`, `path` and `IFS` aside; `if [ ... ]; then`, `else`, `fi`; exactly one line-leading `exec`
+    of a word or `"$NAME"` outside any `if`) and each candidate runner is a literal; a runner variable is
+    judged only when some line outside any `if` assigns it, and an unquoted one only when no value holds a
+    blank or a glob character (the shell would split or expand it). An assignment after the `exec` line
+    never runs and is not counted. The module docstring states the allowlist.
+    Every other hook is unjudged and never stranded, and so is one read under a set `cancel` or with a
+    `search_path` entry that is not absolute.
+    """
+    if any(not os.path.isabs(entry) for entry in search_path.split(os.pathsep)):
+        return False
+    assigned: dict[str, dict[str | None, None]] = {}
+    fixed: set[str] = set()
+    runner = None
+    quoted = False
+    depth = 0
+    for number, raw in enumerate(text.splitlines()):
+        if cancel is not None and cancel.is_set():
+            return False
+        line = raw.strip()
+        if number == 0 and raw.startswith("#!"):
+            if not _shell_shebang(raw):
+                return False
+        elif not line or line.startswith("#"):
+            pass
+        elif _IF.match(line):
+            depth += 1
+        elif line == "else" and depth:
+            pass
+        elif line == "fi" and depth:
+            depth -= 1
+        elif _ASSIGNMENT.match(line):
+            name, value = _ASSIGNMENT.match(line).groups()
+            known, word = _assigned_word(value)
+            if name in ("PATH", "path", "IFS") or not known:
+                return False
+            if runner is None:  # a line after the `exec` never runs, so it sets no value
+                assigned.setdefault(name, {})[word] = None
+                if depth == 0:
+                    fixed.add(name)
+        elif _EXEC.match(line) and runner is None and depth == 0:
+            try:
+                words = shlex.split(_EXEC.match(line).group(1), comments=True)
+            except ValueError:
+                return False
+            if not words or words[0].startswith("-"):
+                return False
+            runner = words[0]
+            quoted = _EXEC.match(line).group(1).startswith('"')
+        else:
+            return False
+    if runner is None or depth:
+        return False
+    variable = _VARIABLE.match(runner)
+    if variable:
+        values = assigned.get(variable.group(1))
+        if not values or None in values or variable.group(1) not in fixed:
+            return False
+        candidates = list(values)
+        if not quoted and any(char.isspace() or char in "*?[" for value in candidates for char in value):
+            return False
+    else:
+        candidates = [runner]
+    for candidate in candidates:
+        if _SHELL_SYNTAX & set(candidate) or ("/" in candidate and not candidate.startswith("/")):
+            return False
+    return not any(_runner_found(candidate, search_path) for candidate in candidates)
+
+
+def _hook_text(root: str, source: Path | str, cancel: threading.Event | None = None) -> str:
+    """A hook's text, `""` when it is unreadable or above `TEXT_LIMIT` bytes (never a truncated prefix)."""
+    if isinstance(source, Path):
+        try:
+            with source.open("rb") as stream:
+                body = stream.read(TEXT_LIMIT + 1)
+        except OSError:
+            return ""
+    else:
+        printed = _git(root, "rev-parse", "--verify", f"HEAD:{source}", cancel=cancel)
+        blob_id = printed.decode("ascii", "replace").strip() if printed else ""
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob_id):
+            return ""
+        size = _git(root, "cat-file", "-s", blob_id, cancel=cancel)
+        if size is None or not re.fullmatch(r"[0-9]+", size.decode("ascii", "replace").strip()) \
+                or int(size.decode("ascii").strip()) > TEXT_LIMIT:
+            return ""
+        blob = _git(root, "cat-file", "blob", blob_id, cancel=cancel)
+        body = blob if blob is not None else b""
+    return "" if len(body) > TEXT_LIMIT else body.decode("utf-8", "replace")
+
+
+def read_hooks(root: str, cancel: threading.Event | None = None, *,
+               search_path: str | None = None) -> dict:
+    """The commit hooks, which of them are stranded, and the environment files: `{hooks, stranded, environments}`.
+
+    Never raises and never writes. `search_path` defaults to the console's own `PATH`.
+    """
+    path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+    try:
+        sources = _hook_sources(root, cancel)
+        stranded = [name for name, source in sources
+                    if hook_stranded(_hook_text(root, source, cancel), path, cancel)]
+        return {"hooks": [name for name, _ in sources], "stranded": stranded,
+                "environments": _environments(root, cancel)}
+    except Exception:  # read_hooks never raises: an unreadable repository reads as empty
+        return {"hooks": [], "stranded": [], "environments": []}
 
 
 def _host(url: str) -> str | None:
@@ -578,6 +851,14 @@ def _proposal(reading: Mapping) -> str | None:
     return next((command for name, command in ENVIRONMENTS if name in environments), None)
 
 
+def _environment_record(command: str, name: str, remotes: int) -> dict:
+    return {"field": ENVIRONMENT_FIELD, "label": LABELS[ENVIRONMENT_FIELD],
+            "value": command, "source": "files",
+            "options": copy.deepcopy(OPTIONS[ENVIRONMENT_FIELD]),
+            "text": TEXT[ENVIRONMENT_FIELD], "reason": None,
+            "ask": _ask(ENVIRONMENT_FIELD, name, remotes)}
+
+
 def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> list[dict]:
     """The 29 fields, filled from the reading and the console's starting values."""
     remotes = list(reading.get("remotes") or ())
@@ -609,14 +890,39 @@ def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> li
                        "ask": _ask(field, name, len(remotes))})
     proposal = _proposal(reading)
     if proposal is not None:
-        fields.append({"field": ENVIRONMENT_FIELD, "label": LABELS[ENVIRONMENT_FIELD],
-                       "value": proposal, "source": "files",
-                       "options": copy.deepcopy(OPTIONS[ENVIRONMENT_FIELD]),
-                       "text": TEXT[ENVIRONMENT_FIELD], "reason": None,
-                       "ask": _ask(ENVIRONMENT_FIELD, name, len(remotes))})
+        fields.append(_environment_record(proposal, name, len(remotes)))
     held = taken_id(fields, entries, root)
     if held is not None:
         fields[0]["reason"] = held
+    return fields
+
+
+def reconcile_fields(root: str, reading: Mapping) -> list[dict]:
+    """The one `commit-environment` record a reconcile plan proposes, `[]` when no stranded hook needs it."""
+    environments = reading.get("environments") or ()
+    if not reading.get("stranded"):
+        return []
+    command = next((command for name, command in ENVIRONMENTS if name in environments), None)
+    return [] if command is None else [_environment_record(command, Path(root).name, 1)]
+
+
+def amends(fields: object) -> bool:
+    """Whether `fields` is an amendment: a non-empty list of only `PROPOSED` records."""
+    return (isinstance(fields, list) and bool(fields)
+            and all(isinstance(f, Mapping) and f.get("field") in PROPOSED for f in fields))
+
+
+def environment(fields: Iterable[Mapping]) -> str | None:
+    """The command the `commit-environment` record names, None when it has none or says `none`."""
+    value = next((f["value"] for f in fields if f["field"] == ENVIRONMENT_FIELD), None)
+    return None if value is None or value == "none" else value
+
+
+def carried(fields: list[dict] | None, plan: Mapping) -> list[dict] | None:
+    """`fields`, or None when an amendment's environment is missing from a plan that carries no error."""
+    if (fields is not None and amends(fields) and environment(fields) is not None
+            and "error" not in plan and "commit_environment" not in (plan.get("plan") or {})):
+        return None
     return fields
 
 

@@ -192,6 +192,25 @@ def stored_draft(document: dict) -> dict | None:
     return draft
 
 
+def stored_environment(document: dict) -> list[str] | None:
+    """The commit environment argv the stored plan carries, if it carries one.
+
+    `apply` re-derives with it, so a stored value that is not a non-empty list
+    of non-empty strings is refused here rather than handed to the shared
+    derivation.
+    """
+    plan = document["plan"]
+    if "commit_environment" not in plan:
+        return None
+    argv = plan["commit_environment"]
+    if (not isinstance(argv, list) or not argv
+            or any(not isinstance(word, str) or not word for word in argv)):
+        raise refuse(
+            "adopt_failure", "adopt.plan.malformed", "/plan/commit_environment",
+            "the stored plan's commit environment is not a list of words")
+    return argv
+
+
 def validate_operations(root: Path, operations: list[object]) -> None:
     """Every operation is a known kind of the right arity over contained paths.
 

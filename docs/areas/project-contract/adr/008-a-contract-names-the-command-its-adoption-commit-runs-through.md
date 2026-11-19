@@ -1,6 +1,6 @@
 # ADR-project-contract-008 — A contract names the command its adoption commit runs through
 
-- **Status:** accepted; D4 amended by ADR-console-082
+- **Status:** accepted; D4 amended by ADR-console-082 and ADR-project-contract-009
 - **Decided in:** #1249
 
 ## Context
