@@ -7,6 +7,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -521,22 +522,6 @@ class HappyPathTest(unittest.TestCase):
         self.assertNotIn("--delete-branch", merge)
         self.assertNotIn("GITHUB_TOKEN", PROGRAM.read_text(encoding="utf-8"))
 
-    def test_delete_branch_follows_the_contract(self):
-        _, calls = run()
-        self.assertIn(f"--merge --match-head-commit {SHA} --delete-branch", prompt(calls, "merge"))
-
-    def test_non_default_integration_closes_the_issue_explicitly(self):
-        _, calls = run()
-        self.assertIn("Refs #9", prompt(calls, "pr"))
-        close = prompt(calls, "close-out")
-        self.assertIn("gh issue close 9 --repo owner/repo", close)
-        self.assertIn("dev is not the default branch", close)
-
-    def test_default_integration_uses_closes_and_still_confirms(self):
-        _, calls = run(patch={"setup": {"integration_branch": "main"}})
-        self.assertIn("Closes #9", prompt(calls, "pr"))
-        self.assertIn("gh issue close 9", prompt(calls, "close-out"))
-
     def test_non_code_criterion_holds_the_issue_open(self):
         plan = dict(PLAN, acceptance=PLAN["acceptance"] + [EVIDENCE])
         result, calls = run(replies={"plan": plan}, patch={"setup": {"integration_branch": "main"},
@@ -717,13 +702,6 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertNotIn("plan-codex", labels(calls))
         self.assertNotIn("final-codex", labels(calls))
-
-    def test_reviewers_get_standards_hints_and_rejections(self):
-        _, calls = run()
-        for label in ("plan-review", "review-1", "final-1"):
-            text = prompt(calls, label)
-            for path in ("/r/docs/standards", "/r/.hints", "/r/.rej", "the-bar.md"):
-                self.assertIn(path, text, label)
 
 
 ANSWER = {"verdict": "answered", "comment_id": 30, "decisions": "May the delivery push? Chosen: Approve: push it.",
@@ -1203,26 +1181,6 @@ class TransientTest(unittest.TestCase):
         self.assertEqual(schema_of(calls, "acquire")["properties"]["transient"], {"type": "boolean"})
         self.assertIn("transient", prompt(calls, "acquire"))
 
-    def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
-        timeout = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
-                   "the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then "
-                   "answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.")
-        _, calls = run()
-        for via in ("setup", "impl-1", "renew-final-review", "verify", "pr", "merge"):
-            with self.subTest(via=via):
-                self.assertIn(timeout, prompt(calls, via))
-        _, resumed = run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))
-        self.assertIn(timeout, prompt(resumed, "owner-answer"))
-        _, calls = run(patch={"pr": {"head": "c" * 40}})  # a head-moved stop releases the lock
-        self.assertIn(timeout, prompt(calls, "land-unlock"))
-        stopped, _ = run(patch={"pr": {"renew": None}})
-        _, calls = run(args=dict(ARGS, cont=stopped["cont"]))
-        self.assertIn(timeout, prompt(calls, "acquire"))
-        merge = "d" * 40
-        _, calls = run(replies={"checks-2": {"state": "passed", "passed": ["ci"], "head": merge}},
-                       patch={"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": merge}})
-        self.assertIn(timeout, prompt(calls, "checks-2"))
-
     RETRIED = re.compile(r"forge-claim (?:acquire|renew|release|status|land acquire|land release|owner-action status)\b")
 
     def test_every_prompt_that_runs_a_retried_forge_claim_command_gives_the_long_bash_timeout(self):
@@ -1277,12 +1235,6 @@ class SetupIdempotenceTest(unittest.TestCase):
         result, calls = run(patch={"setup": {"existing": existing}})
         self.assertEqual(result["stage"], "done")
         self.assertIn("when existing.local_branch is true, git -C /r worktree add <worktree_path> <branch> (adopt the local branch)",
-                      prompt(calls, "setup"))
-
-    def test_remote_only_branch_is_checked_out_from_origin(self):
-        existing = dict(self.EXISTING, worktree=False, local_branch=False, dirty=False, status="")
-        _, calls = run(patch={"setup": {"existing": existing}})
-        self.assertIn("when existing.remote_branch is true, git -C /r worktree add --no-track -b <branch> <worktree_path> origin/<branch>",
                       prompt(calls, "setup"))
 
     def test_merged_pr_referencing_the_issue_stops_as_a_duplicate(self):
@@ -1416,14 +1368,6 @@ class SpecPrTest(unittest.TestCase):
 
 
 class PlanTest(unittest.TestCase):
-    def test_plan_stays_outside_the_tree_and_out_of_the_pr(self):
-        _, calls = run()
-        plan = prompt(calls, "plan")
-        self.assertIn("/r/.git/worktrees/w/deliver-standard/plan.md", plan)
-        self.assertIn("never commit them", plan)
-        self.assertIn("Never attach or link the plan", prompt(calls, "pr"))
-        self.assertIn("Acceptance (a table", prompt(calls, "pr"))
-
     def test_spec_argument_reaches_planner_and_plan_reviewers(self):
         _, calls = run(args=dict(ARGS, spec="/s/spec.md"))
         for label in ("plan", "plan-review", "plan-codex"):
@@ -1528,13 +1472,6 @@ class ReviewSizingPlanTest(unittest.TestCase):
         review = next(c for c in calls if c["label"] == "plan-review")
         self.assertEqual((review["agentType"], review["schema"]["properties"]["findings"]["items"]["properties"]["rule"]["enum"][0]),
                          ("reviewer", "R1"))
-
-    def test_on_keeps_the_full_rubric_for_the_planner(self):
-        _, calls = run(args=SIZED, replies={"plan-review": {"verdict": "findings",
-                                                             "findings": [{"severity": "important", "summary": "gap"}]}})
-        for label in ("plan", "plan-revise"):
-            with self.subTest(label=label):
-                self.assertIn(FULL_RUBRIC, prompt(calls, label))
 
     def test_on_without_a_plan_review_capability_keeps_the_full_rubric(self):
         _, calls = run(args=SIZED, patch={"setup": {"review_state": {"code": "available", "plan": "unsupported"}}})
@@ -1896,16 +1833,6 @@ class PlanRulesTest(unittest.TestCase):
         _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": self.RULE_FINDING,
                                 "plan-rules-review": minor}, patch={"close-out": {"issue_state": "OPEN"}})
         self.assertIn("impl-1", labels(calls))
-
-    def test_planner_and_reviewer_prompts_point_to_the_rules(self):
-        _, calls = run(replies={"plan-review": self.RULE_FINDING})
-        plan = prompt(calls, "plan")
-        for needle in ("~/.agents/standards/acceptance-planning.md", "verify-pending lint --input",
-                       f"--repo-root /r/.wt/w-issue-9-x --pr-branch issue-9-x", "--pr-workflow",
-                       f'"merge": "{SHA}"', "metric", "scripts"):
-            self.assertIn(needle, plan)
-        for label in ("plan-review", "plan-rules-review"):
-            self.assertIn("~/.agents/standards/acceptance-planning.md", prompt(calls, label))
 
     def test_program_does_not_copy_the_rule_text(self):
         source = PROGRAM.read_text(encoding="utf-8")
@@ -3303,15 +3230,6 @@ class ReviewAndVerifyTest(unittest.TestCase):
                 result, _ = run(replies={"impl-1": reply})
                 self.assertEqual(result["stage"], "task")
 
-    def test_skip_eligibility_lists_both_sides_of_a_rename(self):
-        _, calls = run()
-        self.assertIn("diff --no-renames --name-only", prompt(calls, "verify"))
-
-    def test_fix_reviews_cover_the_whole_fix_range(self):
-        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug", "failing_input": "x"}]}
-        _, calls = run(replies={"final-1": bad})
-        self.assertIn("diff b0..c0ffee", prompt(calls, "fix-wave-review"))
-
     def test_codex_code_review_unavailable_stops(self):
         result, _ = run(replies={"final-codex": {"available": False, "verdict": "pass", "findings": []}})
         self.assertEqual((result["stage"], result["step"]), ("codex-unavailable", "code"))
@@ -3957,12 +3875,6 @@ class VerifyRerunTest(unittest.TestCase):
 
 
 class ShipTest(unittest.TestCase):
-    def test_checks_wait_uses_the_required_names_rule(self):
-        _, calls = run()
-        checks = prompt(calls, "pr")
-        self.assertIn("gh api repos/owner/repo/rules/branches/dev", checks)
-        self.assertIn("never treat a partial list as green", checks)
-
     def test_failed_checks_stop_unmerged(self):
         fix = "f" * 40
         result, calls = run(replies={"checks-2": {"state": "failed", "head": fix}},
@@ -5141,12 +5053,6 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertEqual(result["stage"], "head-moved")
         self.assertNotIn("fix-ci", labels(calls))
 
-    def test_checks_prompt_asks_for_failing_names_and_the_log_tail(self):
-        _, calls = run()
-        checks = prompt(calls, "pr")
-        self.assertIn("failing", checks)
-        self.assertIn("--log-failed", checks)
-
     def test_sync_review_finding_gets_one_fix_wave_then_merges(self):
         result, calls = run(replies={"sync-review-1": FINDING,
                                      "checks-2": {"state": "passed", "passed": ["ci"], "head": FIX, "required": ["ci-tests"]}},
@@ -5442,16 +5348,6 @@ class HoldTest(unittest.TestCase):
         self.assertNotIn("gh issue create", hold)
         split = hold[hold.index("(forge-issue create --repo owner/repo"):]
         self.assertNotIn("--block", split[:split.index(")")])  # the split issue carries no edge (R7)
-
-    def test_every_ruled_step_files_issues_through_forge_issue(self):
-        """#697 D11: an issue a plan's task declares is filed by forge-issue with native edges."""
-        _, calls = self.ship(EVIDENCE)
-        _, direct = run(args=dict(ARGS, lane="direct"))
-        for found, label in ((calls, "plan"), (calls, "impl-1"), (calls, "hold"), (direct, "direct-impl")):
-            with self.subTest(label=label):
-                text = prompt(found, label)
-                for argv in ("forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"):
-                    self.assertIn(argv, text)
 
     def test_passing_verify_run_closes_instead_of_holding(self):
         result, _ = self.ship(EVIDENCE, hold={"issue_state": "CLOSED"}, close="CLOSED")
@@ -5756,12 +5652,6 @@ class FixWaveTest(unittest.TestCase):
         result, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": self.narrowing(),
                                  "fix-wave-2": {"status": "blocked", "notes": "no"}})
         self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave", 2))
-
-    def test_rereview_is_asked_to_classify_each_finding(self):
-        _, calls = run(replies={"final-1": self.FIRST})
-        rereview = prompt(calls, "fix-wave-review")
-        for needle in ("relation", "narrowing", "Unsure is new"):
-            self.assertIn(needle, rereview)
 
     def test_waves_are_counted(self):
         result, _ = run()
@@ -7025,13 +6915,6 @@ class DirectLaneTest(unittest.TestCase):
         self.assertEqual(result["cont"]["lane"], "direct")
         self.assertNotIn("pr", labels(calls))
 
-    def test_direct_implementer_follows_deliver_direct_steps(self):
-        _, calls = run(args=DIRECT)
-        impl = prompt(calls, "direct-impl")
-        for needle in ("deliver-direct skill", "Skill tool", "Eligibility", "step 3", "steps 4 to 7",
-                       "/r/.wt/w-issue-9-x", "h1/session-s1"):
-            self.assertIn(needle, impl)
-
     def test_sensitive_diff_gets_the_full_reviewer(self):
         _, calls = run(args=DIRECT, patch={"direct-impl": {"sensitive": True}})
         review = [c for c in calls if c["label"] == "direct-review"][0]
@@ -7106,11 +6989,6 @@ class DirectLaneTest(unittest.TestCase):
     OLD_FIX = ("Fix these review findings in the worktree, with a regression test for each real defect, then commit: %s. "
                "If a finding is wrong, say so in notes with evidence instead of changing code. Run only the tests covering the files you changed")
     FIX_FINDINGS = re.compile(r"then commit: (\[.*?\])\. If a finding is wrong")
-
-    def test_the_implementer_keeps_the_declared_verification_out_of_the_criteria(self):
-        _, calls = run(args=DIRECT)
-        self.assertIn("Do not write the declared verification commands as an acceptance criterion: the verify step gates on them.",
-                      prompt(calls, "direct-impl"))
 
     def test_only_ungraded_criteria_ask_the_fix_round_for_their_evidence(self):
         result, calls = run(args=DIRECT, replies={"direct-review": self.UNGRADED})
@@ -7192,12 +7070,6 @@ class DirectLaneTest(unittest.TestCase):
         result, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": []}})
         self.assertEqual(result["stage"], "task")
         self.assertNotIn("direct-review", labels(calls))
-
-    def test_close_out_grades_the_implementer_criteria(self):
-        acceptance = [{"id": "AC1", "text": "x", "kind": "code"}, {"id": "AC2", "text": "y", "kind": "evidence"}]
-        _, calls = run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance},
-                                           "close-out": {"issue_state": "OPEN"}})
-        self.assertIn("needs-verification", prompt(calls, "hold"))
 
     def test_resume_after_the_review_skips_to_verify(self):
         stopped, _ = run(args=DIRECT, replies={"verify": None})
@@ -8060,24 +7932,6 @@ class CodeMapTest(unittest.TestCase):
                 self.assertNotIn("context.md", prompt(calls, label))
         self.assertEqual([l for l in map_carriers(calls) if not MAP_READERS.fullmatch(l)], [])
 
-    def test_the_planner_writes_the_map_in_the_plan_directory(self):
-        _, calls = run()
-        self.assertIn(MAP_PATH, prompt(calls, "plan"))
-
-    def test_plan_reviewers_reviser_and_implementers_name_the_map(self):
-        _, calls = run(replies={"plan-review": MAP_TASK_FINDING, "review-1": MAP_TASK_FINDING})
-        for label in ("plan-review", "plan-codex", "plan-revise", "impl-1", "fix-1-1"):
-            with self.subTest(label=label):
-                self.assertIn(MAP_PATH, prompt(calls, label))
-
-    def test_the_rules_only_reviser_names_the_map(self):
-        # The scenario of PlanRulesTest.keep_stop: both reviews return an R2 rule finding, so plan-rules-revise runs.
-        plan = with_criteria(HUMAN)
-        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": PlanRulesTest.REVISED,
-                                "plan-review": PlanRulesTest.RULE_FINDING,
-                                "plan-rules-review": PlanRulesTest.RULE_FINDING})
-        self.assertIn(MAP_PATH, prompt(calls, "plan-rules-revise"))
-
     def test_task_reviewers_get_no_map(self):
         _, calls = run(replies={"review-1": MAP_TASK_FINDING})
         self.assert_no_map(calls, ("review-1", "rereview-1-1", "final-1", "final-codex"))
@@ -8330,31 +8184,6 @@ class WholeTestFileTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(FOCUSED_RUN, text)
                 self.assertNotIn(WHOLE_RUN[0], text)
-
-
-class KeptObligationTest(unittest.TestCase):
-    """#787: the byte-budget trims left these obligations of the post-loop prompts in place."""
-
-    def test_the_whitespace_attestation_stays_a_question(self):
-        _, calls = WhitespaceCarryForwardTest.scenario(WS_ONLY)
-        self.assertIn("Also judge whether each of its whitespace changes is insignificant:",
-                      prompt(calls, "verify-fix-review-1"))
-
-    def test_a_rejected_finding_needs_evidence_in_notes(self):
-        _, calls = run(replies={"final-1": FixWaveTest.FIRST})
-        self.assertIn("If a finding is wrong, explain with evidence in notes.", prompt(calls, "fix-wave"))
-
-    def test_the_verify_body_asks_for_precise_failure_summaries(self):
-        _, calls = run(replies={"verify": VERIFY_RED})
-        self.assertIn("summarize the failing tests or errors precisely.", prompt(calls, "verify"))
-
-    def test_the_sync_fix_may_not_rewrite_the_merge_and_its_rebuttal_is_checked_yourself(self):
-        fix = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "the finding is wrong because x"}
-        _, calls = run(replies={"sync-review-1": BAD},
-                       patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                              "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})
-        self.assertIn("never redo or rewrite the merge", prompt(calls, "fix-sync-1"))
-        self.assertIn("Check each rebuttal against the code yourself", prompt(calls, "fix-sync-review-1"))
 
 
 class CodexUnavailableReasonTest(unittest.TestCase):
@@ -9758,14 +9587,6 @@ class OwnRedOutsideLockTest(unittest.TestCase):
                 self.assertEqual(out["result"]["stage"], "land-lock")
                 self.assertEqual(self.shipped(out), ["pr", "land-unlock"])
 
-    def test_the_diagnosis_under_the_lock_is_bounded(self):
-        _, calls = run(patch={"pr": {"checks": RED}, "fix-ci": self.FIXED}, replies={"checks-2": self.GREEN})
-        fix = prompt(calls, "fix-ci")
-        for needle in ("read only the failed job log, the check details and the branch's diff, and run no build and no test before the release",
-                       "When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file",
-                       "Only when the failure clearly has no cause in the code (no commit is needed), keep the lock"):
-            self.assertIn(needle, fix)
-
     STALE = {"state": "failed", "head": SHA, "failing": ["gate"], "stale": [77]}
     STALE_ASK = "This poll follows a rerun of failed jobs at this head."
 
@@ -10342,12 +10163,6 @@ class LookStopTest(unittest.TestCase):
                 self.assertNotIn("pr", got)
                 self.assertIn("verify", got)
 
-    def test_both_setup_prompts_read_the_look_marker(self):
-        _, fresh = run()
-        _, resumed = run(args=dict(ARGS, cont=ship_cont()))
-        for calls in (fresh, resumed):
-            self.assertIn("look-approval marked --repo <slug> --issue 9", prompt(calls, "setup"))
-
     def test_ready_mode_reports_the_look_verdict(self):
         ready, _ = run(args=dict(ARGS, mode="ready"), patch={"setup": {"look": MARKED}})
         self.assertEqual(ready["look"], {"verdict": "marked", "covers": ["the settings page"]})
@@ -10896,6 +10711,269 @@ class LookTickTest(unittest.TestCase):
         self.assertEqual(silent["result"]["stage"], "done")
         self.assertIsNone(silent["result"]["look_tick"])
         self.assertTrue([l for l in silent["logs"] if "was not ticked: no reply" in l])
+
+
+LONG_BASH_TIMEOUT = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
+                     "the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then "
+                     "answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.")
+
+
+def _own_red_scenario():
+    return run(patch={"pr": {"checks": RED}, "fix-ci": OwnRedOutsideLockTest.FIXED},
+               replies={"checks-2": OwnRedOutsideLockTest.GREEN})[1]
+
+
+def _graded_hold_scenario():
+    acceptance = [{"id": "AC1", "text": "x", "kind": "code"}, {"id": "AC2", "text": "y", "kind": "evidence"}]
+    return run(args=DIRECT, patch={"direct-impl": {"acceptance": acceptance},
+                                   "close-out": {"issue_state": "OPEN"}})[1]
+
+
+def _rules_only_revise_scenario():
+    plan = with_criteria(HUMAN)
+    return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": PlanRulesTest.REVISED,
+                        "plan-review": PlanRulesTest.RULE_FINDING,
+                        "plan-rules-review": PlanRulesTest.RULE_FINDING})[1]
+
+
+def _sync_rebuttal_scenario():
+    fix = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "the finding is wrong because x"}
+    return run(replies={"sync-review-1": BAD},
+               patch={"pr": {"checks": {"state": "behind", "head": SHA}},
+                      "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})[1]
+
+
+def _renew_lost_resume_scenario():
+    stopped, _ = run(patch={"pr": {"renew": None}})
+    return run(args=dict(ARGS, cont=stopped["cont"]))[1]
+
+
+def _checks_behind_scenario():
+    merge = "d" * 40
+    return run(replies={"checks-2": {"state": "passed", "passed": ["ci"], "head": merge}},
+               patch={"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": {"merge_commit": merge}})[1]
+
+
+PROMPT_SCENARIOS = {
+    "happy": lambda: run()[1],
+    "main-integration": lambda: run(patch={"setup": {"integration_branch": "main"}})[1],
+    "resume-for-answer": lambda: run(args=dict(ARGS, cont=RESUME_FOR_ANSWER))[1],
+    "head-moved": lambda: run(patch={"pr": {"head": "c" * 40}})[1],
+    "renew-lost-resume": _renew_lost_resume_scenario,
+    "checks-behind": _checks_behind_scenario,
+    "remote-only-branch": lambda: run(patch={"setup": {"existing": dict(
+        SetupIdempotenceTest.EXISTING, worktree=False, local_branch=False, dirty=False, status="")}})[1],
+    "sized-plan-finding": lambda: run(args=SIZED, replies={"plan-review": {
+        "verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}})[1],
+    "rule-finding": lambda: run(replies={"plan-review": PlanRulesTest.RULE_FINDING})[1],
+    "final-finding": lambda: run(replies={"final-1": {
+        "verdict": "findings", "findings": [{"severity": "important", "summary": "bug", "failing_input": "x"}]}})[1],
+    "evidence-hold": lambda: HoldTest().ship(EVIDENCE)[1],
+    "direct": lambda: run(args=DIRECT)[1],
+    "fix-wave": lambda: run(replies={"final-1": FixWaveTest.FIRST})[1],
+    "direct-graded-hold": _graded_hold_scenario,
+    "map-findings": lambda: run(replies={"plan-review": MAP_TASK_FINDING, "review-1": MAP_TASK_FINDING})[1],
+    "rules-only-revise": _rules_only_revise_scenario,
+    "whitespace-only": lambda: WhitespaceCarryForwardTest.scenario(WS_ONLY)[1],
+    "verify-red": lambda: run(replies={"verify": VERIFY_RED})[1],
+    "sync-rebuttal": _sync_rebuttal_scenario,
+    "own-red": _own_red_scenario,
+    "ship-resume": lambda: run(args=dict(ARGS, cont=ship_cont()))[1],
+}
+_SCENARIO_CALLS = {}
+
+
+def scenario_calls(name):
+    """The calls of one scenario, run once per process; callers never mutate the list."""
+    if name not in _SCENARIO_CALLS:
+        _SCENARIO_CALLS[name] = PROMPT_SCENARIOS[name]()
+    return _SCENARIO_CALLS[name]
+
+
+def _rows(scenario, label, origin, *phrases):
+    return tuple((scenario, label, phrase, origin) for phrase in phrases)
+
+
+PROMPT_PHRASES = {
+    "planner": (
+        *_rows("happy", "plan", "PlanTest.test_plan_stays_outside_the_tree_and_out_of_the_pr",
+               "/r/.git/worktrees/w/deliver-standard/plan.md", "never commit them"),
+        *_rows("sized-plan-finding", "plan", "ReviewSizingPlanTest.test_on_keeps_the_full_rubric_for_the_planner", FULL_RUBRIC),
+        *_rows("sized-plan-finding", "plan-revise", "ReviewSizingPlanTest.test_on_keeps_the_full_rubric_for_the_planner", FULL_RUBRIC),
+        *_rows("rule-finding", "plan", "PlanRulesTest.test_planner_and_reviewer_prompts_point_to_the_rules",
+               "~/.agents/standards/acceptance-planning.md", "verify-pending lint --input",
+               "--repo-root /r/.wt/w-issue-9-x --pr-branch issue-9-x", "--pr-workflow",
+               f'"merge": "{SHA}"', "metric", "scripts"),
+        *_rows("evidence-hold", "plan", "HoldTest.test_every_ruled_step_files_issues_through_forge_issue",
+               "forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"),
+        *_rows("happy", "plan", "CodeMapTest.test_the_planner_writes_the_map_in_the_plan_directory", MAP_PATH),
+        *_rows("map-findings", "plan-revise", "CodeMapTest.test_plan_reviewers_reviser_and_implementers_name_the_map", MAP_PATH),
+        *_rows("rules-only-revise", "plan-rules-revise", "CodeMapTest.test_the_rules_only_reviser_names_the_map", MAP_PATH),
+    ),
+    "implementer": (
+        *_rows("happy", "impl-1", "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout", LONG_BASH_TIMEOUT),
+        *_rows("evidence-hold", "impl-1", "HoldTest.test_every_ruled_step_files_issues_through_forge_issue",
+               "forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"),
+        *_rows("direct", "direct-impl", "HoldTest.test_every_ruled_step_files_issues_through_forge_issue",
+               "forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"),
+        *_rows("direct", "direct-impl", "DirectLaneTest.test_direct_implementer_follows_deliver_direct_steps",
+               "deliver-direct skill", "Skill tool", "Eligibility", "step 3", "steps 4 to 7",
+               "/r/.wt/w-issue-9-x", "h1/session-s1"),
+        *_rows("direct", "direct-impl",
+               "DirectLaneTest.test_the_implementer_keeps_the_declared_verification_out_of_the_criteria",
+               "Do not write the declared verification commands as an acceptance criterion: the verify step gates on them."),
+        *_rows("map-findings", "impl-1", "CodeMapTest.test_plan_reviewers_reviser_and_implementers_name_the_map", MAP_PATH),
+        *_rows("map-findings", "fix-1-1", "CodeMapTest.test_plan_reviewers_reviser_and_implementers_name_the_map", MAP_PATH),
+        *_rows("fix-wave", "fix-wave", "KeptObligationTest.test_a_rejected_finding_needs_evidence_in_notes",
+               "If a finding is wrong, explain with evidence in notes."),
+        *_rows("sync-rebuttal", "fix-sync-1",
+               "KeptObligationTest.test_the_sync_fix_may_not_rewrite_the_merge_and_its_rebuttal_is_checked_yourself",
+               "never redo or rewrite the merge"),
+        *_rows("own-red", "fix-ci", "OwnRedOutsideLockTest.test_the_diagnosis_under_the_lock_is_bounded",
+               "read only the failed job log, the check details and the branch's diff, and run no build and no test before the release",
+               "When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file",
+               "Only when the failure clearly has no cause in the code (no commit is needed), keep the lock"),
+    ),
+    "reviewer": (
+        *(row for label in ("plan-review", "review-1", "final-1")
+          for row in _rows("happy", label, "ContractTest.test_reviewers_get_standards_hints_and_rejections",
+                           "/r/docs/standards", "/r/.hints", "/r/.rej", "the-bar.md")),
+        *_rows("rule-finding", "plan-review", "PlanRulesTest.test_planner_and_reviewer_prompts_point_to_the_rules",
+               "~/.agents/standards/acceptance-planning.md"),
+        *_rows("rule-finding", "plan-rules-review", "PlanRulesTest.test_planner_and_reviewer_prompts_point_to_the_rules",
+               "~/.agents/standards/acceptance-planning.md"),
+        *_rows("final-finding", "fix-wave-review", "ReviewAndVerifyTest.test_fix_reviews_cover_the_whole_fix_range",
+               "diff b0..c0ffee"),
+        *_rows("fix-wave", "fix-wave-review", "FixWaveTest.test_rereview_is_asked_to_classify_each_finding",
+               "relation", "narrowing", "Unsure is new"),
+        *_rows("map-findings", "plan-review", "CodeMapTest.test_plan_reviewers_reviser_and_implementers_name_the_map", MAP_PATH),
+        *_rows("whitespace-only", "verify-fix-review-1", "KeptObligationTest.test_the_whitespace_attestation_stays_a_question",
+               "Also judge whether each of its whitespace changes is insignificant:"),
+        *_rows("sync-rebuttal", "fix-sync-review-1",
+               "KeptObligationTest.test_the_sync_fix_may_not_rewrite_the_merge_and_its_rebuttal_is_checked_yourself",
+               "Check each rebuttal against the code yourself"),
+    ),
+    "clerk": (
+        *_rows("happy", "merge", "HappyPathTest.test_delete_branch_follows_the_contract",
+               f"--merge --match-head-commit {SHA} --delete-branch"),
+        *_rows("happy", "pr", "HappyPathTest.test_non_default_integration_closes_the_issue_explicitly", "Refs #9"),
+        *_rows("happy", "close-out", "HappyPathTest.test_non_default_integration_closes_the_issue_explicitly",
+               "gh issue close 9 --repo owner/repo", "dev is not the default branch"),
+        *_rows("main-integration", "pr", "HappyPathTest.test_default_integration_uses_closes_and_still_confirms", "Closes #9"),
+        *_rows("main-integration", "close-out", "HappyPathTest.test_default_integration_uses_closes_and_still_confirms",
+               "gh issue close 9"),
+        *(row for label in ("setup", "renew-final-review", "verify", "pr", "merge")
+          for row in _rows("happy", label, "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout",
+                           LONG_BASH_TIMEOUT)),
+        *_rows("resume-for-answer", "owner-answer", "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout",
+               LONG_BASH_TIMEOUT),
+        *_rows("head-moved", "land-unlock", "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout",
+               LONG_BASH_TIMEOUT),
+        *_rows("renew-lost-resume", "acquire", "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout",
+               LONG_BASH_TIMEOUT),
+        *_rows("checks-behind", "checks-2", "TransientTest.test_every_forge_claim_prompt_gives_the_long_bash_timeout",
+               LONG_BASH_TIMEOUT),
+        *_rows("remote-only-branch", "setup", "SetupIdempotenceTest.test_remote_only_branch_is_checked_out_from_origin",
+               "when existing.remote_branch is true, git -C /r worktree add --no-track -b <branch> <worktree_path> origin/<branch>"),
+        *_rows("happy", "pr", "PlanTest.test_plan_stays_outside_the_tree_and_out_of_the_pr",
+               "Never attach or link the plan", "Acceptance (a table"),
+        *_rows("happy", "verify", "ReviewAndVerifyTest.test_skip_eligibility_lists_both_sides_of_a_rename",
+               "diff --no-renames --name-only"),
+        *_rows("happy", "pr", "ShipTest.test_checks_wait_uses_the_required_names_rule",
+               "gh api repos/owner/repo/rules/branches/dev", "never treat a partial list as green"),
+        *_rows("happy", "pr", "ShipFixWaveTest.test_checks_prompt_asks_for_failing_names_and_the_log_tail",
+               "failing", "--log-failed"),
+        *_rows("evidence-hold", "hold", "HoldTest.test_every_ruled_step_files_issues_through_forge_issue",
+               "forge-issue create", "--blocked-by <n>", "--blocks <n>", "forge-issue link"),
+        *_rows("direct-graded-hold", "hold", "DirectLaneTest.test_close_out_grades_the_implementer_criteria",
+               "needs-verification"),
+        *_rows("map-findings", "plan-codex", "CodeMapTest.test_plan_reviewers_reviser_and_implementers_name_the_map", MAP_PATH),
+        *_rows("verify-red", "verify", "KeptObligationTest.test_the_verify_body_asks_for_precise_failure_summaries",
+               "summarize the failing tests or errors precisely."),
+        *_rows("happy", "setup", "LookStopTest.test_both_setup_prompts_read_the_look_marker",
+               "look-approval marked --repo <slug> --issue 9"),
+        *_rows("ship-resume", "setup", "LookStopTest.test_both_setup_prompts_read_the_look_marker",
+               "look-approval marked --repo <slug> --issue 9"),
+    ),
+}
+
+
+def row_failure(role, row, calls):
+    """Why the row's call does not carry its phrase as the role's call, or None; only the last call of the label counts."""
+    _, label, phrase, _ = row
+    found = [c for c in calls if c["label"] == label]
+    if not found:
+        return f"no call labelled {label}"
+    last = found[-1]
+    if last["agentType"] != role:
+        return f"{label} is a {last['agentType']} call, not {role}"
+    if phrase not in last["prompt"]:
+        return f"{label} lacks {phrase}"
+    return None
+
+
+class PromptPhraseTableTest(unittest.TestCase):
+    """#1312: the phrases a delivery prompt must carry, one table per agent role, replacing the tests that only searched a prompt.
+
+    A row is a phrase that one labelled call of one scenario must contain; the role is the agentType the program gives the call.
+    """
+
+    @staticmethod
+    def rows_of(role):
+        return PROMPT_PHRASES[role]
+
+    def check_role(self, role):
+        for row in self.rows_of(role):
+            scenario, label, phrase, _ = row
+            with self.subTest(scenario=scenario, label=label, phrase=phrase):
+                self.assertIsNone(row_failure(role, row, scenario_calls(scenario)))
+
+    def test_the_planner_prompts_carry_their_phrases(self):
+        self.check_role("planner")
+
+    def test_the_implementer_prompts_carry_their_phrases(self):
+        self.check_role("implementer")
+
+    def test_the_reviewer_prompts_carry_their_phrases(self):
+        self.check_role("reviewer")
+
+    def test_the_clerk_prompts_carry_their_phrases(self):
+        self.check_role("clerk")
+
+    def test_row_failure_names_each_cause(self):
+        calls = [{"label": "x", "prompt": "alpha beta", "agentType": "clerk"},
+                 {"label": "x", "prompt": "gamma", "agentType": "clerk"},
+                 {"label": "y", "prompt": "alpha", "agentType": "reviewer"}]
+        self.assertIsNone(row_failure("clerk", ("s", "x", "gamma", "o"), calls))
+        self.assertEqual(row_failure("clerk", ("s", "x", "alpha", "o"), calls), "x lacks alpha")
+        self.assertEqual(row_failure("clerk", ("s", "y", "alpha", "o"), calls), "y is a reviewer call, not clerk")
+        self.assertEqual(row_failure("clerk", ("s", "z", "alpha", "o"), calls), "no call labelled z")
+        self.assertIs(scenario_calls("happy"), scenario_calls("happy"))
+
+    def test_removing_any_phrase_fails_exactly_its_row(self):
+        for role, table in PROMPT_PHRASES.items():
+            for row in table:
+                scenario, label, phrase, _ = row
+                with self.subTest(role=role, scenario=scenario, label=label, phrase=phrase):
+                    same = [r for r in table if r[0] == scenario]
+                    original = scenario_calls(scenario)
+                    baseline = {r for r in same if row_failure(role, r, original) is not None}
+                    mutated = copy.deepcopy(original)
+                    last = [c for c in mutated if c["label"] == label][-1]
+                    last["prompt"] = last["prompt"].replace(phrase, "")
+                    vanished = {r for r in same if r[1] == label and r[2] not in last["prompt"]}
+                    failing = {r for r in same if row_failure(role, r, mutated) is not None}
+                    self.assertEqual(failing, {row} | vanished | baseline)
+
+    def test_the_table_lists_each_row_once_under_a_known_scenario(self):
+        self.assertEqual(set(PROMPT_PHRASES), {"planner", "implementer", "reviewer", "clerk"})
+        triples = [(r[0], r[1], r[2]) for table in PROMPT_PHRASES.values() for r in table]
+        for table in PROMPT_PHRASES.values():
+            self.assertEqual(len(set(table)), len(table))
+        self.assertEqual(len(set(triples)), len(triples))
+        used = {r[0] for table in PROMPT_PHRASES.values() for r in table}
+        self.assertTrue(used <= set(PROMPT_SCENARIOS), used - set(PROMPT_SCENARIOS))
+        self.assertEqual(used, set(PROMPT_SCENARIOS))
 
 
 if __name__ == "__main__":
