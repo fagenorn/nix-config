@@ -243,7 +243,7 @@ class ReadingTest(unittest.TestCase):
             (access, TAILNET, loc, [TAILNET.upper()], [COLLEAGUE], [], [],
              {"admitted": True, "forwarded_host_form": "exact", "forwarded_host": TAILNET.upper()}),
             (access, TAILNET, loc, [OTHER_HOST], [COLLEAGUE], [], [],
-             {"forwarded_host_form": "other", "reason": "host", "forwarded_host": OTHER_HOST}),
+             {"forwarded_host_form": "other", "reason": "host", "forwarded_host": None}),
             (access, TAILNET, loc, [], [COLLEAGUE], [], [],
              {"forwarded_hosts": 0, "forwarded_host": None, "forwarded_host_form": "none",
               "reason": "host"}),
@@ -362,10 +362,15 @@ class ClientTest(unittest.TestCase):
                 text = json.dumps(r)
                 for part in ("100.64", "1684300805", "0x64"):
                     self.assertNotIn(part, text)
-        for value in ("localhost", OTHER_HOST, OTHER_HOST + ":443", "v4.example", "a1.b2.example:8"):
+        for host, forwarded in (("localhost", TAILNET), ("LocalHost", TAILNET.upper()),
+                                (TAILNET, TAILNET + ":443"), (TAILNET + ":443", "localhost")):
+            with self.subTest(host=host, forwarded=forwarded):
+                r = guest.reading(access, TAILNET, [host], [forwarded], [COLLEAGUE], [], [])
+                self.assertEqual((r["host"], r["forwarded_host"]), (host, forwarded))
+        for value in (OTHER_HOST, OTHER_HOST + ":443", "v4.example", "a1.b2.example:8", TAILNET + ":8"):
             with self.subTest(value=value):
                 r = guest.reading(access, TAILNET, [value], [value], [COLLEAGUE], [], [])
-                self.assertEqual((r["host"], r["forwarded_host"]), (value, value))
+                self.assertEqual((r["host"], r["forwarded_host"]), (None, None))
 
     def test_a_host_carrying_the_clients_address_is_not_kept(self):
         access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
@@ -384,9 +389,25 @@ class ClientTest(unittest.TestCase):
                     text = json.dumps(r)
                     for part in ("100.64", "example.invalid"):
                         self.assertNotIn(part, text)
-        r = guest.reading(access, TAILNET, [OTHER_HOST], [OTHER_HOST], [COLLEAGUE],
+        r = guest.reading(access, TAILNET, ["localhost"], [TAILNET], [COLLEAGUE],
                           [OTHER_DEVICE_ADDRESS], [], own=own)
-        self.assertEqual((r["host"], r["forwarded_host"]), (OTHER_HOST, OTHER_HOST))
+        self.assertEqual((r["host"], r["forwarded_host"]), ("localhost", TAILNET))
+
+    def test_a_host_spelling_the_clients_address_in_any_encoding_is_not_kept(self):
+        access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))
+        own = guest.own_addresses(OWN)
+        client = OTHER_DEVICE_ADDRESS  # 100.64.0.20
+        for value in ("app-64400014.example.invalid", "magic-c0a80101.nip.io",
+                      "100-064-000-020.example.invalid", "app.1681915924.example.invalid",
+                      "fd7a-115c-a1e0-0-0-0-0-a.example.invalid", "100-64-0-20.example.invalid",
+                      "0x64400014.example.invalid", "x.0144.0100.0.0024.example.invalid"):
+            for host, forwarded in ((value, value), ("localhost", value), (value, TAILNET)):
+                with self.subTest(value=value, host=host, forwarded=forwarded):
+                    r = guest.reading(access, TAILNET, [host], [forwarded], [COLLEAGUE], [client], [],
+                                      own=own)
+                    self.assertEqual(r["host"], "localhost" if host == "localhost" else None)
+                    self.assertEqual(r["forwarded_host"], TAILNET if forwarded == TAILNET else None)
+                    self.assertNotIn(value, json.dumps(r))
 
     def test_the_reading_keeps_only_the_comparison(self):
         access = Access(True, MappingProxyType({COLLEAGUE: frozenset({"owner/p01"})}))

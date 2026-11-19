@@ -84,9 +84,10 @@ finds in that guest's scoped view.
 showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if
 not, the `REASON_CODES` code (`sharing_off`, `name_unread`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
 and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
-it is a hostname of letters, digits, dots and hyphens with an optional port whose last label is not
-numeric and that carries no address of the request's `X-Forwarded-For` or of this host's own (so an `@`, a
-long value, an address in any numeric spelling or a name built on one, dotted or dashed, is never kept);
+it is one of the names the door knows (`localhost`, the read name, or the read name with `:443`, case
+aside); any other value is recorded by its `forwarded_host_form` or `host_local` alone and never by its
+text, so no address in any spelling, and no name built on one, is ever kept (no check of a client-sent
+name can tell every spelling of an address from a name);
 `host_local` (exactly one `Host`, `localhost` lowercased); and the
 `forwarded_host_form` (`HOST_FORMS`: `exact` the read name, `with_port` the name with `:443`,
 `other`, `none`) of the forwarded host; whether
@@ -192,7 +193,6 @@ PROJECT_MAX = 200
 _TAILNET = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
 _SELF_NAME = re.compile(r"([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.){2}ts\.net")
 _LOGIN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+")
-_HOST = re.compile(r"[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?")
 
 
 class Refused(Exception):
@@ -247,13 +247,6 @@ def self_name(status: object) -> str | None:
 
 
 _OWS = " \t"  # HTTP optional whitespace; no other character pads a field value
-_NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*")
-
-
-def _names_address(host: str) -> bool:
-    """Whether a Host-shaped value (no port needed) is an IP address in any numeric spelling, trailing dot included."""
-    last = host.rsplit(":", 1)[0].rstrip(".").rsplit(".", 1)[-1]  # a trailing dot names the same address
-    return _NUMERIC_LABEL.fullmatch(last) is not None
 
 
 def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -269,31 +262,13 @@ def _address(text: object) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
     return found
 
 
-def _spellings(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> set:
-    """The ways a host name can carry `address`: dotted or colon text, and the dash form a name must use."""
-    found = {str(address), address.exploded}
-    return found | {text.replace(".", "-").replace(":", "-") for text in found}
+def _kept_host(value: str, allowed: Sequence[str]) -> bool:
+    """Whether a host value is one of the `allowed` names, ignoring case: the only forms the reading keeps (ADR-console-079).
 
-
-def _literals(forwarded: Sequence[str], own: frozenset) -> frozenset:
-    """The address spellings a kept host must not carry: each forwarded address (a list taken apart) and this host's."""
-    found: set = set()
-    for address in own:
-        found |= _spellings(address)
-    for value in forwarded:
-        for part in value.split(","):
-            try:
-                address = _address(part)
-            except ValueError:
-                continue
-            found |= {part.strip(_OWS).lower()} | _spellings(address)
-    return frozenset(found)
-
-
-def _kept_host(value: str, literals: frozenset = frozenset()) -> bool:
-    """Whether a host value may be kept in the reading: host-shaped, no address and none of `literals` in it (ADR-console-079)."""
-    return (_HOST.fullmatch(value) is not None and not _names_address(value)
-            and not any(literal in value.lower() for literal in literals))
+    Anything else is recorded by its form alone, never by its text, because no check of a client-sent
+    name can tell every spelling of an address from a name (hex, octal, integer, padded or unpadded dash forms).
+    """
+    return value.lower() in allowed
 
 
 def own_addresses(status: object) -> frozenset:
@@ -428,7 +403,7 @@ def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_ho
             *, own: frozenset = frozenset()) -> dict:
     """What one guest-door request showed, for the owner's `sharing.last_request`; never a login or an address."""
     _, text = admit(access, name, hosts, forwarded_hosts, logins)
-    literals = _literals(forwarded, own)
+    known = (LOCAL_HOST,) if name is None else (LOCAL_HOST, name, name + ":443")
     host = hosts[0] if len(hosts) == 1 else None
     one = forwarded_hosts[0] if len(forwarded_hosts) == 1 else None
     if one is None:
@@ -442,10 +417,10 @@ def reading(access: Access, name: str | None, hosts: Sequence[str], forwarded_ho
     return {"admitted": text is None,
             "client": client_of(forwarded, own),
             "forwarded_for": bool(forwarded),
-            "forwarded_host": one if one is not None and _kept_host(one, literals) else None,
+            "forwarded_host": one if one is not None and _kept_host(one, known) else None,
             "forwarded_host_form": form,
             "forwarded_hosts": len(forwarded_hosts),
-            "host": host if host is not None and _kept_host(host, literals) else None,
+            "host": host if host is not None and _kept_host(host, known) else None,
             "host_local": host is not None and host.lower() == LOCAL_HOST,
             "hosts": len(hosts),
             "login_headers": len(logins),

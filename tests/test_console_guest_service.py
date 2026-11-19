@@ -1120,6 +1120,9 @@ class ReadingServiceTest(GuestCase):
         self.seed()
         svc = self.start()
         for value in ("100-64-0-20.example.invalid", "100.64.0.20.example.invalid",
+                      "app-64400014.example.invalid", "magic-c0a80101.nip.io",
+                      "100-064-000-020.example.invalid", "app.1681915924.example.invalid",
+                      "fd7a-115c-a1e0-0-0-0-0-a.example.invalid",
                       "ip-100-64-0-20.sslip.invalid", "fd7a-115c-a1e0--a.example.invalid",
                       "fd7a-115c-a1e0-0000-0000-0000-0000-000a.example.invalid",
                       "100-64-0-10.example.invalid"):
@@ -1129,7 +1132,8 @@ class ReadingServiceTest(GuestCase):
                 last = self.reading(svc)
                 self.assertEqual((last["host"], last["forwarded_host"]), (None, None))
                 owner = svc.view_bytes.lower()
-                for part in (b"100-64-0", b"100.64.0", b"fd7a-", b"fd7a:"):
+                for part in (b"100-64-0", b"100.64.0", b"fd7a-", b"fd7a:", b"64400014", b"c0a80101",
+                             b"100-064", b"1681915924"):
                     self.assertNotIn(part, owner)
 
     def test_the_owner_view_says_whether_another_device_came(self):
@@ -1281,7 +1285,7 @@ class ReadingServiceTest(GuestCase):
             (("TRACE", "/api/state", {"logins": [STRANGER, STRANGER]}), 403, guest.NOT_SHARED_TEXT,
              {"login_headers": 2, "reason": "not_shared", "admitted": False}),
             (("POST", "/api/looked", {"forwarded_host": OTHER_HOST}), 403, guest.HOST_TEXT,
-             {"forwarded_host_form": "other", "forwarded_host": OTHER_HOST}),
+             {"forwarded_host_form": "other", "forwarded_host": None}),
             (("GET", "/api/whoami", {"logins": []}), 200, None,
              {"login_headers": 0, "reason": "not_shared"}),
             (("DELETE", "/api/state", {}), 405, None, {"admitted": True, "reason": None}),

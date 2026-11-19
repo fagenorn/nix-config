@@ -210,7 +210,7 @@ class SharingPanelTest(unittest.TestCase):
              last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
                     "refused because sharing is off."),
             (guest.reading(ACCESS, None, local, [TAILNET], [COLLEAGUE], [], []),
-             last + f"Host localhost, forwarded Host {TAILNET}, a login header, "
+             last + "Host localhost, a forwarded Host the console does not keep, a login header, "
                     "refused because the console could not read this host's tailnet name."),
             (None, "No request has come to the guest door yet."),
         ]
