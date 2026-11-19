@@ -1,7 +1,7 @@
 # ADR-console-077 — The guest door on eleven-m5 is a Unix socket only Serve and the owner can open
 
 - **Status:** accepted
-- **Decided in:** #1298
+- **Decided in:** #1298, #1299
 
 ## Context
 
@@ -15,9 +15,9 @@ ADR-console-066 fixed how a named colleague reaches the console through Tailscal
 
 **D3. ADR-console-066 D1, restated for a shared host.** An administrator with sudo stays out of reach, as ADR-console-076 D6 says: this record does not claim to stop one, who can run as root or as the owner. No other local account can pose as a colleague any more, because it can neither open the folder nor connect as a permitted peer, so a forged login header from it never reaches the console. The Windows-era argument that a forged header gains a local process nothing no longer carries the rule.
 
-**D4. The rule of ADR-console-066 D2 stands, except its first bullet.** The first bullet of ADR-console-066 D2, that Serve proxies to a second loopback port of the console, is superseded by D1: Serve proxies to the guest socket. The remaining bullets of ADR-console-066 D2 stand unchanged. A request on the guest door is a guest only when its `Host` is exactly the tailnet name the owner configured (`<host>.<tailnet>.ts.net`) and it carries exactly one login header naming a listed colleague (`<colleague-login>`); anything else is refused. The owner's port, the guest token, the owner-only list of ADR-console-066 D3 and the diagnostics reading of the last guest request all stay as written.
+**D4. The rule of ADR-console-066 D2 stands, except its first bullet and where the tailnet name is read.** The first bullet of ADR-console-066 D2, that Serve proxies to a second loopback port of the console, is superseded by D1: Serve proxies to the guest socket. The remaining bullets of ADR-console-066 D2 stand unchanged, except where the name is read. By the owner's answer of 19 Nov (through the lead), a request on the guest door is a guest only when it carries exactly one `Host`, exactly `localhost`, exactly one `X-Forwarded-Host`, equal to the tailnet name the owner configured (`<host>.<tailnet>.ts.net`) with no port form, and exactly one login header naming a listed colleague (`<colleague-login>`); the login check stays as it is, both names are compared lowercased as ADR-console-066 compared the `Host`, and anything else is refused (fail closed). The socket file is mode 0600 and the owner's, inside the mode-0700 folder of D1, so only root and the owner can reach it; on every guest connection the console checks the folder and the file again and refuses the connection, before reading it, while either is not the owner's or its mode is wider, that is, carries any bit beyond 0700 for the folder or 0600 for the file. The owner's port, the guest token, the owner-only list of ADR-console-066 D3 and the diagnostics reading of the last guest request all stay as written; the reading also keeps the forwarded name, how many arrived, and whether the `Host` was `localhost`.
 
-**D5. The commands, replacing ADR-console-066 D4's `tailscale.exe` ones.** The lead runs these on eleven-m5; `<socket-path>` is the path the console reports for the guest socket, and Serve stays off until the socket is in.
+**D5. The commands, replacing ADR-console-066 D4's `tailscale.exe` ones.** The lead runs these on eleven-m5; `<socket-path>` is the path the console reports for the guest socket (the owner's `sharing.socket`), and Serve stays off until the slice of #1299 has landed and the lead has probed it.
 
 ```sh
 # on, in the background, HTTPS on the tailnet name, proxying to the guest socket

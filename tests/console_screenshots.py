@@ -922,12 +922,18 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
     return service
 
 
-def _guest_get(door: str | tuple[str, int], path: str = "/", *, host: str | None = TAILNET,
+def _guest_headers(door: str | tuple[str, int]) -> dict:
+    """The headers Serve sends to `door`: a port door (the base commit) reads the tailnet name as its
+    `Host`; a socket door reads `Host: localhost` and the name as its one `X-Forwarded-Host`."""
+    if isinstance(door, str):
+        return {"Host": "localhost", "X-Forwarded-Host": TAILNET}
+    return {"Host": TAILNET}
+
+
+def _guest_get(door: str | tuple[str, int], path: str = "/", *,
                login: str | None = COLLEAGUE) -> http.client.HTTPResponse:
-    """One GET to `door` carrying the tailnet Host and the colleague's login header."""
-    headers = {}
-    if host is not None:
-        headers["Host"] = host
+    """One GET to `door` carrying the door's host headers and the colleague's login header."""
+    headers = _guest_headers(door)
     if login is not None:
         headers["Tailscale-User-Login"] = login
     connection = _door_connection(door, 10)
@@ -938,8 +944,10 @@ def _guest_get(door: str | tuple[str, int], path: str = "/", *, host: str | None
 class _Serve:
     """A loopback stand-in for Tailscale Serve in front of the guest port.
 
-    Each GET is forwarded to the guest door `door` with `Host: TAILNET` and `Tailscale-User-Login:
-    COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For` and `Host` dropped; the status and
+    Each GET is forwarded to the guest door `door` with the door's host headers (`_guest_headers`:
+    `Host: TAILNET` for a port door, `Host: localhost` and `X-Forwarded-Host: TAILNET` for a socket
+    door) and `Tailscale-User-Login: COLLEAGUE`, any incoming `Tailscale-*`, `X-Forwarded-For`,
+    `X-Forwarded-Host` and `Host` dropped; the status and
     headers are copied and the body is streamed until EOF, each chunk flushed (the view stream
     is event-stream). `.address` is where a browser reads it; `.close()` stops it.
     """
@@ -949,11 +957,11 @@ class _Serve:
             def do_GET(self) -> None:
                 kept = {name: value for name, value in self.headers.items()
                         if not name.lower().startswith("tailscale-")
-                        and name.lower() not in ("x-forwarded-for", "host")}
+                        and name.lower() not in ("x-forwarded-for", "x-forwarded-host", "host")}
                 connection = _door_connection(door, 3600)
                 try:
                     connection.request("GET", self.path, headers={
-                        **kept, "Host": TAILNET, "Tailscale-User-Login": COLLEAGUE})
+                        **kept, **_guest_headers(door), "Tailscale-User-Login": COLLEAGUE})
                     response = connection.getresponse()
                     self.send_response_only(response.status)
                     for name, value in response.getheaders():

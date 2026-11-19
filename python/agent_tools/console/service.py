@@ -92,9 +92,9 @@ the connection with no answer, appends nothing, records no reading and prints on
 guest_refused <door_wider|not_permitted|unreadable>`. A guest request is admitted by
 `guest.admit` in this order, each refusal `403` `text/plain`, one line, `Connection: close`, with
 nothing appended (the one thing a guest-door request may publish is the reading below): sharing
-off (no tailnet name), a `Host` that is not exactly the configured tailnet name, then not exactly one `Tailscale-User-Login` header of a listed colleague.
-`GET /api/whoami` is answered to any request before admission: it reports the `Host` it saw, how
-many `Host` and login headers arrived, whether `X-Forwarded-For` did, and whether the login named
+off (no tailnet name), a `Host` that is not exactly one `localhost` or an `X-Forwarded-Host` that is not exactly one and the configured tailnet name (no port form; ADR-console-077 D4), then not exactly one `Tailscale-User-Login` header of a listed colleague.
+`GET /api/whoami` is answered to any request before admission: it reports the `Host` and the
+`X-Forwarded-Host` it saw, how many of each and of the login headers arrived, whether `X-Forwarded-For` did, and whether the login named
 by `X-Console-Probe` arrived as a login header, and never repeats a login. After admission an
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
@@ -3268,15 +3268,17 @@ class GuestHandler(ConsoleHandler):
         console = self.server.console
         route = self.path.split("?", 1)[0]
         hosts = self.headers.get_all("Host") or []
+        forwarded_hosts = self.headers.get_all(guest.FORWARDED_HOST_HEADER) or []
         logins = self.headers.get_all(guest.LOGIN_HEADER) or []
         if self.command == "GET" and route == WHOAMI_PATH:
             body = json.dumps(
-                guest.whoami(hosts, logins, self.headers.get_all("X-Forwarded-For") or [],
+                guest.whoami(hosts, forwarded_hosts, logins,
+                             self.headers.get_all("X-Forwarded-For") or [],
                              self.headers.get_all(guest.PROBE_HEADER) or []),
                 sort_keys=True, separators=(",", ":"))
             return self._send(200, "application/json", body.encode())
         access = console.access
-        login, text = guest.admit(access, hosts, logins)
+        login, text = guest.admit(access, hosts, forwarded_hosts, logins)
         if text is not None:
             return self._refuse(403, text)
         if route in OWNER_ONLY:
@@ -3294,13 +3296,14 @@ class GuestHandler(ConsoleHandler):
                 return self._refuse(403, guest.NOT_SHARED_TEXT)
             self._send(200, "application/json", view)
         elif route == STREAM_PATH:
-            self._stream(self._readmitting(login, hosts, logins))
+            self._stream(self._readmitting(login, hosts, forwarded_hosts, logins))
         elif route.startswith(PICTURE_PREFIX):
             self._guest_picture(route, access, login)
         else:
             self._refuse(404, "not found")
 
-    def _readmitting(self, login: str, hosts: list[str], logins: list[str]):
+    def _readmitting(self, login: str, hosts: list[str], forwarded_hosts: list[str],
+                     logins: list[str]):
         console = self.server.console
         last: list[bytes | None] = [None]
 
@@ -3313,7 +3316,8 @@ class GuestHandler(ConsoleHandler):
                 if change is None:
                     return None
                 version, access, view = change
-                if guest.admit(access, hosts, logins) != (login, None) or view is None:
+                if (guest.admit(access, hosts, forwarded_hosts, logins) != (login, None)
+                        or view is None):
                     return version, None
                 if view == last[0]:
                     seen = version
@@ -3347,6 +3351,7 @@ class GuestHandler(ConsoleHandler):
             console = self.server.console
             console.record_guest_request(guest.reading(
                 console.access, headers.get_all("Host") or [],
+                headers.get_all(guest.FORWARDED_HOST_HEADER) or [],
                 headers.get_all(guest.LOGIN_HEADER) or [],
                 headers.get_all("X-Forwarded-For") or [],
                 headers.get_all(guest.PROBE_HEADER) or []))

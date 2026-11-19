@@ -150,13 +150,16 @@ class GuestCase(unittest.TestCase):
         return support.service(
             self, self.store, self.registry, guest_socket=self.guest_socket, **kwargs)
 
-    def request(self, address, method, path, host, logins, headers, length):
+    def request(self, address, method, path, host, logins, headers, length, forwarded_host=None):
         connection = (support.UnixHTTPConnection(address) if isinstance(address, str)
                       else http.client.HTTPConnection(*address, timeout=5))
         try:
             connection.putrequest(method, path, skip_host=True)
             if host is not None:
                 connection.putheader("Host", host)
+            for name in ([] if forwarded_host is None else [forwarded_host]
+                         if isinstance(forwarded_host, str) else forwarded_host):
+                connection.putheader("X-Forwarded-Host", name)
             for login in logins:
                 connection.putheader("Tailscale-User-Login", login)
             for name, value in (headers or {}).items():
@@ -170,9 +173,10 @@ class GuestCase(unittest.TestCase):
         finally:
             connection.close()
 
-    def guest(self, svc, method, path, host=TAILNET, logins=(COLLEAGUE,), headers=None,
-              length=None):
-        return self.request(svc.guest_socket, method, path, host, logins, headers, length)
+    def guest(self, svc, method, path, host="localhost", forwarded_host=TAILNET,
+              logins=(COLLEAGUE,), headers=None, length=None):
+        return self.request(svc.guest_socket, method, path, host, logins, headers, length,
+                            forwarded_host)
 
     def owner(self, svc, method, path, headers=None, length=None):
         return self.request(svc.address, method, path, f"{svc.address[0]}:{svc.address[1]}",
@@ -205,7 +209,8 @@ class GuestCase(unittest.TestCase):
         connection = support.UnixHTTPConnection(svc.guest_socket)
         self.addCleanup(connection.close)
         connection.putrequest("GET", "/api/stream", skip_host=True)
-        connection.putheader("Host", TAILNET)
+        connection.putheader("Host", "localhost")
+        connection.putheader("X-Forwarded-Host", TAILNET)
         connection.putheader("Tailscale-User-Login", COLLEAGUE)
         connection.endheaders()
         response = connection.getresponse()
@@ -341,20 +346,41 @@ class AdmissionTest(GuestCase):
                     svc = self.start()
                     for route in sorted(service.ROUTES - {service.WHOAMI_PATH}):
                         status, _, body = self.unchanged(
-                            svc, lambda: self.guest(svc, "GET", route, host=host, logins=logins))
+                            svc, lambda: self.guest(
+                                svc, "GET", route, forwarded_host=host, logins=logins))
                         self.assertEqual((route, status, body), (route, 403, text.encode() + b"\n"))
                         for marker in (b"owner/p0", b"/srv/p0", COLLEAGUE.encode(),
                                        STRANGER.encode()):
                             self.assertNotIn(marker, body)
                     svc.close()
 
+    def test_the_tailnet_name_is_read_from_one_forwarded_host(self):
+        self.seed()
+        svc = self.start()
+        self.assertEqual(self.guest(svc, "GET", "/api/state")[0], 200)
+        rows = (
+            {"host": TAILNET},
+            {"host": "localhost:80"},
+            {"forwarded_host": None},
+            {"forwarded_host": [TAILNET, TAILNET]},
+            {"forwarded_host": TAILNET + ":443"},
+            {"forwarded_host": OTHER_HOST},
+        )
+        for change in rows:
+            with self.subTest(change=change):
+                status, _, body = self.unchanged(
+                    svc, lambda: self.guest(svc, "GET", "/api/state", **change))
+                self.assertEqual((status, body), (403, guest.HOST_TEXT.encode() + b"\n"))
+        svc.close()
+
     def test_whoami_answers_any_request(self):
         svc = self.start()
-        status, _, body = self.guest(svc, "GET", "/api/whoami", host=OTHER_HOST, logins=())
+        status, _, body = self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST,
+                                     logins=())
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {
-            "forwarded_for": False, "host": OTHER_HOST, "hosts": 1, "login_headers": 0,
-            "probe_login_arrived": False})
+            "forwarded_for": False, "forwarded_host": OTHER_HOST, "forwarded_hosts": 1,
+            "host": "localhost", "hosts": 1, "login_headers": 0, "probe_login_arrived": False})
         svc.close()
         self.seed()
         svc = self.start()
@@ -733,8 +759,9 @@ class AccessWriteTest(GuestCase):
         self.assertEqual(mine["sharing"], {
             "tailnet": TAILNET, "colleagues": [{"login": COLLEAGUE, "projects": ["owner/p01"]}],
             "state": "unchecked", "socket": str(self.guest_socket), "last_request": {
-                "admitted": True, "forwarded_for": False, "host": TAILNET,
-                "host_form": "exact", "hosts": 1, "login_headers": 1, "login_valid": True,
+                "admitted": True, "forwarded_for": False, "forwarded_host": TAILNET,
+                "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
+                "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True,
                 "probe": False, "probe_login_arrived": False, "reason": None}})
         status, _, body = self.write(
             svc, "/api/share-colleague", {"login": COLLEAGUE, "projects": ["owner/p00"]})
@@ -855,9 +882,10 @@ class ReadingServiceTest(GuestCase):
                                      headers={"X-Forwarded-For": "100.64.0.1"})
         self.assertEqual((status, body), (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
         self.assertEqual(self.reading(svc), {
-            "admitted": False, "forwarded_for": True, "host": TAILNET, "host_form": "exact",
-            "hosts": 1, "login_headers": 1, "login_valid": True, "probe": False,
-            "probe_login_arrived": False, "reason": "not_shared"})
+            "admitted": False, "forwarded_for": True, "forwarded_host": TAILNET,
+            "forwarded_host_form": "exact", "forwarded_hosts": 1, "host": "localhost",
+            "host_local": True, "hosts": 1, "login_headers": 1, "login_valid": True,
+            "probe": False, "probe_login_arrived": False, "reason": "not_shared"})
         self.assertNotIn(STRANGER.encode(), svc.view_bytes.lower())
         status, _, _ = self.guest(svc, "GET", "/api/whoami", headers={"X-Console-Probe": FORGED})
         self.assertEqual(status, 200)
@@ -865,18 +893,18 @@ class ReadingServiceTest(GuestCase):
         self.assertTrue(got["admitted"] and got["probe"])
         self.assertIsNone(got["reason"])
         self.assertFalse(got["probe_login_arrived"])
-        status, _, body = self.guest(svc, "GET", "/", host=TAILNET + ":443")
+        status, _, body = self.guest(svc, "GET", "/", forwarded_host=TAILNET + ":443")
         self.assertEqual((status, body), (403, guest.HOST_TEXT.encode() + b"\n"))
         got = self.reading(svc)
-        self.assertEqual((got["host_form"], got["reason"], got["host"]),
+        self.assertEqual((got["forwarded_host_form"], got["reason"], got["forwarded_host"]),
                          ("with_port", "host", TAILNET + ":443"))
         version = svc.version
-        self.guest(svc, "GET", "/", host=TAILNET + ":443")
+        self.guest(svc, "GET", "/", forwarded_host=TAILNET + ":443")
         self.assertEqual(svc.version, version)
         body = self.guest(svc, "GET", "/api/state")[2]
         frame = next_frame(self.open_stream(svc))
         for seen in (body, frame):
-            for member in (b"last_request", b"host_form", b'"sharing"'):
+            for member in (b"last_request", b"forwarded_host_form", b'"sharing"'):
                 self.assertNotIn(member, seen)
         self.assertEqual(support.log_rows(self.store), rows)
 
@@ -928,8 +956,8 @@ class ReadingServiceTest(GuestCase):
         table = [
             (("TRACE", "/api/state", {"logins": [STRANGER, STRANGER]}), 403, guest.NOT_SHARED_TEXT,
              {"login_headers": 2, "reason": "not_shared", "admitted": False}),
-            (("POST", "/api/looked", {"host": OTHER_HOST}), 403, guest.HOST_TEXT,
-             {"host_form": "other", "host": OTHER_HOST}),
+            (("POST", "/api/looked", {"forwarded_host": OTHER_HOST}), 403, guest.HOST_TEXT,
+             {"forwarded_host_form": "other", "forwarded_host": OTHER_HOST}),
             (("GET", "/api/whoami", {"logins": []}), 200, None,
              {"login_headers": 0, "reason": "not_shared"}),
             (("DELETE", "/api/state", {}), 405, None, {"admitted": True, "reason": None}),
@@ -965,11 +993,12 @@ class ConnectionTest(GuestCase):
     def test_a_second_request_on_one_connection_is_never_answered(self):
         self.seed()
         svc = self.start()
-        inner = (b"GET /api/state HTTP/1.1\r\nHost: " + TAILNET.encode()
-                 + b"\r\nTailscale-User-Login: " + COLLEAGUE.encode() + b"\r\n\r\n")
+        inner = (b"GET /api/state HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Host: "
+                 + TAILNET.encode() + b"\r\nTailscale-User-Login: " + COLLEAGUE.encode()
+                 + b"\r\n\r\n")
 
         def head(path, login=True, body=b""):
-            lines = [f"GET {path} HTTP/1.1", f"Host: {TAILNET}"]
+            lines = [f"GET {path} HTTP/1.1", "Host: localhost", f"X-Forwarded-Host: {TAILNET}"]
             if login:
                 lines.append(f"Tailscale-User-Login: {COLLEAGUE}")
             if body:
@@ -1108,9 +1137,13 @@ class HeldCheckServiceTest(GuestCase):
         self.assertEqual(check(), (0, "met"))
         svc.set_tailnet(OTHER_HOST)
         self.assertEqual(check(), (75, "stale"))
-        self.guest(svc, "GET", "/api/whoami", host=OTHER_HOST, logins=[FORGED],
+        self.guest(svc, "GET", "/api/whoami", forwarded_host=OTHER_HOST, logins=[FORGED],
                    headers={"X-Forwarded-For": "100.64.0.1",
                             "X-Console-Probe": "other-probe@example.invalid"})
+        self.assertEqual(check(), (1, "not_met"))
+        svc.set_tailnet(TAILNET)
+        self.guest(svc, "GET", "/api/whoami", host=TAILNET,
+                   headers={"X-Forwarded-For": "100.64.0.1", "X-Console-Probe": FORGED})
         self.assertEqual(check(), (1, "not_met"))
 
 

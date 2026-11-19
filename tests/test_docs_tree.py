@@ -864,7 +864,8 @@ class DocsTreeTest(unittest.TestCase):
         text = re.sub(r"\s+", " ", raw)
         self.assertTrue(raw.splitlines()[0].startswith("# ADR-console-077 \u2014 "))
         for needle in (
-            "- **Status:** accepted", "- **Decided in:** #1298", "ADR-console-066", "ADR-console-076",
+            "- **Status:** accepted", "- **Decided in:** #1298, #1299", "ADR-console-066",
+            "ADR-console-076",
             "eleven-m5", "Unix socket", "mode-0700", "peer user", "second line", "administrator",
             "sudo tailscale serve --bg --https=443 unix:<socket-path>", "tailscale serve status",
             "sudo tailscale serve --https=443 off", "<host>.<tailnet>.ts.net", "<colleague-login>",
@@ -880,11 +881,19 @@ class DocsTreeTest(unittest.TestCase):
             with self.subTest(d2=needle):
                 self.assertIn(needle, d2)
         d4 = text.split("**D4.", 1)[1].split("**D5.", 1)[0]
-        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged"):
+        for needle in ("first bullet of ADR-console-066 D2", "superseded", "stand unchanged",
+                       "19 Nov", "exactly `localhost`", "exactly one `X-Forwarded-Host`",
+                       "no port form", "the login check stays as it is", "mode 0600", "wider",
+                       "fail closed"):
             with self.subTest(d4=needle):
                 self.assertIn(needle, d4)
-        guest = self.doc("docs/areas/console/CONTEXT.md").split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
-        self.assertIn("not yet built", guest)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        guest = context.split("**Guest**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertNotIn("not yet built", guest)
+        self.assertIn("ADR-console-077", guest)
+        console = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("ADR-console-077", console)
+        self.assertNotIn("guest port", console)
         status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
                                       "through-tailscale-serve-on-a-guest-port.md"
                                       ).read_text().splitlines() if row.startswith("- **Status:**"))

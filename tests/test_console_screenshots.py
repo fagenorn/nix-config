@@ -751,6 +751,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     serve.close()
                 svc.close()
 
+    def test_the_harness_sends_each_door_its_own_headers(self) -> None:
+        self.assertEqual(shots._guest_headers(("127.0.0.1", 9)), {"Host": shots.TAILNET})
+        self.assertEqual(shots._guest_headers("/tmp/cg-x/g.sock"),
+                         {"Host": "localhost", "X-Forwarded-Host": shots.TAILNET})
+
     def test_the_harness_opens_the_base_and_the_head_guest_door(self) -> None:
         def base(store, registry, *, port, guest_port=None, guest_token_path=None, **kwargs):
             pass

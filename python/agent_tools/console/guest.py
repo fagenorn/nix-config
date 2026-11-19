@@ -13,11 +13,13 @@ payload that is not a valid name turns sharing off; a colleague row whose login 
 normal form (lowercase) or whose projects are not a non-empty list of non-empty strings removes
 that login (fail closed); a row whose login is not a string is ignored.
 
-`admit(access, hosts, logins)` returns `(login, None)` for an admitted request and `(None, text)`
-for a refused one. The checks run in this order: sharing is off (`SHARING_OFF_TEXT`); the request
-carries exactly one `Host` that, lowercased, is the configured tailnet name exactly, port
-included (`HOST_TEXT`); it carries exactly one login header (`LOGIN_HEADER`) whose normal form is
-a listed colleague (`NOT_SHARED_TEXT`). No text names a project or echoes a login or a host.
+`admit(access, hosts, forwarded_hosts, logins)` returns `(login, None)` for an admitted request and
+`(None, text)` for a refused one (ADR-console-077 D4). The checks run in this order: sharing is off
+(`SHARING_OFF_TEXT`); the request carries exactly one `Host` that, lowercased, is `LOCAL_HOST`
+(`localhost`, no port) and exactly one `X-Forwarded-Host` (`FORWARDED_HOST_HEADER`) that, lowercased,
+is the configured tailnet name exactly, with no port form (`HOST_TEXT`); it carries exactly one login
+header (`LOGIN_HEADER`) whose normal form is a listed colleague (`NOT_SHARED_TEXT`). No text names a
+project or echoes a login or a host.
 Each text is answered as `403 text/plain` with a trailing newline.
 
 The guest door is a Unix socket (ADR-console-077). `door_refusal(folder, sock, owner_uid)` takes the
@@ -32,7 +34,8 @@ The owner's port refuses a request that carries any header whose name, lowercase
 Serve must never reach the owner's port, and a forged header gains a local process nothing.
 
 `whoami` is the probe's answer (`PROBE_HEADER` carries a forged login the probe sends to learn
-whether Serve strips it): counts and flags only, never the login values.
+whether Serve strips it): the `Host` and the forwarded host it saw (each only when exactly one
+arrived), how many of each arrived, and counts and flags only for the logins, never their values.
 
 A guest sees a scoped copy of the owner's view (`scoped`, `scrub`). `scoped(inputs, projects)`
 takes the keyword inputs of `view.derive_view` and a guest's project ids and returns inputs that
@@ -49,12 +52,14 @@ registration members, the digest, the activation line, the spend view and the ca
 stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
 finds in that guest's scoped view.
 
-`reading(access, hosts, logins, forwarded, probes)` is what one guest-port request showed, for the
-owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if not, the
-`REASON_CODES` code (`sharing_off`, `host`, `not_shared`); how many `Host` and login headers arrived;
-the `Host` itself only when exactly one arrived and it is a hostname of letters, digits, dots and
-hyphens with an optional port (so an `@` or a long value is never kept), and its `host_form`
-(`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`, `other`, `none`); whether
+`reading(access, hosts, forwarded_hosts, logins, forwarded, probes)` is what one guest-door request
+showed, for the owner's `sharing.last_request` (`READING_MEMBERS`): whether it was admitted and, if
+not, the `REASON_CODES` code (`sharing_off`, `host`, `not_shared`); how many `Host`, `X-Forwarded-Host`
+and login headers arrived; each of the `Host` and the forwarded host only when exactly one arrived and
+it is a hostname of letters, digits, dots and hyphens with an optional port (so an `@` or a long
+value is never kept); `host_local` (exactly one `Host`, `localhost` lowercased); and the
+`forwarded_host_form` (`HOST_FORMS`: `exact` the tailnet name, `with_port` the name with `:443`,
+`other`, `none`) of the forwarded host; whether
 `X-Forwarded-For` arrived; `probe` (exactly one probe header carrying `PROBE_LOGIN`) and
 `probe_login_arrived` (`PROBE_LOGIN` arrived as a login, whatever the probe header said); `login_valid`
 (at least one login header arrived and every one is a well-formed login, so a combined value such as
@@ -115,18 +120,22 @@ LOGIN_HEADER = "Tailscale-User-Login"
 PROBE_HEADER = "X-Console-Probe"
 PROBE_LOGIN = "forged-probe@example.invalid"
 
+LOCAL_HOST = "localhost"
+FORWARDED_HOST_HEADER = "X-Forwarded-Host"
+
 SHARING_OFF_TEXT = "Sharing is off on this console."
 HOST_TEXT = "This console is shared only at its tailnet name."
 NOT_SHARED_TEXT = "This console is not shared with you. Ask its owner to add your Tailscale login."
 OWNER_ONLY_TEXT = "Only the console's owner can do that."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
-                   "Point Tailscale Serve at the console's guest port.")
+                   "Point Tailscale Serve at the console's guest socket.")
 
 HOST_FORMS = ("exact", "with_port", "other", "none")
 REASON_CODES: Mapping[str, str] = MappingProxyType({
     SHARING_OFF_TEXT: "sharing_off", HOST_TEXT: "host", NOT_SHARED_TEXT: "not_shared"})
-READING_MEMBERS = ("admitted", "forwarded_for", "host", "host_form", "hosts", "login_headers",
-                   "login_valid", "probe", "probe_login_arrived", "reason")
+READING_MEMBERS = ("admitted", "forwarded_for", "forwarded_host", "forwarded_host_form",
+                   "forwarded_hosts", "host", "host_local", "hosts", "login_headers", "login_valid",
+                   "probe", "probe_login_arrived", "reason")
 
 TAILNET_MAX = 253
 LOGIN_MAX = 254
@@ -236,11 +245,13 @@ def parse_removal(body: bytes) -> str:
     return _login(_object(body, {"login"})["login"])
 
 
-def admit(access: Access, hosts: Sequence[str],
+def admit(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
           logins: Sequence[str]) -> tuple[str | None, str | None]:
     if access.tailnet is None:
         return None, SHARING_OFF_TEXT
-    if len(hosts) != 1 or hosts[0].lower() != access.tailnet:
+    if len(hosts) != 1 or hosts[0].lower() != LOCAL_HOST:
+        return None, HOST_TEXT
+    if len(forwarded_hosts) != 1 or forwarded_hosts[0].lower() != access.tailnet:
         return None, HOST_TEXT
     if len(logins) != 1:
         return None, NOT_SHARED_TEXT
@@ -250,11 +261,12 @@ def admit(access: Access, hosts: Sequence[str],
     return login, None
 
 
-def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
-            forwarded: Sequence[str], probes: Sequence[str]) -> dict:
-    """What one guest-port request showed, for the owner's `sharing.last_request`; never a login."""
-    _, text = admit(access, hosts, logins)
-    one = hosts[0] if len(hosts) == 1 else None
+def reading(access: Access, hosts: Sequence[str], forwarded_hosts: Sequence[str],
+            logins: Sequence[str], forwarded: Sequence[str], probes: Sequence[str]) -> dict:
+    """What one guest-door request showed, for the owner's `sharing.last_request`; never a login."""
+    _, text = admit(access, hosts, forwarded_hosts, logins)
+    host = hosts[0] if len(hosts) == 1 else None
+    one = forwarded_hosts[0] if len(forwarded_hosts) == 1 else None
     if one is None:
         form = "none"
     elif access.tailnet is not None and one.lower() == access.tailnet:
@@ -265,8 +277,11 @@ def reading(access: Access, hosts: Sequence[str], logins: Sequence[str],
         form = "other"
     return {"admitted": text is None,
             "forwarded_for": bool(forwarded),
-            "host": one if one is not None and _HOST.fullmatch(one) else None,
-            "host_form": form,
+            "forwarded_host": one if one is not None and _HOST.fullmatch(one) else None,
+            "forwarded_host_form": form,
+            "forwarded_hosts": len(forwarded_hosts),
+            "host": host if host is not None and _HOST.fullmatch(host) else None,
+            "host_local": host is not None and host.lower() == LOCAL_HOST,
             "hosts": len(hosts),
             "login_headers": len(logins),
             "login_valid": bool(logins) and all(normal_login(value) is not None for value in logins),
@@ -283,10 +298,12 @@ def owner_port_refusal(names: Iterable[str]) -> str | None:
     return None
 
 
-def whoami(hosts: Sequence[str], logins: Sequence[str], forwarded: Sequence[str],
-           probes: Sequence[str]) -> dict:
+def whoami(hosts: Sequence[str], forwarded_hosts: Sequence[str], logins: Sequence[str],
+           forwarded: Sequence[str], probes: Sequence[str]) -> dict:
     return {"host": hosts[0] if len(hosts) == 1 else None,
             "hosts": len(hosts),
+            "forwarded_host": forwarded_hosts[0] if len(forwarded_hosts) == 1 else None,
+            "forwarded_hosts": len(forwarded_hosts),
             "login_headers": len(logins),
             "forwarded_for": bool(forwarded),
             "probe_login_arrived": len(probes) == 1 and probes[0] in logins}
