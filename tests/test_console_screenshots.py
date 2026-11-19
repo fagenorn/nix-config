@@ -7,6 +7,8 @@ import http.client
 import json
 import os
 import pwd
+import re
+import shutil
 import sys
 import tempfile
 import time
@@ -53,6 +55,30 @@ def fake_browser(present):
             self.reads = 0
             self.card = ()
             self.fills = []
+            self.style = []
+            self.placed = []
+            self.order = []
+            self.mutations = []
+            self.unbreakable = set()
+            self.media = []
+            self.cdp = []
+            self.fresh_mutation = False
+            page = self
+
+            class Session:
+                def send(self, method, params=None):
+                    page.cdp.append((method, params))
+                    page.order.append(method)
+                    if method == "DOM.getDocument":
+                        return {"root": {"nodeId": 1}}
+                    if method == "DOM.querySelectorAll":
+                        return {"nodeIds": [2]}
+                    return {}
+
+            self.context = SimpleNamespace(new_cdp_session=lambda _page: Session())
+
+        def emulate_media(self, **kw):
+            self.media.append(kw)
 
         def goto(self, url):
             pass
@@ -70,6 +96,29 @@ def fake_browser(present):
             self.fills.append((selector, text))
 
         def evaluate(self, expression, arg=None):
+            if expression == shots.STYLE_PLACE:
+                self.order.append("STYLE_PLACE")
+                self.placed.append(arg)
+                return 0
+            if expression == shots.STYLE_CLEAR:
+                self.order.append("STYLE_CLEAR")
+                self.fresh_mutation = False
+                return None
+            if expression == shots.STYLE_SETTLE:
+                self.order.append("STYLE_SETTLE")
+                return None
+            if expression == shots.STYLE_MUTATE:
+                self.order.append("STYLE_MUTATE")
+                self.mutations.append(arg)
+                self.fresh_mutation = True
+                return None
+            if expression == shots.STYLE_READING:
+                self.order.append("STYLE_READING")
+                found = list(self.style)
+                if (self.fresh_mutation and len(arg) == 1
+                        and arg[0]["name"] not in self.unbreakable):
+                    found.append(f"{arg[0]['name']}: x is y")
+                return found
             if expression == shots.ASK_READING:
                 self.reads += 1
                 return list(shots.HEAD_ASK if shots.READING_PANEL in present else shots.OPEN_ASK)
@@ -100,7 +149,7 @@ def fake_browser(present):
             return 0
 
         def screenshot(self, path, full_page):
-            pass
+            self.order.append("screenshot")
 
         def close(self):
             pass
@@ -112,6 +161,68 @@ def fake_browser(present):
             return page
 
     return Browser(), page
+
+
+def style_row(name="held-nowrap", **kw):
+    fields = dict(name=name, states=("live-several",), widths=(1440,), selector=".held.blocks",
+                  prop="white-space", want="equals", value="nowrap",
+                  broken=".held.blocks { white-space: normal !important }")
+    fields.update(kw)
+    return shots.StyleCheck(**fields)
+
+
+@dataclasses.dataclass(frozen=True)
+class Moved:
+    """One property a removed source-reading test asserted, and the style rows that now read it."""
+    test: str
+    selector: str
+    prop: str
+    widths: tuple[int, ...]
+    rows: tuple[str, ...]
+    via: str = ""
+
+
+MOVED: tuple[Moved, ...] = ()
+STRIPPED: frozenset[str] = frozenset()
+RENAMED: dict[str, str] = {}
+LONGHANDS = {
+    "font": ("font-style", "font-weight", "font-size", "line-height", "font-family"),
+    "background": ("background-color", "background-image"),
+    "transition": ("transition-property", "transition-duration"),
+    "text-decoration": ("text-decoration-line",),
+    "list-style": ("list-style-type",),
+    "border": ("border-width", "border-style", "border-color"),
+    "outline": ("outline-style", "outline-width", "outline-color"),
+}
+SOURCE_READING = re.compile(
+    r"style_rules|css_rules|css_decls|css_declared|page_css|media_block|margin_top_at|"
+    r"fold_colour_faults|PAGE_TEXT|PAGE\.read_text|SPEND\.read_text|<style>|base_rules|rules_of|"
+    r"controls_block|desk_block|outside_blocks|page_style|spend_style|short_rules|decls_of|"
+    r"kind_owned|self\.style\b")
+
+
+def uncovered(moved, rows) -> list[str]:
+    """Name each moved property, at each width, that no style row reads."""
+    by_name = {row.name: row for row in rows}
+    misses = []
+    for entry in moved:
+        absent = [f"{entry.test}: no row {name}" for name in entry.rows if name not in by_name]
+        if absent:
+            misses += absent
+            continue
+        counting = [
+            by_name[name] for name in entry.rows
+            if entry.via or entry.selector == by_name[name].selector
+            or entry.selector in [part.strip() for part in by_name[name].selector.split(",")]]
+        required = ((entry.prop,) if entry.prop not in LONGHANDS
+                    or any(row.prop == entry.prop for row in counting) else LONGHANDS[entry.prop])
+        for prop in required:
+            seen = {width for row in counting if row.prop == prop for width in row.widths}
+            if not set(entry.widths) <= seen:
+                misses.append(f"{entry.test} {entry.selector} {entry.prop} @{entry.widths}: "
+                              "no row reads it")
+                break
+    return misses
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
@@ -573,6 +684,107 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("has a control under 32 px", out.getvalue())
         self.assertIn("button.undo 24px", out.getvalue())
+
+    def shoot_main(self, page_state, browser, width=1440):
+        """Run `main` with `capture` shooting one state on the fake browser; return (code, stdout)."""
+        out = StringIO()
+
+        def fake_capture(path, *args, **kw):
+            return [shots._shoot(browser, "http://console.test/", page_state, width, Path(path))]
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(shots, "capture", side_effect=fake_capture), redirect_stdout(out):
+            code = shots.main(["--out", tmp])
+        return code, out.getvalue()
+
+    def test_a_shot_with_a_broken_page_style_fails_the_command(self) -> None:
+        browser, page = fake_browser(set())
+        page.style = ["held-nowrap: .held.blocks white-space is normal"]
+        with mock.patch.object(shots, "STYLE_CHECKS", (style_row(),)):
+            code, text = self.shoot_main("live-several", browser)
+        self.assertEqual(code, 1)
+        self.assertIn("console-screenshots: live-several-1440.png breaks a page style "
+                      "(held-nowrap: .held.blocks white-space is normal)", text)
+
+    def test_the_style_reading_runs_after_the_capture_and_clicks_only_a_present_step(self) -> None:
+        row = style_row("look-row", states=("look-card",))
+        for present, clicked in (({"button.pic-thumb"}, True), (set(), False)):
+            with self.subTest(clicked=clicked), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                with mock.patch.object(shots, "STYLE_CHECKS", (row,)), \
+                        mock.patch.object(shots, "STYLE_STEPS",
+                                          {"look-card": ("button.pic-thumb",)}):
+                    shot = shots._shoot(browser, "http://console.test/", "look-card", 1440,
+                                        Path(tmp))
+                self.assertEqual(page.order[:1], ["screenshot"])
+                reading = ["STYLE_CLEAR", "STYLE_PLACE", "STYLE_SETTLE", "STYLE_READING",
+                           "STYLE_CLEAR"]
+                styled = [name for name in page.order if name.startswith("STYLE_")]
+                self.assertEqual(styled, (["STYLE_SETTLE"] if clicked else []) + reading)
+                self.assertEqual("button.pic-thumb" in page.clicks, clicked)
+                if clicked:
+                    self.assertEqual(page.clicks[-1], "button.pic-thumb")
+                else:
+                    self.assertNotIn("button.pic-thumb", page.waits)
+                self.assertEqual(shot.style, ())
+                self.assertEqual(shot.checked, (row.name,))
+
+    def test_a_forced_row_forces_its_pseudo_class_settles_and_releases_it(self) -> None:
+        browser, page = fake_browser(set())
+        forced = ("CSS.forcePseudoState", {"nodeId": 2, "forcedPseudoClasses": ["hover"]})
+        released = ("CSS.forcePseudoState", {"nodeId": 2, "forcedPseudoClasses": []})
+        self.assertEqual(shots.read_style(page, [style_row(forced=("hover",))]), ())
+        self.assertEqual([call for call in page.cdp if call[0] == "CSS.forcePseudoState"],
+                         [forced, released])
+        at = page.order.index("CSS.forcePseudoState")
+        self.assertEqual(page.order[at:at + 4],
+                         ["CSS.forcePseudoState", "STYLE_SETTLE", "STYLE_READING",
+                          "CSS.forcePseudoState"])
+        select = next(params for method, params in page.cdp if method == "DOM.querySelectorAll")
+        self.assertEqual(select["nodeId"], 1)
+        self.assertEqual(select["selector"],
+                         ":is(.held.blocks):not([data-style-probe], [data-style-probe] *)")
+
+    def test_a_shot_of_another_page_reads_no_style(self) -> None:
+        browser, page = fake_browser({"button.pic-thumb"})
+        page.style = ["r: .a b is c"]
+        with mock.patch.object(shots, "style_applies", return_value=False), \
+                mock.patch.object(shots, "STYLE_CHECKS", (style_row("r", states=("look-card",)),)), \
+                mock.patch.object(shots, "STYLE_STEPS", {"look-card": ("button.pic-thumb",)}):
+            code, text = self.shoot_main("look-card", browser)
+            with tempfile.TemporaryDirectory() as tmp:
+                shot = shots._shoot(browser, "http://console.test/", "look-card", 1440, Path(tmp),
+                                    mutate=True)
+        self.assertEqual(code, 0)
+        self.assertEqual([name for name in page.order if name.startswith("STYLE_")], [])
+        self.assertNotIn("button.pic-thumb", page.clicks)
+        self.assertEqual((shot.style, shot.checked, shot.broke), ((), (), ()))
+
+    def test_a_real_answer_shot_skips_the_fixture_rows(self) -> None:
+        rows = (style_row("a", states=("question-read",)),
+                style_row("b", states=("question-read",), fixture=True))
+        for canonical, expected in ((False, ("a",)), (True, ("a", "b"))):
+            with self.subTest(canonical=canonical), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(set())
+                with mock.patch.object(shots, "STYLE_CHECKS", rows):
+                    shot = shots._shoot(browser, "http://console.test/", "question-read", 1440,
+                                        Path(tmp), canonical=canonical)
+                self.assertEqual(shot.checked, expected)
+                self.assertEqual([[row["name"] for row in placed] for placed in page.placed],
+                                 [list(expected)])
+
+    def test_a_mutated_shot_records_each_row_its_rule_broke(self) -> None:
+        rows = (style_row("a", broken="a { x: y }"), style_row("b", broken="b { x: y }"))
+        browser, page = fake_browser(set())
+        page.unbreakable = {"b"}
+        with mock.patch.object(shots, "STYLE_CHECKS", rows), tempfile.TemporaryDirectory() as tmp:
+            shot = shots._shoot(browser, "http://console.test/", "live-several", 1440, Path(tmp),
+                                mutate=True)
+            self.assertEqual((shot.checked, shot.broke, shot.style), (("a", "b"), ("a",), ()))
+            self.assertEqual(page.mutations, ["a { x: y }", "b { x: y }"])
+            browser, page = fake_browser(set())
+            shot = shots._shoot(browser, "http://console.test/", "live-several", 1440, Path(tmp))
+            self.assertEqual((shot.broke, page.mutations), ((), []))
 
     def test_a_shot_not_taken_from_the_top_fails_the_command(self) -> None:
         def run(shot):
@@ -1138,6 +1350,286 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(days[-1]["total"]["dollars"], 0)
 
 
+class ScreenshotStyleTableTest(unittest.TestCase):
+    def test_every_style_check_is_well_formed(self) -> None:
+        names = [row.name for row in shots.STYLE_CHECKS]
+        self.assertEqual(len(names), len(set(names)))
+        mapped = {name for entry in MOVED for name in entry.rows}
+        for row in shots.STYLE_CHECKS:
+            with self.subTest(row.name):
+                self.assertRegex(row.name, r"^[a-z0-9-]+$")
+                self.assertTrue(row.states and set(row.states) <= set(shots.STATES))
+                self.assertTrue(row.widths and set(row.widths) <= set(shots.WIDTHS))
+                self.assertIn(row.want, shots.WANTS)
+                self.assertTrue("{" in row.broken and "}" in row.broken)
+                if row.probe:
+                    self.assertIn("data-style-probe", row.probe)
+                if row.compare_probe:
+                    self.assertIn("data-style-probe", row.compare_probe)
+                self.assertLessEqual(
+                    set(row.forced), {"hover", "active", "focus", "focus-visible", "focus-within"})
+                if row.fixture:
+                    self.assertIn("question-read", row.states)
+                self.assertIn(row.name, mapped)
+
+    def test_every_moved_property_has_a_checking_row(self) -> None:
+        missing = uncovered(MOVED, shots.STYLE_CHECKS)
+        self.assertEqual(missing, [], "\n".join(missing))
+
+    def test_the_coverage_check_names_a_property_or_width_no_row_reads(self) -> None:
+        entry = Moved("t", ".held.blocks", "white-space", (1440, 480), ("h",))
+        both = style_row("h", prop="text-overflow", widths=(1440, 480))
+        self.assertEqual(uncovered([entry], [both]),
+                         ["t .held.blocks white-space @(1440, 480): no row reads it"])
+        narrow = style_row("h", prop="white-space", widths=(1440,))
+        self.assertEqual(uncovered([entry], [narrow]),
+                         ["t .held.blocks white-space @(1440, 480): no row reads it"])
+        small = style_row("h2", prop="white-space", widths=(480,))
+        entry = Moved("t", ".held.blocks", "white-space", (1440, 480), ("h", "h2"))
+        self.assertEqual(uncovered([entry], [narrow, small]), [])
+        longhands = [style_row(f"f{n}", prop=prop, widths=(1440, 480))
+                     for n, prop in enumerate(LONGHANDS["font"])]
+        entry = Moved("t", ".held.blocks", "font", (1440,), tuple(row.name for row in longhands))
+        self.assertEqual(uncovered([entry], longhands), [])
+        entry = Moved("t", ".held.blocks", "font", (1440,), tuple(row.name for row in longhands[:4]))
+        self.assertEqual(uncovered([entry], longhands),
+                         ["t .held.blocks font @(1440,): no row reads it"])
+        entry = Moved("t", ".held.blocks", "white-space", (1440,), ("x",))
+        self.assertEqual(uncovered([entry], [narrow]), ["t: no row x"])
+        other = Moved("t", ".other", "white-space", (1440,), ("h",))
+        self.assertEqual(uncovered([other], [narrow]),
+                         ["t .other white-space @(1440,): no row reads it"])
+        self.assertEqual(uncovered([dataclasses.replace(other, via="hand")], [narrow]), [])
+        listed = style_row("h", selector=".a, .held.blocks", widths=(1440,))
+        self.assertEqual(
+            uncovered([dataclasses.replace(other, selector=".held.blocks")], [listed]), [])
+
+    def test_every_moved_test_is_gone_or_stripped(self) -> None:
+        import ast
+        ids = {entry.test for entry in MOVED}
+        self.assertLessEqual(STRIPPED | set(RENAMED), ids)
+        root = Path(__file__).resolve().parents[1]
+
+        def body(test_id):
+            path, cls, method = test_id.split("::")
+            file = root / path
+            if not file.is_file():
+                return None
+            text = file.read_text(encoding="utf-8")
+            for node in ast.parse(text).body:
+                if isinstance(node, ast.ClassDef) and node.name == cls:
+                    for item in node.body:
+                        if (isinstance(item, ast.FunctionDef)
+                                and item.name == RENAMED.get(test_id, method)):
+                            return ast.get_source_segment(text, item)
+            return None
+
+        for test_id in sorted(ids):
+            with self.subTest(test_id):
+                found = body(test_id)
+                if test_id in STRIPPED:
+                    self.assertIsNotNone(found)
+                    self.assertIsNone(SOURCE_READING.search(found))
+                else:
+                    self.assertIsNone(found)
+
+    def test_style_applies_only_to_the_page_beside_the_module(self) -> None:
+        source = Path(shots.__file__).resolve().parents[1] / "python/agent_tools/console"
+        with tempfile.TemporaryDirectory() as tmp:
+            served = Path(tmp)
+            for name in ("page.html", "spend.html"):
+                shutil.copy(source / name, served / name)
+            self.assertTrue(shots.style_applies(served))
+            with (served / "page.html").open("ab") as handle:
+                handle.write(b" ")
+            self.assertFalse(shots.style_applies(served))
+            shutil.copy(source / "page.html", served / "page.html")
+            (served / "spend.html").unlink()
+            self.assertFalse(shots.style_applies(served))
+
+
+class ScreenshotStyleTest(unittest.TestCase):
+    def styled(self, html, rows, mutation=None, only=None):
+        """Load `html` alone in one 1440x900 Chromium page and return the style misses."""
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page.set_content(html)
+                found = shots.read_style(page, rows, mutation=mutation, only=only)
+                self.last_leftover = page.evaluate(
+                    "document.querySelectorAll('[data-style-probe], #style-mutation').length")
+                return found
+            finally:
+                browser.close()
+
+    def test_each_want_kind_passes_its_value_and_names_a_miss(self) -> None:
+        html = ("<style>.a{white-space:nowrap;margin-top:12px;color:color-mix(in srgb, "
+                "rgb(245, 169, 127) 100%, white 0%)} .b{margin-top:8px}</style>"
+                '<p class="a">x</p><p class="b">y</p>')
+        white = "white-space"
+        margin = "margin-top"
+        rows = [
+            ("equals-ok", style_row("equals-ok", selector=".a", prop=white, value="nowrap"), None),
+            ("equals-bad", style_row("equals-bad", selector=".a", prop=white, value="normal"),
+             ".a white-space is nowrap"),
+            ("colour", style_row("colour", selector=".a", prop="color",
+                                 value="rgb(245, 169, 127)"), None),
+            ("in-ok", style_row("in-ok", selector=".a", prop=white, want="in", value="nowrap|pre"),
+             None),
+            ("in-bad", style_row("in-bad", selector=".a", prop=white, want="in",
+                                 value="normal|pre"), ".a white-space is nowrap"),
+            ("not-ok", style_row("not-ok", selector=".a", prop=white, want="not",
+                                 value="normal"), None),
+            ("not-bad", style_row("not-bad", selector=".a", prop=white, want="not",
+                                  value="nowrap"), ".a white-space is nowrap"),
+            ("starts-ok", style_row("starts-ok", selector=".a", prop=white, want="starts",
+                                    value="now"), None),
+            ("starts-bad", style_row("starts-bad", selector=".a", prop=white, want="starts",
+                                     value="pre"), ".a white-space is nowrap"),
+            ("min-ok", style_row("min-ok", selector=".a", prop=margin, want="min", value="12"),
+             None),
+            ("min-bad", style_row("min-bad", selector=".a", prop=margin, want="min", value="13"),
+             ".a margin-top is 12px"),
+            ("max-ok", style_row("max-ok", selector=".a", prop=margin, want="max", value="12"),
+             None),
+            ("max-bad", style_row("max-bad", selector=".a", prop=margin, want="max", value="11"),
+             ".a margin-top is 12px"),
+            ("same-bad", style_row("same-bad", selector=".a", prop=margin, want="same_as",
+                                   value=".b"), ".a margin-top is 12px"),
+            ("same-white", style_row("same-white", selector=".a", prop=white, want="same_as",
+                                  value=".b"), ".a white-space is nowrap"),
+            ("gt-ok", style_row("gt-ok", selector=".a", prop=margin, want="gt", value=".b"),
+             None),
+            ("gt-bad", style_row("gt-bad", selector=".b", prop=margin, want="gt", value=".a"),
+             ".b margin-top is 8px"),
+        ]
+        misses = self.styled(html, [row for _, row, _ in rows])
+        self.assertEqual(
+            list(misses), [f"{name}: {text}" for name, _, text in rows if text is not None])
+        absent = style_row("gone", selector=".missing")
+        self.assertEqual(self.styled(html, [absent]), ("gone: .missing is absent",))
+        hidden = style_row("hidden", selector=".h", prop="color", every=True)
+        self.assertEqual(self.styled('<p class="h" style="display:none">x</p>', [hidden]),
+                         ("hidden: .h is absent",))
+        loose = style_row("loose", selector=".a", prop=white, want="same_as", value=".nowhere")
+        self.assertEqual(self.styled(html, [loose]), ("loose: .nowhere is absent",))
+        every = style_row("every", selector="p", prop=margin, want="max", value="10", every=True)
+        self.assertEqual(self.styled(html, [every]), ("every: p.a margin-top is 12px",))
+
+    def test_each_row_reads_its_own_probe_and_leaves_nothing_behind(self) -> None:
+        html = ('<style>#h .p{color:rgb(1, 2, 3)} #h .p.q{color:rgb(4, 5, 6)}</style>'
+                '<div id="h"></div>')
+        rows = [
+            style_row("one", selector=".p", prop="color", value="rgb(1, 2, 3)", host="#h",
+                      probe='<span class="p" data-style-probe></span>'),
+            style_row("two", selector=".p", prop="color", value="rgb(4, 5, 6)", host="#h",
+                      probe='<span class="p q" data-style-probe></span>'),
+            style_row("root", selector=".p", prop="color", value="rgb(1, 2, 3)", host="#h",
+                      probe='<span class="p" data-style-probe><span class="p q"></span></span>'),
+        ]
+        self.assertEqual(self.styled(html, rows), ())
+        self.assertEqual(self.last_leftover, 0)
+        for row in rows:
+            with self.subTest(row.name):
+                self.assertEqual(self.styled(html, rows, only=row.name), ())
+        page_row = style_row("plain", selector=".p", prop="color", value="rgb(1, 2, 3)")
+        self.assertEqual(self.styled(html, [*rows, page_row]), ("plain: .p is absent",))
+        self.assertEqual(self.last_leftover, 0)
+
+    def test_a_comparison_probe_is_read_beside_a_page_subject(self) -> None:
+        html = '<style>.s{font-size:17px} #h .c{font-size:17px}</style><p class="s">x</p><div id="h"></div>'
+        row = style_row("beside", selector=".s", prop="font-size", want="same_as", value=".c",
+                        compare_probe='<span class="c" data-style-probe></span>',
+                        compare_host="#h")
+        self.assertEqual(self.styled(html, [row]), ())
+        changed = html.replace("#h .c{font-size:17px}", "#h .c{font-size:16px}")
+        self.assertEqual(self.styled(changed, [row]), ("beside: .s font-size is 17px",))
+        bare = style_row("bare", selector=".s", prop="font-size", want="same_as", value=".c")
+        self.assertEqual(self.styled(html.replace("#h .c{", "#h .z{"), [bare]),
+                         ("bare: .c is absent",))
+
+    def test_a_forced_pseudo_class_is_read_after_its_transition_settles(self) -> None:
+        html = ("<style>button{color:rgb(9, 9, 9);transition:color 10s} "
+                "button:hover{color:rgb(1, 2, 3)}</style><button>x</button>")
+        forced = style_row("hovered", selector="button", prop="color", value="rgb(1, 2, 3)",
+                           forced=("hover",))
+        self.assertEqual(self.styled(html, [forced]), ())
+        plain = style_row("plain", selector="button", prop="color", value="rgb(1, 2, 3)")
+        self.assertEqual(self.styled(html, [plain]), ("plain: button color is rgb(9, 9, 9)",))
+
+    def test_reduced_motion_is_read_from_a_specimen_that_moves_without_it(self) -> None:
+        motion = ("@media (prefers-reduced-motion: reduce) { *, *::before, *::after { "
+                  "animation-duration: .001ms !important; animation-delay: 0s !important; "
+                  "transition-duration: .001ms !important } }")
+        base = ('<style>.m i, .m i::before, .m i::after { content: ""; transition: opacity 1s; '
+                'animation: none 1s } %s</style><span class="m"><i></i></span>')
+        for pseudo in ("", "::before", "::after"):
+            for prop in ("transition-duration", "animation-duration"):
+                def row(name, **kw):
+                    return style_row(name, selector=".m i", prop=prop, pseudo=pseudo, **kw)
+                reduced = row("reduced", want="max", value="0.000001", reduced_motion=True)
+                moving = row("moving", want="max", value="0.000001")
+                free = row("free", want="min", value="0.5")
+                with self.subTest(pseudo=pseudo, prop=prop):
+                    self.assertEqual(self.styled(base % motion, [reduced, free]), ())
+                    self.assertEqual(self.styled(base % motion, [moving]),
+                                     (f"moving: .m i{pseudo} {prop} is 1s",))
+                    self.assertEqual(
+                        [m.split(":")[0] for m in self.styled(base % "", [reduced, free])],
+                        ["reduced"])
+
+    def test_a_mutation_breaks_the_row_it_names(self) -> None:
+        html = ("<style>.a{white-space:nowrap}.b{margin-top:8px}</style>"
+                '<p class="a">x</p><p class="b">y</p>')
+        rows = [style_row("a", selector=".a"),
+                style_row("b", selector=".b", prop="margin-top", value="8px")]
+        mutation = ".a { white-space: normal !important }"
+        self.assertEqual(self.styled(html, rows, mutation=mutation, only="a"),
+                         ("a: .a white-space is normal",))
+        self.assertEqual(self.last_leftover, 0)
+        self.assertEqual(self.styled(html, rows, mutation=mutation, only="b"), ())
+
+    def sandboxed_capture(self, **kw):
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        with sync_playwright() as pw:
+            try:
+                pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"]).close()
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+        with tempfile.TemporaryDirectory() as tmp:
+            return shots.capture(Path(tmp) / "out", **kw)
+
+    def test_every_style_check_passes_and_fails_when_broken(self) -> None:
+        taken = self.sandboxed_capture(mutate=True)
+        self.assertEqual([(s.path.name, s.style) for s in taken if s.style], [])
+        for shot in taken:
+            expected = {r.name for r in shots.STYLE_CHECKS
+                        if shot.state in r.states and shot.width in r.widths}
+            with self.subTest(shot.path.name):
+                self.assertEqual(set(shot.checked), expected)
+                self.assertEqual(set(shot.broke), set(shot.checked))
+        self.assertEqual(set().union(*(set(s.checked) for s in taken)),
+                         {r.name for r in shots.STYLE_CHECKS})
+
+    def test_a_plain_answer_run_reads_only_the_rows_it_can_have(self) -> None:
+        taken = self.sandboxed_capture(
+            states=("question-read",), read=("Q?", "Answer: plain\nQuestion for you: none"))
+        fixture = {r.name for r in shots.STYLE_CHECKS if r.fixture}
+        self.assertEqual([s for s in taken if s.style], [])
+        self.assertEqual({name for s in taken for name in s.checked} & fixture, set())
+
+
 class ScreenshotCaptureTest(unittest.TestCase):
     def test_the_command_writes_a_png_per_state_and_width_and_nothing_scrolls_sideways(self) -> None:
         try:
@@ -1162,7 +1654,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             self.assertEqual(
                 [s for s in taken if s.state != "tell-box-open" and s.tell is not None], [])
             self.assertEqual(
-                [s.width for s in taken if s.state == "ask-box" and s.ask == shots.OPEN_ASK],
+                [s.width for s in taken if s.state == "ask-box" and s.ask == shots.HEAD_ASK],
                 list(shots.WIDTHS))
             self.assertEqual([s for s in taken if s.state != "ask-box" and s.ask is not None], [])
             self.assertEqual(

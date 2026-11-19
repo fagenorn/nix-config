@@ -125,8 +125,13 @@ Contract:
   a goal button (their vertical centres differ by more than 4 px, `ACTS_ROW`); or when any shot is not taken from the top of the
   page (`window.scrollY` is not 0 right before its full-page capture); or when any shot has a
   rendered, visible button, input, textarea, select, `btn-` link or `btn-` summary under 32 px
-  tall (`SHORT_CONTROLS`, read after the state is drawn). It returns 2 with a one-line
-  reason when Playwright or Chromium is missing, else 0.
+  tall (`SHORT_CONTROLS`, read after the state is drawn). When any shot misses a `STYLE_CHECKS`
+  row, the line names each miss: the row's computed style is read after the capture, with probes
+  and steps as `StyleCheck` and `STYLE_STEPS` say. The style reading and its steps run only when
+  `style_applies()` (the page served is the page beside this module), so a base run's pictures and
+  result are as before. In real-answer mode, `fixture` rows are skipped. `capture(...,
+  mutate=True)` records in `Shot.broke` each row whose `broken` rule made it miss. It returns 2
+  with a one-line reason when Playwright or Chromium is missing, else 0.
 - Real-answer mode: `main(["--out", dir, "--question", TEXT, "--answer-file", PATH])` (both or
   neither; one alone exits 2) shoots only `question-read`, seeded with that question and the
   file's UTF-8 text as the stored answer, so it writes exactly `question-read-1440.png` and
@@ -156,7 +161,7 @@ import tempfile
 import threading
 import zlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -374,6 +379,162 @@ class Fixture:
 
 
 @dataclass(frozen=True)
+class StyleCheck:
+    """One computed-style check of the page, read after the picture of each state it names.
+
+    `selector` names the element (the first match, or every rendered match with `every`), `prop`
+    its computed property (of `pseudo` when set) and `want` how `value` is compared (`WANTS`).
+    A row with a `probe` reads the matches of `selector` in the probe's markup, placed last in
+    `host` and marked with `data-style-probe`; `compare_probe` places the element `same_as` and
+    `gt` compare with. `forced` pseudo-classes are forced on the matches over CDP, and
+    `reduced_motion` reads under `prefers-reduced-motion: reduce`. `broken` is a rule that must
+    make this row miss, which `capture(mutate=True)` proves. A `fixture` row reads the canonical
+    fixture answer, so a real-answer run skips it.
+    """
+    name: str
+    states: tuple[str, ...]
+    widths: tuple[int, ...]
+    selector: str
+    prop: str
+    want: str
+    value: str
+    broken: str
+    probe: str = ""
+    host: str = "body"
+    compare_probe: str = ""
+    compare_host: str = "body"
+    pseudo: str = ""
+    forced: tuple[str, ...] = ()
+    every: bool = False
+    reduced_motion: bool = False
+    fixture: bool = False
+
+
+STYLE_CHECKS: tuple[StyleCheck, ...] = ()
+# The selectors clicked, in order, after a state's picture and before its style reading.
+STYLE_STEPS: dict[str, tuple[str, ...]] = {}
+WANTS = frozenset({"equals", "in", "not", "starts", "min", "max", "same_as", "gt"})
+PALETTE = {
+    "--base": "rgb(36, 39, 58)", "--mantle": "rgb(30, 32, 48)", "--s0": "rgb(54, 58, 79)",
+    "--s1": "rgb(73, 77, 100)", "--s2": "rgb(91, 96, 120)", "--text": "rgb(202, 211, 245)",
+    "--sub1": "rgb(184, 192, 224)", "--sub0": "rgb(165, 173, 203)", "--ov2": "rgb(147, 154, 183)",
+    "--crust": "rgb(24, 25, 38)", "--peach": "rgb(245, 169, 127)", "--lav": "rgb(183, 189, 248)",
+    "--green": "rgb(166, 218, 149)", "--yellow": "rgb(238, 212, 159)", "--red": "rgb(237, 135, 150)",
+}
+STYLE_PLACE = r"""((rows) => {
+  let placed = 0;
+  const put = (html, host, name) => {
+    if (!html) return;
+    const where = document.querySelector(host);
+    if (!where) return;
+    const template = document.createElement('template');
+    template.innerHTML = html.trim();
+    const probe = template.content.firstElementChild;
+    if (!probe) return;
+    probe.setAttribute('data-style-probe', name);
+    where.appendChild(probe);
+    placed++;
+  };
+  for (const row of rows) {
+    put(row.probe, row.host, row.name);
+    put(row.compare_probe, row.compare_host, row.name + ':compare');
+  }
+  return placed;
+})"""
+STYLE_MUTATE = r"""((css) => {
+  const style = document.createElement('style');
+  style.id = 'style-mutation';
+  style.textContent = css;
+  document.head.appendChild(style);
+})"""
+STYLE_SETTLE = r"""(() => {
+  for (const animation of document.getAnimations()) {
+    try { animation.finish(); } catch (error) { /* an infinite animation has no end */ }
+  }
+})"""
+STYLE_CLEAR = r"""(() => {
+  for (const node of document.querySelectorAll('[data-style-probe], #style-mutation')) node.remove();
+})"""
+STYLE_READING = r"""((rows) => {
+  const parse = (text) => {
+    const found = /^(?:rgba?\(|(color)\(srgb\s+)([^)]*)\)$/.exec(String(text).trim());
+    if (!found) return null;
+    const parts = found[2].split(/[\s,\/]+/).filter(Boolean).map(Number);
+    if (parts.length < 3 || parts.length > 4 || parts.some((n) => Number.isNaN(n))) return null;
+    const scale = found[1] ? 255 : 1;
+    const channel = (n) => Math.round(Math.min(255, Math.max(0, n * scale)));
+    const alpha = parts.length === 4 ? parts[3] : 1;
+    return [channel(parts[0]), channel(parts[1]), channel(parts[2]),
+            Math.round(alpha * 100) / 100].join(',');
+  };
+  const same = (a, b) => {
+    const pa = parse(a), pb = parse(b);
+    return pa !== null || pb !== null ? pa === pb : a === b;
+  };
+  const probes = (name) => Array.from(document.querySelectorAll('[data-style-probe]')).filter(
+    (node) => node.getAttribute('data-style-probe') === name);
+  const within = (roots, selector) => roots.flatMap((root) => [
+    ...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)]);
+  const onPage = (selector) => Array.from(document.querySelectorAll(selector)).filter(
+    (node) => !node.closest('[data-style-probe]'));
+  const label = (node) => node.tagName.toLowerCase() + '.'
+    + (node.getAttribute('class') || '').split(/\s+/)[0];
+  const misses = [];
+  for (const row of rows) {
+    const matches = row.probe ? within(probes(row.name), row.selector) : onPage(row.selector);
+    const subjects = row.every ? matches.filter((node) => node.getClientRects().length > 0)
+                               : matches.slice(0, 1);
+    if (!subjects.length) {
+      misses.push(`${row.name}: ${row.selector} is absent`);
+      continue;
+    }
+    const pseudo = row.pseudo || null;
+    for (const node of subjects) {
+      const got = getComputedStyle(node, pseudo).getPropertyValue(row.prop);
+      let other = null;
+      if (row.want === 'same_as' || row.want === 'gt') {
+        const [rival] = [...within(probes(row.name + ':compare'), row.value), ...onPage(row.value)];
+        if (!rival) {
+          misses.push(`${row.name}: ${row.value} is absent`);
+          continue;
+        }
+        other = getComputedStyle(rival, pseudo).getPropertyValue(row.prop);
+      }
+      let ok = false;
+      if (row.want === 'equals') ok = same(got, row.value);
+      else if (row.want === 'in') ok = row.value.split('|').some((member) => same(got, member));
+      else if (row.want === 'not') ok = !same(got, row.value);
+      else if (row.want === 'starts') ok = got.startsWith(row.value);
+      else if (row.want === 'min') ok = parseFloat(got) >= parseFloat(row.value);
+      else if (row.want === 'max') ok = parseFloat(got) <= parseFloat(row.value);
+      else if (row.want === 'same_as') ok = same(got, other);
+      else if (row.want === 'gt') ok = parseFloat(got) > parseFloat(other);
+      if (!ok) {
+        misses.push(`${row.name}: ${row.every ? label(node) : row.selector + row.pseudo} `
+                    + `${row.prop} is ${got}`);
+      }
+    }
+  }
+  return misses;
+})"""
+
+
+def style_applies(served: Path | None = None) -> bool:
+    """Whether the page served is the page beside this module (a base run serves the base's)."""
+    if served is None:
+        import agent_tools.console
+        served = Path(next(iter(agent_tools.console.__path__)))
+    here = Path(__file__).resolve().parents[1] / "python/agent_tools/console"
+    for name in ("page.html", "spend.html"):
+        try:
+            if (Path(served) / name).read_bytes() != (here / name).read_bytes():
+                return False
+        except OSError:
+            return False
+    return True
+
+
+@dataclass(frozen=True)
 class Shot:
     state: str
     width: int
@@ -391,6 +552,9 @@ class Shot:
     reading: tuple[bool, int, bool, bool, int] | None = None
     activation: tuple[str | None, int] | None = None
     card: tuple[str | None, str | None, bool | None, str | None] | None = None
+    style: tuple[str, ...] = ()
+    checked: tuple[str, ...] = ()
+    broke: tuple[str, ...] = ()
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -1038,7 +1202,8 @@ class _Serve:
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
-            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> list[Shot]:
+            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER),
+            mutate: bool = False) -> list[Shot]:
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -1072,7 +1237,9 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                             path = "spend" if state == "spend-page" else ""
                             taken.append(
                                 _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
-                                      question=read[0]))
+                                       question=read[0],
+                                       canonical=read == (READ_QUESTION, READ_ANSWER),
+                                       mutate=mutate))
                     finally:
                         if serve is not None:
                             serve.close()
@@ -1217,8 +1384,54 @@ SCROLL_TOP = "window.scrollTo(0, 0)"
 SCROLL_Y = "window.scrollY"
 
 
+def read_style(page, rows: Sequence[StyleCheck], *, mutation: str | None = None,
+               only: str | None = None) -> tuple[str, ...]:
+    """Read each row's computed style on `page`, leaving no probe and no mutation behind."""
+    page.evaluate(STYLE_CLEAR)
+    if mutation is not None:
+        page.evaluate(STYLE_MUTATE, mutation)
+    page.evaluate(STYLE_PLACE, [asdict(row) for row in rows])
+    page.evaluate(STYLE_SETTLE)
+    read = [row for row in rows if only is None or row.name == only]
+    found: list[str] = []
+    plain = [row for row in read if not row.forced and not row.reduced_motion]
+    if plain:
+        found += page.evaluate(STYLE_READING, [asdict(row) for row in plain])
+    for row in (row for row in read if row.forced):
+        session = page.context.new_cdp_session(page)
+        for method in ("DOM.enable", "CSS.enable"):
+            session.send(method)
+        root = session.send("DOM.getDocument")["root"]["nodeId"]
+        if row.probe:
+            mark = f'[data-style-probe="{row.name}"]'
+            selector = f":is({mark}, {mark} *):is({row.selector})"
+        else:
+            selector = f":is({row.selector}):not([data-style-probe], [data-style-probe] *)"
+        nodes = session.send("DOM.querySelectorAll", {"nodeId": root, "selector": selector})
+        nodes = nodes["nodeIds"] if row.every else nodes["nodeIds"][:1]
+        for node in nodes:
+            session.send("CSS.forcePseudoState",
+                         {"nodeId": node, "forcedPseudoClasses": list(row.forced)})
+        page.evaluate(STYLE_SETTLE)
+        found += page.evaluate(STYLE_READING, [asdict(row)])
+        for node in nodes:
+            session.send("CSS.forcePseudoState", {"nodeId": node, "forcedPseudoClasses": []})
+    moving = [row for row in read if row.reduced_motion]
+    if moving:
+        page.emulate_media(reduced_motion="reduce")
+        page.evaluate(STYLE_SETTLE)
+        found += page.evaluate(STYLE_READING, [asdict(row) for row in moving])
+        page.emulate_media(reduced_motion="no-preference")
+    page.evaluate(STYLE_CLEAR)
+
+    def place(miss: str) -> int:
+        return next((n for n, row in enumerate(read) if miss.startswith(row.name + ": ")), len(read))
+
+    return tuple(sorted(found, key=place))
+
+
 def _shoot(browser, url: str, state: str, width: int, out: Path, *,
-           question: str = READ_QUESTION) -> Shot:
+           question: str = READ_QUESTION, canonical: bool = True, mutate: bool = False) -> Shot:
     page = browser.new_page(viewport={"width": width, "height": HEIGHT})
     try:
         page.goto(url)
@@ -1316,11 +1529,29 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         acts = tuple(page.evaluate(ACTS_ROW))
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
+        style: tuple[str, ...] = ()
+        checked: tuple[str, ...] = ()
+        broke: tuple[str, ...] = ()
+        if style_applies():
+            for selector in STYLE_STEPS.get(state, ()):
+                if page.query_selector(selector) is not None:
+                    page.click(selector)
+                    page.evaluate(STYLE_SETTLE)
+            rows = [row for row in STYLE_CHECKS
+                    if state in row.states and width in row.widths and (canonical or not row.fixture)]
+            if rows:
+                style = read_style(page, rows)
+                checked = tuple(row.name for row in rows)
+                if mutate:
+                    broke = tuple(
+                        row.name for row in rows
+                        if any(miss.startswith(row.name + ": ") for miss in read_style(
+                            page, rows, mutation=row.broken, only=row.name)))
     finally:
         page.close()
     return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y,
                 short=short, ask=ask, goal=goal, acts=acts, thread=thread, reading=reading,
-                card=card, activation=activation)
+                card=card, activation=activation, style=style, checked=checked, broke=broke)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1412,8 +1643,12 @@ def main(argv: list[str] | None = None) -> int:
     for shot in short:
         print(f"console-screenshots: {shot.path.name} has a control under 32 px "
               f"({', '.join(shot.short)})")
+    broken = [shot for shot in taken if shot.style]
+    for shot in broken:
+        print(f"console-screenshots: {shot.path.name} breaks a page style "
+              f"({'; '.join(shot.style)})")
     return 1 if (wide or squeezed or jargon or closed or unasked or unfilled or unthreaded or unread
-                 or unlined or uncarded or offrow or scrolled or short) else 0
+                 or unlined or uncarded or offrow or scrolled or short or broken) else 0
 
 
 if __name__ == "__main__":
