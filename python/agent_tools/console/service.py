@@ -147,10 +147,13 @@ whatever its method) in memory only (never logged, null after a restart) as the 
 becomes true on the first reading whose `client` is `other_device` and stays true until the service
 stops or a poll reads own addresses that differ from the ones before, which drops the reading and the
 flag taken under the old ones (memory only, false after a restart); a status read that gives no address
-changes none of this. A reading of another device is confirmed by one fresh status read before it is kept
-(else it is kept as `unknown`), and a poll that reads a tailnet name other than the one a reading was judged
-under drops that reading, so a request sent just before a change of address or name is never kept as one
-judged under the old.
+changes none of this. A reading of another device that would change what is shown is confirmed by one fresh
+`status --json` read before it is kept (kept as `unknown` when that read gives no address, dropped when it
+gives addresses other than the ones it was judged under, the poll then taking the new ones), and a poll that
+reads a tailnet name other than the one a reading was judged under drops that reading, so a request sent just
+before a change of address or name is never kept as one judged under the old. That read runs on one worker
+thread, never on the request's thread (a guest request never waits on Tailscale), the latest waiting
+reading alone kept; `settle_guest_readings` waits for it and `close` does.
 
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
@@ -1774,6 +1777,7 @@ SPEND_SECONDS = 60.0
 SPEND_THREAD = "console-spend"
 SERVE_SECONDS = 60.0
 SERVE_THREAD = "console-serve-poll"
+CONFIRM_THREAD = "console-guest-confirm"
 MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
@@ -3785,7 +3789,8 @@ class ConsoleService:
         self._tailnet_name: str | None = None
         self._tailnet_addresses: frozenset = frozenset()
         self._other_device_seen = False
-        self._confirming = threading.Lock()
+        self._confirm_pending: tuple[Mapping, guest.Policy] | None = None
+        self._confirm_worker: threading.Thread | None = None
         self._guest_reading_name: str | None = None
         self._serve_seconds = serve_seconds
         self._serve_status: object | None = None
@@ -4040,16 +4045,24 @@ class ConsoleService:
     def record_guest_request(self, reading: Mapping, judged: guest.Policy = guest.NO_POLICY) -> None:
         """Keep the latest guest-port request's reading for the owner; see the module docstring.
 
-        A reading of another device is first confirmed by a fresh status read, so a request from this
-        host's own address that moved since the last poll is never taken for another device's; one the
-        read cannot confirm is kept as `unknown`. A reading judged under addresses or a name other than
-        the current ones is dropped.
+        Never reads Tailscale on the caller's thread. A reading of another device that would change what
+        the owner is shown is handed to the confirming worker; a reading that would change nothing is
+        not confirmed. A reading judged under addresses or a name other than the current ones is dropped.
         """
         if reading.get("client") == guest.OTHER_DEVICE:
-            with self._confirming:
-                confirmed = self.poll_serve()
-            if not confirmed:
-                reading = {**reading, "client": guest.UNKNOWN_CLIENT}
+            with self._ingest:
+                if (reading == self._guest_reading and self._other_device_seen
+                        and judged.addresses == self._tailnet_addresses):
+                    return
+                self._confirm_pending = (reading, judged)
+                if self._confirm_worker is None:
+                    self._confirm_worker = threading.Thread(
+                        target=self._confirm_guest_readings, name=CONFIRM_THREAD, daemon=True)
+                    self._confirm_worker.start()
+            return
+        self._keep_guest_reading(reading, judged)
+
+    def _keep_guest_reading(self, reading: Mapping, judged: guest.Policy) -> None:
         with self._ingest:
             if judged.addresses != self._tailnet_addresses or (
                     judged.name is not None and self._tailnet_name is not None
@@ -4062,6 +4075,32 @@ class ConsoleService:
             self._guest_reading_name = judged.name
             self._other_device_seen = seen
             self._publish(guests=False)
+
+    def _confirm_guest_readings(self) -> None:
+        """Confirm each waiting reading of another device by a fresh status read, outside every lock."""
+        while True:
+            with self._ingest:
+                pending, self._confirm_pending = self._confirm_pending, None
+                if pending is None:
+                    self._confirm_worker = None
+                    return
+            reading, judged = pending
+            addresses = guest.own_addresses(self._tailnet_status())
+            if not addresses:
+                self._keep_guest_reading({**reading, "client": guest.UNKNOWN_CLIENT}, judged)
+            elif addresses == judged.addresses:
+                self._keep_guest_reading(reading, judged)
+            else:
+                self.poll_serve()  # the reading was judged under addresses that have moved: drop it
+
+    def settle_guest_readings(self) -> None:
+        """Wait until no guest reading waits to be confirmed."""
+        while True:
+            with self._ingest:
+                worker = self._confirm_worker
+            if worker is None:
+                return
+            worker.join()
 
     def _publish(self, *, guests: bool = True) -> None:
         """Derive and publish the views; `guests=False` publishes the owner's view alone.
@@ -7718,14 +7757,23 @@ class ConsoleService:
         """The reading the page and Activate go by: none while a successful run awaits a reading begun after it."""
         return None if self._activation_after is not None else self._activation
 
-    def poll_serve(self) -> bool:
+    def _tailnet_status(self) -> object:
+        """One `status --json` reading, None when there is no reader or it raised."""
+        if self._status_reader is None:
+            return None
+        try:
+            return self._status_reader()
+        except Exception as error:
+            print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
+            return None
+
+    def poll_serve(self) -> None:
         """One reading of Tailscale Serve's status and of this host's name; see the module docstring (guest door).
 
-        Returns whether the status gave this host's own addresses. A read that gives none keeps the
-        addresses before it, so a failed read moves nothing.
+        A read that gives no address keeps the addresses before it, so a failed read moves nothing.
         """
         if self._serve_reader is None and self._status_reader is None:
-            return False
+            return
         found = None
         if self._serve_reader is not None:
             try:
@@ -7733,12 +7781,7 @@ class ConsoleService:
             except Exception as error:
                 print(f"console: serve_status_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
-        status = None
-        if self._status_reader is not None:
-            try:
-                status = self._status_reader()
-            except Exception as error:
-                print(f"console: tailnet_status_failed {type(error).__name__}", file=sys.stderr)
+        status = self._tailnet_status()
         name = guest.self_name(status)
         addresses = guest.own_addresses(status)
         with self._ingest:
@@ -7754,7 +7797,6 @@ class ConsoleService:
                     and name != self._guest_reading_name):
                 self._guest_reading = None  # judged under a name that has gone (ADR-console-079 D3)
             self._publish()
-        return bool(addresses)
 
     def activate(self, commit: str) -> None:
         """Start one activation of `commit`, the shown tip; see the module docstring."""
@@ -8301,6 +8343,7 @@ class ConsoleService:
             workers = list(self._approval_workers)
         for worker in workers:
             worker.join()
+        self.settle_guest_readings()
         with self._ingest:
             while self._project_questions_open:
                 self._project_questions_done.wait()

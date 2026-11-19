@@ -186,8 +186,10 @@ class GuestCase(unittest.TestCase):
 
     def guest(self, svc, method, path, host="localhost", forwarded_host=TAILNET,
               logins=(COLLEAGUE,), headers=None, length=None):
-        return self.request(svc.guest_socket, method, path, host, logins, headers, length,
-                            forwarded_host)
+        got = self.request(svc.guest_socket, method, path, host, logins, headers, length,
+                           forwarded_host)
+        svc.settle_guest_readings()
+        return got
 
     def owner(self, svc, method, path, headers=None, length=None):
         return self.request(svc.address, method, path, f"{svc.address[0]}:{svc.address[1]}",
@@ -1204,7 +1206,8 @@ class ReadingServiceTest(GuestCase):
         self.assertEqual(sharing()["last_request"]["client"], "other_device")
         # the host moves to OTHER_DEVICE_ADDRESS and probes itself before the next poll
         self.status = {"Self": {"DNSName": TAILNET + ".", "TailscaleIPs": [OTHER_DEVICE_ADDRESS]}}
-        self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
+        self.guest(svc, "GET", "/api/whoami", logins=(),
+                   headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
         # the request confirms the addresses first, so the self-probe is never kept as another device
         self.assertIsNone(sharing()["last_request"])
         self.assertIs(sharing()["other_device_seen"], False)
@@ -1214,6 +1217,38 @@ class ReadingServiceTest(GuestCase):
         self.guest(svc, "GET", "/api/whoami", headers={"X-Forwarded-For": OTHER_DEVICE_ADDRESS})
         self.assertEqual(sharing()["last_request"]["client"], "this_host")
         self.assertIs(sharing()["other_device_seen"], False)
+
+    def test_a_guest_request_of_another_device_never_waits_on_the_status_read(self):
+        self.seed()
+        gate = threading.Event()
+        reads = []
+
+        def slow():
+            reads.append(True)
+            gate.wait(10)
+            return self.status
+
+        svc = self.start()
+        svc._status_reader = slow
+        self.addCleanup(gate.set)
+        headers = {"X-Forwarded-For": OTHER_DEVICE_ADDRESS}
+        started = time.monotonic()
+        for _ in range(4):
+            self.request(svc.guest_socket, "GET", "/api/whoami", "localhost", (COLLEAGUE,), headers,
+                         None, TAILNET)
+        self.assertLess(time.monotonic() - started, 5)
+        gate.set()
+        svc.settle_guest_readings()
+        self.assertLess(len(reads), 4)  # a burst waits on one read at a time, the latest reading alone
+        sharing = json.loads(self.owner(svc, "GET", "/api/state")[2])["sharing"]
+        self.assertIs(sharing["other_device_seen"], True)
+        self.assertEqual(sharing["last_request"]["client"], "other_device")
+        # a reading that changes nothing is never confirmed again
+        before = len(reads)
+        self.request(svc.guest_socket, "GET", "/api/whoami", "localhost", (COLLEAGUE,), headers,
+                     None, TAILNET)
+        svc.settle_guest_readings()
+        self.assertEqual(len(reads), before)
 
     def test_a_failed_status_read_moves_no_address_and_forgets_no_visit(self):
         self.seed()
