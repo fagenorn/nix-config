@@ -5,7 +5,8 @@ nothing addresses the owner's gui/<uid> domain; the legacy login agents of an ea
 generation are booted out and removed at the start of nix-darwin's `launchd` step. A login
 host keeps its login-session agents. The cleanup segment is run here with fake `launchctl`,
 `id` and `sudo`.
-Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
+Reads the host evaluations from `tests/host_readings.py`, which evaluates the flake from this
+checkout's git tree, so new files must be `git add`-ed first.
 Run: just agent-workflow-tests
 """
 import os
@@ -18,7 +19,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from . import test_verify_pending_units as units
+from . import host_readings, test_verify_pending_units as units
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 WAIT = "/bin/wait4path /nix/store && exec "
@@ -64,30 +65,11 @@ exit 0
 
 
 class OwnerServices(unittest.TestCase):
-    APPLY = """c: u: {
-      atBoot = c.ownerServices.atBoot;
-      user = u.home.username; home = u.home.homeDirectory;
-      homeAgents = builtins.filter (n: u.launchd.agents.${n}.enable) (builtins.attrNames u.launchd.agents);
-      userAgents = builtins.attrNames c.launchd.user.agents;
-      daemonPlists = builtins.attrNames c.environment.launchDaemons;
-      proxyArgs = u.launchd.agents.claude-cache-proxy.config.ProgramArguments;
-      proxyEnv = u.launchd.agents.claude-cache-proxy.config.EnvironmentVariables;
-      sopsProgram = u.launchd.agents.sops-nix.config.Program;
-      sopsEnv = u.launchd.agents.sops-nix.config.EnvironmentVariables;
-      plists = builtins.mapAttrs (_: p: p.text) (builtins.intersectAttrs {
-        "org.nixos.agent-console.plist" = 0; "org.nixos.verify-pending.plist" = 0;
-        "org.nixos.claude-cache-proxy.plist" = 0; "org.nixos.sops-nix.plist" = 0; } c.environment.launchDaemons);
-      sopsActivation = u.home.activation.sops-nix.data;
-      pre = c.system.activationScripts.preActivation.text;
-      launchdText = c.system.activationScripts.launchd.text;
-    }"""
-
     @classmethod
     def setUpClass(cls):
-        cls.user = units.username()
-        # pure: the required CI job runs on Linux, where only a pure evaluation works.
-        cls.got = {host: units.evaluate(f"darwinConfigurations.{host}", cls.APPLY, pure=True)
-                   for host in units.DarwinHosts.HOSTS}
+        cls.user = host_readings.username()
+        # Read from a pure evaluation: the required CI job runs on Linux, where only that works.
+        cls.got = {host: host_readings.read(host, "owner-services") for host in units.DarwinHosts.HOSTS}
 
     def plist(self, got, label):
         return plistlib.loads(got["plists"][f"{label}.plist"].encode())
@@ -276,10 +258,7 @@ class ActivationOrder(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.got = {host: units.evaluate(f"darwinConfigurations.{host}", """c: u: {
-          pre = c.system.activationScripts.preActivation.text;
-          activate = c.system.activationScripts.script.text;
-        }""") for host in units.DarwinHosts.BOOT_HOSTS}
+        cls.got = {host: host_readings.read(host, "owner-activation") for host in units.DarwinHosts.BOOT_HOSTS}
 
     def test_the_cleanup_runs_after_the_preflight_checks_and_before_any_daemon_loads(self):
         for host in units.DarwinHosts.BOOT_HOSTS:

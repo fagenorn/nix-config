@@ -6,14 +6,19 @@ becomes an evaluation per reader. Needs nix and git; the freshness cases evaluat
 Run: just agent-workflow-tests
 """
 import fcntl
+import importlib
+import io
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest import mock
 
@@ -456,6 +461,121 @@ class EvaluationEnvironmentTest(unittest.TestCase):
             calls = self.act()
             for _, env in calls:
                 self.assertEqual(env["HOME"], "/nonexistent-1286/later-home")
+
+
+class RunReadsEachHostOnce(unittest.TestCase):
+    """Every host-reading test reads the cached answer, so a run evaluates each host once (AC1)."""
+
+    # reader module -> the parts it reads
+    READERS = {
+        "tests.test_verify_pending_units": ("verify-pending", "verify-pending-darwin", "verify-pending-activation"),
+        "tests.test_console_units": ("console", "console-darwin"),
+        "tests.test_darwin_user_agent_reload": ("user-launchd",),
+        "tests.test_darwin_path_order": ("zsh-init",),
+        "tests.test_host_sudo": ("sudo",),
+        "tests.test_runner_home": ("runner-home",),
+        "tests.test_system_packages": ("system-packages",),
+        "tests.test_owner_services_units": ("owner-services", "owner-activation"),
+    }
+    # test ids the sweep does not run because they evaluate for real
+    REAL_EVALUATIONS = ()
+    MENTIONS_ALLOWED = {
+        "tests/host_readings.py": "the cache itself",
+        "tests/test_host_readings.py": "the cache's own tests",
+        "tests/test_branch_protection.py": "CI's Nix Eval job text, not an evaluation",
+        "tests/test_github_runners.py": "evaluates directly until its runners tests read the cache",
+    }
+
+    @staticmethod
+    def members():
+        lines = (ROOT / "justfile").read_text(encoding="utf-8").splitlines()
+        start = lines.index("agent-workflow-tests *args:")
+        body = []
+        for line in lines[start + 1:]:
+            if not line.startswith("  "):
+                break
+            body.append(line)
+        return [line.strip().removesuffix(" \\") for line in body[1:]]
+
+    @staticmethod
+    def cases(suite):
+        for item in suite:
+            if isinstance(item, unittest.TestSuite):
+                yield from RunReadsEachHostOnce.cases(item)
+            else:
+                yield item
+
+    def test_no_other_test_names_a_host_output(self):
+        paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("*.py")}
+        naming = {
+            path for path in paths
+            if re.search(r"(nixos|darwin)Configurations\.", (ROOT / path).read_text(encoding="utf-8"))
+        }
+        self.assertLessEqual(naming, set(self.MENTIONS_ALLOWED), sorted(naming - set(self.MENTIONS_ALLOWED)))
+
+    def test_a_run_evaluates_each_host_once_and_every_reader_reads_that_answer(self):
+        real_nix = shutil.which("nix")
+        self.assertIsNotNone(real_nix)
+        with mock.patch.object(host_readings, "_evaluate", wraps=host_readings._evaluate) as evaluate:
+            for host in host_readings.HOSTS:
+                host_readings.reading(host)
+        counts = Counter(call.args[0] for call in evaluate.call_args_list)
+        self.assertTrue(all(count <= 1 for count in counts.values()), counts)
+
+        darwin_machine = platform.system() == "Darwin"
+        linux_builder = host_readings.can_build("x86_64-linux")
+        with tempfile.TemporaryDirectory() as tmp:
+            refused = Path(tmp) / "refused"
+            wrapper = Path(tmp) / "nix"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                'evaluating=no; host=no\n'
+                'for a in "$@"; do\n'
+                '  case "$a" in\n'
+                "    eval) evaluating=yes;;\n"
+                "    *Configurations.*) host=yes;;\n"
+                "  esac\n"
+                "done\n"
+                'if [ "$evaluating" = yes ] && [ "$host" = yes ]; then\n'
+                f'  echo "$*" >> "{refused}"; exit 1\n'
+                "fi\n"
+                f'exec "{real_nix}" "$@"\n', encoding="utf-8")
+            wrapper.chmod(0o755)
+            recorded = {}
+            results = {}
+            with mock.patch.dict(os.environ, {"PATH": f"{tmp}:{os.environ['PATH']}"}), \
+                    mock.patch.object(host_readings, "read", wraps=host_readings.read) as read:
+                for name in self.READERS:
+                    module = importlib.import_module(name)
+                    cases = [case for case in self.cases(unittest.defaultTestLoader.loadTestsFromModule(module))
+                             if case.id() not in self.REAL_EVALUATIONS]
+                    before = len(read.call_args_list)
+                    stream = io.StringIO()
+                    results[name] = (
+                        unittest.TextTestRunner(stream=stream, verbosity=2).run(unittest.TestSuite(cases)),
+                        stream)
+                    recorded[name] = {call.args[:2] for call in read.call_args_list[before:]}
+            for name, parts in self.READERS.items():
+                with self.subTest(name):
+                    result, stream = results[name]
+                    self.assertTrue(result.wasSuccessful(), stream.getvalue())
+                    allowed = {(h, p) for p in parts for h in host_readings.PARTS[p].hosts}
+                    expected = {
+                        (h, p) for p in parts for h in host_readings.PARTS[p].hosts
+                        if p in host_readings.select(
+                            h, host_readings.PARTS, darwin_machine=darwin_machine, linux_builder=linux_builder)[0]
+                    }
+                    self.assertLessEqual(expected, recorded[name])
+                    self.assertLessEqual(recorded[name], allowed)
+            refusals = refused.read_text() if refused.exists() else ""
+            self.assertEqual(refusals, "", "a reader ran a host evaluation of its own")
+
+        paths = set(self.members()) | {f"tests/{path.name}" for path in (ROOT / "tests").glob("test_*.py")}
+        readers = {
+            path for path in paths
+            if path != "tests/test_host_readings.py" and "host_readings" in (ROOT / path).read_text(encoding="utf-8")
+        }
+        self.assertEqual(readers, {name.replace(".", "/") + ".py" for name in self.READERS})
 
 
 if __name__ == "__main__":

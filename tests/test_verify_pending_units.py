@@ -1,56 +1,24 @@
 """The verify-pending schedule as each host's configuration evaluates it (issue 632).
 
-Evaluates the flake from this checkout's git tree, so new files must be `git add`-ed first.
-An evaluation started under the accounts sandbox runs with the environment from before it, so it
-reads the user's Nix cache instead of fetching every flake input into an empty one (#1286).
+Reads the host evaluations from `tests/host_readings.py`, which evaluates the flake from this
+checkout's git tree once per checkout content, so new files must be `git add`-ed first.
 Run: just agent-workflow-tests (the file also runs directly).
 """
-import json
 import os
 import platform
 import plistlib
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 try:
-    from . import accounts_sandbox
+    from . import host_readings
 except ImportError:  # run directly: no parent package, and tests/ is sys.path[0]
-    import accounts_sandbox
+    import host_readings
 
 ROOT = Path(__file__).resolve().parents[1]
-EVAL_TIMEOUT = 1200
 LABEL = "org.nixos.verify-pending"
-NIX = ["nix", "--extra-experimental-features", "nix-command flakes", "eval"]
-
-
-def nix(*args, pure=False):
-    """`pure` forbids import-from-derivation, so the evaluation needs no build of another system."""
-    options = ["--option", "allow-import-from-derivation", "false"] if pure else []
-    done = subprocess.run(
-        [*NIX, *options, *args],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=EVAL_TIMEOUT,
-        env=accounts_sandbox.unsandboxed_environment(),
-    )
-    if done.returncode != 0:
-        raise AssertionError(f"nix eval {' '.join(args)} failed:\n{done.stderr[-4000:]}")
-    return done.stdout
-
-
-def username():
-    return nix("--raw", "--file", str(ROOT / "vars/default.nix"), "username")
-
-
-def evaluate(output, apply, pure=False):
-    """`apply` is a Nix function of the host's `config` and the user's home-manager config `u`."""
-    expression = f"c: let u = c.home-manager.users.{json.dumps(username())}; in ({apply}) c u"
-    return json.loads(nix("--json", f"{ROOT}#{output}.config", "--apply", expression, pure=pure))
 
 
 def check_command(case, command, host):
@@ -77,18 +45,7 @@ class LinuxUnits(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.got = evaluate(f"nixosConfigurations.{cls.HOST}", """c: u: {
-          command = u.verifyPending.command;
-          label = u.verifyPending.label;
-          kickScript = u.verifyPending.kick;
-          start = u.verifyPending.start;
-          probe = u.verifyPending.probe;
-          kickText = u.verifyPending.kickText;
-          service = u.systemd.user.services.verify-pending;
-          timer = u.systemd.user.timers.verify-pending;
-          paths = builtins.attrNames u.systemd.user.paths;
-          kick = u.home.activation.verifyPendingKick;
-        }""")
+        cls.got = host_readings.read(cls.HOST, "verify-pending")
 
     def test_the_command_carries_this_hosts_flake_hostname(self):
         check_command(self, self.got["command"], self.HOST)
@@ -133,37 +90,11 @@ class DarwinHosts(unittest.TestCase):
     # system daemon of the owner.
     LOGIN_HOSTS = ("mbp",)
     BOOT_HOSTS = ("eleven-m5",)
-    APPLY = """c: u: {
-          atBoot = c.ownerServices.atBoot;
-          user = u.home.username;
-          home = u.home.homeDirectory;
-          command = u.verifyPending.command;
-          label = u.verifyPending.label;
-          kickScript = u.verifyPending.kick;
-          start = u.verifyPending.start;
-          probe = u.verifyPending.probe;
-          kickText = u.verifyPending.kickText;
-          homeKick = u.home.activation ? verifyPendingKick;
-          agentCommand = if c.launchd.user.agents ? verify-pending then c.launchd.user.agents.verify-pending.command else null;
-          daemonCommand = if c.launchd.daemons ? verify-pending then c.launchd.daemons.verify-pending.command else null;
-          inUserAgents = c.environment.userLaunchAgents ? "org.nixos.verify-pending.plist";
-          inDaemons = c.environment.launchDaemons ? "org.nixos.verify-pending.plist";
-          plist = (c.environment.userLaunchAgents // c.environment.launchDaemons)."org.nixos.verify-pending.plist".text;
-        }"""
-    # The activation scripts embed the home-manager activation package, whose evaluation
-    # imports from a derivation built for darwin (the catppuccin starship theme), so only a
-    # darwin machine can evaluate them. The assertions on them live in DarwinActivation.
-    ACTIVATION_APPLY = """c: u: {
-          user = u.home.username;
-          kickScript = u.verifyPending.kick;
-          post = c.system.activationScripts.postActivation.text;
-          activate = c.system.activationScripts.script.text;
-        }"""
 
     @classmethod
     def setUpClass(cls):
-        # pure: this part must evaluate on any machine, as the required CI job runs on Linux.
-        cls.got = {host: evaluate(f"darwinConfigurations.{host}", cls.APPLY, pure=True) for host in cls.HOSTS}
+        # Read from a pure evaluation: this part must evaluate on any machine, as the required CI job runs on Linux.
+        cls.got = {host: host_readings.read(host, "verify-pending-darwin") for host in cls.HOSTS}
 
     def test_each_command_carries_its_own_flake_hostname(self):
         for host in self.HOSTS:
@@ -259,8 +190,7 @@ class DarwinActivation(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.got = {host: evaluate(f"darwinConfigurations.{host}", DarwinHosts.ACTIVATION_APPLY)
-                   for host in cls.HOSTS}
+        cls.got = {host: host_readings.read(host, "verify-pending-activation") for host in cls.HOSTS}
 
     REPOINT = 'ln -sfn "$(readlink -f "$systemConfig")" /run/current-system'
 
@@ -295,75 +225,7 @@ class DarwinActivation(unittest.TestCase):
                 self.assertLess(activate.rindex(line), activate.index(self.REPOINT))
 
 
-class EvaluationEnvironmentTest(unittest.TestCase):
-    """The environment each `nix eval` child starts with (#1286); nothing here evaluates."""
-
-    CACHE_INPUTS = ("NIX_CACHE_HOME", "XDG_CACHE_HOME")
-
-    def record(self):
-        calls = []
-
-        def fake(argv, **kwargs):
-            # The child's environment as of the call: a fixture's tear-down must not change it.
-            env = dict(os.environ) if kwargs.get("env") is None else dict(kwargs["env"])
-            calls.append((argv, env))
-            return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
-
-        return calls, fake
-
-    def act(self):
-        calls, fake = self.record()
-        with mock.patch.object(subprocess, "run", fake):
-            evaluate("nixosConfigurations.anis-desktop", "c: u: {}")
-            evaluate("darwinConfigurations.mbp", "c: u: {}", pure=True)
-        self.assertEqual(len(calls), 4)
-        # Each evaluate() is a username call, then the evaluation; only the pure one forbids IFD.
-        for index, (argv, _) in enumerate(calls):
-            self.assertEqual("allow-import-from-derivation" in argv, index == 3, argv)
-        return calls
-
-    def test_a_sandboxed_evaluation_runs_with_the_environment_from_before_the_sandbox(self):
-        self.assertIsNone(accounts_sandbox.root())
-        variables = accounts_sandbox.VARIABLES
-        with tempfile.TemporaryDirectory() as t:
-            before = {"HOME": f"{t}/real-home", "CLAUDE_ACCOUNTS_DIR": f"{t}/real-accounts"}
-            cases = {
-                "both cache inputs absent": {},
-                "XDG_CACHE_HOME only": {"XDG_CACHE_HOME": f"{t}/xdg"},
-                "NIX_CACHE_HOME present and empty": {"NIX_CACHE_HOME": ""},
-            }
-            for name, inputs in cases.items():
-                with self.subTest(name), mock.patch.dict(os.environ, clear=False):
-                    os.environ.update(before)
-                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
-                    for v in self.CACHE_INPUTS:
-                        os.environ.pop(v, None)
-                    os.environ.update(inputs)
-                    parent = dict(os.environ)
-                    accounts_sandbox.setUpModule()
-                    try:
-                        calls = self.act()
-                    finally:
-                        accounts_sandbox.tearDownModule()
-                    for _, env in calls:
-                        self.assertEqual(
-                            {v: env.get(v) for v in variables},
-                            {v: parent.get(v) for v in variables},
-                        )
-                        for v in self.CACHE_INPUTS:
-                            self.assertEqual((v in env, env.get(v)), (v in parent, parent.get(v)), v)
-                        self.assertEqual(
-                            {k: x for k, x in env.items() if k not in variables},
-                            {k: x for k, x in parent.items() if k not in variables},
-                        )
-
-    def test_an_unsandboxed_evaluation_inherits_the_callers_environment(self):
-        self.assertIsNone(accounts_sandbox.root())
-        with mock.patch.dict(os.environ, {"HOME": "/nonexistent-1286/later-home"}):
-            calls = self.act()
-            for _, env in calls:
-                self.assertEqual(env["HOME"], "/nonexistent-1286/later-home")
-
+class DirectRunTest(unittest.TestCase):
     def test_the_file_still_runs_directly(self):
         done = subprocess.run(
             [sys.executable, str(ROOT / "tests/test_verify_pending_units.py"), "-h"],

@@ -21,7 +21,7 @@ Contract:
   (removed when they were unset): the environment a fault-injected child starts with.
 - `unsandboxed_environment()` is None outside a fixture, else `os.environ` with the three
   variables put back to what the outermost `setUpModule` found: the environment of every
-  configuration evaluation of `tests/test_verify_pending_units.py` (#1286).
+  configuration evaluation of `tests/host_readings.py` (#1286).
 - `accounts_snapshot(path)` records an accounts directory's structure, never its
   contents, and never follows a link or opens a file: `.` and every root entry as
   `link:<target>`, `dir:<mode>`, `file:<mode>` or `other`; each `profiles/<n>`; and per
