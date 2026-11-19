@@ -508,7 +508,7 @@ class CapacityCheckTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)
 
-    # `--code-signin` (#1323) reads the sign-in rows of the console's log.
+    # `--remote-signin` (#1323) reads the sign-in rows of the console's log.
     @staticmethod
     def start(profile):
         return ("signin.acted", None, {"by": "owner", "profile": profile, "action": "start",
@@ -536,42 +536,51 @@ class CapacityCheckTest(unittest.TestCase):
             events.append(rows)
         return log
 
-    def code_signin(self, rows, *extra):
+    def remote_signin(self, rows, profile="work", *extra):
         home, log = self.log_home(rows)
-        code, out = self.run_check("--code-signin", "--log", str(log), *extra)
+        code, out = self.run_check("--remote-signin", "--profile", profile, "--log", str(log),
+                                   *extra)
         return code, json.loads(out)
 
-    def test_code_signin_is_met_by_a_pasted_code_then_a_signed_in_end_of_that_attempt(self):
-        rows = [self.start("work"), self.code("work"), self.end("work", "signed_in", 1)]
-        self.assertEqual(self.code_signin(rows), (0, {"profiles": ["work"], "status": "met"}))
-
-    def test_code_signin_is_not_yet_without_a_pasted_code_inside_a_signed_in_attempt(self):
+    def test_remote_signin_is_met_by_either_route_of_the_named_profiles_attempt(self):
         start, code, end = self.start, self.code, self.end
-        guest = ("signin.acted", None, {"by": "guest", "profile": "work", "action": "code",
-                                         "outcome": "sent"})
         cases = {
-            "loopback finish, no code": [start("work"), end("work", "signed_in", 1)],
-            "code before the start": [code("work"), start("work"), end("work", "signed_in", 2)],
+            "pasted code": ([start("work"), code("work"), end("work", "signed_in", 1)], "code"),
+            "forwarded port, no code": ([start("work"), end("work", "signed_in", 1)], "forward"),
+            "code of a failed attempt does not mark a later one": (
+                [start("work"), code("work"), end("work", "failed", 1), start("work"),
+                 end("work", "signed_in", 4)], "forward"),
+        }
+        for label, (rows, route) in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.remote_signin(rows),
+                                 (0, {"profile": "work", "route": route, "status": "met"}))
+
+    def test_remote_signin_is_not_yet_without_a_signed_in_end_of_a_start_of_the_named_profile(self):
+        start, code, end = self.start, self.code, self.end
+        guest = ("signin.acted", None, {"by": "guest", "profile": "work", "action": "start",
+                                         "outcome": "started"})
+        cases = {
+            "another profile signed in": [start("spare"), code("spare"),
+                                          end("spare", "signed_in", 1)],
             "failed end": [start("work"), code("work"), end("work", "failed", 1)],
-            "code of another profile": [start("work"), code("spare"),
-                                        end("work", "signed_in", 1)],
             "end of another attempt": [start("work"), code("work"),
                                        end("work", "signed_in", 99)],
-            "code by a guest": [start("work"), guest, end("work", "signed_in", 1)],
-            "code after the end": [start("work"), end("work", "signed_in", 1), code("work")],
-            "code of a failed attempt": [start("work"), code("work"), end("work", "failed", 1),
-                                         start("work"), end("work", "signed_in", 4)],
+            "start by a guest": [guest, end("work", "signed_in", 1)],
+            "no start": [end("work", "signed_in", 1)],
+            "no end": [start("work"), code("work")],
         }
         for label, rows in cases.items():
             with self.subTest(label=label):
-                self.assertEqual(self.code_signin(rows), (75, {"status": "pending"}))
+                self.assertEqual(self.remote_signin(rows), (75, {"status": "pending"}))
 
-    def test_code_signin_after_a_commit_ignores_rows_from_before_it(self):
+    def test_remote_signin_after_a_commit_ignores_rows_from_before_it(self):
         sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True,
                              text=True, check=True).stdout.strip()
         cutoff = subprocess.run(["git", "-C", str(ROOT), "show", "-s", "--format=%cI", "HEAD"],
                                 capture_output=True, text=True, check=True).stdout.strip()
         full = [self.start("work"), self.code("work"), self.end("work", "signed_in", 1)]
+        met = (0, {"profile": "work", "route": "code", "status": "met"})
         cases = {
             "all before the commit": ([("2000-01-01T00:00:00.000000+00:00", full)],
                                       (75, {"status": "pending"})),
@@ -579,21 +588,22 @@ class CapacityCheckTest(unittest.TestCase):
                                      (utc_now(), [self.code("work"),
                                                   self.end("work", "signed_in", 1)])],
                                     (75, {"status": "pending"})),
-            "all after the commit": ([(utc_now(), full)],
-                                     (0, {"profiles": ["work"], "status": "met"})),
+            "all after the commit": ([(utc_now(), full)], met),
         }
         for label, (batches, expected) in cases.items():
             with self.subTest(label=label):
                 log = self.stamped_log(batches)
-                code, out = self.run_check("--code-signin", "--log", str(log),
-                                           "--after-commit", sha)
+                code, out = self.run_check("--remote-signin", "--profile", "work", "--log",
+                                           str(log), "--after-commit", sha)
                 self.assertEqual((code, json.loads(out)), expected)
 
-    def test_code_signin_with_an_unknown_commit_is_not_yet(self):
+    def test_remote_signin_with_an_unknown_commit_is_not_yet(self):
         home, log = self.log_home([self.start("work")])
-        code, out = self.run_check("--code-signin", "--log", str(log), "--after-commit", "0" * 40)
+        code, out = self.run_check("--remote-signin", "--profile", "work", "--log", str(log),
+                                   "--after-commit", "0" * 40)
         self.assertEqual((code, json.loads(out)), (75, {"status": "no_commit"}))
-        done = subprocess.run([ROOT / WRAPPER, "--code-signin", "--after-commit", "abc"],
+        done = subprocess.run([ROOT / WRAPPER, "--remote-signin", "--profile", "work",
+                               "--after-commit", "abc"],
                               cwd=ROOT, capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 2)
 
@@ -606,11 +616,11 @@ class CapacityCheckTest(unittest.TestCase):
                                side_effect=subprocess.TimeoutExpired(["git"], 10)):
             self.assertIsNone(capacity_check.commit_time(sha))
             with contextlib.redirect_stdout(out):
-                code = capacity_check.main(["--code-signin", "--log", str(log),
-                                            "--after-commit", sha])
+                code = capacity_check.main(["--remote-signin", "--profile", "work", "--log",
+                                            str(log), "--after-commit", sha])
         self.assertEqual((code, json.loads(out.getvalue())), (75, {"status": "no_commit"}))
 
-    def test_code_signin_is_not_yet_without_a_readable_log(self):
+    def test_remote_signin_is_not_yet_without_a_readable_log(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -621,28 +631,34 @@ class CapacityCheckTest(unittest.TestCase):
         empty.close()
         for name in ("missing", "junk", "empty.sqlite3"):
             with self.subTest(name=name):
-                code, out = self.run_check("--code-signin", "--log", str(root / name),
-                                           env={"HOME": str(root)})
+                code, out = self.run_check("--remote-signin", "--profile", "work", "--log",
+                                           str(root / name), env={"HOME": str(root)})
                 self.assertEqual((code, json.loads(out)), (75, {"status": "no_log"}))
         self.assertEqual(sorted(path.name for path in root.iterdir()),
                          ["empty.sqlite3", "junk"])
 
-    def test_code_signin_needs_no_console_and_writes_nothing(self):
+    def test_remote_signin_needs_no_console_and_writes_nothing(self):
         home, log = self.log_home([self.start("work"), self.code("work"),
                                    self.end("work", "signed_in", 1)])
         before_bytes = log.read_bytes()
         before_files = sorted(path.name for path in log.parent.iterdir())
-        code, out = self.run_check("--code-signin", "--log", str(log),
+        code, out = self.run_check("--remote-signin", "--profile", "work", "--log", str(log),
                                    "--url", "http://127.0.0.1:1/api/state")
-        self.assertEqual((code, json.loads(out)), (0, {"profiles": ["work"], "status": "met"}))
+        self.assertEqual((code, json.loads(out)),
+                         (0, {"profile": "work", "route": "code", "status": "met"}))
         self.assertEqual(log.read_bytes(), before_bytes)
         self.assertEqual(sorted(path.name for path in log.parent.iterdir()), before_files)
 
-    def test_code_signin_is_exclusive_with_the_other_modes(self):
-        for other in (["--every"], ["--signin"], ["--accounts"], ["--page-signin"],
-                      ["--page-add"], ["--after-seq", "1"]):
-            with self.subTest(other=other):
-                done = subprocess.run([ROOT / WRAPPER, "--code-signin", *other], cwd=ROOT,
+    def test_remote_signin_is_exclusive_with_the_other_modes_and_needs_its_profile(self):
+        for args in (["--remote-signin", "--profile", "work", "--every"],
+                     ["--remote-signin", "--profile", "work", "--signin"],
+                     ["--remote-signin", "--profile", "work", "--accounts"],
+                     ["--remote-signin", "--profile", "work", "--page-signin"],
+                     ["--remote-signin", "--profile", "work", "--page-add"],
+                     ["--remote-signin", "--profile", "work", "--after-seq", "1"],
+                     ["--remote-signin"], ["--every", "--profile", "work"]):
+            with self.subTest(args=args):
+                done = subprocess.run([ROOT / WRAPPER, *args], cwd=ROOT,
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual(done.returncode, 2)
 

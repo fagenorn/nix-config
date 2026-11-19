@@ -19,16 +19,16 @@ stderr line `console: signin_link_refused <profile>` and no part of the line.
 The client also writes its manual link to its standard output (client 2.1.322, stdin not a terminal:
 `If the browser didn't open, visit: <link>`, the link possibly wrapped in OSC 8 escapes). The runner
 reads that output for the whole run, in lines of at most `MAX_OUTPUT_LINE` (16384) bytes (the rest of
-a longer line is dropped), and `output_links(line)` lists each token of a line that starts at an
+a longer line is dropped, together with any token the limit cut in two), and `output_links(line)` lists each token of a line that starts at an
 `https://` and runs to the next byte outside 0x21 to 0x7E, the ones that pass `valid_link`. The first
 token whose route is `manual` is the run's manual link.
 
 Route. `link_route(url)` classifies a link by its one `redirect_uri` query member, and never raises:
 `("manual", None)` for an `https` return address on a host that is present and not in
-`LOOPBACK_HOSTS` (`localhost`, `127.0.0.1`, `::1`); `("loopback", port)` for an `http` one on such a
+`LOOPBACK_HOSTS` (`localhost`, `127.0.0.1`, `::1`), whose port is none or in 1 to 65535; `("loopback", port)` for an `http` one on such a
 host, the port being the written one or 80 when none is written, in 1 to 65535; None for any other
-link (no `redirect_uri` or two of them, another scheme or host, an unreadable port, a URL that does
-not parse). A link of the browser hook that is None is handed out as `unknown`.
+link (no `redirect_uri` or two of them, another scheme or host, an unreadable port in the link's own
+authority or in its return address, a URL that does not parse). A link of the browser hook that is None is handed out as `unknown`.
 `forward_command(port, host)` is `ssh -N -L <port>:localhost:<port> <host>` for a port in 1 to 65535
 and a host of letters, digits and hyphens that starts with a letter or digit, else None.
 `default_host()` is the machine's short host name. `Link(url, route, port, forward)` is what
@@ -38,7 +38,9 @@ and a host of letters, digits and hyphens that starts with a letter or digit, el
 A manual link wins when the client offers one: `wait_link` answers as soon as the manual link is
 known, or, when only the browser link arrived, once `manual_grace` (`MANUAL_GRACE`, 2.0) seconds have
 passed since it did. A run has one answer: the first Link `wait_link` returns for it is returned
-again by every later call, whatever the client prints afterwards.
+again by every later call, whatever the client prints afterwards. The one exception is a call whose
+`link_wait` ends while the browser link is still inside its grace: it returns the browser link's
+answer without keeping it, and the next call waits out the rest of the grace.
 
 Code input. The client reads the code that the browser shows the owner from its standard input.
 Host finding, anis-desktop, 2026-11-13, client 2.1.322, each run under a throwaway configuration
@@ -177,18 +179,20 @@ def valid_link(text: str) -> bool:
 
 def link_route(url: str) -> tuple[str, int | None] | None:
     try:
-        values = parse_qs(urlsplit(url).query, keep_blank_values=True).get("redirect_uri")
+        link = urlsplit(url)
+        link.port  # noqa: B018 -- raises ValueError for an authority that cannot be read
+        values = parse_qs(link.query, keep_blank_values=True).get("redirect_uri")
         if values is None or len(values) != 1:
             return None
         target = urlsplit(values[0])
         host = target.hostname
+        port = target.port
         if target.scheme == "http" and host in LOOPBACK_HOSTS:
-            port = target.port
             if port is None:
                 port = 80
             return ("loopback", port) if 1 <= port <= 65535 else None
         if target.scheme == "https" and host and host not in LOOPBACK_HOSTS:
-            return ("manual", None)
+            return ("manual", None) if port is None or 1 <= port <= 65535 else None
     except ValueError:
         return None
     return None
@@ -488,19 +492,26 @@ class SignIns:
         if run is None:
             return None
         give_up = time.monotonic() + self._link_wait
+        provisional = False
         with run.cond:
             while run.chosen is None:
                 now = time.monotonic()
-                if run.manual is not None or run.done or now >= give_up:
+                if run.manual is not None or run.done:
                     break
-                wait = give_up - now
+                grace = None
                 if run.fifo_link is not None:
-                    wait = min(wait, run.fifo_at + self._manual_grace - now)
-                    if wait <= 0:
+                    grace = run.fifo_at + self._manual_grace - now
+                    if grace <= 0:
                         break
-                run.cond.wait(wait)
+                if now >= give_up:
+                    provisional = grace is not None
+                    break
+                run.cond.wait(give_up - now if grace is None else min(give_up - now, grace))
             if run.chosen is None:
-                run.chosen = self._pick(run)
+                link = self._pick(run)
+                if provisional:
+                    return link
+                run.chosen = link
             return run.chosen
 
     def _pick(self, run: _Run) -> Link | None:
@@ -658,6 +669,10 @@ class SignIns:
                 continue
 
 
+_TOKEN_BYTES = bytes(range(0x21, 0x7F))
+_TOKEN = re.compile(rb"[\x21-\x7e]")
+
+
 class _Lines:
     """Split a byte stream into lines of at most `limit` bytes; the rest of a longer line is dropped."""
 
@@ -675,13 +690,21 @@ class _Lines:
                 continue
             self._tail += head
             if len(self._tail) > self._limit:
-                lines.append(self._tail[:self._limit])
+                lines.append(self._cut(self._tail))
                 self._tail = b""
                 self._skipping = not newline
             elif newline:
                 lines.append(self._tail)
                 self._tail = b""
         return lines
+
+    def _cut(self, tail: bytes) -> bytes:
+        """The first `limit` bytes of `tail`, less a token the limit cut in two."""
+        line = tail[:self._limit]
+        if not (_TOKEN.match(tail[self._limit - 1:self._limit])
+                and _TOKEN.match(tail[self._limit:self._limit + 1])):
+            return line
+        return line.rstrip(_TOKEN_BYTES)
 
     def rest(self) -> list[bytes]:
         tail, self._tail = self._tail, b""

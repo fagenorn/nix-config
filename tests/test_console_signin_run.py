@@ -209,6 +209,10 @@ class ParseTest(unittest.TestCase):
             (query("redirect_uri=http%3A%2F%2F%5B%3A%3A1%5D%3A9%2Fcallback"), ("loopback", 9)),
             (query("redirect_uri=http%3A%2F%2Flocalhost%2Fcallback"), ("loopback", 80)),
             (query("redirect_uri=http%3A%2F%2Flocalhost%3A99999%2Fcallback"), None),
+            (query("redirect_uri=https%3A%2F%2Fexample.com%3A99999%2Fcb"), None),
+            (query("redirect_uri=https%3A%2F%2Fexample.com%3A0%2Fcb"), None),
+            (query("redirect_uri=https%3A%2F%2Fexample.com%3A8443%2Fcb"), ("manual", None)),
+            ("https://a.example:99999/o?redirect_uri=https%3A%2F%2Fexample.com%2Fcb", None),
             (query("redirect_uri=http%3A%2F%2F%5B%3A%3A1%2Fcallback"), None),
             (BAD_LINK, None),
             (MANUAL_LINK, ("manual", None)),
@@ -236,6 +240,19 @@ class ParseTest(unittest.TestCase):
         for line, expected in rows:
             with self.subTest(line=line[:40]):
                 self.assertEqual(signin_run.output_links(line), expected)
+
+    def test_lines_drop_a_token_the_limit_cut_in_two(self):
+        rows = [
+            (10, b"ab cdefghijkl\n", [b"ab "]),
+            (10, b"abcdefghi jkl\n", [b"abcdefghi "]),
+            (10, b"abcdefghijkl\nnext\n", [b"", b"next"]),
+            (10, b"abcdefghij\n", [b"abcdefghij"]),
+        ]
+        for limit, data, expected in rows:
+            with self.subTest(data=data):
+                self.assertEqual(signin_run._Lines(limit).feed(data), expected)
+        chunked = signin_run._Lines(10)
+        self.assertEqual(chunked.feed(b"ab cdefgh") + chunked.feed(b"ijkl\n"), [b"ab "])
 
     def test_forward_command_table(self):
         self.assertEqual(signin_run.forward_command(54321, "console-host"), LOOPBACK_FORWARD)
@@ -526,6 +543,35 @@ class RunTest(unittest.TestCase):
         until(self, lambda: getattr(runs._runs.get("work"), "manual", None) is not None)
         second = runs.wait_link("work")
         self.assertEqual(route_of(second), expected)
+
+    def test_an_unusable_manual_link_does_not_displace_a_working_one(self):
+        unusable = ("https://claude.example/oauth/authorize?code=true"
+                    "&redirect_uri=https%3A%2F%2Fexample.com%3A99999%2Fcb&state=SENTINEL-OUT")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=unusable,
+                     FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_line_cut_by_the_output_limit_never_hands_out_a_shortened_link(self):
+        cut = len(MANUAL_LINK) - 5
+        long_line = " " * (signin_run.MAX_OUTPUT_LINE - cut) + MANUAL_LINK
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=long_line,
+                     FAKE_MANUAL=MANUAL_LINK, FAKE_MANUAL_DELAY="0.3")
+        runs = self.make(manual_grace=5)
+        runs.start("work")
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_request_deadline_inside_the_grace_leaves_the_choice_open(self):
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="2.5")
+        runs = self.make(manual_grace=8, link_wait=1.5)
+        runs.start("work")
+        first = runs.wait_link("work")
+        self.assertEqual(route_of(first), (LOOPBACK_LINK, "loopback", 54321, LOOPBACK_FORWARD))
+        until(self, lambda: route_of(runs.wait_link("work"))[1] == "manual")
+        self.assertEqual(route_of(runs.wait_link("work")),
+                         (MANUAL_LINK, "manual", None, None))
 
     def test_a_malformed_link_on_the_output_is_skipped_and_the_run_finishes(self):
         self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=BAD_LINK,

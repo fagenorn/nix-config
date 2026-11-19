@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --code-signin | --pin | --page-remove | --exclusion | --account-names] [--after-seq N | --after-commit SHA] [--log PATH]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --remote-signin | --pin | --page-remove | --exclusion | --account-names] [--after-seq N | --after-commit SHA] [--profile NAME] [--log PATH]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -90,21 +90,25 @@ exits 1: a row that is not there yet may still be recorded.
 For `--page-add`, `--after-seq N` reads only log rows whose `seq` is above N (a log carried over
 from another host keeps its rows below N), and the add and the start must both be above N.
 
-`--code-signin` (#1323, exclusive with the other modes, `--max-age` and `--after-seq` not allowed) meets
-when the console's own event log shows a sign-in finished by a code pasted into the page. It never
-asks the console, so the `--url` is not used; the log is `--log PATH` or the console's own, opened
-read-only as for `--page-add`. A profile P is in the set when, for one attempt A (the `seq` of the
-start row), the log holds a `signin.acted` row at `seq` A whose payload has `by` `owner`, `action`
-`start`, `outcome` `started` and `profile` P; a `signin.acted` row whose payload has `by` `owner`,
-`action` `code`, `outcome` `sent` and `profile` P with `seq` above A; and a `signin.ended` row for P
-with `attempt` A and `outcome` `signed_in` at a higher `seq` than that code.
-A code counts only for the latest start of its profile. `--after-commit SHA` (40 lowercase hex)
-keeps only rows whose `at` is strictly after the commit's committer time, read with `git show -s
---format=%cI SHA` in the current directory; all three rows must be later, the start included. A
-non-empty set is `{"status": "met", "profiles": [<set, sorted>]}`, exit 0; an empty one `{"status":
-"pending"}`, exit 75; an unreadable log `{"status": "no_log"}`, exit 75; a commit time Git cannot
-give (a failure, a timeout or an unparsable time) `{"status": "no_commit"}`, exit 75. It never exits
-1, and it only reads: no request, no write.
+`--remote-signin --profile NAME` (#1323, exclusive with the other modes, `--max-age` ignored, `--after-seq`
+not allowed, `--profile` required) meets when the console's own event log shows the sign-in of the
+profile NAME, which the operator names as the one signed in from a browser on another machine,
+finished from the page. The console cannot see where the owner's browser is (a page read over an SSH
+forward reaches it from the loopback), so the operator's naming is the identification of the remote
+attempt. It never asks the console, so the `--url` is not used; the log is `--log PATH` or the
+console's own, opened read-only as for `--page-add`. It is met when, for one attempt A (the `seq` of
+the start row), the log holds a `signin.acted` row at `seq` A whose payload has `by` `owner`, `action`
+`start`, `outcome` `started` and `profile` NAME, and a `signin.ended` row for NAME with `attempt` A
+and `outcome` `signed_in`. Both finishing routes count: the route is `code` when a `signin.acted`
+row with `by` `owner`, `action` `code`, `outcome` `sent` and `profile` NAME lies between the start
+and the end (the code of the manual link, pasted into the page), else `forward` (the browser reached
+the client's return port through a forward, so no code was sent). A code counts only for the latest
+start of its profile. `--after-commit SHA` (40 lowercase hex) keeps only rows whose `at` is strictly
+after the commit's committer time, read with `git show -s --format=%cI SHA` in the current
+directory; the start and the end must both be later. Met is `{"status": "met", "profile": NAME,
+"route": "code" | "forward"}`, exit 0; otherwise `{"status": "pending"}`, exit 75; an unreadable log
+`{"status": "no_log"}`, exit 75; a commit time Git cannot give (a failure, a timeout or an unparsable
+time) `{"status": "no_commit"}`, exit 75. It never exits 1, and it only reads: no request, no write.
 
 `--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
 manager has started under a profile while the owner's page pin of that profile was in force. It
@@ -536,8 +540,9 @@ def _later(text: object, after: datetime | None) -> bool:
     return at > after
 
 
-def code_signin_verdict(log: Path, after: datetime | None = None) -> tuple[int, dict]:
-    """Met when the log shows an owner start, a pasted code inside it and its signed-in end."""
+def remote_signin_verdict(log: Path, profile: str,
+                          after: datetime | None = None) -> tuple[int, dict]:
+    """Met when the log shows an owner start of `profile` and a signed-in end of that attempt."""
     try:
         connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
     except (sqlite3.Error, OSError):
@@ -551,10 +556,9 @@ def code_signin_verdict(log: Path, after: datetime | None = None) -> tuple[int, 
         return NOT_YET, {"status": "no_log"}
     finally:
         connection.close()
-    starts: dict[int, str] = {}
-    latest: dict[str, int] = {}
-    coded: dict[int, int] = {}
-    met: set[str] = set()
+    starts: set[int] = set()
+    latest: int | None = None
+    coded: set[int] = set()
     for seq, at, kind, text in rows:
         if not _later(at, after):
             continue
@@ -562,23 +566,20 @@ def code_signin_verdict(log: Path, after: datetime | None = None) -> tuple[int, 
             payload = json.loads(text)
         except ValueError:
             continue
-        profile = payload.get("profile") if isinstance(payload, dict) else None
-        if not isinstance(payload, dict) or not isinstance(profile, str) or not profile:
+        if not isinstance(payload, dict) or payload.get("profile") != profile:
             continue
         if kind == "signin.acted" and _owner(payload):
             if payload.get("action") == "start" and payload.get("outcome") == "started":
-                starts[seq] = profile
-                latest[profile] = seq
+                starts.add(seq)
+                latest = seq
             elif (payload.get("action") == "code" and payload.get("outcome") == "sent"
-                  and profile in latest):
-                coded.setdefault(latest[profile], seq)
+                  and latest is not None):
+                coded.add(latest)
         elif kind == "signin.ended" and payload.get("outcome") == "signed_in":
             attempt = payload.get("attempt")
-            if (isinstance(attempt, int) and not isinstance(attempt, bool)
-                    and starts.get(attempt) == profile and attempt in coded):
-                met.add(profile)
-    if met:
-        return 0, {"status": "met", "profiles": sorted(met)}
+            if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt in starts:
+                route = "code" if attempt in coded else "forward"
+                return 0, {"status": "met", "profile": profile, "route": route}
     return NOT_YET, {"status": "pending"}
 
 
@@ -678,9 +679,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--page-add", action="store_true",
                       help="require the console's log to show an account added from the page "
                            "and that profile's sign-in started from the page")
-    mode.add_argument("--code-signin", action="store_true",
-                      help="require the console's log to show a sign-in finished by a code "
-                           "pasted into the page")
+    mode.add_argument("--remote-signin", action="store_true",
+                      help="require the console's log to show the sign-in of the profile named "
+                           "by --profile, signed in from another machine, finished")
     mode.add_argument("--pin", action="store_true",
                       help="require a new session or manager started under a profile while the "
                            "owner's pin of it was in force, read from the console's log")
@@ -699,7 +700,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "--page-add and --page-remove")
     parser.add_argument("--after-commit", type=_sha, default=None,
                         help="read only log rows stamped after this commit's time, for "
-                             "--code-signin")
+                             "--remote-signin")
+    parser.add_argument("--profile", default=None,
+                        help="the profile signed in from another machine, for --remote-signin")
     return parser
 
 
@@ -722,16 +725,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.after_seq is not None and not (args.page_signin or args.page_add or args.page_remove):
         parser.error("--after-seq applies to --page-signin, --page-add and --page-remove only")
-    if args.after_commit is not None and not args.code_signin:
-        parser.error("--after-commit applies to --code-signin only")
-    if args.code_signin:
+    if args.after_commit is not None and not args.remote_signin:
+        parser.error("--after-commit applies to --remote-signin only")
+    if args.profile is not None and not args.remote_signin:
+        parser.error("--profile applies to --remote-signin only")
+    if args.remote_signin and not args.profile:
+        parser.error("--remote-signin needs --profile")
+    if args.remote_signin:
         after = None
         if args.after_commit is not None:
             after = commit_time(args.after_commit)
             if after is None:
                 print(json.dumps({"status": "no_commit"}, sort_keys=True))
                 return NOT_YET
-        code, result = code_signin_verdict(args.log or default_log(), after)
+        code, result = remote_signin_verdict(args.log or default_log(), args.profile, after)
         print(json.dumps(result, sort_keys=True))
         return code
     if args.page_add:
