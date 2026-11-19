@@ -6,7 +6,9 @@ Run: just agent-workflow-tests
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from agent_tools.console import deliveries, event_log, question_records, sprints, view
 from agent_tools.console.event_log import Event
@@ -219,6 +221,31 @@ class ProjectRecordsTest(unittest.TestCase):
                         "next_step": None})]
         r = records(events=events)
         self.assertEqual([a["commit"] for a in r["activations"]], ["e" * 40])
+
+    def test_a_predecessors_activation_stays_out_after_retention_removed_every_old_row(self):
+        # The host's newest activation rows are kept whatever their age; the registrations that say
+        # who owned the path when they were written must be kept with them, the new project's own
+        # registration included, or the predecessor's failure reads as the new project's.
+        old, day = "2026-08-01T00:00:00.000000+00:00", [""]
+        with tempfile.TemporaryDirectory() as directory:
+            log = event_log.EventLog(Path(directory) / "events.sqlite3", clock=lambda: day[0])
+            self.addCleanup(log.close)
+            day[0] = old
+            log.append([("project.registered", "owner/old", {"root": P_ROOT}),
+                        (event_log.ACTIVATION_STARTED, None,
+                         {"root": P_ROOT, "commit": "c" * 40, "tree": "group:1"}),
+                        (event_log.ACTIVATION_FINISHED, None,
+                         {"root": P_ROOT, "commit": "c" * 40, "ok": False,
+                          "reason": "it exited 1: error: build failed", "next_step": NEXT_STEP}),
+                        (event_log.PROJECT_UNREGISTERED, "owner/old", {})])
+            day[0] = "2026-08-02T00:00:00.000000+00:00"
+            log.append([("project.registered", P, {"root": P_ROOT})])
+            day[0] = "2026-11-17T00:00:00.000000+00:00"
+            log.retain()
+            retained = log.events()
+        self.assertEqual([e.kind for e in retained if e.kind.startswith("activation")],
+                         [event_log.ACTIVATION_STARTED, event_log.ACTIVATION_FINISHED])
+        self.assertEqual(records(events=retained)["activations"], [])
 
     def test_the_projects_own_registrations_and_unrelated_ones_drop_nothing(self):
         def registry(seq, kind, project, payload):

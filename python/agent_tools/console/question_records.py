@@ -36,11 +36,12 @@ says who owned the path when it was observed. The rows' registrations are folded
 project other than `project_id` stopped owning `root` is its predecessor's end. Activation rows at or
 before that `seq` are not counted, and neither are spend days up to and including that row's UTC date
 (a day shared with a predecessor is not counted, so a figure is never the predecessor's); `days` still
-lists those days, with zero figures. Retention removes a registration row after 90 days but keeps the
-newest activation rows, so a predecessor's rows can outlive the evidence that it owned the path: an
-activation row at or before the seq of `project_id`'s own earliest retained registration at `root` is
-not counted either, since the project cannot have owned the path before it was registered there. With
-neither bound nothing is dropped.
+lists those days, with zero figures. Retention keeps the newest activation rows whatever their age, so it
+keeps every registration row (`event_log`, #1271) and the unregistration that ends one: the evidence
+of who owned a path lasts as long as the activation rows that name it. A registration row from before that
+rule may already be gone from an older log; an activation row at or before the seq of `project_id`'s own
+earliest retained registration at `root` is not counted either, since the project cannot have owned the path
+before it was registered there. With neither bound nothing is dropped.
 
 Scope (ADR-console-082 D3, D4). Every section holds only rows, keys and ids of `project_id`. A `delivery.seen` row counts
 only when its project column is `project_id`. The activation rows have no project column, so one
@@ -79,12 +80,11 @@ from typing import TYPE_CHECKING
 
 from agent_tools.console import deliveries, inbox as inbox_module, spend as spend_module, sprints
 from agent_tools.console.event_log import (
-    ACTIVATION_FINISHED, ACTIVATION_STARTED, PROJECT_UNREGISTERED, Event)
+    ACTIVATION_FINISHED, ACTIVATION_STARTED, PROJECT_REGISTERED as REGISTERED, PROJECT_UNREGISTERED, Event)
 
 if TYPE_CHECKING:
     from agent_tools.console.view import InboxRecord
 
-REGISTERED = "project.registered"
 HELD_PREFIX = "verify-"
 SPEND_NOTE = (
     "Tokens sum input, cache writes, cache reads and output; dollars are estimates at API list "

@@ -69,6 +69,13 @@ retention pass never removes it, whatever its age, so a key the console has aske
 after the asked row is gone and a retry of that key starts no second session. The question's own rows go
 at 90 days as before; the receipt is two short strings.
 
+Two kinds are kept in part for the ownership of a path (#1271): `PROJECT_REGISTERED` (`project.registered`,
+payload `root`) and `PROJECT_UNREGISTERED` (`project.unregistered`) are not in `KEPT_KINDS`, but the retention pass
+never removes a registered row, and removes an unregistered row only when no earlier registered row of its
+project remains. The activation rows above are kept past the window and name a root, not a project, so the
+registrations that say who held the root when one was written must outlive it too (ADR-console-082 D3);
+one pair of short rows per registration is all that is kept.
+
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
@@ -223,6 +230,7 @@ REGISTRATION_CANCELLED = "registration.cancelled"
 INBOX_SEEN = "inbox.seen"
 INBOX_CHANGED = "inbox.changed"
 INBOX_GONE = "inbox.gone"
+PROJECT_REGISTERED = "project.registered"
 PROJECT_UNREGISTERED = "project.unregistered"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
@@ -426,7 +434,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force, and every question key receipt; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force, and every question key receipt, and the registry rows that say who owned a root; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -489,14 +497,18 @@ class EventLog:
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind IN (?, ?) AND "
                     "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login'))) "
-                    "AND kind <> ?",
+                    "AND kind NOT IN (?, ?) "
+                    "AND NOT (kind = ? AND EXISTS (SELECT 1 FROM events AS began "
+                    "WHERE began.kind = ? AND began.project IS events.project "
+                    "AND began.seq < events.seq))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED, SHARING_TAILNET,
                      SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED,
-                     PROJECT_QUESTION_KEYED)).rowcount
+                     PROJECT_QUESTION_KEYED, PROJECT_REGISTERED, PROJECT_UNREGISTERED,
+                     PROJECT_REGISTERED)).rowcount
 
             return self._transaction(remove)
 
