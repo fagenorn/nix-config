@@ -1648,6 +1648,7 @@ GUEST_PAGE: bytes = PAGE.replace(DOOR_OWNER, DOOR_GUEST)
 SPEND_PAGE: bytes = Path(__file__).with_name("spend.html").read_bytes()
 BACKLOG = 16
 POLL_SECONDS = 0.25
+DRAIN_POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 SPEND_PAGE_PATH = "/spend"
@@ -3671,7 +3672,7 @@ class ConsoleService:
                  signer_out: Callable[[probe.Probe], None] | None = None,
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
-                 draft_reader: Callable[[str], dict] = contract_draft.read,
+                 draft_reader: Callable[[str], dict] | None = None,
                  checkout_reader: Callable[..., checkout_remote.Comparison] = checkout_remote.compare,
                  checkout_updater: Callable[..., checkout_remote.Updated] = checkout_remote.update,
                  forge=None,
@@ -3718,7 +3719,7 @@ class ConsoleService:
         self._signer_out = signer_out
         self._account_remover = account_remover
         self._adopter = adopter
-        self._draft_reader = draft_reader
+        self._draft_reader = draft_reader or self._read_draft
         self._checkout_reader = checkout_reader
         self._checkout_updater = checkout_updater
         self._forge = forge
@@ -3884,6 +3885,7 @@ class ConsoleService:
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
         self._project_questions_done = threading.Condition(self._ingest)
+        self._runs_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
         self._published = threading.Condition()
         self._view = b""
@@ -4451,6 +4453,35 @@ class ConsoleService:
             self._dispatch_launch(sprint_id)
         return sprint_id
 
+    def _admit_run(self, root: str) -> None:
+        """Reserve the run of `root`, or refuse once the console stops (ADR-console-081 D3); `_ingest` held."""
+        if self._stop.is_set():
+            raise sprints.Refused(register.STOPPING)
+        self._registering = root
+
+    def _announce_run(self) -> None:
+        """Publish an admitted run, releasing it when the publication fails; `_ingest` held (#1330).
+
+        Nothing is dispatched yet at that point, so no worker would ever release the reservation
+        and `close` would wait on it for good.
+        """
+        try:
+            self._publish()
+        except BaseException:
+            self._answering = False
+            self._approving = False
+            self._end_run()
+            raise
+
+    def _read_draft(self, root: str) -> dict:
+        """Read a checkout for its draft, its git children ended by the stop (#1330)."""
+        return contract_draft.read(root, cancel=self._stop)
+
+    def _end_run(self) -> None:
+        """Release the reservation and wake the drain of `close` (ADR-console-081 D3); `_ingest` held."""
+        self._registering = None
+        self._runs_done.notify_all()
+
     def _on_new_thread(self, job: Callable[[], None]) -> None:
         threading.Thread(target=job, name=MANAGER_THREAD, daemon=True).start()
 
@@ -4464,9 +4495,11 @@ class ConsoleService:
     def _on_approval_thread(self, job: Callable[[], None]) -> None:
         worker = threading.Thread(target=job, name=APPROVAL_THREAD, daemon=True)
         with self._ingest:
+            # Started inside the lock and listed only once started: the list never holds an
+            # unstarted thread, which `close` could not join (and a failed start lists nothing).
             self._approval_workers = [w for w in self._approval_workers if w.is_alive()]
+            worker.start()
             self._approval_workers.append(worker)
-        worker.start()
 
     def _on_project_question_thread(self, job: Callable[[], None]) -> None:
         """Run a question's job on a tracked daemon thread; `close` joins every one it started."""
@@ -4890,13 +4923,13 @@ class ConsoleService:
         with self._ingest:
             if self._registering is not None:
                 raise sprints.Refused(register.running(register.name_of(self._registering)))
-            self._registering = str(root)
-            self._publish()
+            self._admit_run(str(root))
+            self._announce_run()
         try:
             self._dispatch(lambda: self._run_registration(str(root), entries))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._publish()
             raise
 
@@ -4922,8 +4955,8 @@ class ConsoleService:
         with self._ingest:
             if self._check_answerable(root, choice)["at"] != latest["at"]:
                 raise sprints.Refused(register.NOT_WAITING)
-            self._registering = root
-            self._publish()
+            self._admit_run(root)
+            self._announce_run()
 
         remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
 
@@ -4942,7 +4975,7 @@ class ConsoleService:
             self._dispatch(run)
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._publish()
             raise
 
@@ -4960,8 +4993,8 @@ class ConsoleService:
             with self._ingest:
                 if self._cancellable(root) is not latest:
                     raise sprints.Refused(register.NOT_WAITING)
-                self._registering = root
-                self._publish()
+                self._admit_run(root)
+                self._announce_run()
             try:
                 if self._adopter is None:
                     refused = True
@@ -4972,33 +5005,45 @@ class ConsoleService:
                 refused = True
             except BaseException:
                 with self._ingest:
-                    self._registering = None
+                    self._end_run()
                     self._publish()
                 raise
+            # The reservation stays through the log append: a registration admitted between the
+            # discard and the row would otherwise find the copy gone and no cancellation (#1330).
             with self._ingest:
-                self._registering = None
-                if refused:
+                try:
+                    if refused:
+                        raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+                    self._record_cancel(root, latest, held=True)
+                finally:
+                    self._end_run()
                     self._publish()
-            if refused:
-                raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+            return
         with self._ingest:
-            if self._cancellable(root) is not latest:
-                raise sprints.Refused(register.NOT_WAITING)
-            plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
-                                             if one != latest["plan_id"])]
-            self._cancelled[root] = self._cancelled.get(root, 0) + 1
-            self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
-            self._answer_refusal = None
+            self._record_cancel(root, latest, held=False)
             self._publish()
+
+    def _record_cancel(self, root: str, latest: dict, *, held: bool) -> None:
+        """Append the cancellation rows of `root`; `held` is the caller's own reservation; `_ingest` held."""
+        if self._cancellable(root, held=held) is not latest:
+            raise sprints.Refused(register.NOT_WAITING)
+        plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
+                                         if one != latest["plan_id"])]
+        self._cancelled[root] = self._cancelled.get(root, 0) + 1
+        self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
+        self._answer_refusal = None
 
     def _failed_applies(self, root: str) -> list[str]:
         """The plan ids of `root` whose apply failed, held under the ingest lock."""
         return sorted(plan_id for plan_id, found in self._adoptions.items()
                       if found["root"] == root and found["step"] == "apply_failed")
 
-    def _cancellable(self, root: str) -> dict:
-        """The shown registration of `root` when it may be cancelled, held under the ingest lock."""
-        if self._registering is not None:
+    def _cancellable(self, root: str, *, held: bool = False) -> dict:
+        """The shown registration of `root` when it may be cancelled, held under the ingest lock.
+
+        `held` is a cancel that keeps its own reservation, which is not another run.
+        """
+        if self._registering is not None and not held:
             raise sprints.Refused(register.running(register.name_of(self._registering)))
         latest = self._registration
         if latest is None or latest["root"] != root:
@@ -5098,9 +5143,11 @@ class ConsoleService:
         elif remote is not None:
             payload = {**payload, "remote": remote}
         with self._ingest:
-            if not self._closed:
-                self._fold(self.log.append([register.ended(payload)]))
-            self._registering = None
+            try:
+                if not self._closed:
+                    self._fold(self.log.append([register.ended(payload)]))
+            finally:
+                self._end_run()
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5154,15 +5201,15 @@ class ConsoleService:
             asked = {"id": question, "subject": subject}
             draft = latest["draft"]
             remote = latest["remote"] if isinstance(latest.get("remote"), str) else None
-            self._registering = root
+            self._admit_run(root)
             self._answering = True
             self._answer_refusal = None
-            self._publish()
+            self._announce_run()
         try:
             self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed, remote))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._answering = False
                 self._publish()
             raise
@@ -5177,6 +5224,9 @@ class ConsoleService:
             plan_ids = sorted(plan_id for plan_id, found in self._adoptions.items()
                               if found["root"] == root and found["step"] == "apply_failed")
         for plan_id in plan_ids:
+            if self._stop.is_set():
+                # A run queued behind a kept copy starts no cleanup once the console stops (#1330).
+                raise register.RunFailed("cancelled")
             if not approve.left_behind(plan_id, root):
                 continue
             try:
@@ -5282,14 +5332,16 @@ class ConsoleService:
             traceback.print_exception(error, file=sys.stderr)
             text = plan_questions.rerun_failed(register.UNEXPECTED)
         with self._ingest:
-            if payload is not None and not self._closed:
-                self._fold(self.log.append([register.ended(payload)]))
-            elif payload is None:
-                self._answer_refusal = {
-                    "plan_id": plan_id, "text": text,
-                    "id": asked["id"], "subject": asked["subject"]}
-            self._registering = None
-            self._answering = False
+            try:
+                if payload is not None and not self._closed:
+                    self._fold(self.log.append([register.ended(payload)]))
+                elif payload is None:
+                    self._answer_refusal = {
+                        "plan_id": plan_id, "text": text,
+                        "id": asked["id"], "subject": asked["subject"]}
+            finally:
+                self._end_run()
+                self._answering = False
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -5322,14 +5374,14 @@ class ConsoleService:
             root = latest["root"]
             shown = dict(latest)
             adoption = None if found is None else dict(found)
-            self._registering = root
+            self._admit_run(root)
             self._approving = True
-            self._publish()
+            self._announce_run()
         try:
             self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
         except BaseException:
             with self._ingest:
-                self._registering = None
+                self._end_run()
                 self._approving = False
                 self._publish()
             raise
@@ -5451,11 +5503,13 @@ class ConsoleService:
             traceback.print_exception(error, file=sys.stderr)
         appended = False
         with self._ingest:
-            if final is not None and not self._closed:
-                self._fold(self.log.append([approve.step_row(final)]))
-                appended = True
-            self._registering = None
-            self._approving = False
+            try:
+                if final is not None and not self._closed:
+                    self._fold(self.log.append([approve.step_row(final)]))
+                    appended = True
+            finally:
+                self._end_run()
+                self._approving = False
             if not self._closed:
                 self._publish()
         if not self._closed:
@@ -8171,6 +8225,8 @@ class ConsoleService:
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         with self._ingest:
+            if self._stop.is_set():
+                raise sprints.Refused(register.STOPPING)
             found = self._adoptions.get(plan_id)
             if plan_id in self._enrolling:
                 name = register.name_of(found["root"]) if found is not None else plan_id
@@ -8461,6 +8517,8 @@ class ConsoleService:
         for worker in workers:
             worker.join()
         with self._ingest:
+            while self._registering is not None or self._enrolling:
+                self._runs_done.wait(DRAIN_POLL_SECONDS)
             workers = list(self._approval_workers)
         for worker in workers:
             worker.join()

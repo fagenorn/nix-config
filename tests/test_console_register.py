@@ -14,10 +14,12 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import approve, contract_draft, plan_questions, register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
+from agent_tools.system import siblings
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 
@@ -1111,10 +1113,40 @@ class AdopterTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
 
 
+FORBIDDEN = ("systemd-run", "systemctl", "/proc")
+
+
 class PlatformTest(unittest.TestCase):
-    def test_adopter_for(self):
-        self.assertIsInstance(register.adopter_for("linux"), Adopter)
-        self.assertIsNone(register.adopter_for("darwin"))
+    def test_adopter_for_each_platform(self):
+        for platform in ("linux", "darwin", "win32"):
+            with self.subTest(platform=platform):
+                found = register.adopter_for(platform)
+                if platform == "win32":
+                    self.assertIsNone(found)
+                else:
+                    self.assertIsInstance(found, Adopter)
+
+    def test_a_darwin_adopter_runs_only_its_sibling_and_no_linux_tool(self):
+        records = []
+
+        def run(argv, **kwargs):
+            records.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, b'{"plan": {}}', None)
+
+        with mock.patch.object(register.manager, "run_in_own_group", run):
+            adopter = register.adopter_for("darwin")
+            plan_id = "sha256:" + "a" * 64
+            adopter.plan("/r")
+            adopter.register("/r", integration_branch="main", plan_id=plan_id)
+            adopter.apply(plan_id, acknowledge_deletions=True, discard_retained=True)
+            adopter.discard(plan_id)
+        sibling = siblings.sibling_argv("project_contract.adopt_project")
+        self.assertEqual(len(records), 4)
+        for argv, kwargs in records:
+            with self.subTest(argv=argv):
+                self.assertEqual(argv[:len(sibling)], sibling)
+                self.assertFalse(any(word in element for word in FORBIDDEN for element in argv))
+                self.assertIs(kwargs["start_new_session"], True)
 
 
 if __name__ == "__main__":

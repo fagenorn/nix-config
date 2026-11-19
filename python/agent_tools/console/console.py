@@ -49,11 +49,11 @@ It is also given `account_remove.signer_out_for(sys.platform)` and `account_remo
 (#1030), so on Linux and macOS the owner removes an account from the page, signed out first
 (`agent_tools.console.account_remove`).
 
-It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux the owner names a
+It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux and macOS the owner names a
 repository on the page and sees what adopting it would change, or registers it when it is adopted
 (`agent_tools.console.register`); elsewhere the route refuses.
 
-It is also given `project_question.asker_for(sys.platform)` (#1176): on Linux a question from the page
+It is also given `project_question.asker_for(sys.platform)` (#1176): on Linux and macOS a question from the page
 about a registered project starts one read-only session under a chosen account
 (`agent_tools.console.project_question`) and its answer is recorded in the log; elsewhere the route
 refuses.
@@ -75,7 +75,7 @@ and with `status --json` for this host's own tailnet name, the one name the gues
 which tell its own requests from another device's (ADR-console-079). Without it the console never reads Serve, shows
 the state as unchecked and its guest door shares with nobody.
 
-It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
+It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux and macOS the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
 refuses.
 

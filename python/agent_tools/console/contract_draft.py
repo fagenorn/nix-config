@@ -63,10 +63,12 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from agent_tools import canonical
+from agent_tools.console import manager
 from agent_tools.project_contract.adopt_planning import normalize_remote_url
 
 QUESTION_ID = "contract-draft"
@@ -262,12 +264,15 @@ OTHER_TOOLS = (("Cargo.toml", {"build": "cargo build", "test": "cargo test"}),
 # --------------------------------------------------------------------------
 
 
-def _git(root: str, *arguments: str) -> bytes | None:
+def _git(root: str, *arguments: str, cancel: threading.Event | None = None) -> bytes | None:
+    """One read-only git child in its own group, so a timeout or a set `cancel` ends its transport children too."""
+    if cancel is not None and cancel.is_set():
+        return None
     try:
-        done = subprocess.run(
-            ["git", "-C", root, *arguments], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=GIT_TIMEOUT, shell=False,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        done = manager.run_in_own_group(
+            ["git", "-C", root, *arguments], timeout=GIT_TIMEOUT, cancel=cancel,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, start_new_session=True)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -277,37 +282,42 @@ def _lines(output: bytes | None) -> list[str]:
     return output.decode("utf-8", "replace").splitlines() if output else []
 
 
-def _remotes(root: str) -> list[tuple[str, str]]:
+def _remotes(root: str, cancel: threading.Event | None = None) -> list[tuple[str, str]]:
     found: dict[str, str] = {}
-    for line in _lines(_git(root, "config", "--get-regexp", r"^remote\..*\.url$")):
+    for line in _lines(_git(root, "config", "--get-regexp", r"^remote\..*\.url$", cancel=cancel)):
         key, _, url = line.partition(" ")
         if key.startswith("remote.") and key.endswith(".url") and url.strip():
             found.setdefault(key[len("remote."):-len(".url")], url.strip())
     return sorted(found.items())
 
 
-def _default_branch(root: str, remotes: list[tuple[str, str]]) -> str | None:
+def _default_branch(root: str, remotes: list[tuple[str, str]],
+                    cancel: threading.Event | None = None) -> str | None:
     if len(remotes) != 1 or remotes[0][0].startswith("-"):
         return None
-    lines = _lines(_git(root, "ls-remote", "--symref", remotes[0][0], "HEAD"))
+    lines = _lines(_git(root, "ls-remote", "--symref", remotes[0][0], "HEAD", cancel=cancel))
     match = re.fullmatch(r"ref: refs/heads/(\S.*)\tHEAD", lines[0]) if lines else None
     return match.group(1) if match else None
 
 
-def read(root: str) -> dict:
-    """What the repository says: remotes, default branch, local branches, tracked files and texts."""
+def read(root: str, cancel: threading.Event | None = None) -> dict:
+    """What the repository says: remotes, default branch, local branches, tracked files and texts.
+
+    A set `cancel` ends the running git child's whole group and reads the rest as empty.
+    """
     try:
-        remotes = _remotes(root)
-        branches = _lines(_git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads"))
-        listed = _git(root, "ls-files", "-z")
+        remotes = _remotes(root, cancel)
+        branches = _lines(_git(root, "for-each-ref", "--format=%(refname:short)", "refs/heads",
+                               cancel=cancel))
+        listed = _git(root, "ls-files", "-z", cancel=cancel)
         files = [part for part in listed.decode("utf-8", "replace").split("\0") if part] if listed else []
         texts: dict[str, str] = {}
         for name in TEXT_FILES:
             if name in files:
-                body = _git(root, "show", f"HEAD:{name}")
+                body = _git(root, "show", f"HEAD:{name}", cancel=cancel)
                 if body is not None:
                     texts[name] = body[:TEXT_LIMIT].decode("utf-8", "replace")
-        return {"remotes": remotes, "default_branch": _default_branch(root, remotes),
+        return {"remotes": remotes, "default_branch": _default_branch(root, remotes, cancel),
                 "branches": branches, "files": files, "texts": texts}
     except Exception:  # read never raises: an unreadable repository reads as empty
         return {"remotes": [], "default_branch": None, "branches": [], "files": [], "texts": {}}
