@@ -508,6 +508,12 @@ def read(root: str, cancel: threading.Event | None = None) -> dict:
 _ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 _ASSIGNED_ANYWHERE = re.compile(r"(?<![\w$])([A-Za-z_][A-Za-z0-9_]*)\+?=")
 _EXEC = re.compile(r"^exec\s+(.*)$")
+# What can run or rebind a runner without a `NAME=` or a line-leading `exec`: an exec reached after `&&`,
+# `||`, `;` or `then`, a default expansion `${NAME:=x}`, and the builtins that assign or run other text.
+_UNREADABLE_BINDING = re.compile(
+    r"(?<![\w$/.-])(?:exec|read|getopts|for|select|eval|source|unset|mapfile|readarray|printf)(?![\w-])"
+    r"|\$\{[A-Za-z_][A-Za-z0-9_]*:?[=]"
+    r"|(?:^|[;&|(]|\bthen|\bdo|\belse)\s*\.\s")
 _VARIABLE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 _SHELL_SYNTAX = set("$`;&|<>()")
 
@@ -552,7 +558,8 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
 
     Total and conservative: a hook the rule cannot judge (no `exec` line, an unreadable line or runner,
     shell syntax, an option, a relative path, a `search_path` entry that is not absolute, a runner variable
-    assigned anywhere but on a line of its own) is never stranded, and neither is one read under a set
+    assigned anywhere but on a line of its own, an `exec` reached after another command, a default
+    expansion or a `read`/`for`/`eval`-style binding) is never stranded, and neither is one read under a set
     `cancel`. Each distinct variable value and runner is looked up once.
     """
     if any(not os.path.isabs(entry) for entry in search_path.split(os.pathsep)):
@@ -567,6 +574,8 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
             continue
         assignment = _ASSIGNMENT.match(line)
         if assignment:
+            if _UNREADABLE_BINDING.search(assignment.group(2)):
+                return False
             assigned.setdefault(assignment.group(1), {})[_assigned_word(assignment.group(2))] = None
             for name in _ASSIGNED_ANYWHERE.findall(assignment.group(2)):
                 assigned.setdefault(name, {})[None] = None
@@ -581,6 +590,8 @@ def hook_stranded(text: str, search_path: str, cancel: threading.Event | None = 
                 return False
             runners[words[0]] = None
             continue
+        if _UNREADABLE_BINDING.search(line):
+            return False
         for name in _ASSIGNED_ANYWHERE.findall(line):
             assigned.setdefault(name, {})[None] = None
     if not runners:

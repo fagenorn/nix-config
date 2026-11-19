@@ -1060,6 +1060,24 @@ class StrandedHookTest(unittest.TestCase):
         self.tool("prek")
         self.assertFalse(cd.hook_stranded(text, str(self.bin)))
 
+    def test_a_runner_rebound_by_a_default_expansion_or_unset_is_not_judged_from_its_first_assignment(self):
+        self.tool("prek")
+        for letter, rebind in (("default", ": \"${PREK:=prek}\"\n"), ("read", "read PREK < /dev/null\n"),
+                               ("for", "for PREK in prek; do break; done\n")):
+            with self.subTest(case=letter):
+                text = ("#!/bin/sh\nPREK=/gone/prek\n[ -x \"$PREK\" ] || unset PREK\n" + rebind
+                        + "exec \"$PREK\" hook-impl\n")
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+
+    def test_an_exec_reached_after_another_command_on_its_line_is_not_judged_from_the_other_execs(self):
+        self.tool("prek")
+        for letter, first in (("and", "command -v prek >/dev/null && exec prek hook-impl\n"),
+                              ("then", "if true; then exec prek hook-impl; fi\n"),
+                              ("semicolon", "true; exec prek hook-impl\n")):
+            with self.subTest(case=letter):
+                text = "#!/bin/sh\n" + first + "exec /gone/prek hook-impl\n"
+                self.assertFalse(cd.hook_stranded(text, str(self.bin)))
+
     def test_a_path_with_an_entry_that_is_not_absolute_judges_nothing(self):
         text = "#!/bin/sh\nexec hooktool \"$@\"\n"
         self.assertTrue(cd.hook_stranded(text, str(self.bin)))
