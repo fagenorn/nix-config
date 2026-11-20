@@ -161,16 +161,19 @@ class PageTest(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
-    def test_the_page_is_under_64_kb_compressed(self) -> None:
+    def test_the_page_is_under_65_kb_compressed(self) -> None:
         # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could
         # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
         # Raised from 61 KB by #1323: the route sentence, its three wordings and the forward-command check
         # (about 700 bytes compressed) did not fit the 439 bytes the cap had left.
         # Raised from 62 KB by #1263: its guest controls and actor marks on both pages, merged with #1323's
         # route sentence, came to 64126 bytes against the 63488 the two caps held.
-        # Raised from 63 KB by #1338: the notice that keeps a refused merge's words once its card is gone
-        # (a merge that found another head merged) took the 63 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 65536)
+        # Raised from 63 KB by #1341: the guest pool's line, rows and settling (about 1.4 KB compressed) did
+        # not fit the 302 bytes the cap had left.
+        # #1338 also needed room beyond the 63 KB cap: the notice that keeps a refused merge's words once its
+        # card is gone (a merge that found another head merged) took the 63 bytes it had left, and merged with
+        # #1341 the page is 66082 bytes against the 66560 the cap holds.
+        self.assertLess(len(gzip.compress(self.data, 9)), 66560)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]

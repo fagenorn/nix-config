@@ -116,7 +116,9 @@ by `X-Console-Probe` arrived as a login header, and never repeats a login. After
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
 its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
-scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
+scoped view (`guest.scoped`, `guest.scrub`; it carries the pool and each running sprint's account label,
+`guest.pool_view`, `guest.sprint_labels`): `GET /` is the guest page (`GUEST_PAGE`: the page with its
+door meta set to `guest`, so it draws the
 desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
@@ -1898,11 +1900,18 @@ def default_session_dirs() -> list[Path]:
 def default_profile_dirs() -> list[Path]:
     """Every account's config directory: each directory of `profiles/`.
 
-    The unprofiled `~/.claude` is not an account (#1016).
+    The unprofiled `~/.claude` is not an account (#1016). A missing `profiles/` is no accounts; one
+    that cannot be listed raises `OSError`, which is not the same thing (`glob` would hide it), so a
+    caller decides what an unlistable folder means for it: the service names it on stderr and keeps
+    its last reading, `register_check` names what it could not clean, and `cleanup_check` is not yet.
     """
     home = Path.home()
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
-    return sorted(p for p in Path(accounts).glob("profiles/*") if p.is_dir())
+    try:
+        with os.scandir(Path(accounts) / "profiles") as entries:
+            return sorted(Path(e.path) for e in entries if e.is_dir())
+    except (FileNotFoundError, NotADirectoryError):
+        return []
 
 
 def default_choice_file() -> Path:
@@ -3891,6 +3900,12 @@ class ConsoleService:
         self._profile_dirs = profile_dirs
         self._profiles: frozenset[str] = frozenset()
         self._capacity = capacity.CapacityState({}, {})
+        self._numbers_path = Path(store).with_name(guest.NUMBERS_FILE)
+        self._account_numbers = guest.read_numbers(self._numbers_path)
+        self._retired_numbers = guest.read_retired(self._numbers_path)
+        self._numbers_saved = (dict(self._account_numbers), dict(self._retired_numbers))
+        self._numbers_established: dict[str, str] = {}
+        self._profiles_read = False
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
         self._pinned: str | None = None
@@ -4313,9 +4328,59 @@ class ConsoleService:
         """Derive and publish the views; `guests=False` publishes the owner's view alone.
 
         A guest view is derived from the clock (a sprint's age text), so recomputing it for a
-        guest-port reading would change a guest's bytes: the cached guest views are kept.
+        guest-port reading would change a guest's bytes: the cached guest views are kept. The account
+        numbers are kept in `account-numbers.json` beside the event log, written when they change,
+        and a failed write keeps them in memory and is retried on every publish while they differ from
+        the last numbers written (ADR-console-086). A view that lists no profile before the profiles are
+        first read leaves them as they are, so a restart does not forget them; once they are read, an
+        empty list is a confirmed empty pool and ends the numbering, but a failed read of the profiles
+        directory is not a list (`_scan_profiles`) and leaves them as they are. The number of a
+        removed profile that a sprint still runs on is kept for that sprint, with the address the
+        profile had, while a profile still on that address holds the number, so the sprint keeps
+        its account label and a number given to another account never labels it; when none does,
+        or none had, the sprint is kept detached (a None number) so a profile name recreated for
+        another account never labels it. It is kept in
+        `account-numbers.json` too, so a restart keeps the label, and by sprint, so a profile name
+        given to another account later does not move it, with the profile the sprint's manager was on,
+        so it ends when the manager runs on another profile (a takeover): the sprint is then labelled
+        by the account of the profile it runs on. A write that fails and a profiles directory
+        that cannot be listed are each named once on stderr until the next good one (`numbers_unwritten`,
+        `profiles_unlistable`).
         """
         inputs = self._view_inputs()
+        if inputs["capacity"]["profiles"] or self._profiles_read:
+            numbers = guest.account_numbers(
+                inputs["capacity"], self._account_numbers, self._numbers_established)
+            before = self._numbers_established
+            self._numbers_established = {
+                entry["profile"]: entry["account"] for entry in inputs["capacity"]["profiles"]
+                if entry["account"] is not None}
+            managers = guest.running_managers(self._sprints)
+            held = {sprint_id: entry for sprint_id, entry in self._retired_numbers.items()
+                    if managers.get(sprint_id) == entry[2]}
+            gone = {**{sprint_id: (
+                         (self._account_numbers[name], before[name], name)
+                         if name in self._account_numbers and name in before else (None, "", name))
+                       for sprint_id, name in managers.items()
+                       if name not in numbers and sprint_id not in held},
+                    **held}
+            self._retired_numbers = {
+                sprint_id: (number, address, name) if number is not None and any(
+                    numbers[other] == number and now == address
+                    for other, now in self._numbers_established.items())
+                else (None, address, name)
+                for sprint_id, (number, address, name) in gone.items()}
+            self._account_numbers = numbers
+        if (self._account_numbers, self._retired_numbers) != self._numbers_saved:
+            try:
+                guest.write_numbers(self._numbers_path, self._account_numbers,
+                                    self._retired_numbers)
+            except OSError as error:
+                self._warn_once(
+                    "numbers", f"console: numbers_unwritten {type(error).__name__}: {error}")
+            else:
+                self._numbers_saved = (dict(self._account_numbers), dict(self._retired_numbers))
+                self._unreadable.discard("numbers")
         latest = self._registration
         apply_items = inputs["apply_items"]
         access = self._access
@@ -4340,9 +4405,15 @@ class ConsoleService:
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.shared and name is not None:
+            pool = guest.pool_view(inputs["capacity"], self._account_numbers)
+            running = guest.sprint_labels(
+                self._sprints, guest.profile_labels(self._account_numbers),
+                {sprint_id: None if number is None else f"Account {number}"
+                 for sprint_id, (number, _, _) in self._retired_numbers.items()})
             for login, projects in access.colleagues.items():
                 derived = guest.mark_steer(
-                    guest.scrub(derive_view(**guest.scoped(inputs, projects))), login)
+                    guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running),
+                    login)
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
         with self._published:
@@ -4972,6 +5043,7 @@ class ConsoleService:
                 raise account_add.AddFailed("not_listed")
             with self._ingest:
                 self._profiles = listed
+                self._profiles_read = True
                 self._fold(self.log.append([account_add.added(name)]))
                 self._publish()
         self._grant_registered_projects(name)
@@ -4989,7 +5061,7 @@ class ConsoleService:
             if os.path.lexists(self.registry):
                 print(f"console: trust_account_registry_unreadable {name}", file=sys.stderr)
             return
-        found = [d for d in self._profile_dirs() if sessions.account_name(d) == name]
+        found = [d for d in self._dirs() if sessions.account_name(d) == name]
         if not found:
             return
         for entry in entries:
@@ -5571,7 +5643,7 @@ class ConsoleService:
                 return []
             self._grants_running += 1
         try:
-            found = (folder_trust.targets(self._trust_home, self._profile_dirs())
+            found = (folder_trust.targets(self._trust_home, self._dirs())
                      if profiles is None else list(profiles))
             if not found:
                 return []
@@ -5621,7 +5693,7 @@ class ConsoleService:
         with self._ingest:
             failed = self._trust_failures.get((root, profile))
             epoch = self._cancelled.get(root, 0)
-        found = [pair for pair in folder_trust.targets(self._trust_home, self._profile_dirs())
+        found = [pair for pair in folder_trust.targets(self._trust_home, self._dirs())
                  if pair[0] == profile]
         if failed is None or not found:
             raise sprints.Refused(folder_trust.NOT_FAILED)
@@ -5819,12 +5891,13 @@ class ConsoleService:
                 except account_remove.RemoveFailed as error:
                     self._record_removal(profile, "remove_failed", error.kind)
                     raise
-                listed = self._read_profiles()
-                if profile in listed:
+                listed = self._scan_profiles()
+                if listed is None or profile in listed:
                     self._record_removal(profile, "remove_failed", "still_listed")
                     raise account_remove.RemoveFailed("still_listed")
                 with self._ingest:
                     self._profiles = listed
+                    self._profiles_read = True
                     rows = []
                     if profile in self._excluded:
                         rows.append(exclusion.entry(profile, False))
@@ -7637,7 +7710,9 @@ class ConsoleService:
                 self._sessions, observations, self._absent, self._repo_of, project_of)
             appended = self.log.append(changes)
             self._absent = absent
-            self._profiles = self._read_profiles()
+            scanned = self._scan_profiles()
+            if scanned is not None:
+                self._profiles, self._profiles_read = scanned, True
             if appended:
                 self._fold(appended)
             self._publish()
@@ -7746,10 +7821,37 @@ class ConsoleService:
         self._choice = profile
         self._unreadable.discard("choice")
 
-    def _read_profiles(self) -> frozenset[str]:
-        """The accounts among the profile directories as they are now."""
-        names = (sessions.account_name(d) for d in self._profile_dirs() if d.is_dir())
+    def _listed_dirs(self) -> list[Path] | None:
+        """The profile directories, None (one stderr line until the next good listing) when they cannot be listed."""
+        try:
+            found = list(self._profile_dirs())
+        except OSError as error:
+            self._warn_once(
+                "profiles", f"console: profiles_unlistable {type(error).__name__}: {error}")
+            return None
+        self._unreadable.discard("profiles")
+        return found
+
+    def _dirs(self) -> list[Path]:
+        """The profile directories, none when they cannot be listed."""
+        return self._listed_dirs() or []
+
+    def _scan_profiles(self) -> frozenset[str] | None:
+        """The accounts among the profile directories as they are now; None when they cannot be listed.
+
+        A directory that cannot be listed is not an empty one: the numbering is not ended by a read
+        that failed, and `_read_profiles` answers no account rather than a stale one.
+        """
+        found = self._listed_dirs()
+        if found is None:
+            return None
+        names = (sessions.account_name(d) for d in found if d.is_dir())
         return frozenset(name for name in names if name is not None)
+
+    def _read_profiles(self) -> frozenset[str]:
+        """The accounts among the profile directories as they are now; none when they cannot be listed."""
+        scanned = self._scan_profiles()
+        return frozenset() if scanned is None else scanned
 
     def _warn_once(self, key: str, line: str) -> None:
         """Print `line` unless `key` is already unreadable; `_unreadable` is cleared by a good read."""

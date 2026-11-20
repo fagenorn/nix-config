@@ -43,7 +43,7 @@
 // disabled element. The fake setTimeout/clearTimeout fire when a clock step
 // reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
 // of the inbox, statement, projects, unmanaged, register, digest, goal, capacity,
-// promoted and reading sections; every serialized node carries its title attribute (null
+// pool, promoted and reading sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time, and
 // its placeholder attribute (null when unset) and its inline style.width (null
 // when unset; Elem.style is a plain object) and its aria-label attribute as
@@ -586,6 +586,7 @@ async function run() {
         digest: byId("digest") ? node(byId("digest")) : null,
         goal: byId("goal") ? node(byId("goal")) : null,
         capacity: byId("capacity") ? node(byId("capacity")) : null,
+        pool: byId("pool") ? node(byId("pool")) : null,
         account_add: byId("account-add") ? node(byId("account-add")) : null,
         register: byId("register") ? node(byId("register")) : null,
         accounts: byId("accounts") ? node(byId("accounts")) : null,

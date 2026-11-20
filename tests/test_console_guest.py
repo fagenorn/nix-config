@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 
 import copy
+import dataclasses
 import json
 import os
 import shutil
@@ -15,16 +16,21 @@ import unittest
 from pathlib import Path
 from types import MappingProxyType
 
-from agent_tools.console import guest, sprints, view
+from agent_tools.console import guest, signin, sprints, view
 from agent_tools.console import capacity as capacity_module
 from agent_tools.console.event_log import (
     GOAL_STATED, INBOX_SEEN, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     Event, EventLog)
 from agent_tools.console.guest import Access, GuestActor
+from agent_tools.console.capacity import CapacityState
 from agent_tools.console.sessions import SessionState
-from agent_tools.console.sprints import Notice
+from agent_tools.console.signin import SignIn
+from agent_tools.console.spend import Tokens
+from agent_tools.console.sprints import FAILED, STARTED, Manager, Notice
 from agent_tools.console.view import REGISTERED, derive_view, encode_view
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_capacity import T, iso, reading_of, report, window
+from .test_console_signin import SIGNED_IN
 
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_HOST = "other.invented-tailnet.ts.net"
@@ -564,7 +570,7 @@ class ScopeTest(unittest.TestCase):
         resets = {"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
                   "accounts_added": [], "pin": None, "pin_launches": [], "registration": None,
                   "digest": None, "activation": None, "spend": None,
-                  "capacity": dict(capacity_module.EMPTY)}
+                  "capacity": dict(capacity_module.EMPTY), "pool": guest.EMPTY_POOL}
         for name, reset in resets.items():
             with self.subTest(name=name):
                 self.assertEqual(result[name], reset)
@@ -577,6 +583,415 @@ class ScopeTest(unittest.TestCase):
                   "entries": [{"sprints": [{"pictures": [{"id": "c"}]}]}],
                   "other": [{"id": "not-a-picture"}]}
         self.assertEqual(guest.picture_ids(walked), frozenset({"a", "b", "c"}))
+
+
+NAMES = ["home-zq1", "spare-zq3", "work-zq2", "zalias-zq4"]
+HOME_AT = "home-zq1@corp-zq.invalid"
+WORK_AT = "work-zq2@corp-zq.invalid"
+ORG = "org-zq9"
+
+
+def signed_in(address):
+    document = json.loads(SIGNED_IN)
+    document["email"] = address
+    document["orgName"] = ORG
+    document["orgId"] = "org-id-zq9"
+    status = signin.parse_status(0, json.dumps(document).encode())
+    return SignIn("signed_in", None, "t1", True, status.account)
+
+
+def pool_readings():
+    return {
+        "home-zq1": reading_of(report(account="acct-zq5", reset=T + 3600, windows={
+            "7d": window("allowed", 0.38, T + 86400), "5h": window("allowed", 0.2, T + 3600)}),
+            "home-zq1", 1, "t1"),
+        "work-zq2": reading_of(report(
+            http_status=429, status="rejected", reset=T + 7200, binding="7d", account="acct-zq6",
+            windows={"7d": window("rejected", 1.0, T + 7200),
+                     "5h": window("allowed", 0.1, T + 1800)}), "work-zq2", 2, "t2"),
+        "spare-zq3": reading_of(report(reset=T + 3600, windows={
+            "7d": window("allowed", 0.1, T + 3600)}), "spare-zq3", 3, "t3")}
+
+
+POOL_SIGNINS = {"home-zq1": signed_in(HOME_AT), "zalias-zq4": signed_in(HOME_AT),
+                "work-zq2": signed_in(WORK_AT), "spare-zq3": SignIn("signed_out", None, "t1", True)}
+OWNER = capacity_module.capacity_view(
+    NAMES, CapacityState(pool_readings(), {}), T, POOL_SIGNINS)
+
+
+def owner_numbers():
+    return guest.account_numbers(OWNER, {})
+
+
+SPEND = {"approximate": False, "days": [{
+    "day": "2026-11-19", "total": Tokens(input=10, output=5, dollars=9876.5432).wire(),
+    "project": {"owner/p00": Tokens(dollars=9876.5432).wire(),
+                "owner/p01": Tokens(dollars=1.25).wire()}}]}
+
+
+def sprint_nodes(node):
+    found = []
+    if isinstance(node, dict):
+        if node.get("type") == "sprint":
+            found.append(node)
+        for member in node.values():
+            found.extend(sprint_nodes(member))
+    elif isinstance(node, list):
+        for member in node:
+            found.extend(sprint_nodes(member))
+    return found
+
+
+def running_inputs():
+    inputs = guest_inputs()
+    base = inputs["sprints"]
+    inputs["sprints"] = {
+        "s-p00": dataclasses.replace(base["s-p00"], manager=Manager(STARTED, at(5), "work-zq2", "m-1")),
+        "s-p01": dataclasses.replace(base["s-p01"], manager=Manager(STARTED, at(5), "zalias-zq4", "m-2"))}
+    return inputs
+
+
+class PoolTest(unittest.TestCase):
+    def test_the_pool_matches_the_owner_capacity_for_the_same_readings(self):
+        pool = guest.pool_view(OWNER, owner_numbers())
+        self.assertEqual(
+            owner_numbers(), {"home-zq1": 1, "spare-zq3": 2, "work-zq2": 3, "zalias-zq4": 1})
+        self.assertEqual([row["label"] for row in pool["accounts"]],
+                         ["Account 1", "Account 2", "Account 3"])
+        for key in ("tight", "all_out", "resumes_at", "no_reading"):
+            with self.subTest(key=key):
+                self.assertEqual(pool[key], OWNER[key])
+        self.assertEqual(pool["state"], "tight")
+        rows = {row["label"]: row for row in pool["accounts"]}
+        for entry in OWNER["profiles"]:
+            if entry["duplicate_of"] is not None:
+                continue
+            row = rows[f"Account {owner_numbers()[entry['profile']]}"]
+            for key in ("state", "week_left", "five_hour_left", "week_reset", "five_hour_reset",
+                        "next_reset", "out_until"):
+                with self.subTest(profile=entry["profile"], key=key):
+                    self.assertEqual(row[key], entry[key])
+        keys = ("week_left", "five_hour_left", "week_reset", "five_hour_reset")
+        self.assertEqual(tuple(rows["Account 1"][k] for k in keys),
+                         (62, 80, iso(T + 86400), iso(T + 3600)))
+        keys = ("state", "week_left", "five_hour_left", "week_reset", "five_hour_reset",
+                "out_until")
+        self.assertEqual(tuple(rows["Account 3"][k] for k in keys),
+                         ("out", 0, 90, iso(T + 7200), iso(T + 1800), iso(T + 7200)))
+        self.assertEqual([row["in_use"] for row in pool["accounts"]], [True, False, True])
+        published = json.loads(encode_view(guest.scrub(derive_view(**guest.scoped(
+            {**guest_inputs(), "capacity": OWNER}, frozenset({"owner/p01"}))), pool, {})))
+        self.assertEqual(published["pool"], pool)
+
+    def test_the_pool_line_follows_the_owner_rule(self):
+        def open_one(name, seq):
+            return reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.1, T + 3600)}), name, seq, "t")
+
+        def refused(name, seq, reset=T + 7200):
+            return reading_of(report(http_status=429, status="rejected", reset=reset, windows={
+                "7d": window("rejected", 1.0, reset)}), name, seq, "t")
+
+        table = [
+            ("two open", ["a", "b"], {"a": open_one("a", 1), "b": open_one("b", 2)}, (),
+             "fine", None, None),
+            ("one refused", ["a", "b"], {"a": open_one("a", 1), "b": refused("b", 2)}, (),
+             "tight", None, None),
+            ("two refused", ["a", "b"],
+             {"a": refused("a", 1), "b": refused("b", 2, T + 5000)}, (),
+             "out", iso(T + 5000), None),
+            ("no reading", ["a"], {}, (), None, None, "1 with no reading yet"),
+            ("refused and unread", ["a", "b"], {"a": refused("a", 1)}, (),
+             "fine", None, "1 with no reading yet"),
+            ("all excluded", ["a", "b"], {"a": open_one("a", 1), "b": open_one("b", 2)},
+             ("a", "b"), None, None, None),
+        ]
+        for label, names, readings, excluded, state, resumes_at, no_reading in table:
+            with self.subTest(label):
+                view_ = capacity_module.capacity_view(
+                    names, CapacityState(readings, {}), T, excluded=excluded)
+                pool = guest.pool_view(view_, guest.account_numbers(view_, {}))
+                self.assertEqual((pool["state"], pool["resumes_at"], pool["no_reading"]),
+                                 (state, resumes_at, no_reading))
+                if label == "all excluded":
+                    self.assertEqual((pool["tight"], pool["all_out"]), (False, False))
+        self.assertEqual(guest.pool_view(capacity_module.EMPTY, {}), guest.EMPTY_POOL)
+        self.assertEqual(guest.EMPTY_POOL["accounts"], [])
+
+    def test_a_label_stays_with_its_account_across_alias_pin_and_removal(self):
+        readings = {
+            "home": reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.38, T + 86400)}), "home", 1, "t1"),
+            "work": reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.5, T + 86400)}), "work", 2, "t2")}
+
+        def cv(names, signins, **extra):
+            return capacity_module.capacity_view(
+                names, CapacityState(readings, {}), T, signins, **extra)
+
+        def by_name(capacity):
+            return {entry["profile"]: entry for entry in capacity["profiles"]}
+
+        def mine(profile, address):
+            return SignIn("signed_in", None, "t", True, address)
+
+        S = {"aalias": mine("aalias", HOME_AT), "home": mine("home", HOME_AT),
+             "zalias": mine("zalias", HOME_AT), "work": mine("work", WORK_AT)}
+        n0 = guest.account_numbers(cv(["home", "spare", "work"], S), {})
+        self.assertEqual(n0, {"home": 1, "spare": 2, "work": 3})
+        v1 = cv(["aalias", "home", "spare", "work"], S)
+        self.assertEqual(by_name(v1)["home"]["duplicate_of"], "aalias")
+        n1 = guest.account_numbers(v1, n0)
+        self.assertEqual(n1, {"aalias": 1, "home": 1, "spare": 2, "work": 3})
+        rows = guest.pool_view(v1, n1)["accounts"]
+        self.assertEqual([row["label"] for row in rows], ["Account 1", "Account 2", "Account 3"])
+        self.assertEqual(rows[0]["week_left"], 62)
+        running = {
+            name: dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                      manager=Manager(STARTED, at(5), profile, "m"))
+            for name, profile in (("on-home", "home"), ("on-alias", "aalias"))}
+        self.assertEqual(guest.sprint_labels(running, guest.profile_labels(n1)),
+                         {"on-home": "Account 1", "on-alias": "Account 1"})
+        v2 = cv(["aalias", "home", "spare", "work"], S, pinned="home")
+        self.assertIsNone(by_name(v2)["home"]["duplicate_of"])
+        self.assertEqual(guest.account_numbers(v2, n1), n1)
+        n3 = guest.account_numbers(cv(["aalias", "spare", "work"], S), n1)
+        self.assertEqual(n3, {"aalias": 1, "spare": 2, "work": 3})
+        v4 = cv(["aalias", "work"], S)
+        n4 = guest.account_numbers(v4, n3)
+        self.assertEqual(n4, {"aalias": 1, "work": 3})
+        self.assertEqual(len(n3), 3)
+        self.assertEqual([row["label"] for row in guest.pool_view(v4, n4)["accounts"]],
+                         ["Account 1", "Account 3"])
+        n5 = guest.account_numbers(cv(["aalias", "bbb", "work"], S), n4)
+        self.assertEqual(n5["bbb"], 2)
+        self.assertEqual(
+            guest.account_numbers(cv(["aalias", "bbb", "ccc", "work"], S), n5)["ccc"], 4)
+        signed_out = {**S, "home": SignIn("signed_out", None, "t", True)}
+        self.assertEqual(
+            guest.account_numbers(cv(["home", "work", "zalias"], signed_out),
+                                  {"home": 1, "work": 3, "zalias": 1}),
+            {"home": 2, "work": 3, "zalias": 1})
+
+    def test_an_account_that_signs_in_as_an_established_one_keeps_the_established_number(self):
+        readings = {
+            "newcomer": reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.1, T + 86400)}), "newcomer", 1, "t1"),
+            "work": reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.5, T + 86400)}), "work", 2, "t2")}
+
+        def cv(signins):
+            return capacity_module.capacity_view(
+                ["newcomer", "work"], CapacityState(readings, {}), T, signins)
+
+        def mine(address):
+            return SignIn("signed_in", None, "t", True, address)
+
+        before = {"work": mine(WORK_AT)}
+        numbers = guest.account_numbers(cv(before), {"work": 2})
+        self.assertEqual(numbers, {"newcomer": 1, "work": 2})
+        after = {**before, "newcomer": mine(WORK_AT)}
+        merged = guest.account_numbers(cv(after), numbers, {"work"})
+        self.assertEqual(merged, {"newcomer": 2, "work": 2})
+        running = {"s": dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                            manager=Manager(STARTED, at(5), "work", "m"))}
+        self.assertEqual(guest.sprint_labels(running, guest.profile_labels(merged)),
+                         {"s": "Account 2"})
+
+    def test_an_alias_that_moves_between_two_accounts_that_stay_keeps_both_labels(self):
+        readings = {name: reading_of(report(reset=T + 3600, windows={
+            "7d": window("allowed", 0.3, T + 86400)}), name, seq, "t")
+            for seq, name in enumerate(("awork", "home", "zalias"), 1)}
+
+        def cv(zalias_at):
+            def mine(address):
+                return SignIn("signed_in", None, "t", True, address)
+            return capacity_module.capacity_view(
+                ["awork", "home", "zalias"], CapacityState(readings, {}), T,
+                {"awork": mine(WORK_AT), "home": mine(HOME_AT), "zalias": mine(zalias_at)})
+
+        previous = {"home": 1, "zalias": 1, "awork": 2}
+        moved = cv(WORK_AT)
+        for established in ({"home", "zalias", "awork"},
+                            {"home": HOME_AT, "zalias": HOME_AT, "awork": WORK_AT}):
+            with self.subTest(established=type(established).__name__):
+                self.assertEqual(guest.account_numbers(moved, previous, established),
+                                 {"home": 1, "awork": 2, "zalias": 2})
+
+    def test_a_profile_that_leaves_a_shared_account_for_a_new_address_does_not_take_its_label(self):
+        readings = {name: reading_of(report(reset=T + 3600, windows={
+            "7d": window("allowed", 0.3, T + 86400)}), name, seq, "t")
+            for seq, name in enumerate(("a", "z"), 1)}
+
+        def cv(a_at):
+            def mine(address):
+                return SignIn("signed_in", None, "t", True, address)
+            return capacity_module.capacity_view(
+                ["a", "z"], CapacityState(readings, {}), T,
+                {"a": mine(a_at), "z": mine(HOME_AT)})
+
+        self.assertEqual(guest.account_numbers(cv(HOME_AT), {}), {"a": 1, "z": 1})
+        left = guest.account_numbers(
+            cv(WORK_AT), {"a": 1, "z": 1}, {"a": HOME_AT, "z": HOME_AT})
+        self.assertEqual(left, {"a": 2, "z": 1})
+
+    def test_a_recorded_stall_reason_never_reaches_a_guest(self):
+        reason = "zalias-zq4 is being removed"
+        inputs = running_inputs()
+        inputs["sprints"] = {**inputs["sprints"], "s-p01": dataclasses.replace(
+            inputs["sprints"]["s-p01"], stalled=reason, stalled_at=at(7))}
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        self.assertIn(reason, json.dumps(derived))
+        encoded = encode_view(guest.scrub(derived))
+        self.assertNotIn(b"zalias-zq4", encoded)
+        self.assertNotIn(b"being removed", encoded)
+        seen = json.loads(encoded)
+        self.assertEqual({node["manager_text"] for node in sprint_nodes(seen)}, {guest.STALLED_TEXT})
+        cards = [item for item in seen["inbox"]["open"] if item["reason"] == "manager"]
+        self.assertEqual([card["last_reason"] for card in cards], [guest.MANAGER_REASON_TEXT])
+
+    def test_a_stop_failure_reason_never_reaches_a_guest(self):
+        inputs = running_inputs()
+        reason = "zalias-zq4 is being removed"
+        inputs["sprints"] = {**inputs["sprints"], "s-p01": dataclasses.replace(
+            inputs["sprints"]["s-p01"], stop_at=at(6), stop_failed_at=at(7), stop_reason=reason)}
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        self.assertEqual({node["stop_text"] for node in sprint_nodes(derived)},
+                         {sprints.STOP_FAILED_TEXT.format(reason=reason)})
+        encoded = encode_view(guest.scrub(derived))
+        self.assertNotIn(b"zalias-zq4", encoded)
+        self.assertNotIn(b"being removed", encoded)
+        self.assertEqual({node["stop_text"] for node in sprint_nodes(json.loads(encoded))},
+                         {guest.STOP_FAILED_TEXT})
+
+    def test_a_dropped_sprints_unstopped_reason_never_reaches_a_guest(self):
+        inputs = running_inputs()
+        reason = "zalias-zq4 is being removed"
+        inputs["pending"] = {"s-p01": sprints.PendingStop(
+            "s-p01", "owner/p01", "own-goal-zq8", at(6), reason, at(7))}
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        self.assertEqual([item["text"] for item in derived["unstopped"]],
+                         [sprints.UNSTOPPED_TEXT.format(reason=reason)])
+        encoded = encode_view(guest.scrub(derived))
+        self.assertNotIn(b"zalias-zq4", encoded)
+        self.assertNotIn(b"being removed", encoded)
+        self.assertEqual([item["text"] for item in json.loads(encoded)["unstopped"]],
+                         [guest.UNSTOPPED_TEXT])
+
+    def test_every_profile_of_one_account_reads_its_accounts_label(self):
+        self.assertEqual(guest.profile_labels(owner_numbers()),
+                         {"home-zq1": "Account 1", "spare-zq3": "Account 2",
+                          "work-zq2": "Account 3", "zalias-zq4": "Account 1"})
+
+    def test_only_a_running_sprint_carries_its_account_label(self):
+        base = guest_inputs()["sprints"]["s-p00"]
+        running = dataclasses.replace(base, manager=Manager(STARTED, at(5), "home-zq1", "m-1"))
+        sprint_map = {
+            "run-id": running,
+            "failed-id": dataclasses.replace(
+                base, manager=Manager(FAILED, at(5), "home-zq1", "m-2")),
+            "stopped-id": dataclasses.replace(running, stopped_at=at(6)),
+            "stranger-id": dataclasses.replace(
+                base, manager=Manager(STARTED, at(5), "gone-zq9", "m-3")),
+            "idle-id": dataclasses.replace(base, manager=None)}
+        self.assertEqual(guest.sprint_labels(sprint_map, {"home-zq1": "Account 1"}),
+                         {"run-id": "Account 1"})
+
+    def test_a_listed_sprint_carries_its_account_label_and_an_unlisted_one_is_absent(self):
+        inputs = running_inputs()
+        running = guest.sprint_labels(inputs["sprints"], guest.profile_labels(owner_numbers()))
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        scrubbed = guest.scrub(derived, guest.pool_view(OWNER, owner_numbers()), running)
+        self.assertEqual(running, {"s-p00": "Account 3", "s-p01": "Account 1"})
+        self.assertEqual(
+            [(node["sprint_id"], node["account_label"])
+             for entry in scrubbed["entries"] for node in entry["sprints"]],
+            [("s-p01", "Account 1")])
+        encoded = encode_view(scrubbed)
+        for marker in (b"s-p00", b"other-goal-zq7"):
+            self.assertNotIn(marker, encoded)
+        for node in sprint_nodes(derived):
+            self.assertNotIn("account_label", node)
+
+    def test_no_owner_string_reaches_the_serialized_guest_view(self):
+        inputs = {**running_inputs(), "capacity": OWNER, "spend": SPEND}
+        running = guest.sprint_labels(inputs["sprints"], guest.profile_labels(owner_numbers()))
+        owner_bytes = encode_view(derive_view(**inputs))
+        guest_bytes = encode_view(guest.scrub(
+            derive_view(**guest.scoped(inputs, frozenset({"owner/p01"}))),
+            guest.pool_view(OWNER, owner_numbers()), running))
+        leaks = NAMES + [HOME_AT, WORK_AT]
+        for secret in leaks + ["9876.5432"]:
+            with self.subTest(present=secret):
+                self.assertIn(secret.encode(), owner_bytes)
+        for secret in (ORG, "org-id-zq9"):
+            self.assertNotIn(secret.encode(), owner_bytes)
+        for secret in leaks + [ORG, "org-id-zq9", "acct-zq5", "acct-zq6", "9876.5432", "dollars"]:
+            with self.subTest(absent=secret):
+                self.assertNotIn(secret.encode(), guest_bytes)
+        published = json.loads(guest_bytes)
+        self.assertIsNone(published["spend"])
+        self.assertEqual(published["capacity"], capacity_module.EMPTY)
+        for row in published["pool"]["accounts"]:
+            self.assertEqual(set(row), set(guest.ACCOUNT_MEMBERS))
+        self.assertEqual(set(published["pool"]), set(guest.POOL_MEMBERS))
+
+    def test_the_numbers_file_round_trips_and_a_bad_one_reads_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            path = d / guest.NUMBERS_FILE
+            self.assertEqual(guest.read_numbers(path), {})
+            guest.write_numbers(path, {"b": 3, "a": 1})
+            self.assertEqual(guest.read_numbers(path), {"a": 1, "b": 3})
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(os.listdir(d), [guest.NUMBERS_FILE])
+            for text in ("not json", "[1]", '{"a": 0}', '{"a": true}', '{"a": "1"}',
+                         '{"a": 1, "a": 2}'):
+                with self.subTest(text=text):
+                    path.write_text(text)
+                    self.assertEqual(guest.read_numbers(path), {})
+            path.unlink()
+            path.mkdir()
+            self.assertEqual(guest.read_numbers(path), {})
+
+    def test_the_numbers_file_keeps_the_label_a_running_sprint_holds_and_a_bad_one_reads_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / guest.NUMBERS_FILE
+            self.assertEqual(guest.read_retired(path), {})
+            guest.write_numbers(path, {"a": 1}, {"s-1": (1, "h@corp.invalid", "b")})
+            self.assertEqual(guest.read_numbers(path), {"a": 1})
+            self.assertEqual(guest.read_retired(path), {"s-1": (1, "h@corp.invalid", "b")})
+            for retired in ('{"s": [0, "x", "b"]}', '{"s": [1]}', '{"s": [1, "x"]}',
+                            '{"s": [1, 2, "b"]}', '{"s": [1, "x", 2]}', '{"s": 1}',
+                            '{"s": [true, "x", "b"]}', '[]'):
+                with self.subTest(retired=retired):
+                    path.write_text('{"numbers": {"a": 1}, "retired": %s}' % retired)
+                    self.assertEqual((guest.read_numbers(path), guest.read_retired(path)), ({}, {}))
+
+    def test_a_retired_label_outranks_the_label_of_a_profile_that_took_the_name_since(self):
+        sprint = dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                     manager=Manager(STARTED, at(5), "b", "m"))
+        other = dataclasses.replace(sprint, manager=Manager(STARTED, at(6), "b", "m2"))
+        labels = guest.profile_labels({"b": 2})
+        self.assertEqual(guest.sprint_labels({"old": sprint, "new": other}, labels,
+                                             {"old": "Account 1"}),
+                         {"old": "Account 1", "new": "Account 2"})
+        self.assertEqual(guest.sprint_labels({"old": sprint}, {}, {"old": "Account 1"}),
+                         {"old": "Account 1"})
+
+    def test_a_detached_sprint_has_no_label_even_when_its_profile_name_is_numbered_again(self):
+        sprint = dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                     manager=Manager(STARTED, at(5), "b", "m"))
+        self.assertEqual(guest.sprint_labels({"old": sprint}, guest.profile_labels({"b": 2}),
+                                             {"old": None}), {})
+
+    def test_the_numbers_file_keeps_a_detached_sprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / guest.NUMBERS_FILE
+            guest.write_numbers(
+                path, {"a": 1}, {"s-1": (None, "h@corp.invalid", "b"), "s-2": (None, "", "c")})
+            self.assertEqual(guest.read_retired(path),
+                             {"s-1": (None, "h@corp.invalid", "b"), "s-2": (None, "", "c")})
 
 
 class DoorTest(unittest.TestCase):

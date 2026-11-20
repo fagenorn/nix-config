@@ -2,6 +2,7 @@
 
 Run: just agent-workflow-tests
 """
+import base64
 import dataclasses
 import http.client
 import json
@@ -13,12 +14,13 @@ import time
 import types
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import approve, service, sprints
+from agent_tools.console import approve, pictures, service, sprints
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
@@ -911,6 +913,21 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertNotIn("sharing", state)
                 self.assertIn("owner/web", body.decode())
                 self.assertNotIn("owner/api", body.decode())
+
+                def at(seconds):
+                    return datetime.fromtimestamp(int(now_s) + seconds, timezone.utc).isoformat()
+
+                rows = state["pool"]["accounts"]
+                self.assertEqual([r["label"] for r in rows], ["Account 1", "Account 2"])
+                self.assertEqual(
+                    [(r["week_left"], r["five_hour_left"], r["week_reset"], r["five_hour_reset"])
+                     for r in rows],
+                    [(60, 75, at(3 * 86400), at(2 * 3600)), (10, 40, at(5 * 86400), at(4 * 3600))])
+                labelled = [s["account_label"] for s in all_sprints(state)
+                            if s.get("account_label") is not None]
+                self.assertEqual(labelled, ["Account 1"])
+                self.assertNotIn(b"work-main", body)
+                self.assertNotIn(b"work-spare", body)
                 status, body = get(serve.address, "/")
                 self.assertEqual(status, 200)
                 self.assertIn(service.DOOR_GUEST, body)
@@ -918,6 +935,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(json.loads(body)["sharing"]["colleagues"],
                                  [{"login": shots.COLLEAGUE, "projects": ["owner/web"]}])
+                self.assertEqual([p["profile"] for p in json.loads(body)["capacity"]["profiles"]],
+                                 ["work-main", "work-spare"])
             finally:
                 if serve is not None:
                     serve.close()
@@ -1046,6 +1065,68 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 else:
                     shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
                 self.assertIn("#top-who:not([hidden])", page.waits)
+
+    def test_the_guest_shot_waits_for_the_pool_where_the_page_has_one(self) -> None:
+        pool = ("#pool:not([hidden])", "#pool .pool-session time", ".sprint-account")
+        for present, waits in (({"#console-door", "#pool"}, True), ({"#console-door"}, False)):
+            with self.subTest(pool=waits), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake_browser(present)
+                shots._shoot(browser, "http://console.test/", "guest-page", 480, Path(tmp))
+                if waits:
+                    indexes = [page.waits.index(selector) for selector in pool]
+                    self.assertEqual(indexes, sorted(indexes))
+                    self.assertLess(page.waits.index("#top-who:not([hidden])"), indexes[0])
+                else:
+                    for selector in pool:
+                        self.assertNotIn(selector, page.waits)
+
+    def test_a_sheet_puts_the_shots_side_by_side_and_refuses_one_over_the_picture_limit(self) -> None:
+        recorded = []
+
+        class Row:
+            def screenshot(self, path=None, **kwargs):
+                Path(path).write_bytes(b"x" * size)
+
+        class Page:
+            def set_content(self, html, **kwargs):
+                recorded.append(html)
+
+            def locator(self, selector):
+                return Row()
+
+            def screenshot(self, path=None, **kwargs):
+                Path(path).write_bytes(b"x" * size)
+
+            def close(self):
+                pass
+
+        class Browser:
+            def new_page(self, **kwargs):
+                return Page()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b, out = Path(tmp) / "a.png", Path(tmp) / "b.png", Path(tmp) / "out-sheet.png"
+            a.write_bytes(b"\x89PNG-first")
+            b.write_bytes(b"\x89PNG-second")
+            size = 10
+            self.assertEqual(shots.sheet(Browser(), [a, b], out), out)
+            self.assertTrue(out.exists())
+            html = recorded[-1]
+            first = base64.b64encode(a.read_bytes()).decode()
+            second = base64.b64encode(b.read_bytes()).decode()
+            self.assertIn("data:image/png;base64," + first, html)
+            self.assertLess(html.index(first), html.index(second))
+            size = pictures.MAX_BYTES + 1
+            with self.assertRaisesRegex(RuntimeError, "out-sheet.png"):
+                shots.sheet(Browser(), [a, b], out)
+
+    def test_main_asks_capture_for_sheets_only_with_the_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for flag, expected in (([], False), (["--sheets"], True)):
+                with self.subTest(flag=flag), mock.patch.object(shots, "capture", return_value=[]) as capture, \
+                        redirect_stdout(StringIO()):
+                    self.assertEqual(shots.main(["--out", tmp, *flag]), 0)
+                    self.assertIs(capture.call_args.kwargs["sheets"], expected)
 
     def test_the_actor_shots_wait_for_what_the_owner_judges_and_guest_steer_refuses_the_owner_page(self) -> None:
         door = "#console-door"
