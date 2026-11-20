@@ -92,7 +92,7 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
 ## Questions
 
 1. Decide every reversible matter inside the approved brief yourself, and answer a delivery's "may I proceed" yourself. A merge the guard refuses is not a real choice: report it as Reporting says and ask nothing about it.
-2. Bring every real choice, one only the owner can make, in one round: collect the questions and send them together with `sprint ask --round-file -`, a JSON object on standard input, `{"questions": [{"question": ..., "context": ..., "blocks": ..., "options": [...], "recommended": ...}]}`:
+2. Bring every real choice in one round, a design choice for the sprint's starter to answer and a go-ahead (see `owner_only`) for the owner: collect the questions and send them together with `sprint ask --round-file -`, a JSON object on standard input, `{"questions": [{"question": ..., "context": ..., "blocks": ..., "options": [...], "recommended": ...}]}`:
    - `question`: the ask: one sentence of at most 140 characters, written as the question the owner answers.
    - `context`: optional, at most 400 characters: the cause and the evidence the owner needs to answer.
    - `blocks`: one line, what waits behind the answer.
@@ -103,7 +103,7 @@ A delivery stops at awaiting look when its issue carries that criterion: its pul
    - `replaces`: optional, `{"round": <id>, "index": <n>}`: names one open question of this sprint by its round id and its index, which counts from 0 in the order the round was sent; see item 4.
    - `pictures`: optional, at most 8 to a question: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`. `sprint ask` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once in a question) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and nothing is sent.
 
-   A question about look or layout carries its pictures, each with one line saying what to look at: attach them with `pictures` (`file`, `line`, optional `pair`) instead of pointing at a folder. A round in which a question's `question` or `context` names screenshots (the word screenshot or screenshots, in any case, or "screen shot"), a `.png` file or a folder with a `screenshots` segment, but attaches no picture, is refused with that question named and nothing is sent: attach the pictures with `pictures`, or reword the question.
+   A question about look or layout carries its pictures, each with one line saying what to look at: attach them with `pictures` (`file`, `line`, optional `pair`) instead of pointing at a folder. On a design choice for the starter (which layout to build), attach unpaired pictures, with no `pair`: a question carrying both a `before` and an `after` picture is an owner's look and a colleague who started the sprint cannot answer it. Reserve `pair` for the owner's review before a merge. A round in which a question's `question` or `context` names screenshots (the word screenshot or screenshots, in any case, or "screen shot"), a `.png` file or a folder with a `screenshots` segment, but attaches no picture, is refused with that question named and nothing is sent: attach the pictures with `pictures`, or reword the question.
 
    A round over a limit is refused with the limit named and nothing is sent, so shorten that member and send again.
 
