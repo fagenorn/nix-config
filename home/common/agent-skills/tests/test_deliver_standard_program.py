@@ -10809,6 +10809,25 @@ class LookHoldTest(unittest.TestCase):
                 self.assertEqual(result["stage"], "look-approve")
                 self.assertNotIn("hold", labels(calls))
 
+    def test_a_replay_fetches_before_it_resolves_the_landing_commit(self):
+        """#1356 I3: the landing commit is read against origin, so a checkout that predates the other pull request's merge is refreshed first."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        head = prompt(calls, "look-head")
+        self.assertIn("git -C /r fetch origin", head)
+        self.assertLess(head.index("git -C /r fetch origin"), head.index("gh pr view 42"))
+        self.assertLess(head.index("git -C /r fetch origin"), head.index("merge-base --is-ancestor"))
+
+    def test_a_replay_of_an_indirect_merge_names_the_landing_commit_to_the_look_stale_read_and_the_hold(self):
+        """#1356 I3: the merged PR has a null mergeCommit, so the split-child fence match and the hold name the landing commit the replay resolved."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        stale_read, hold = prompt(calls, "look-stale"), prompt(calls, "hold")
+        self.assertIn(f"the merge commit of PR 42 ({self.MERGE})", stale_read)
+        self.assertIn(f"Merge commit: {self.MERGE}", hold)
+        self.assertNotIn("read from gh pr view", stale_read + hold)
+        self.assertNotIn("merge-base --is-ancestor", prompt(calls, "hold"))
+
     def test_a_swapped_checkbox_order_keeps_the_marker_to_plan_mapping_of_the_planning(self):
         """#1356 C2: the look checkbox and an ordinary human checkbox swapped while delivery waited; the plan's ids still name the look criterion."""
         ordinary = dict(HUMAN, id="AC3")

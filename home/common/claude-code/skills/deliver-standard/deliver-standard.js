@@ -861,9 +861,11 @@ const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const openCriteria = acceptance.filter(isOpen)
   const notes = acceptance.filter(a => a && a.kind === 'note')
   // Ship regrades the code rows for every plan; a plan with a non-code row is then held by the acceptance-planning rules' "Linting a hold" procedure.
-  const merged = mergeCommit ? mergeCommit : `read from gh pr view ${PR} --repo ${SLUG} --json mergeCommit,headRefOid`
+  // #1356: a replay of a PR merged indirectly has already resolved the landing commit (landedCommit), so the hold and the look-stale read are given it, not asked to resolve it again.
+  const known = mergeCommit || landedCommit
+  const merged = known ? known : `read from gh pr view ${PR} --repo ${SLUG} --json mergeCommit,headRefOid`
   // A PR merged indirectly (its head reached the integration branch through another PR's merge) is MERGED with a null mergeCommit.
-  const indirect = mergeCommit ? '' : INDIRECT_FOR(PR, 'merge_commit_local false')
+  const indirect = known ? '' : INDIRECT_FOR(PR, 'merge_commit_local false')
   const heldBlock = noHold ? '' : `
 4. Read the issues this one blocks: gh api repos/${SLUG}/issues/${ISSUE}/dependencies/blocking (their numbers, returned as blocks).
 5. When blocks is non-empty, move each human criterion into its own new issue that blocks no other issue (forge-issue create --repo ${SLUG}, its body naming #${ISSUE}), hold that issue by step 6 with only that criterion's check (no --blocks flag; its once-run uses --issue <child>${answered.length ? `; no child's verify fence may hold a check for ${answered.join(', ')}: when a hold of that child already exists and its fence names any of them, edit that comment in place as step 6 does, before that child's once-run` : ''}), and return one split entry per moved criterion with its issue, block, lint, verify_run and issue_state.
@@ -947,7 +949,7 @@ if (CONT && setup.merged_pr) {
   if (!LOOK_READ) return LOOK_UNREAD()
   if (MARKED) {
     const MR = setup.merged_pr
-    const mergedHead = await recall(() => call(`Issue #${ISSUE} of ${SLUG}: read the head and the landing commit of the merged PR #${MR}, changing nothing: run ${UNSET}gh pr view ${MR} --repo ${SLUG} --json state,headRefOid,mergeCommit and return state, head (headRefOid, the full sha) and merge (the merge commit: the oid of mergeCommit, the full sha).${INDIRECT_FOR(MR, 'merge null')} Run nothing else.
+    const mergedHead = await recall(() => call(`Issue #${ISSUE} of ${SLUG}: read the head and the landing commit of the merged PR #${MR}, changing nothing but the refs of the checkout: first run git -C ${REPO} fetch origin, then run ${UNSET}gh pr view ${MR} --repo ${SLUG} --json state,headRefOid,mergeCommit and return state, head (headRefOid, the full sha) and merge (the merge commit: the oid of mergeCommit, the full sha).${INDIRECT_FOR(MR, 'merge null')} Run nothing else.
 ${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' }, merge: { type: ['string', 'null'] } }, required: ['state', 'head', 'merge'] } }))
     if (!mergedHead || typeof mergedHead.head !== 'string' || !SHA_RE.test(mergedHead.head) || typeof mergedHead.merge !== 'string' || !SHA_RE.test(mergedHead.merge)) return stop('look-approve', { details: `the approval could not be checked: the head and the landing commit of merged PR #${MR} could not be read`, result: mergedHead })
     landedCommit = mergedHead.merge
