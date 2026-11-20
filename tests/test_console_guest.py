@@ -812,6 +812,20 @@ class PoolTest(unittest.TestCase):
         self.assertEqual({node["stop_text"] for node in sprint_nodes(json.loads(encoded))},
                          {guest.STOP_FAILED_TEXT})
 
+    def test_a_dropped_sprints_unstopped_reason_never_reaches_a_guest(self):
+        inputs = running_inputs()
+        reason = "zalias-zq4 is being removed"
+        inputs["pending"] = {"s-p01": sprints.PendingStop(
+            "s-p01", "owner/p01", "own-goal-zq8", at(6), reason, at(7))}
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        self.assertEqual([item["text"] for item in derived["unstopped"]],
+                         [sprints.UNSTOPPED_TEXT.format(reason=reason)])
+        encoded = encode_view(guest.scrub(derived))
+        self.assertNotIn(b"zalias-zq4", encoded)
+        self.assertNotIn(b"being removed", encoded)
+        self.assertEqual([item["text"] for item in json.loads(encoded)["unstopped"]],
+                         [guest.UNSTOPPED_TEXT])
+
     def test_every_profile_of_one_account_reads_its_accounts_label(self):
         self.assertEqual(guest.profile_labels(owner_numbers()),
                          {"home-zq1": "Account 1", "spare-zq3": "Account 2",

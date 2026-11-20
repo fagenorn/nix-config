@@ -94,7 +94,7 @@ smaller one, so the established account and its running sprints keep their label
 log (`read_numbers`, `write_numbers`; an unreadable file numbers afresh). `sprint_labels` gives the
 label of the account each running sprint's manager is on, and `scrub` adds it as `account_label` to
 every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
-`STOP_FAILED_TEXT`, which carries no reason: a stop failure's reason can name a profile. No profile name, address, organisation or
+`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. No profile name, address, organisation or
 proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
 per account or per project would show work on projects the colleague is not listed for.
 `picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
@@ -576,6 +576,7 @@ ACCOUNT_MEMBERS = ("label", "state", "week_left", "five_hour_left", "week_reset"
 POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
 NUMBERS_FILE = "account-numbers.json"
 STOP_FAILED_TEXT = "could not stop the manager; trying again"
+UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped; trying again"
 
 
 def _accounts(capacity: Mapping) -> list[tuple[bool, list[str]]]:
@@ -684,6 +685,7 @@ def scrub(view: Mapping, pool: Mapping | None = None,
         return node
 
     scrubbed = labelled({name: member for name, member in view.items() if name != "sharing"})
+    scrubbed["unstopped"] = [{**item, "text": UNSTOPPED_TEXT} for item in view.get("unstopped", ())]
     shown = EMPTY_POOL if pool is None else pool
     scrubbed.update({"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
                      "accounts_added": [], "pin": None, "pin_launches": [],
