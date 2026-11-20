@@ -2958,6 +2958,17 @@ class ClaimOverlapTest(unittest.TestCase):
                 self.assertEqual(len(readings), 1)
                 self.assertEqual(readings[0]["claims"], [3, 5])
 
+    def test_a_later_live_fault_claim_of_a_slice_still_asks_the_owner(self):
+        entries = [claim_entry(1, SA, "a.py", started=1),
+                   claim_entry(2, SB, "a.py,b.py", live_fault=True, started=2),
+                   {**claim_entry(3, SA, "b.py", live_fault=True, started=1), "issue": 1}]
+        entries[0]["issue"] = 1
+        for order in (entries, entries[::-1]):
+            readings = sprints.claim_overlaps(order)
+            self.assertEqual(readings, [{"claims": [3, 2], "sprints": [SA, SB],
+                                         "files": ["a.py", "b.py"], "first": None,
+                                         "rule": "unsettled", "asks": SB}])
+
     def test_a_reposted_claim_keeps_its_slices_start(self):
         slices = ((7, 3, {"claims": [6, 4], "sprints": [SA, SB], "first": 6}),
                   (9, 6, {"claims": [4, 6], "sprints": [SB, SA], "first": 4}))

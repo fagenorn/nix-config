@@ -2117,35 +2117,43 @@ def _claim_start(entry: Mapping) -> int:
 
 
 def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
-    """One reading per pair of overlapping open claims of two sprints, in `(start, start)` order."""
+    """One reading per pair of slices with overlapping open claims, in `(start, start)` order.
+
+    A slice is a sprint's claims for one issue. A slice is a live-fault fix when any of its
+    overlapping claims is; its claim in the reading is its earliest such claim, else its earliest."""
     claims = [entry for entry in entries
               if entry.get("kind") == "claim" and entry.get("owner") is not True]
-    readings = []
-    seen: dict[tuple, dict] = {}
+    pairs: dict[frozenset, dict] = {}
     for index, one in enumerate(claims):
         for two in claims[index + 1:]:
             if one["sprint_id"] == two["sprint_id"]:
                 continue
-            a, b = sorted((one, two), key=_claim_start)
-            files = sorted({file for p in claim_paths(a["what"]) for q in claim_paths(b["what"])
-                            for file in _overlapping_files(p, q)})
+            files = {file for p in claim_paths(one["what"]) for q in claim_paths(two["what"])
+                     for file in _overlapping_files(p, q)}
             if not files:
                 continue
-            key = tuple((c["sprint_id"], c.get("issue", c["id"])) for c in (a, b))
-            if key in seen:
-                seen[key]["files"] = sorted({*seen[key]["files"], *files})
-                continue
-            fault_a, fault_b = a.get("live_fault") is True, b.get("live_fault") is True
-            if fault_a and fault_b:
-                first, rule, asks = None, OVERLAP_UNSETTLED, b["sprint_id"]
-            elif fault_a != fault_b:
-                first, rule, asks = (a if fault_a else b)["id"], OVERLAP_FAULT, None
-            else:
-                first, rule, asks = a["id"], OVERLAP_EARLIER, None
-            reading = {"claims": [a["id"], b["id"]], "sprints": [a["sprint_id"], b["sprint_id"]],
-                       "files": files, "first": first, "rule": rule, "asks": asks}
-            seen[key] = reading
-            readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]), reading))
+            slices = [(c["sprint_id"], c.get("issue", c["id"])) for c in (one, two)]
+            group = pairs.setdefault(frozenset(slices), {"files": set(), "claims": {}})
+            group["files"] |= files
+            for slice_key, claim in zip(slices, (one, two)):
+                group["claims"].setdefault(slice_key, []).append(claim)
+    readings = []
+    for group in pairs.values():
+        speaking = []
+        for slice_claims in group["claims"].values():
+            faulted = [c for c in slice_claims if c.get("live_fault") is True]
+            speaking.append(min(faulted or slice_claims, key=lambda c: (_claim_start(c), c["id"])))
+        a, b = sorted(speaking, key=lambda c: (_claim_start(c), c["id"]))
+        fault_a, fault_b = a.get("live_fault") is True, b.get("live_fault") is True
+        if fault_a and fault_b:
+            first, rule, asks = None, OVERLAP_UNSETTLED, b["sprint_id"]
+        elif fault_a != fault_b:
+            first, rule, asks = (a if fault_a else b)["id"], OVERLAP_FAULT, None
+        else:
+            first, rule, asks = a["id"], OVERLAP_EARLIER, None
+        reading = {"claims": [a["id"], b["id"]], "sprints": [a["sprint_id"], b["sprint_id"]],
+                   "files": sorted(group["files"]), "first": first, "rule": rule, "asks": asks}
+        readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]), reading))
     return [reading for _, reading in sorted(readings, key=lambda keyed: keyed[0])]
 
 
