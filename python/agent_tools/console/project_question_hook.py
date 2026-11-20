@@ -74,7 +74,7 @@ this order:
 The confinement (#1271, ADR-console-089 D2). With a confinement the only file under its private
 directory that any tool may reach is its records file. A path reaches (`_reaches`) when its real path
 (symlinks resolved, `~` expanded, relative to `cwd`) is not the records file and is the private
-directory or a transcript store, lies inside one, or is an ancestor of one, and is not inside the
+directory, the directory holding the records file or a transcript store, lies inside one, or is an ancestor of one, and is not inside the
 session's own `tool-results` directory of a store (`_own_results`); a reach is `RECORDS_DENIED`. It applies to:
 
 - `Read`: `file_path`.
@@ -99,8 +99,8 @@ The traversal rule (`_tree_reaches`) covers the client's search meeting the cons
 client's behaviour about symlinks while searching is not established, so the walk assumes it follows
 them: it lists with `os.scandir` and descends each real directory once, by filesystem identity
 (`st_dev`, `st_ino`) and not by spelling, so a symlinked directory and a second mount of one are one
-directory. Every directory it enters is compared by identity with the private directory and each
-transcript store, so a bind-mounted alias of one is `RECORDS_DENIED`, and every symlink it meets is
+directory. Every directory it enters is compared by identity with the private directory, the directory holding the records file and each
+transcript store, so a bind-mounted alias of one (a mount of the records directory alone included, whose visible ancestry holds neither the private directory nor a store) is `RECORDS_DENIED`, and every symlink it meets is
 checked by the path rule on the link's real path. It trusts no subtree: a link into `/nix/store` is
 walked like any other, since a store path can hold a link back into the console's state. Each entry
 listed counts toward `WALK_LIMIT` and the walk has `WALK_SECONDS` of time; past either, and when a
@@ -217,6 +217,12 @@ class Confinement:
     records: str
     transcripts: tuple[str, ...] = ()
     session: str | None = None
+
+    @property
+    def protected(self) -> tuple[str, ...]:
+        """The roots no tool may reach beyond the records file: the private directory, the records file's own
+        directory (a mount of it has neither the private directory nor a store in its visible ancestry) and the stores."""
+        return (self.private, os.path.dirname(self.records), *self.transcripts)
 
 
 def _identity(path: str) -> tuple[int, int] | None:
@@ -457,7 +463,7 @@ def _reaches(text: str, base: str, c: Confinement) -> bool:
     path = _resolve(text, base)
     if _same_file(path, c.records) or _own_results(path, c):
         return False
-    return any(_inside(path, held) or _inside(held, path) for held in (c.private, *c.transcripts))
+    return any(_inside(path, held) or _inside(held, path) for held in c.protected)
 
 
 def _word_targets(word: str) -> list[str]:
@@ -488,7 +494,7 @@ def _tree_reaches(root: str, c: Confinement) -> str | None:
         return None
     denied = RECORDS_DENIED.format(records=c.records)
     unchecked = SEARCH_UNCHECKED.format(limit=WALK_LIMIT)
-    held = {identity for identity in map(_identity, (c.private, *c.transcripts)) if identity is not None}
+    held = {identity for identity in map(_identity, c.protected) if identity is not None}
     deadline = time.monotonic() + WALK_SECONDS
     visited: set[tuple[int, int]] = set()
     pending: list[str] = []

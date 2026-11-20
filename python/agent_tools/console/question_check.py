@@ -42,16 +42,23 @@ Order of one run:
    only way a retry finds the question it already asked). Reading the state, choosing the keys and
    writing it are one section under an exclusive `flock` on `<state file>.lock`, so two runs at
    once share one set of keys and cannot start six paid sessions. A state file that exists but is
-   not the shape above (truncated, not JSON, a wrong type, an empty key, or one key saved for two
+   not the shape above (truncated, not JSON, a wrong type, no `projects` member, a key that is not 32
+   lowercase hex digits (`project_question.REQUEST_KEY`, which the console would refuse over HTTP on every
+   run), or one key saved for two
    texts of a project, since two lookups of one key would judge one answer for two questions) is status `bad_state`, exit 2, nothing
    posted and the file left as it was: a fresh empty state would generate new keys and could ask
-   every paid question again. A missing file is an empty state.
+   every paid question again. A missing file is an empty state, `{"projects": {}}`.
 5. A question is found by its own key only (P6): the view question of ID whose `request_key` is the
    key saved for its text, judged by that question's `id`; a question of the same text under
    another key or none is never judged. A text whose key no view question carries is posted as
-   `{"project_id", "question", "request_key"}`, at most once per run; an unreadable token file is
+   `{"project_id", "question", "request_key"}`, at most once per run (but see below); an unreadable token file is
    `no_token`, 75, nothing posted. A 204 is `posted`; any other status, or none, is `refused` and
-   the key stays saved.
+   the key stays saved. The console keeps a receipt of every key it has asked beyond the question's own
+   retention and answers 204 to it without starting a session, so a key kept from an earlier run whose
+   question the view no longer holds is posted, the view is read at once, and when that key's question
+   is still not shown the key was answered by its receipt: under the lock the saved key is replaced
+   by a new one (a run that finds another run already replaced it adopts that one and posts nothing)
+   and the text is posted once more under it. Only a receipt hit is posted a second time, and it started no session.
 6. The run waits within itself (P9): it polls, `sleep(POLL_SECONDS)` and then a new view read (a
    None read keeps polling), until every question is found and not `working`, or until `--wait`
    seconds have passed since the run began. After a post the view is read again before it is trusted.
@@ -77,6 +84,10 @@ the first one that does to the end of the section matches `_FAILED_READ` (could 
 failed, denied, refused, not found, not readable, missing, error and the like): an answer that says,
 in that clause or any later one, that it could not open its records file has not read it. A failure
 word in a clause before the first naming one (`flake.nix (could not open), q2.records.json`) does not count.
+A failure word that belongs to the run the question asks about (`failed activation`, `build failed`: a
+failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `check`, `job`, `workflow`,
+`step`, `test`, `switch`, `delivery`, `release`, `commit` or `merge`, unless `to` follows, as in `run failed
+to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
 
 The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
 """
@@ -113,6 +124,11 @@ _FAILED_READ = re.compile(
     r"\b(?:could\s*n[o']t|can\s*n[o']t|can't|unable|fail(?:ed|s|ure)?|den(?:y|ied|ies)|refus(?:e|ed|al)"
     r"|did\s*n[o']t|didn't|not\s+(?:found|readable|permitted|allowed|available|opened?|read)"
     r"|no\s+such|unreadable|missing|errors?)\b", re.IGNORECASE)
+_FAILED_RUN = re.compile(
+    r"\b(?:(?:activation|run|build|deploy\w*|production|check|job|workflow|step|test|switch|delivery|release"
+    r"|commit|merge)s?\s+(?:fail(?:ed|s|ure)?|errors?)(?!\s+to\b)"
+    r"|(?:fail(?:ed|s|ure)?|errors?)\s+(?:activation|run|build|deploy\w*|production|check|job|workflow|step"
+    r"|test|switch|delivery|release|commit|merge)s?)\b", re.IGNORECASE)
 _LINE_SUFFIX = re.compile(r":[0-9][0-9,-]*$")
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
@@ -129,7 +145,8 @@ def cites(read_text: str | None, name: str) -> bool:
         return False
     clauses = _CLAUSE_SPLIT.split(read_text.removeprefix(view.ASK_READ_TEXT.format(text="")))
     named = [i for i, clause in enumerate(clauses) if _names(clause, name)]
-    return bool(named) and not any(_FAILED_READ.search(clause) for clause in clauses[named[0]:])
+    return bool(named) and not any(
+        _FAILED_READ.search(_FAILED_RUN.sub(" ", clause)) for clause in clauses[named[0]:])
 
 
 def _names(clause: str, name: str) -> bool:
@@ -185,22 +202,23 @@ def _shown(entry: dict, key: str) -> dict | None:
 def _valid_state(document: object) -> bool:
     if not isinstance(document, dict):
         return False
-    projects = document.get("projects", {})
+    projects = document.get("projects")
     return isinstance(projects, dict) and all(
         isinstance(kept, dict) and isinstance(kept.get("revision"), str)
         and isinstance(kept.get("keys"), dict)
-        and all(isinstance(text, str) and isinstance(key, str) and key
+        and all(isinstance(text, str) and isinstance(key, str)
+                and project_question.REQUEST_KEY.fullmatch(key)
                 for text, key in kept["keys"].items())
         and len(set(kept["keys"].values())) == len(kept["keys"])
         for kept in projects.values())
 
 
 def _read_state(path: Path) -> dict | None:
-    """The saved state; `{}` when there is no file, None when the file is not a valid state."""
+    """The saved state; an empty one when there is no file, None when the file is not a valid state."""
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return {"projects": {}}
     except (OSError, ValueError):
         return None
     return document if _valid_state(document) else None
@@ -285,18 +303,48 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
     entry = _project_entry(current, args.project)
     posts: dict[str, str] = {}
     stale = False
-    for text in texts:
-        if _shown(entry, keys[text]) is not None:
-            continue
+    retried = [text for text in texts if text in kept["keys"]]
+
+    def ask(text: str) -> bool:
+        """Post `text` under its key; False when there is no token to post with."""
+        nonlocal stale
         try:
             token = Path(token_file).read_text(encoding="utf-8").strip()
         except OSError:
-            return _finish_result(finish, result_file, args.project, rev, now, "no_token", texts,
-                                  keys, ["pending"] * len(texts), posts, entry)
+            return False
         status, detail = post(args.url, token, {
             "project_id": args.project, "question": text, "request_key": keys[text]})
         posts[text] = "posted" if status == 204 else f"refused: {status}: {detail}"
         stale = True
+        return True
+
+    for text in texts:
+        if _shown(entry, keys[text]) is None and not ask(text):
+            return _finish_result(finish, result_file, args.project, rev, now, "no_token", texts,
+                                  keys, ["pending"] * len(texts), posts, entry)
+    posted = [text for text in retried if posts.get(text) == "posted"]
+    fresh = state(args.url) if posted else None
+    if fresh is not None and _project_entry(fresh, args.project) is not None:
+        current, entry, stale = fresh, _project_entry(fresh, args.project), False
+        # A kept key the console accepted but that shows no question was answered by its permanent receipt
+        # after the answer's retention expired: it starts nothing and never appears, so ask again under a new key.
+        expired = [text for text in posted if _shown(entry, keys[text]) is None]
+        if expired:
+            with _locked(state_file):
+                saved = _read_state(state_file)
+                if saved is None:
+                    return finish("bad_state", 2)
+                held = saved["projects"].get(args.project, {"revision": rev, "keys": {}})
+                rotate = [text for text in expired if held["keys"].get(text) == keys[text]]
+                for text in expired:
+                    keys[text] = new_key() if text in rotate else held["keys"].get(text, keys[text])
+                manager_check._write_json(state_file, {**saved, "projects": {
+                    **saved["projects"], args.project: {
+                        "revision": rev, "keys": {**held["keys"], **{t: keys[t] for t in expired}}}}})
+            for text in rotate:
+                if not ask(text):
+                    return _finish_result(finish, result_file, args.project, rev, now, "no_token",
+                                          texts, keys, ["pending"] * len(texts), posts, entry)
 
     def settled() -> bool:
         return not stale and all(

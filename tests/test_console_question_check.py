@@ -182,10 +182,38 @@ class QuestionCheckTest(unittest.TestCase):
         h.state_file.parent.mkdir(parents=True)
         h.state_file.write_text(json.dumps({"projects": {PROJECT: {
             "revision": REV, "keys": dict(zip(TEXTS, old))}}}), encoding="utf-8")
+        h.after_post = lambda document: (h.add(h.asked(
+            f"q{len(h.posts)}", document["question"], document["request_key"])), (204, ""))[1]
         code, line = h.run()
         self.assertEqual((code, line["status"]), (75, "waiting"))
         self.assertEqual(h.documents(), three_posts(old))
         self.assertEqual(h.new_keys, 0)
+
+    def test_a_kept_key_answered_by_its_receipt_after_retention_is_replaced_and_asked_again(self):
+        h = Harness(self)
+        old = ("d" * 32, "e" * 32, "f" * 32)
+        h.state_file.parent.mkdir(parents=True)
+        h.state_file.write_text(json.dumps({"projects": {PROJECT: {
+            "revision": REV, "keys": dict(zip(TEXTS, old))}}}), encoding="utf-8")
+        receipts = set(old)
+
+        def post(document):
+            # The console answers 204 to a key it has a receipt of and starts nothing; a new key is a new question.
+            if document["request_key"] not in receipts:
+                number = len(h.posts)
+                h.add(h.asked(f"q{number}", document["question"], document["request_key"]),
+                      h.answered(f"q{number}", grounded(f"q{number}")))
+            return 204, ""
+
+        h.after_post = post
+        code, line = h.run()
+        self.assertEqual((code, line["status"]), (0, "met"))
+        self.assertEqual([d["request_key"] for d in h.documents()], [*old, *KEYS])
+        self.assertEqual(h.saved()["projects"][PROJECT]["keys"], dict(zip(TEXTS, KEYS)))
+        self.assertEqual(h.new_keys, 3)
+        self.assertEqual(h.saved_before_post, [True] * 6)
+        code, line = h.run()
+        self.assertEqual((code, line["status"], len(h.posts)), (0, "met", 6))
 
     def test_an_older_revisions_answered_questions_are_never_judged(self):
         h = Harness(self)
@@ -311,12 +339,26 @@ class QuestionCheckTest(unittest.TestCase):
                      "Read " + path + ".\nIt could not be opened."):
             with self.subTest(read=read):
                 self.assertFalse(question_check.cites("Read: " + read, "q2.records.json"))
+        for read in ("flake.nix (could not open), " + path, path + ", docs/a.md",
+                     path + " (failed activation)", path + " (the activation failed)",
+                     path + " (build failed)",
+                     "the production run failed; I read " + path):
+            with self.subTest(read=read):
+                self.assertTrue(question_check.cites("Read: " + read, "q2.records.json"))
+        for read in (path + " (failed to open)", path + " (the run failed to open it)",
+                     path + " (failed activation); could not open it"):
+            with self.subTest(read=read):
+                self.assertFalse(question_check.cites("Read: " + read, "q2.records.json"))
         for read in ("flake.nix (could not open), " + path, path + ", docs/a.md"):
             with self.subTest(read=read):
                 self.assertTrue(question_check.cites("Read: " + read, "q2.records.json"))
 
     def test_a_malformed_state_file_is_a_setup_error_that_posts_nothing(self):
-        for text in ('{"projects": {"owner/p01": {"revision": "1', "", "[]", '{"projects": []}',
+        for text in ('{"projects": {"owner/p01": {"revision": "1', "", "[]", "{}", '{"projects": []}',
+                     json.dumps({"other": 1}),
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: "not-a-key"}}}}),
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: "A" * 32}}}}),
+                     json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: "a" * 31}}}}),
                      json.dumps({"projects": {PROJECT: {"revision": REV, "keys": []}}}),
                      json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: 7}}}}),
                      json.dumps({"projects": {PROJECT: {"revision": REV, "keys": {T1: ""}}}}),
@@ -351,6 +393,8 @@ class QuestionCheckTest(unittest.TestCase):
         argv = ["--project", PROJECT, "--token-file", str(h.token_file), "--state-file",
                 str(h.state_file), "--result-file", str(h.result_file), "--wait", "1"]
         seams = dict(state=h.state, post=h.post, now=h.now, sleep=h.sleep, revision=h.revision)
+        h.after_post = lambda document: (h.add(h.asked(
+            f"q{len(h.posts)}", document["question"], document["request_key"])), (204, ""))[1]
         workers = []
 
         def slow_key():
@@ -405,7 +449,14 @@ class QuestionCheckTest(unittest.TestCase):
     def test_a_refused_question_keeps_its_key_and_its_reason_stays_local(self):
         h = Harness(self)
         refusals = iter([(409, "the console is stopping LOCAL-ONLY-7f3a")])
-        h.after_post = lambda document: next(refusals, (204, ""))
+
+        def accept(document):
+            refused = next(refusals, None)
+            if refused is None:
+                h.add(h.asked(f"q{len(h.posts)}", document["question"], document["request_key"]))
+            return refused or (204, "")
+
+        h.after_post = accept
         code, line = h.run()
         self.assertEqual((code, line["verdicts"][0]), (75, "refused"))
         self.assertEqual(set(line), {"status", "verdicts", "result_file"})
@@ -416,7 +467,8 @@ class QuestionCheckTest(unittest.TestCase):
         self.assertEqual(h.saved()["projects"][PROJECT]["keys"][T1], KEYS[0])
         h.posts.clear()
         h.run()
-        self.assertEqual(h.documents(), three_posts())
+        self.assertEqual(h.documents(), three_posts()[:1])
+        self.assertEqual(h.new_keys, 3)
 
     def test_the_result_file_keeps_every_answer_section(self):
         h = Harness(self)

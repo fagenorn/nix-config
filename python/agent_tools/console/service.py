@@ -1587,7 +1587,7 @@ model, flags, settings and cap are a first question's (ADR-console-062). Its job
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
 records (`question_records.project_records`, ADR-console-089) after the reach and before the
-session; a gathering that raises is a `failed` answer with one stderr line `console:
+session, under the ingest lock and only while the project still holds the root the question was asked in; a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
 project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
 question and a question whose profile is being removed or already removed fails without starting a
@@ -4749,8 +4749,14 @@ class ConsoleService:
 
         The events and the folded state are read in one section under the ingest lock, so a delivery
         that finishes while the records are gathered shows either before or after, never half of each.
+        That section also rechecks that `project_id` still holds `root`: a checkout path taken by another
+        project since the question was admitted would put the next owner's activations after the cutoff,
+        so the gathering raises and the question is a failed answer.
         """
         with self._ingest:
+            held_state = self._states.get(project_id)
+            if held_state is None or held_state.root != root:
+                raise RuntimeError("the project no longer holds the checkout the question was asked in")
             events = self.log.events()
             spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
             live_runs = {

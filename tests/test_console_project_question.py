@@ -624,6 +624,31 @@ class HookConfinementTest(unittest.TestCase):
         self.assertEqual(
             hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.allowed)
 
+    def test_a_separate_mount_of_the_records_directory_alone_is_confined_by_identity(self):
+        # The settings directory holds every question's records; a mount of it has neither the private
+        # directory nor a transcript store in its visible ancestry.
+        (self.root / "mnt").mkdir()
+        real_stat = os.stat
+        settings = real_stat(self.S)
+
+        def stat(path, *args, **kwargs):
+            return settings if str(path) == str(self.root / "mnt") else real_stat(path, *args, **kwargs)
+
+        with mock.patch.object(hook.os, "stat", stat):
+            for name, tool_input in (
+                ("Read", {"file_path": str(self.root / "mnt" / "b.records.json")}),
+                ("Grep", {"pattern": "x"}),
+                ("Grep", {"pattern": "x", "path": str(self.root / "mnt")}),
+                ("Glob", {"pattern": "**/*.json"}),
+            ):
+                with self.subTest(name=name, tool_input=tool_input):
+                    self.assertEqual(
+                        hook.decide(self.doc(name, tool_input), DECLARED, None, self.c), self.denied)
+            self.assertEqual(hook.decide(self.command("git blame -wS" + str(self.root / "mnt" / "b.records.json")
+                                                      + " flake.nix"), DECLARED, None, self.c), self.denied)
+        self.assertEqual(
+            hook.decide(self.doc("Grep", {"pattern": "x"}), DECLARED, None, self.c), self.allowed)
+
     def test_a_search_with_a_directory_it_cannot_list_is_refused(self):
         real_scandir = os.scandir
 
@@ -2242,6 +2267,29 @@ class QuestionRecordsServiceTest(QuestionCase):
         self.assertEqual(self.question_rows()[-1][2], {
             "question_id": qid, "outcome": "failed",
             "reason": "the console's records could not be gathered: RuntimeError: boom"})
+        self.assertIn("console: project_question_records_failed " + qid, stderr.getvalue())
+        self.assertEqual(svc._project_questions_open, 0)
+
+    def test_a_checkout_taken_by_another_project_before_the_gathering_answers_failed(self):
+        svc = self.arrange()
+        gather = mock.Mock()
+        real = svc._project_reach
+
+        def reach(root):
+            found = real(root)
+            # Another project takes the root after the question was admitted and before its records are gathered.
+            svc._states = {**svc._states, WHY: dataclasses.replace(svc._states[WHY], root="/srv/elsewhere")}
+            return found
+
+        svc._project_reach = reach
+        stderr = io.StringIO()
+        with mock.patch("agent_tools.console.question_records.project_records", gather), \
+                contextlib.redirect_stderr(stderr):
+            qid = svc.ask_project_question(WHY, "why?")
+        gather.assert_not_called()
+        self.assertEqual(self.asked, [])
+        self.assertTrue(self.question_rows()[-1][2]["reason"].startswith(
+            "the console's records could not be gathered: RuntimeError:"))
         self.assertIn("console: project_question_records_failed " + qid, stderr.getvalue())
         self.assertEqual(svc._project_questions_open, 0)
 

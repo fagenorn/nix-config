@@ -222,6 +222,19 @@ class ProjectRecordsTest(unittest.TestCase):
         r = records(events=events)
         self.assertEqual([a["commit"] for a in r["activations"]], ["e" * 40])
 
+    def test_an_unregistration_alone_names_its_root_and_ends_the_predecessors_ownership(self):
+        # An older log kept the predecessor's unregistration (its payload names the root) but neither its
+        # registration nor this project's own, so only the payload says whose activations these are.
+        events = EVENTS + [
+            Event(100, f"{DAY1}T12:00:00+00:00", event_log.PROJECT_UNREGISTERED, "owner/old",
+                  {"root": P_ROOT}),
+            activation(103, event_log.ACTIVATION_FINISHED,
+                       {"root": P_ROOT, "commit": "e" * 40, "ok": True, "reason": None,
+                        "next_step": None})]
+        r = records(events=events)
+        self.assertEqual([a["commit"] for a in r["activations"]], ["e" * 40])
+        self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [0, 60])
+
     def test_a_predecessors_activation_stays_out_after_retention_removed_every_old_row(self):
         # The host's newest activation rows are kept whatever their age; the registrations that say
         # who owned the path when they were written must be kept with them, the new project's own

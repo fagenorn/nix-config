@@ -96,7 +96,8 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
     """The newest row at which a project other than `project_id` stopped owning `root`, else None.
 
     The rows are folded in `seq` order into each project's registered root: a registration of another
-    project under a different root, or its unregistration, while it held `root` ends its ownership.
+    project under a different root, or its unregistration, while it held `root` ends its ownership; an
+    unregistration names the root it ended in its payload, else the root the fold holds for the project.
     """
     roots: dict[str, str] = {}
     left = None
@@ -109,7 +110,8 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
             if isinstance(now, str):
                 roots[other] = now
         elif event.kind == PROJECT_UNREGISTERED and isinstance(other, str):
-            if other != project_id and roots.get(other) == root:
+            named = event.payload.get("root") if isinstance(event.payload, dict) else None
+            if other != project_id and (named if isinstance(named, str) and named else roots.get(other)) == root:
                 left = event
             roots.pop(other, None)
     return left
