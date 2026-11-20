@@ -116,7 +116,9 @@ owner-only route (`OWNER_ONLY`: every page write, manager write, hook and readin
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
 its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
 scoped view (`guest.scoped`, `guest.scrub`; it carries the pool and each running sprint's account label,
-`guest.pool_view`, `guest.sprint_labels`): `GET /` is the guest page (`GUEST_PAGE`: the page with its
+`guest.pool_view`, `guest.sprint_labels`, each reading `yours` for an account the colleague added
+himself and `Account <n>` for every other, and `own_signin`, the state of his own profile's latest
+sign-in run, #1343): `GET /` is the guest page (`GUEST_PAGE`: the page with its
 door meta set to `guest`, so it draws the
 desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
@@ -3835,6 +3837,7 @@ class ConsoleService:
         self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        self._account_owners: dict[str, str] = {}
         self._trust_failures: dict[tuple[str, str], dict] = {}
         self._pin_launches: pin.PinLaunches = pin.pin_launches([])
         self._signin_live: dict[str, int] = {}
@@ -3974,6 +3977,7 @@ class ConsoleService:
             self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._account_owners = account_add.owners_state(events)
             self._trust_failures = folder_trust.failures(events)
             self._registration_fold = register.fold(events)
             self._registration = self._registration_fold.latest
@@ -4216,7 +4220,7 @@ class ConsoleService:
                   and register.cancellable(latest, self._adoptions.get(latest["plan_id"])))
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
-            excluded=self._excluded, pinned=self._pinned)
+            excluded=self._excluded, pinned=self._pinned, owners=self._account_owners)
         inputs = dict(
             states=list(self._states.values()), records=self._inbox, health=self._health,
             sessions=list(self._sessions.values()), deliveries=self._deliveries,
@@ -4327,14 +4331,17 @@ class ConsoleService:
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.shared and name is not None:
-            pool = guest.pool_view(inputs["capacity"], self._account_numbers)
-            running = guest.sprint_labels(
-                self._sprints, guest.profile_labels(self._account_numbers),
-                {sprint_id: None if number is None else f"Account {number}"
-                 for sprint_id, (number, _, _) in self._retired_numbers.items()})
             for login, projects in access.colleagues.items():
+                mine = {profile for profile, owner in self._account_owners.items()
+                        if owner == login}
+                pool = guest.pool_view(inputs["capacity"], self._account_numbers, mine)
+                running = guest.sprint_labels(
+                    self._sprints, guest.profile_labels(self._account_numbers, mine),
+                    guest.retired_labels(self._retired_numbers, self._account_numbers, mine))
+                own = guest.own_signin(inputs["signin_runs"], self._account_owners, login)
                 derived = guest.mark_steer(
-                    guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running),
+                    guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running,
+                                own_signin=own),
                     login)
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
@@ -7918,6 +7925,7 @@ class ConsoleService:
         self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._account_owners = account_add.owners_state(appended, self._account_owners)
         self._trust_failures = folder_trust.failures(appended, self._trust_failures)
         self._registration_fold = register.fold(appended, self._registration_fold)
         self._registration = self._registration_fold.latest
@@ -7960,6 +7968,7 @@ class ConsoleService:
                 self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._account_owners = account_add.owners_state(events)
                 self._trust_failures = folder_trust.failures(events)
                 self._registration_fold = register.fold(events)
                 self._registration = self._registration_fold.latest
