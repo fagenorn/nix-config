@@ -3250,7 +3250,7 @@ class SigninViewTest(unittest.TestCase):
         shown = derive_view([], adoption_items=[ADOPTION_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"],
-                         "Open the pull request to merge the adoption.")
+                         "Merge the adoption from its card; when it cannot be merged there, the card says why.")
         self.assertEqual(shown["inbox"]["open"], [ADOPTION_ITEM])
         self.assertIsNot(shown["inbox"]["open"][0], ADOPTION_ITEM)
         asked_too = derive_view([state("p00", 1)], sprints={A: asked(started(A))},

@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import pictures, service
+from agent_tools.console import approve, pictures, service, sprints
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
@@ -29,7 +29,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting", "refusing")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -121,8 +121,8 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_forty_six_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 46)
+    def test_the_set_is_forty_nine_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 49)
         self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors"))
@@ -137,7 +137,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("desk-spend") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("register-draft") + 1:][:2],
                          ("register-reconcile-apply", "register-reconcile-draft"))
-        self.assertEqual(shots.STATES[-28:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[shots.STATES.index("register-reconcile-draft") + 1:][:2],
+                         ("adoption-merge", "adoption-moved"))
+        self.assertEqual(shots.STATES[shots.STATES.index("adoption-moved") + 1],
+                         "adoption-failed")
+        self.assertEqual(shots.ADOPTION_STATES, ("adoption-merge", "adoption-moved", "adoption-failed"))
+        self.assertEqual(shots.STATES[-31:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -145,7 +150,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                               "activation-tooling", "activation-host",
                                               "register-apply", "register-draft",
                                               "register-reconcile-apply",
-                                              "register-reconcile-draft"))
+                                              "register-reconcile-draft",
+                                              "adoption-merge", "adoption-moved",
+                                              "adoption-failed"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -224,6 +231,46 @@ class ScreenshotFixtureTest(unittest.TestCase):
         confirms = [i for i in view["inbox"]["open"] if i.get("reason") == "verify-approve"]
         self.assertTrue(confirms)
         self.assertEqual([i["steer"] for i in confirms], [False] * len(confirms))
+
+    def test_capture_serves_each_width_of_the_adoption_failed_state_from_a_fresh_console(self) -> None:
+        # The state clicks Merge, which the console cannot be asked twice, so a width shot after
+        # another would find the card gone.
+        class Browser:
+            def close(self):
+                pass
+
+        class Playwright:
+            chromium = types.SimpleNamespace(launch=lambda args=None: Browser())
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        api = types.ModuleType("playwright.sync_api")
+        api.Error = type("Error", (Exception,), {})
+        api.sync_playwright = Playwright
+        cards = []
+
+        def fake(browser, url, state, width, out, **kwargs):
+            host, port = url.split("//")[1].split("/")[0].split(":")
+            connection = http.client.HTTPConnection(host, int(port))
+            try:
+                connection.request("GET", "/api/state")
+                view = json.loads(connection.getresponse().read())
+            finally:
+                connection.close()
+            cards.append((width, [i["reason"] for i in view["inbox"]["open"]]))
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(sys.modules, {"playwright": types.ModuleType("playwright"),
+                                              "playwright.sync_api": api}), \
+                mock.patch.object(shots, "_shoot", side_effect=fake), \
+                mock.patch.object(shots, "start_service", wraps=shots.start_service) as started:
+            shots.capture(Path(tmp), states=("adoption-failed",))
+        self.assertEqual(started.call_count, len(shots.WIDTHS))
+        self.assertEqual(cards, [(width, ["adoption"]) for width in shots.WIDTHS])
 
     def test_the_recipe_help_counts_the_files_a_full_run_writes(self) -> None:
         justfile = (Path(__file__).resolve().parent.parent / "justfile").read_text()
@@ -1177,6 +1224,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     data = (pictures_dir / picture["id"]).read_bytes()
                     self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_the_adoption_failed_state_refuses_a_click_and_the_card_leaves_the_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp), "adoption-failed", now_s)
+            svc = shots.start_service(fixture, now_s)
+            try:
+                (card,) = json.loads(svc.view_bytes)["inbox"]["open"]
+                with self.assertRaises(sprints.Refused) as refused:
+                    svc.merge_adoption(shots.REGISTER_PLAN_ID, card["number"], card["commit"])
+                self.assertEqual(str(refused.exception), approve.MERGED_ELSEWHERE)
+                self.assertEqual(
+                    [i for i in json.loads(svc.view_bytes)["inbox"]["open"]
+                     if i["reason"] == "adoption"], [])
+            finally:
+                svc.close()
+
     def test_each_fixture_view_shows_its_state(self) -> None:
         for state in shots.STATES:
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
@@ -1317,6 +1380,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         rows = {row["field"]: row["line"] for row in registration["draft"]}
                         self.assertEqual(rows.get("commit-environment"),
                                          shots.PROPOSAL_LINE if shots.proposes_environment() else None)
+                elif state in shots.ADOPTION_STATES:
+                    (card,) = [i for i in view["inbox"]["open"] if i["reason"] == "adoption"]
+                    if state in ("adoption-merge", "adoption-failed"):
+                        self.assertEqual((card["merge"], card["why"]), (True, None))
+                    else:
+                        self.assertEqual((card["merge"], card["why"]), (False, approve.MOVED_WHY))
                 elif state in ("question-words", "question-refused"):
                     (asked,) = view["inbox"]["open"]
                     (look,) = asked["questions"]

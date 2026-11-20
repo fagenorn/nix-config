@@ -170,6 +170,9 @@ class PageTest(unittest.TestCase):
         # route sentence, came to 64126 bytes against the 63488 the two caps held.
         # Raised from 63 KB by #1341: the guest pool's line, rows and settling (about 1.4 KB compressed) did
         # not fit the 302 bytes the cap had left.
+        # #1338 also needed room beyond the 63 KB cap: the notice that keeps a refused merge's words once its
+        # card is gone (a merge that found another head merged) took the 63 bytes it had left, and merged with
+        # #1341 the page is 66082 bytes against the 66560 the cap holds.
         self.assertLess(len(gzip.compress(self.data, 9)), 66560)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
@@ -327,7 +330,7 @@ class PageTest(unittest.TestCase):
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
-             "/api/share-remove"},
+             "/api/share-remove", "/api/adoption-merge"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -336,7 +339,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 46)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 47)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -9247,6 +9250,87 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(full(link), "Open the pull request")
         self.assertEqual(link["href"], ADOPTION_ITEM["url"])
 
+    def test_a_ready_adoption_card_offers_merge_and_posts_its_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])}, {"click": "adoption-merge"}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (button,) = of_class(card, "button", "adoption-merge")
+        self.assertEqual(full(button), "Merge")
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/adoption-merge")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "number": 7, "commit": "a" * 40})
+        self.assertIn("X-Console-Token", post["headers"])
+
+    def test_an_adoption_card_without_merge_says_why_and_offers_no_button(self) -> None:
+        (snap,) = render([START, {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (reason,) = of_class(card, "span", "reason")
+        self.assertEqual(full(reason), MOVED_ITEM["why"])
+        self.assertEqual(of_class(card, "button", "adoption-merge"), [])
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "button"], [])
+        self.assertEqual(len(of_class(card, "a", "pr-link")), 1)
+
+    def test_a_refused_merge_says_why_through_a_redraw_and_can_be_tried_again(self) -> None:
+        refusal = "the pull request's branch holds commits the console did not push\n"
+        first, second = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": refusal}}, {"click": "adoption-merge"},
+            {"frame": frame([ADOPTION_ITEM])}, {"snapshot": True},
+            {"respond": {"status": 204, "text": ""}}, {"click": "adoption-merge"},
+            {"snapshot": True}])
+        (card,) = [n for n in nodes(first["inbox"]) if has_class(n, "adoption")]
+        (fail,) = of_class(card, "span", "fail")
+        self.assertEqual(
+            full(fail),
+            "Could not merge: the pull request's branch holds commits the console did not push")
+        self.assertEqual(
+            [p["url"] for p in second["posts"]], ["/api/adoption-merge", "/api/adoption-merge"])
+        (card,) = [n for n in nodes(second["inbox"]) if has_class(n, "adoption")]
+        self.assertEqual(of_class(card, "span", "fail"), [])
+
+    def test_an_empty_error_answer_says_plain_words(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 500, "text": ""}}, {"click": "adoption-merge"},
+            {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (fail,) = of_class(card, "span", "fail")
+        self.assertEqual(full(fail), "Could not merge: the console did not answer")
+        self.assertNotIn("HTTP", full(card))
+
+    def test_a_refusal_outlives_a_card_the_forge_state_removed_until_dismissed(self) -> None:
+        refusal = "the pull request was merged on the forge with commits the console did not push\n"
+        steps = [START, {"frame": frame([ADOPTION_ITEM])},
+                 {"respond": {"status": 409, "text": refusal}}, {"click": "adoption-merge"},
+                 {"frame": frame([])}, {"snapshot": True}]
+        (gone,) = render(steps)
+        self.assertEqual([n for n in nodes(gone["inbox"]) if has_class(n, "adoption")], [])
+        (notice,) = [n for n in nodes(gone["inbox"]) if has_class(n, "adoption-failed")]
+        self.assertIn("Could not merge the adoption of o/r", full(notice))
+        self.assertIn(refusal.strip(), full(notice))
+        (kept,) = render(steps[:-1] + [{"frame": frame([])}, {"snapshot": True}])
+        self.assertEqual(len([n for n in nodes(kept["inbox"]) if has_class(n, "adoption-failed")]), 1)
+        (done,) = render(steps[:-1] + [{"click": "adoption-failed-dismiss"}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(done["inbox"]) if has_class(n, "adoption-failed")], [])
+
+    def test_a_refusal_shows_no_notice_while_the_plans_card_is_still_listed(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": "no\n"}}, {"click": "adoption-merge"},
+            {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")], [])
+
+    def test_a_replaced_pull_requests_card_shows_no_old_refusal_and_a_notice_carries_it(self) -> None:
+        refusal = "this card is out of date; the page now shows the current one"
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": refusal + "\n"}}, {"click": "adoption-merge"},
+            {"frame": frame([{**ADOPTION_ITEM, "number": 8}])}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        self.assertEqual(of_class(card, "span", "fail"), [])
+        (notice,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")]
+        self.assertIn(refusal, full(notice))
+
 
 LATER = [START, {"respond": {"status": 200, "text": ANSWER}},
          {"frame": frame([with_run(SIGNIN, "running", 7)])}]
@@ -10459,7 +10543,12 @@ ADOPTION_ITEM = {
     "type": "inbox_item", "reason": "adoption", "key": "adoption/" + PLAN_A, "project_id": "o/r",
     "name": "r", "headline": "The adoption of o/r is ready to merge",
     "url": "https://github.com/o/r/pull/7", "number": 7, "answered": False,
-    "waiting_since": "2026-11-15T08:00:00+00:00"}
+    "waiting_since": "2026-11-15T08:00:00+00:00",
+    "plan_id": PLAN_A, "commit": "a" * 40, "merge": True, "why": None}
+MOVED_ITEM = {**ADOPTION_ITEM, "merge": False,
+              "headline": "Merge is not offered for the adoption of o/r",
+              "why": "Its branch holds commits the console did not push. Review them on the forge "
+                     "and merge it there, or close it and choose Apply it again."}
 READY = [START, {"frame": {**frame([]), "registration": READY_SHOWN}}]
 R_PLAN = PLAN_A
 

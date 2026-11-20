@@ -247,7 +247,7 @@ is that mapping, `{profile: run}`, copied (an empty object when none is given). 
 link is never in the view: the page holds it from the start answer, the add answer and the
 link answer of `POST /api/signin-link` alone, each a guarded page request.
 
-An adoption whose pull request is ready to merge (#1054, `approve.inbox_entries`) arrives through the
+An adoption with a card (#1054, #1338, `approve.inbox_entries`) arrives through the
 `adoption_items` argument, one mapping each, and is one entry of `inbox.open`, copied, after the
 sign-in entries and before the questions, in the order given. It counts in `inbox_items` and the
 headline and is not filtered by the registered projects: the adoption's project is not registered
@@ -257,9 +257,13 @@ yet. Its entry is
      "project_id": "<the contract's project id>" | null, "name": "<the checkout's name>",
      "headline": "The adoption of <project> is ready to merge", "url": "<pull request url>",
      "number": <pull request number>, "answered": false, "waiting_since": "<time the pull request
-     was first read as ready>"}
+     was first read as ready>", "plan_id": "<plan id>", "commit": "<sha>",
+     "merge": <bool>, "why": "<plain words>" | null}
 
-`ADOPTION_SENTENCE` says what the page offers: opening the pull request, where the owner merges it.
+The item is listed per `approve.inbox_entries`, and Merge is offered (`merge` true, `why` null) only per
+`approve.merge_refusal`; otherwise `why` says in plain words why the card offers no Merge.
+
+`ADOPTION_SENTENCE` says what the page offers: merging the adoption from its card, which says why when it cannot.
 It follows `SIGNIN_SENTENCE` and precedes `QUESTION_SENTENCE` in the precedence.
 
 The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
@@ -939,7 +943,7 @@ SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
 TERMINAL_SENTENCE = "Answer it in the manager's terminal."
 DEAF_SENTENCE = "Bring the manager back, or drop the sprint."
 TERMINAL_DEAF_SENTENCE = "Answer it in the manager's terminal, or bring the other manager back, or drop its sprint."
-ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
+ADOPTION_SENTENCE = "Merge the adoption from its card; when it cannot be merged there, the card says why."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
