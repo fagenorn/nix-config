@@ -5404,6 +5404,10 @@ class ConsoleService:
                 with self._ingest:
                     self._profiles = frozenset(accounts)
                     self._profiles_read = True
+                    if self._identities_seen is not None:
+                        # The listing above saw the directory before its marker was written: the marked
+                        # identity is published with the row, or the owner's start would find it unowned (#1361).
+                        self._identities_seen[name] = bound
                     self._fold(self.log.append([account_add.added(name, by=by.login, identity=bound)]))
                     del self._guest_made[name]
                     self._publish()

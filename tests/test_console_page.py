@@ -8512,6 +8512,18 @@ class StripPageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(snap["capacity"])
                           if has_class(n, "acct-pin") or has_class(n, "cap-pin")], [])
 
+    def test_a_row_of_a_profile_a_colleague_added_offers_no_sign_in_but_keeps_the_owners_other_actions(self) -> None:
+        """#1361: the service refuses the owner that sign-in, so the row offers none."""
+        cap = real_capacity(NOW_S, [{"name": "a", "week": .5, "signin": ("signed_out", None), "ever": True},
+                                    {"name": "b", "week": .5, "signin": ("signed_out", None), "ever": True}])
+        for entry in cap["profiles"]:
+            entry["owner"] = "ana@corp.invalid" if entry["profile"] == "b" else None
+        snap = opened({**view([]), "capacity": cap})
+        self.assertEqual(len(in_row(row_of(snap, "a"), "button", "acct-signin")), 1)
+        theirs = row_of(snap, "b")
+        self.assertEqual(in_row(theirs, "button", "acct-signin"), [])
+        self.assertEqual(len(in_row(theirs, "button", "acct-remove")), 1)
+
     def test_sign_in_words_show_only_when_the_sign_in_asks(self) -> None:
         reading = {"week": .5, "week_reset": NOW_S + 86400}
         frame_ = {**view([]), "capacity": real_capacity(NOW_S, [
@@ -9470,6 +9482,17 @@ class SigninRecoveredPageTest(unittest.TestCase):
         self.assertEqual(linked(snap), ["https://claude.example/a?s=1"])
         self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
         self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
+
+    def test_a_running_sign_in_of_a_profile_a_colleague_added_raises_no_card_and_no_link_request(self) -> None:
+        """#1361: signing a colleague's account in is his, so the owner's page recovers no card for it."""
+        run = {"colleague-1": {"state": "running", "at": None, "attempt": 7}}
+        cap = capacity([profile("colleague-1", "unknown", signin=si("signed_out", None, ask=True),
+                                owner="ana@corp.invalid")])
+        (snap,) = render([
+            START, {"respond": {"status": 200, "text": ANSWER}},
+            {"frame": {**frame([]), "capacity": cap, "signin_runs": run}}, {"snapshot": True}])
+        self.assertEqual(asks(snap), [])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "signin")], [])
 
     def test_a_typed_code_and_its_focus_survive_a_frame_on_a_recovered_card(self) -> None:
         run = {"work": {"state": "running", "at": None, "attempt": 7}}
