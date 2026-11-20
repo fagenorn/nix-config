@@ -559,7 +559,7 @@ the open without pushing again. The console stops between steps and inside every
 and forge call when it closes, appending nothing for the stopped step, so the next approval resumes;
 the one exception is the `applied` row, which is appended even when the close has begun, because
 apply has already made its branch and a restarted console must not offer a fresh apply.
-The console merges only on the owner's Merge (`POST /api/adoption-merge`, ADR-console-086): it
+The console merges only on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088): it
 pushes the one branch and opens its pull request, Apply is refused while that pull request is open,
 ready or failing, and the forge's required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
@@ -601,7 +601,7 @@ is dispatched on a tracked thread (`APPROVAL_THREAD`) that `close` joins, and th
 outcome whatever it is (an identical refusal included, so the card is fresh). Any other exception
 is `console: adoption_register_failed <Type>` and 500 `registering failed`.
 
-`POST /api/adoption-merge` (#1338, ADR-console-086) is the owner's Merge on an adoption's card. It
+`POST /api/adoption-merge` (#1338, ADR-console-088) is the owner's Merge on an adoption's card. It
 is an owner-only page write (`OWNER_ONLY`; in neither `GUEST_WRITES` nor `MANAGER_WRITES`), so
 `write_guard.refusal` runs first and a request without the page's `Origin` and exact token merges
 and appends nothing. It runs the same checks with `MAX_ADOPTION_MERGE_BYTES` (4096) and
@@ -1159,7 +1159,7 @@ bring the card back. A failed read is one stderr line `console: adoption_poll_fa
 not (`checks_error`) records that head and target with one such line, as `open` unless it was
 `failing`, so a moved head never keeps its Merge. An exception escaping a round is one stderr line
 `console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console merges only
-on the owner's Merge (`POST /api/adoption-merge`, ADR-console-086).
+on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088).
 
 The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
 `register_merged()` runs `Adopter.register(root, cancel=..., integration_branch=<the recorded pull

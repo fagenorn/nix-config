@@ -2,7 +2,7 @@
 
 Decided in ADR-console-030. The owner approves a ready adoption plan on the page; the console then
 applies it, pushes its branch and opens its pull request, and tells the owner in plain words how far
-it got. The console merges only on the owner's Merge (ADR-console-086): the forge's branch
+it got. The console merges only on the owner's Merge (ADR-console-088): the forge's branch
 protection keeps merge safety. This module is the pure part (it does no I/O except `retained`);
 the runners that apply, push, open and merge belong to the same module and the service owns every
 append.
@@ -173,7 +173,7 @@ or the local `branch_of` branch of a failed apply remains, so a copy whose recor
 timed-out apply) or whose cleanup stopped half way is still found.
 
 Runners. The console merges only on the owner's Merge, through `GitHubForge.merge_pull_request`
-pinned to the recorded commit, and the forge's branch protection keeps merge safety (ADR-console-086).
+pinned to the recorded commit, and the forge's branch protection keeps merge safety (ADR-console-088).
 `push(root, branch, commit, cancel=None, *, timeout=PUSH_TIMEOUT, environ=None)`
 pushes only the one adoption branch, at the one commit apply recorded, by the one refspec
 `<commit>:refs/heads/<branch>`: the local branch is never read, so a branch that moved after

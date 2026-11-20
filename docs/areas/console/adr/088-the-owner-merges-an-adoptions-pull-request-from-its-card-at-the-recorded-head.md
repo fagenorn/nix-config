@@ -1,4 +1,4 @@
-# ADR-console-086 — The owner merges an adoption's pull request from its card, at the recorded head
+# ADR-console-088 — The owner merges an adoption's pull request from its card, at the recorded head
 
 - **Status:** accepted
 - **Decided in:** #1338
