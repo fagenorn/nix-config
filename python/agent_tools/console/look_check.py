@@ -40,7 +40,7 @@ max(hold time, merge time of the landing): a missing read or a missing, unparsea
 `began_at` is 75 `not_read`, a failed one 75 `stale`. With a fresh read, the offending keys are the
 sorted `key` of the open inbox items of that repository and issue whose kind is `owner-review` and whose
 `criterion` is one of the issue's look-marker criteria (the checkbox lines of its acceptance criteria
-that `look_marker.marker_line` accepts; a card of an ordinary `[human]` criterion never counts): any is
+whose line is one of `look_marker.marker_lines`, the look-marker lines `tick` ticks; a card of an ordinary `[human]` criterion never counts): any is
 1 `not_met` with `keys`, none is 0 `met`. Every not-yet and verdict line carries `issue` and `pr` once there is a landing.
 
 Output and exits: one JSON line with sorted keys; the only file written is the activation record. 0 met, 1 not met, 75 not yet,
@@ -200,9 +200,8 @@ def hold_time(get: Get, repo: str, issue: int) -> datetime | None:
 
 def look_criteria(text: str) -> frozenset[int]:
     """The indexes of the acceptance criteria of an issue body whose line is a look marker."""
-    lines = text.split("\n")
-    return frozenset(c.index for c in inbox.acceptance_criteria(text)
-                     if look_marker.marker_line(lines[c.line]))
+    recognized = look_marker.marker_lines(text)
+    return frozenset(c.index for c in inbox.acceptance_criteria(text) if c.line + 1 in recognized)
 
 
 def landing(get: Get, comments: Callable[[str, int], list], repo: str, boundary: datetime

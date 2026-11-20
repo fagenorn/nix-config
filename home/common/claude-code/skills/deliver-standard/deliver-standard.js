@@ -34,7 +34,7 @@ export const meta = {
 // #1019: every setup first puts a worktree back on its branch when its HEAD is detached at the branch tip and the tree is clean.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look_acs? (#1356: the AC ids the issue's look-marker lines had when the plan was made, kept so a reordered checklist cannot move the criterion a landing leaves out of its hold), look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two (#1019: the second of those two revises runs in the same run, with no stop between, when the first one's re-review leaves only findings on criteria that revise changed); any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -63,7 +63,7 @@ export const meta = {
 // probe, no lock), syncs a branch that is behind the integration branch outside any lock (a conflict resolved and reviewed first), pushes the synced head in a look-push call and stops at
 // awaiting-look { issue, pr, head, reason, covers, pictures? (the before/after pictures verify wrote), flaky?, outside_fixes?, ways, cont } with cont.look = {pr, head}; it holds no lock and merges nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
-// A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place, never by the plan's wording), so no owner check is posted for it (#1356).
+// A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place as the plan numbered it (cont.look_acs), never by the plan's wording), so no owner check is posted for it (#1356).
 //
 // FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
 // the first poll into the pr call, a moved round's renew into its push call, its lock move into its checks call, and the look tick into the close-out call (#1186). Kept separate, each with a program
@@ -446,7 +446,7 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).
-Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
+Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs (the array of its acs, [] when it names none) as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
 // #992: labels of reviews that answered twice with no usable review (readReview). Not dead agents: the breaker does not count them.
@@ -573,6 +573,11 @@ else if (!CONT && setup && setup.ok === true && !setup.acquire && !present(setup
 // A lost reply carries no cont, fresh or resumed: a fresh reply that never showed the refusal checks pass must not resume past them,
 // and a rerun redoes the full fresh setup (the acquire is idempotent for the same holder).
 if (!setup) return { stage: 'setup', result: null, ...deadOf() }
+// #1356: a marked look read that names no acs array is incomplete (the delivery would read it as no criterion and ask the owner twice): the setup is asked once more, and a second such reply is a look read that failed.
+const lookIncomplete = r => !!r && r.ok !== false && isEntry(r.look) && r.look.verdict === 'marked' && !Array.isArray(r.look.acs)
+if (lookIncomplete(setup)) setup = await setupCall()
+if (!setup) return { stage: 'setup', result: null, ...deadOf() }
+if (lookIncomplete(setup)) setup.look = { verdict: 'error', detail: 'look-approval marked named no acs' }
 // #1019: said once in the log, never kept: the cont's setup must not claim it for a later run.
 if (setup.reattached === true) log('setup: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch')
 delete setup.reattached
@@ -735,7 +740,10 @@ const LOOK_READ = !!LOOK && (LOOK.verdict === 'marked' || LOOK.verdict === 'unma
 const MARKED = LOOK_READ && LOOK.verdict === 'marked'
 const COVERS = MARKED && Array.isArray(LOOK.covers) ? LOOK.covers.filter(c => typeof c === 'string' && c.trim()) : []
 // #1356: the ids of the criteria the issue's own look-marker lines name (look-approval marked, acs); a plan may reword that criterion, so its id, never its text, finds it.
-const LOOK_ACS = MARKED && Array.isArray(LOOK.acs) ? LOOK.acs.filter(a => typeof a === 'string' && a.trim()).map(a => a.trim().toUpperCase()) : []
+const acsOf = xs => (Array.isArray(xs) ? xs : []).filter(a => typeof a === 'string' && a.trim()).map(a => a.trim().toUpperCase())
+const LOOK_ACS = MARKED ? acsOf(LOOK.acs) : []
+// The ids as the plan numbered them: the issue's checkboxes can be reordered while the delivery waits, so a plan keeps the ids its planning read (cont.look_acs) and a later read is used only for a plan that carries none.
+let lookAcs = CONT && CONT.plan && Array.isArray(CONT.look_acs) ? acsOf(CONT.look_acs) : LOOK_ACS
 const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
 const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to land on the approval recorded for that head (the owner records it where they answered; this program never posts one, so an approve with none recorded stops), or look {answer: fix, head: <head>, words: <the owner's words>, message?} to approve that head with one fix, or look {answer: changes, words: <the owner's words>} to ask for a change.`
 // #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
@@ -765,7 +773,7 @@ const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog
 let lookWhy = null
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -835,10 +843,11 @@ let landRelease = null
 const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const planned = plan ? plan.acceptance : null
   // #1356: a landing under a recorded approval answers the criterion the issue's look-marker line names: the close-out ticks it, so the hold leaves it out and raises no second ask.
-  const acceptance = planned && MARKED && approvedHead ? planned.filter(a => !(a && typeof a.id === 'string' && LOOK_ACS.includes(a.id.toUpperCase()))) : planned
+  const acceptance = planned && MARKED && approvedHead ? planned.filter(a => !(a && typeof a.id === 'string' && lookAcs.includes(a.id.toUpperCase()))) : planned
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
   const unknown = badKinds(acceptance)
   if (unknown.length) return stop('close-out', { pr: PR, details: 'merged, but a plan criterion has a kind that is not code, evidence, human or note; close out by hand', bad_kinds: unknown })
+  const answered = planned.filter(a => !acceptance.includes(a)).map(a => a && a.id)
   const noHold = !acceptance.some(isOpen)
   const openCriteria = acceptance.filter(isOpen)
   const notes = acceptance.filter(a => a && a.kind === 'note')
@@ -849,7 +858,7 @@ const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
   const heldBlock = noHold ? '' : `
 4. Read the issues this one blocks: gh api repos/${SLUG}/issues/${ISSUE}/dependencies/blocking (their numbers, returned as blocks).
 5. When blocks is non-empty, move each human criterion into its own new issue that blocks no other issue (forge-issue create --repo ${SLUG}, its body naming #${ISSUE}), hold that issue by step 6 with only that criterion's check (no --blocks flag; its once-run uses --issue <child>), and return one split entry per moved criterion with its issue, block, lint, verify_run and issue_state.
-6. For the criteria left (evidence or human, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise, when no hold comment with a verify fence exists yet, gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file> (when one exists, post nothing: write its fence JSON to the file and lint that, so lint is still returned), add the needs-verification label (create it if missing), then run alone, once, even when an earlier attempt ran it: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. Return block (the posted JSON), lint, verify_run (ran, exit) and issue_state read back from the tracker.`
+6. For the criteria left (evidence or human, not split): none left means close #${ISSUE} with a comment naming the evidence and the split issues. Otherwise assemble one hold comment: a line per criterion, then exactly one \`\`\`verify fence holding {"v": 1, "merge": <the merge commit>, "checks": [...]} built from each criterion's verify member with every occurrence of the base sha ${setup.base_sha} replaced by the merge commit (a criterion without a verify member gets one written per ~/.agents/standards/acceptance-planning.md; an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe). Write it to a file outside any work tree and run verify-pending lint --input <file> --repo-root ${REPO} --pr-head ${prHead || '<the headRefOid read in step 1>'} --pr-branch ${setup.branch} plus one --pr-workflow <name> per distinct workflow of gh pr checks ${PR} --repo ${SLUG} --json workflow and one --blocks <n> per blocked issue. On refusal post nothing and return its verdict as lint. Otherwise, when no hold comment with a verify fence exists yet, gh issue comment ${ISSUE} --repo ${SLUG} --body-file <file> (when one exists, post nothing: write its fence JSON to the file and lint that, so lint is still returned), add the needs-verification label (create it if missing), then run alone, once, even when an earlier attempt ran it: verify-pending run --host ${setup.host} --repo ${SLUG} --issue ${ISSUE}. ${answered.length ? `The owner's look approval answers ${answered.join(', ')}, so no check for it may stand in the verify fence: when a hold comment with a verify fence already exists and its checks name any of them, remove those checks from the fence JSON and their lines from the comment text, edit that comment in place (gh api --method PATCH repos/${SLUG}/issues/comments/<comment id> --field body=@<file>), then lint the reduced fence and run the once-run, never before the edit. ` : ''}Return block (the posted JSON, as it stands in the comment after any such edit), lint, verify_run (ran, exit) and issue_state read back from the tracker.`
   const held = await call(`Issue #${ISSUE} of ${SLUG}: PR #${PR} is merged into ${INT}. Hold the issue's acceptance after the merge, by ~/.agents/standards/acceptance-planning.md (its "Linting a hold" section is the procedure). Skip the posting steps an earlier attempt already finished (an existing hold comment with a verify fence, the label, a split issue already filed and held for that criterion), but never skip the evidence you return: lint and verify_run are always fresh results of this attempt, so on such a retry take block from the posted verify fence, lint that block, run the once-run, and return all three. Each command in its own Bash call:
 ${lock ? RELEASE_FIRST(lock.sha, lock.maybe) : ''}1. Run git -C ${REPO} fetch origin. Merge commit: ${merged}${mergeCommit ? '' : ' (and read headRefOid, the PR head)'}.${indirect} Confirm git -C ${REPO} cat-file -e <merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here. Criteria: ${JSON.stringify(acceptance)}
 2. Regrade each code criterion once against the merge commit and the PR's passed required checks; a note criterion is the orchestrator's own observation and is never regraded, held or checked. Return the unmet ids as code_unmet and, if any, stop here: post nothing and add no label.
@@ -877,6 +886,8 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'hold', phase: 'Ship', agentType: 'cl
       if (!(held.lint && held.lint.ok === true) || !RUN_OK(held.verify_run) || !held.block || !Array.isArray(held.block.checks)) return stop('hold', { pr: PR, hold: held })
       const noteChecks = held.block.checks.filter(c => c && noteIds.includes(c.ac)).map(c => c.ac)
       if (noteChecks.length) return stop('hold', { pr: PR, hold: held, note_checks: noteChecks })
+      const lookChecks = held.block.checks.filter(c => c && answered.includes(c.ac)).map(c => c.ac)
+      if (lookChecks.length) return stop('hold', { pr: PR, hold: held, look_checks: lookChecks })
       const uncovered = covers(held.block.checks, remaining.map(a => a.id))
       if (uncovered.length) return stop('hold', { pr: PR, hold: held, missing_checks: uncovered })
       const outside = held.block.checks.filter(commandOutside)
@@ -905,6 +916,21 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType
 if (CONT && setup.merged_pr) {
   phase('Ship')
   log(`PR #${setup.merged_pr} is already merged; closing out`)
+  // #1356: an awaiting-look cont carries no approval, so a replay after the approved PR merged reads the recorded approval against the merged head before the hold is built: an approved one is ticked and its criterion left out of the hold.
+  if (MARKED && approvedHead === null) {
+    const MR = setup.merged_pr
+    const mergedHead = await recall(() => call(`Issue #${ISSUE} of ${SLUG}: read the head of the merged PR #${MR}, changing nothing: run ${UNSET}gh pr view ${MR} --repo ${SLUG} --json state,headRefOid and return state and head (headRefOid, the full sha). Run nothing else.
+${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'look-head', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: { type: 'object', properties: { state: { type: 'string' }, head: { type: 'string' } }, required: ['state', 'head'] } }))
+    if (!mergedHead || typeof mergedHead.head !== 'string' || !SHA_RE.test(mergedHead.head)) return stop('look-approve', { details: `the approval could not be checked: the head of merged PR #${MR} could not be read`, result: mergedHead })
+    const recorded = await call(`Issue #${ISSUE} of ${SLUG}: read the owner's look approval of the merged head; it was recorded where the owner answered, so post nothing. Run alone and exactly: look-approval status --repo ${SLUG} --issue ${ISSUE} --pr ${MR} --head ${mergedHead.head}
+It prints one JSON line. Return its verdict, kept_from and any detail. Run nothing else.
+${RULES_FOR(setup.worktree || '<worktree>')}`, { label: 'look-read', phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: { type: 'object', properties: { verdict: { type: 'string' }, kept_from: { type: ['string', 'null'] }, detail: { type: 'string' } }, required: ['verdict'] } })
+    if (!recorded || typeof recorded.verdict !== 'string' || recorded.verdict === 'error') return stop('look-approve', { details: `the approval could not be checked: look-approval status answered ${recorded ? (recorded.verdict || 'no verdict') : 'nothing'} for the merged head ${mergedHead.head}`, result: recorded })
+    if (recorded.verdict === 'approved') {
+      approvedHead = mergedHead.head
+      lookAt = { pr: MR, head: approvedHead, approved: approvedHead }
+    }
+  }
   return await closeOut(setup.merged_pr, null, setup.worktree, null)
 }
 
@@ -1090,6 +1116,7 @@ ${RULES}`
 // #819: the accepted reply's criteria_edited, taken off the plan so it reaches no cont and no stop.
 let planEdited
 const takePlan = async (p, label, left) => {
+  const fresh = label === 'plan'
   if (wellFormed(p) && branchProblems(p).length) {
     const faults = branchProblems(p)
     log(`${label}: ${faults.length} branch problems, revising once`)
@@ -1104,6 +1131,7 @@ const takePlan = async (p, label, left) => {
   if (bad.length) { dropPlan(left); planReviewed = false; return stop('plan', { step: label, invalid: p, branch_problems: bad }) }
   const { criteria_edited: listed, ...rest } = p
   plan = rest
+  if (fresh) lookAcs = LOOK_ACS
   planEdited = listed
   return null
 }
@@ -1237,6 +1265,7 @@ ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', mod
     if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) return haltTask(1, 'task', { task: { n: 1 }, impl, details: 'no acceptance criteria' })
     plan = { status: 'planned', plan_root: null, acceptance: impl.acceptance, tasks: [{ n: 1, title: 'direct', file: null, risk: impl.sensitive ? 'security' : 'low' }] }
     planReviewed = true
+    lookAcs = LOOK_ACS
     taskLog.push({ n: 1, commit: impl.commit, review_rounds: 0, reviewer: null, reviewed_head: null })
     if (partial === 1) partial = undefined
   }

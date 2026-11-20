@@ -38,7 +38,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    (`look_marker.Unreadable`) is a forge error (`payload_invalid` for the last two), never `needed`.
 3. `marked` reads the issue body only (no comment, nothing posted) and prints `verdict` `marked` or
    `unmarked`, `covers` (the criteria text) and `acs` (the `AC<n>` id of each acceptance criterion whose
-   body line is a look marker, `n` its 1-based place among the checkbox lines of the first
+   body line is a look marker that `tick` ticks (`look_marker.marker_lines`), `n` its 1-based place among the checkbox lines of the first
    `Acceptance criteria` section, the id a plan and a verify block give it; a plan that rewords the
    criterion is still named by its place), exit 0, with the same `payload_invalid` rule as
    `status`: an issue object with no `body` key is a forge error. The delivery programs (issue
@@ -204,9 +204,9 @@ def marked(args: argparse.Namespace) -> int:
 
 
 def _look_acs(body: str) -> list[str]:
-    """The AC ids of the acceptance criteria whose body line is a look marker, in body order."""
-    lines = (body or "").split("\n")
-    return [inbox.ac_id(c) for c in inbox.acceptance_criteria(body or "") if lm.marker_line(lines[c.line])]
+    """The AC ids of the acceptance criteria whose body line is a look marker `tick` will tick, in body order."""
+    recognized = lm.marker_lines(body)
+    return [inbox.ac_id(c) for c in inbox.acceptance_criteria(body or "") if c.line + 1 in recognized]
 
 
 def _reader(repo: str) -> Callable[[str], Any]:

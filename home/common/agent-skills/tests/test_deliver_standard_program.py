@@ -7674,7 +7674,7 @@ class DeclaredBranchTest(unittest.TestCase):
 
 
 # #1139: a marked issue stops at awaiting look; MARKED is the setup's look read, D a head a sync or a push moves the branch to.
-MARKED = {"verdict": "marked", "covers": ["the settings page"]}
+MARKED = {"verdict": "marked", "covers": ["the settings page"], "acs": []}
 D = "d" * 40
 AWAIT_REASON = "issue 9 needs the owner's look before merge"
 F, B = "f" * 40, "b" * 40
@@ -7692,7 +7692,7 @@ LOOK_CONT = {
               "review": {"code": "cr", "plan": "pr"}, "review_state": {"code": "available", "plan": "available"},
               "knowledge": {"standards": ["/r/docs/standards"], "hints": ["/r/.hints"], "rejections": ["/r/.rej"]},
               "verification": [{"id": "build", "argv": ["make", "build"], "cwd": "."}],
-              "look": {"verdict": "marked", "covers": ["the settings page"]}, "holder": "h1/session-s1",
+              "look": {"verdict": "marked", "covers": ["the settings page"], "acs": []}, "holder": "h1/session-s1",
               "worktree": "/r/.wt/w-issue-9-x", "base_sha": SHA, "plan_dir": "/r/.git/worktrees/w/deliver-standard"},
     "lane": "standard",
     "plan": {"status": "planned", "plan_root": "/r/.git/worktrees/w/deliver-standard/plan.md",
@@ -10756,9 +10756,83 @@ class LookHoldTest(unittest.TestCase):
         self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
 
     def test_a_look_read_that_names_no_criterion_holds_every_human_criterion(self):
-        result, calls = self.deliver(self.REWORDED, look={"verdict": "marked", "covers": ["the settings page"]})
+        result, calls = self.deliver(self.REWORDED, look={"verdict": "marked", "covers": ["the settings page"], "acs": []})
         self.assertEqual(result["stage"], "done")
         self.assertIn("Before merge, the owner judges", prompt(calls, "hold"))
+
+    def awaiting(self, *criteria, look=None):
+        """The cont of the awaiting-look stop of a plan made while the issue's look read was `look`."""
+        result, _ = run(patch={"setup": {"look": look or self.LOOKED}}, replies={"plan": with_criteria(*criteria)})
+        self.assertEqual(result["stage"], "awaiting-look")
+        return result["cont"]
+
+    def replay(self, cont, *criteria, left_out=("AC2",), read=None, replies=None, close="CLOSED"):
+        """A resume of `cont` whose approved PR has already merged: a cont of an awaiting-look stop carries no approval."""
+        read = read or self.LOOKED
+        held = [c for c in with_criteria(*criteria)["acceptance"] if c["id"] not in left_out and c["kind"] != "code"]
+        covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": c["id"], "kind": c["kind"]} for c in held]}
+        replies = dict({"hold": dict(HoldTest.HOLD, block=covering)}, **(replies or {}))
+        return run(args=dict(ARGS, cont=cont), replies=replies,
+                   patch={"setup": {"look": read, "head": SHA, **merged(42, "c0ffee")}, "close-out": {"issue_state": close}})
+
+    def test_a_replay_after_the_approved_pr_merged_reads_the_approval_before_the_hold(self):
+        """#1356 C1: the replayed awaiting-look cont has no approved head, so the recorded approval is read against the merged head."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        got = labels(calls)
+        self.assertLess(got.index("look-head"), got.index("look-read"))
+        self.assertLess(got.index("look-read"), got.index("hold"))
+        self.assertIn("gh pr view 42 --repo owner/repo --json state,headRefOid", prompt(calls, "look-head"))
+        self.assertIn("look-approval status --repo owner/repo --issue 9 --pr 42 --head " + SHA, prompt(calls, "look-read"))
+        self.assertNotIn("Before merge, the owner judges", prompt(calls, "hold"))
+        self.assertIn("look-approval tick --repo owner/repo --issue 9 --pr 42 --head " + SHA, prompt(calls, "close-out"))
+
+    def test_a_replay_with_no_recorded_approval_holds_the_look_criterion_and_ticks_nothing(self):
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED, close="OPEN", left_out=(),
+                                    replies={"look-read": {"verdict": "needed", "kept_from": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Before merge, the owner judges", prompt(calls, "hold"))
+        self.assertNotIn("look-approval tick", prompt(calls, "close-out"))
+
+    def test_a_replay_whose_approval_cannot_be_read_stops_before_the_hold(self):
+        for name, replies in (("error", {"look-read": {"verdict": "error", "kept_from": None}}), ("no head", {"look-head": None})):
+            with self.subTest(case=name):
+                result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED, replies=replies)
+                self.assertEqual(result["stage"], "look-approve")
+                self.assertNotIn("hold", labels(calls))
+
+    def test_a_swapped_checkbox_order_keeps_the_marker_to_plan_mapping_of_the_planning(self):
+        """#1356 C2: the look checkbox and an ordinary human checkbox swapped while delivery waited; the plan's ids still name the look criterion."""
+        ordinary = dict(HUMAN, id="AC3")
+        cont = self.awaiting(self.REWORDED, ordinary)
+        self.assertEqual(cont["look_acs"], ["AC2"])
+        swapped = dict(self.LOOKED, acs=["AC3"])
+        result, calls = self.replay(cont, self.REWORDED, ordinary, read=swapped, close="OPEN")
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        self.assertNotIn("Before merge, the owner judges", hold)
+        self.assertIn("looks right", hold)
+
+    def test_an_existing_verify_block_naming_the_look_check_is_reconciled_before_it_runs(self):
+        """#1356 I1: the hold names the answered criterion and edits a posted block that still checks it; a block that still checks it stops."""
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        hold = prompt(calls, "hold")
+        self.assertIn("The owner's look approval answers AC2", hold)
+        self.assertIn("gh api --method PATCH repos/owner/repo/issues/comments/<comment id>", hold)
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "AC2", "kind": "human"}, {"ac": "AC3", "kind": "human"}]}
+        result, _ = self.deliver(self.REWORDED, ordinary, hold={"block": both})
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+
+    def test_a_marked_look_read_without_acs_is_asked_again_and_a_second_one_is_a_failed_read(self):
+        """#1356 I2: a marked reply that omits acs is incomplete, never an empty list."""
+        bare = dict(SETUP_OK, look={"verdict": "marked", "covers": ["the settings page"]})
+        whole = dict(SETUP_OK, look=self.LOOKED)
+        result, calls = run(replies={"setup": [bare, whole]})
+        self.assertEqual((result["stage"], labels(calls).count("setup")), ("awaiting-look", 2))
+        result, calls = run(replies={"setup": [bare, bare]})
+        self.assertEqual(result["stage"], "look")
+        self.assertEqual(labels(calls).count("setup"), 2)
 
 
 LONG_BASH_TIMEOUT = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "

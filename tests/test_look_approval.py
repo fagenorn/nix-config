@@ -225,6 +225,15 @@ class MarkedTest(unittest.TestCase):
         code, out = run(*self.MARKED)
         self.assertEqual((code, out["verdict"], out["acs"]), (0, "marked", ["AC2"]))
 
+    def test_marked_names_only_the_marker_lines_that_tick_ticks(self):
+        """#1356: a fence the console parser closes but the marker reader opens must not suppress a marker tick leaves open."""
+        marker = "- [ ] [human] before merge: " + WHAT + " \u2014 measured: the owner, on the console\n"
+        body = "## Acceptance criteria\n\n" + marker + "- ```\n  sample\n  ```\n" + marker
+        self.assertEqual(lm.tick_markers(body)[1], 1)
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+        code, out = run(*self.MARKED)
+        self.assertEqual((code, out["verdict"], out["acs"]), (0, "marked", ["AC1"]))
+
     def test_an_unmarked_or_fenced_body_is_unmarked(self):
         for body in ("plain", None, "```\n" + BODY + "```\n"):
             with self.subTest(body=body):

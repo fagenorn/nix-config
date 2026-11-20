@@ -253,6 +253,12 @@ class LookCheckTest(unittest.TestCase):
         code, out = self.run_check(world(), state=lambda url: view(open=[ordinary, card()]))
         self.assertEqual((1, "not_met", ["octo/widgets#7/ac1"]), (code, out["status"], out["keys"]))
 
+    def test_a_marker_line_tick_leaves_open_is_no_look_criterion(self):
+        """#1356: the console waits only for look markers `tick` ticks, the lines the marker reader recognizes."""
+        marker = "- [ ] [human] before merge: the page \u2014 measured: the owner\n"
+        body = "## Acceptance criteria\n\n" + marker + "- ```\n  sample\n  ```\n" + marker
+        self.assertEqual(look_check.look_criteria(body), frozenset({1}))
+
     def test_a_later_activation_does_not_move_the_boundary(self):
         later = datetime(2026, 11, 16, 12, 30, tzinfo=timezone.utc)
         code, out = self.run_check(activated=later, state=never)

@@ -42,7 +42,7 @@ immediately followed by `before[\\s_-]*merg`. Prose, a bullet that only talks ab
 marker and text inside inline code are never near misses. `near_misses` returns them in body order with their 1-based
 line numbers; `look-lint` prints them, and a body with any is refused even beside a valid marker.
 
-The console reads a look-marker line with `marker_line`. It names the pull requests an issue's
+The console reads a look-marker line with `marker_line`, and the lines `read_look` and `tick_markers` recognize with `marker_lines`. It names the pull requests an issue's
 approvals mention with `look_prs` and asks `merged_under_look` whether a merged pull request's
 head was merged under an approval, exact or kept; `merged_under_look` reads the head commit of
 the merged REST pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
@@ -273,6 +273,11 @@ def look_answer(comments: Iterable[Mapping[str, Any]], issue: int, pr: int,
 def marker_line(line: str) -> bool:
     """Whether one body line, end-stripped as `body_lines` strips it, is a look marker."""
     return LINE.fullmatch(line.rstrip()) is not None
+
+
+def marker_lines(body: str | None) -> frozenset[int]:
+    """The 1-based numbers of the look-marker lines `read_look` and `tick_markers` recognize, outside fences."""
+    return frozenset(n for n, line in body_lines(body) if LINE.fullmatch(line))
 
 
 def merged_head(pull: Any) -> str | None:
