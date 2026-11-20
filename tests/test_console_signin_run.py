@@ -34,7 +34,9 @@ LOOPBACK_LINK = ("https://claude.com/cai/oauth/authorize?code=true"
                  "&redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fcallback"
                  "&state=SENTINEL-LINK-loop")
 MANUAL_LINK = ("https://claude.com/cai/oauth/authorize?code=true"
+               "&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code"
                "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+               "&code_challenge=SENTINEL-LINK-challenge&code_challenge_method=S256"
                "&state=SENTINEL-LINK-manual")
 NOISE_LINK = ("https://claude.example/oauth/authorize"
               "?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback&state=SENTINEL-OUT")
@@ -356,6 +358,16 @@ class GuestRecordTest(unittest.TestCase):
                     "%2Foauth%2Fcode%2Fcallback",
                     f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Fcb",
                     f"{authorize}?code=true&state=s",
+                    # the whole authorization request, not a part of it: a client id and a challenge
+                    f"{authorize}?code=true&{redirect}&state=s",
+                    f"{authorize}?code=true&{redirect}&response_type=code&code_challenge_method=S256"
+                    "&state=s&code_challenge=x_Y-9",
+                    f"{authorize}?code=true&{redirect}&response_type=code&code_challenge_method=S256"
+                    "&state=s&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                    f"{authorize}?code=true&{redirect}&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+                    "&code_challenge=x_Y-9&state=s",
+                    f"{authorize}?code=true&{redirect}&code_challenge=x_Y-9&state=s"
+                    "&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code",
                     f"{authorize}?code=true&{redirect}&{redirect}",
                     f"{authorize}?code=true&{redirect}&state=a&state=SENTINEL-TOKEN",
                     # a member the client sends is still one of its own values, not any text
@@ -701,6 +713,17 @@ class RunTest(unittest.TestCase):
         second = runs.wait_link("work")
         self.assertEqual(route_of(second), (MANUAL_LINK, "manual", None, None))
         self.assertEqual(guest_answer_members(second), {"link": MANUAL_LINK, "route": "manual"})
+
+    def test_an_incomplete_authorization_url_printed_first_does_not_take_the_manual_slot(self):
+        incomplete = ("https://claude.com/cai/oauth/authorize?code=true"
+                      "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+                      "&state=SENTINEL-DIAG")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=incomplete, FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        link = runs.wait_link("work")
+        self.assertEqual(route_of(link), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(guest_answer_members(link), {"link": MANUAL_LINK, "route": "manual"})
 
     def test_a_manual_link_no_colleague_may_have_still_serves_the_owner_when_it_is_the_only_one(self):
         diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"

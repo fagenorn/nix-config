@@ -193,7 +193,7 @@ retry, which skips the adder and takes the profile only if its directory is stil
 name (with no other profile listed there is no directory to mark at once: a failed second listing then leaves the
 profile unowned and his retry makes another); a new profile's status is read before its row (it must read signed out, else the add is `AddFailed`
 `not_listed` and the profile stays unowned: a reused name can find the launcher's keychain entry), and an add whose marker
-could not be written is `not_listed` too; then the trust grant and `start_signin(profile, by=...)`,
+could not be written is `not_listed` too; then, still under `_adding` (a second add of his cannot pick the new profile before the grant is done), the trust grant and `start_signin(profile, by=...)`,
 which refuses a profile that is not his (`guest.NO_OWN_SIGNIN_TEXT`) or being removed (`guest.ACCOUNT_BUSY_TEXT`), and, once the
 link wait ends, refuses again when his access or epoch is gone or the live run of that attempt has ended (the runner no longer holds it, even
 while the end callback's final status read has yet to clear it) or been replaced, or the profile is no longer his. The code and the
@@ -5299,13 +5299,14 @@ class ConsoleService:
         """Under the ingest lock: the profiles `by` added and still owns among the listed `accounts`, sorted.
 
         A profile is his only while its directory is the one his add recorded: one the owner removed
-        and made again under the name is not (#1343).
+        and made again under the name is not, and a row that recorded no directory proves none, so
+        it gives him no write (#1343).
         """
         return sorted(
             profile for profile, owner in self._account_owners.items()
             if owner == by.login and profile in accounts
-            and self._account_identities.get(profile) in (
-                None, account_add.identity(accounts[profile])))
+            and self._account_identities.get(profile) is not None
+            and self._account_identities.get(profile) == account_add.identity(accounts[profile]))
 
     def add_guest_account(self, by: "guest.GuestActor", consent: bool, attempt: int | None = None
                           ) -> tuple[int, signin_run.Link | None]:
@@ -5339,7 +5340,6 @@ class ConsoleService:
             link = runs.wait_link(profile)
             self._guest_link_still_his(by, runs, profile, attempt)
             return attempt, link
-        created = False
         with self._adding:
             with self._ingest:
                 self._guest_account_refusal(by)
@@ -5403,9 +5403,9 @@ class ConsoleService:
                     del self._guest_made[name]
                     self._publish()
                 target = name
-                created = True
-        if created:
-            self._grant_registered_projects(target, named=False)
+                # Still under `_adding`: another add of his cannot pick the new profile and start its
+                # client before this one has granted the folder trust.
+                self._grant_registered_projects(target, named=False)
         return self.start_signin(target, by=by)
 
     def _grant_registered_projects(self, name: str, *, named: bool = True) -> None:

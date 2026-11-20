@@ -121,7 +121,7 @@ an `https` URL on one of the client's own authorization endpoints (`GUEST_AUTHOR
 the host written bare (no user information or port), with no fragment,
 and a query of the OAuth authorization request's members only, each once
 (`GUEST_LINK_MEMBERS`: `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`,
-`code_challenge_method`, `state`) in which `code` is exactly `true` (the manual flag: a callback URL
+`code_challenge_method`, `state`), all of them present but `scope` (`GUEST_REQUIRED`), in which `code` is exactly `true` (the manual flag: a callback URL
 carrying an authorization code has another value) and `redirect_uri` is present and is exactly the manual
 return address (`GUEST_CALLBACK`: `https://platform.claude.com/oauth/code/callback`, bare, with no
 query or fragment), so no address or path of a printed URL carries a value to the colleague. A
@@ -305,6 +305,9 @@ GUEST_OPAQUE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 GUEST_VALUES = {"client_id": GUEST_CLIENT_ID, "scope": GUEST_SCOPE, "code_challenge": GUEST_OPAQUE,
                 "state": GUEST_OPAQUE}
 GUEST_FIXED = {"response_type": "code", "code_challenge_method": "S256"}
+# The members every authorization request of the client carries (`scope` alone may be left out).
+GUEST_REQUIRED = frozenset({"code", "client_id", "response_type", "redirect_uri", "code_challenge",
+                            "code_challenge_method", "state"})
 
 
 def guest_link(url: str) -> bool:
@@ -316,7 +319,8 @@ def guest_link(url: str) -> bool:
         if link.netloc != link.hostname or link.fragment:
             return False
         query = parse_qs(link.query, keep_blank_values=True)
-        if (set(query) - GUEST_LINK_MEMBERS or query.get("code") != ["true"]
+        if (set(query) - GUEST_LINK_MEMBERS or not GUEST_REQUIRED <= set(query)
+                or query.get("code") != ["true"]
                 or any(len(values) != 1 for values in query.values())):
             return False
         if any(not pattern.fullmatch(query[name][0]) for name, pattern in GUEST_VALUES.items()

@@ -20,12 +20,13 @@ runs `[*command, "add", name]` with no shell, `stdin` from `DEVNULL`, `stdout` a
 `add` then grants no folder trust itself, because the console grants every registered project after
 the add, outside the timeout, and reads each grant back (#1078); the variable marks nothing
 trusted. Exit 0 returns None. The launcher's `add` is the one implementation of
-profile creation: nothing here makes a directory or a link.
+profile creation: nothing here makes a directory or a link. It makes the profile directory with a plain `mkdir`, which fails
+when the directory exists, so a zero exit means that run created it, even when another add of the name ran at the same time.
 
 Failures. A failed run raises `AddFailed(kind)`, `str(error) == kind`, `kind` one of `KINDS`:
 `not_installed` (`FileNotFoundError`, or `PermissionError` on the executable), `timed_out`
 (`subprocess.TimeoutExpired`), `unavailable` (any other `OSError`) and `failed` (a non-zero exit).
-`not_listed` is raised by the console service when the profile does not appear in the listing after
+`failed` is also the exit of an add whose name was made by another add first. `not_listed` is raised by the console service when the profile does not appear in the listing after
 a successful add.
 
 Row. `added(profile, by="owner", identity=None)` is `("account.added", None, {"by": by, "profile": profile})`,

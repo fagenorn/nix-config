@@ -118,6 +118,25 @@ class AdderTest(unittest.TestCase):
             self.assertEqual(os.readlink(profile / "skills"),
                              str(root / "home/.claude/skills"))
 
+    def test_an_add_that_loses_the_race_for_the_directory_fails_and_makes_nothing_of_it(self):
+        # Another add of the name lands between the launcher's look and its mkdir: the shim makes the
+        # directory first, as that other add would. The launcher's own mkdir must then fail the add.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            env = launcher_env(root)
+            real = shutil.which("mkdir")
+            shim = root / "shim"
+            shim.mkdir()
+            (shim / "mkdir").write_text(
+                f'#!{BASH}\nfor last; do :; done\ncase "$last" in */profiles/solo) {real} -p "$last" ;; esac\n'
+                f'exec {real} "$@"\n')
+            (shim / "mkdir").chmod(0o755)
+            env["PATH"] = f"{shim}:{env['PATH']}"
+            with self.assertRaises(AddFailed) as caught:
+                Adder(command=[BASH, str(LAUNCHER)], environ=env)("solo")
+            self.assertEqual(caught.exception.kind, "failed")
+            self.assertEqual(os.listdir(root / "accounts" / "profiles" / "solo"), [])
+
     def test_an_invalid_name_starts_no_process(self):
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp) / "ran"

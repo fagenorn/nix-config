@@ -285,7 +285,14 @@ cmd_list() {
 cmd_add() {
   local name="${1:-}"
   valid_name "$name" || die "'$name' is not an account name (use a-z, 0-9, - and _)"
-  [ -d "$(profile_dir "$name")" ] && die "account '$name' already exists"
+  # The directory is made with a plain `mkdir`, which fails when it exists: a check
+  # followed by `mkdir -p` would let a concurrent add of the name succeed twice, and the
+  # console records who created a profile from this command's success.
+  mkdir -p "$PROFILES"
+  if ! mkdir "$(profile_dir "$name")" 2>/dev/null; then
+    [ -d "$(profile_dir "$name")" ] && die "account '$name' already exists"
+    die "could not create account '$name'"
+  fi
   sync_profile "$name"
   # The console sets CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST: it grants every registered
   # project itself after the add. `--profile=` because a valid name may begin with `-`.

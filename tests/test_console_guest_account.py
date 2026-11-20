@@ -572,6 +572,51 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertIsNone(self.owner_of("colleague-1"))
         self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
 
+    def test_a_row_that_recorded_no_directory_gives_the_colleague_no_write(self):
+        svc = self.begin()
+        (self.profiles / "colleague-1").mkdir(mode=0o700)
+        with svc._ingest:
+            svc._fold(svc.log.append([account_add.added("colleague-1", by=COLLEAGUE)]))
+        svc.poll_sessions()
+        theirs = guest.GuestActor(COLLEAGUE, TAILNET, svc._guest_epoch)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.start_signin("colleague-1", by=theirs)
+        self.assertEqual(str(raised.exception), guest.NO_OWN_SIGNIN_TEXT)
+        self.assertEqual(self.clients(), [])
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+
+    def test_a_second_add_waits_for_the_first_to_grant_the_folder_trust(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, stdin=subprocess.DEVNULL)
+        entered, release = threading.Event(), threading.Event()
+        real = self.granter
+
+        def gated(path, key):
+            entered.set()
+            release.wait(10)
+            return real(path, key)
+        self.granter = gated
+        self.begin()
+        support.write_registry(self.registry, [{"project_id": "repo", "root": str(repo)}])
+        answers = []
+        first = threading.Thread(target=lambda: answers.append(self.add()), daemon=True)
+        first.start()
+        self.assertTrue(entered.wait(10))
+        second = threading.Thread(target=lambda: answers.append(self.add()), daemon=True)
+        second.start()
+        second.join(1.5)
+        self.assertTrue(second.is_alive(), "the second add did not wait for the grant")
+        self.assertEqual(self.clients(), [])
+        release.set()
+        first.join(10)
+        second.join(10)
+        self.assertEqual(sorted(status for status, _ in answers), [200, 200])
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(len(self.clients()), 1)
+
     def test_a_live_sign_in_code_or_cancel_is_refused_once_the_owner_replaced_the_profile(self):
         svc = self.begin()
         self.assertEqual(self.add()[0], 200)
