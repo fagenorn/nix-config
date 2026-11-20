@@ -32,7 +32,7 @@ START = datetime.fromisoformat("2026-11-20T10:00:00+00:00")
 
 
 def grounded(qid):
-    return "Answer: figures\nRead: " + READ.format(qid)
+    return "Answer: figures, 4,200 tokens ($0.42)\nRead: " + READ.format(qid) + " (spend)"
 
 
 class Harness:
@@ -269,30 +269,93 @@ class QuestionCheckTest(unittest.TestCase):
             self.assertEqual(question["shown"], last[question["shown"]["id"]])
 
     def test_a_citation_in_the_prompts_path_formats_is_grounded(self):
-        path = READ.format("q2")
+        path = READ.format("q1")
         for read in ("`" + path + "`", "flake.nix, " + path + ":1-40.",
                      "the records file (" + path + ")", "- " + path):
             with self.subTest(read=read):
                 h = Harness(self)
-                h.seed([grounded("q1"), "Answer: x\nRead: " + read, grounded("q3")])
+                h.seed(["Answer: x\nRead: " + read, grounded("q2"), grounded("q3")])
                 code, line = h.run()
-                self.assertEqual(line["verdicts"][1], "grounded")
+                self.assertEqual(line["verdicts"][0], "grounded")
         self.assertIs(question_check.cites(None, "q2.records.json"), False)
 
     def test_another_file_a_backup_or_a_missing_citation_is_ungrounded(self):
-        for answer in ("Answer: x\nRead: " + READ.format("q1"),
-                       "Answer: x\nRead: " + READ.format("q2") + ".bak",
-                       "Answer: x\nRead: /s/xq2.records.json",
+        for answer in ("Answer: x\nRead: " + READ.format("q2"),
+                       "Answer: x\nRead: " + READ.format("q1") + ".bak",
+                       "Answer: x\nRead: /s/xq1.records.json",
                        "Answer: x\nRead: flake.nix",
                        "Answer: x",
                        "Answer: x\nRead: none",
-                       "Read: " + READ.format("q2")):
+                       "Read: " + READ.format("q1")):
             with self.subTest(answer=answer):
                 h = Harness(self)
-                h.seed([grounded("q1"), answer, grounded("q3")])
+                h.seed([answer, grounded("q2"), grounded("q3")])
                 code, line = h.run()
                 self.assertEqual((code, line["status"]), (1, "not_met"))
-                self.assertEqual(line["verdicts"][1], "ungrounded")
+                self.assertEqual(line["verdicts"][0], "ungrounded")
+
+    def test_a_cost_answer_that_names_no_spend_figure_is_not_met(self):
+        h = Harness(self)
+        h.seed([grounded("q1"),
+                "Answer: Planning costs the most per issue.\nRead: " + READ.format("q2") + " (spend)",
+                grounded("q3")])
+        code, line = h.run()
+        self.assertEqual((code, line["status"], line["verdicts"]),
+                         (1, "not_met", ["grounded", "ungrounded", "grounded"]))
+
+    def test_a_cost_answer_whose_figure_is_an_issue_number_or_whose_spend_part_is_another_files_is_not_met(self):
+        own = READ.format("q2")
+        for text in ("Answer: For issue #7, tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: For issue 7, tokens were unavailable.\nRead: " + own + " (spend)",
+                     "Answer: #7 cost 4,200 tokens.\nRead: " + own + " (deliveries), old-profile.md (spend)",
+                     "Answer: #7 cost 4,200 tokens ($0.42).\nRead: " + own):
+            with self.subTest(text=text):
+                h = Harness(self)
+                h.seed([grounded("q1"), text, grounded("q3")])
+                code, line = h.run()
+                self.assertEqual((code, line["status"], line["verdicts"][1]),
+                                 (1, "not_met", "ungrounded"))
+
+    def test_a_cost_answer_with_a_spend_figure_from_its_spend_part_is_grounded(self):
+        own = READ.format("q2")
+        for answer in ("#7 cost 4,200 tokens.", "#7 cost 4.2M tokens.", "#7 cost $0.42.",
+                       "#7 cost 1.5 million tokens."):
+            for read in (own + " (spend)", "`" + own + "` (spend)", own + ":120-400 (spend, deliveries)",
+                         own + " (deliveries, spend)"):
+                with self.subTest(answer=answer, read=read):
+                    h = Harness(self)
+                    h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + read, grounded("q3")])
+                    code, line = h.run()
+                    self.assertEqual((code, line["verdicts"]), (0, ["grounded"] * 3))
+
+    def test_a_question_other_than_cost_needs_no_spend_figure(self):
+        h = Harness(self)
+        h.seed(["Answer: x\nRead: " + READ.format("q1"), grounded("q2"),
+                "Answer: x\nRead: " + READ.format("q3")])
+        code, line = h.run()
+        self.assertEqual((code, line["status"]), (0, "met"))
+
+    def test_spend_figure_and_cites_part(self):
+        for text in ("4,200 tokens", "$38.10", "40k tokens", "12 USD", "4.2M tokens", "1.5 million tokens"):
+            with self.subTest(text=text):
+                self.assertIs(question_check.spend_figure(text), True)
+        for text in (None, "Planning costs the most per issue.", "#1271 took 3 runs over 7 days",
+                     "For issue #7, tokens were unavailable.", "For issue 7, tokens were unavailable.",
+                     "#7 tokens", "12,34 tokens"):
+            with self.subTest(text=text):
+                self.assertIs(question_check.spend_figure(text), False)
+        own = READ.format("q2")
+        for read in ("Read: " + own + " (spend)", "Read: " + own + " (Spend, deliveries)",
+                     "Read: " + own + ":1-40 (spend)"):
+            with self.subTest(read=read):
+                self.assertIs(question_check.cites_part(read, "q2.records.json", "spend"), True)
+        for read in (None, "Read: flake.nix (spend), " + own,
+                     "Read: " + own + " (deliveries), old-profile.md (spend)",
+                     "Read: /s/xq2.records.json (spend)",
+                     "Read: " + own + " (spend); could not open it",
+                     "Read: the spend part of " + own):
+            with self.subTest(read=read):
+                self.assertIs(question_check.cites_part(read, "q2.records.json", "spend"), False)
 
     def test_a_failed_or_timed_out_question_is_not_met(self):
         for outcome, reason in (("failed", "the session broke"), ("timed_out", "ran too long")):
@@ -327,14 +390,15 @@ class QuestionCheckTest(unittest.TestCase):
         self.assertEqual(len(h.posts), 3)
 
     def test_an_answer_that_says_it_could_not_open_its_records_is_ungrounded(self):
+        own = READ.format("q1")
         path = READ.format("q2")
-        for read in ("could not open " + path, path + ": could not open", "cannot read " + path + ".",
-                     "flake.nix\n" + path + " (permission denied)", "unable to open `" + path + "`"):
+        for read in ("could not open " + own, own + ": could not open", "cannot read " + own + ".",
+                     "flake.nix\n" + own + " (permission denied)", "unable to open `" + own + "`"):
             with self.subTest(read=read):
                 h = Harness(self)
-                h.seed([grounded("q1"), "Answer: x\nRead: " + read, grounded("q3")])
+                h.seed(["Answer: x\nRead: " + read, grounded("q2"), grounded("q3")])
                 code, line = h.run()
-                self.assertEqual((code, line["verdicts"][1]), (1, "ungrounded"))
+                self.assertEqual((code, line["verdicts"][0]), (1, "ungrounded"))
         for read in ("I tried to open " + path + ", but the hook denied it.", path + "; access was refused",
                      "Read " + path + ".\nIt could not be opened."):
             with self.subTest(read=read):
@@ -488,7 +552,7 @@ class QuestionCheckTest(unittest.TestCase):
 
     def test_stdout_holds_no_answer_and_stays_under_the_runner_limit(self):
         h = Harness(self)
-        answers = [f"Answer: {c * 5000}\nRead: " + READ.format(f"q{n}")
+        answers = [f"Answer: {c * 5000} 4,200 tokens\nRead: " + READ.format(f"q{n}") + " (spend)"
                    for n, c in enumerate("xyz", 1)]
         h.seed(answers)
         code, line = h.run()
@@ -498,7 +562,7 @@ class QuestionCheckTest(unittest.TestCase):
             self.assertNotIn(needle, h.stdout)
         result = h.result()
         for question, c in zip(result["questions"], "xyz"):
-            self.assertEqual(question["shown"]["answer"], c * 5000)
+            self.assertEqual(question["shown"]["answer"], c * 5000 + " 4,200 tokens")
         self.assertEqual(h.result_file.stat().st_mode & 0o777, 0o600)
 
     def test_a_named_run_is_the_third_question(self):

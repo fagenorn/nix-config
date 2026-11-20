@@ -64,7 +64,10 @@ Order of one run:
    seconds have passed since the run began. After a post the view is read again before it is trusted.
 7. Verdicts: not found or `working` is `pending` (`refused` when its post was refused); `failed` and
    `timed_out` are `failed`; `answered` is `grounded` or `ungrounded`. An answer is grounded iff its
-   `answer` is a non-blank string and `cites(read_text, question_id + RECORDS_SUFFIX)` holds (P5).
+   `answer` is a non-blank string and `cites(read_text, question_id + RECORDS_SUFFIX)` holds (P5); the
+   cost question's (`QUESTIONS[1]`) answer is also grounded only when `spend_figure(answer)` holds and
+   `cites_part(read_text, question_id + RECORDS_SUFFIX, SPEND_PART)` holds, so a cost answer that names
+   no spend figure, or does not cite the spend part of its own file, is `ungrounded` (ADR-console-090).
 8. Status, first match wins: any `failed` or `ungrounded` is `not_met`, exit 1; any `pending` or
    `refused` is `waiting`, 75; else `met`, 0. A usage or setup error is 2.
 9. The result file is written whenever step 3 found the project. Stdout is exactly one JSON line with
@@ -88,6 +91,17 @@ A failure word that belongs to the run the question asks about (`failed activati
 failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `check`, `job`, `workflow`,
 `step`, `test`, `switch`, `delivery`, `release`, `commit` or `merge`, unless `to` follows, as in `run failed
 to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
+
+`spend_figure(text)` is False for None, else whether the text holds a spend figure: a dollar amount
+(`$0.42`), a number followed by `tokens` (with an optional `k`, `m`, `b`, `thousand`, `million` or
+`billion`) or a number followed by `dollars` or `usd`. A number is digits with commas only between
+three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
+not a figure, so `issue #7, tokens` and `issue 7, tokens` hold none. `cites_part(read_text, name, part)`
+is True iff `cites(read_text, name)` holds and some occurrence of `name` in the Read text, at the start
+of a line or after whitespace, `/`, a backquote, a quote, `(`, `[` or `<`, is followed by an optional
+closing backquote, an optional line range (`:120-400`) and optional whitespace and then a parenthesized
+group one of whose tokens equals `part` (case-insensitively), so the part is bound to the citation of
+the question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
 
 The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
 """
@@ -130,6 +144,12 @@ _FAILED_RUN = re.compile(
     r"|(?:fail(?:ed|s|ure)?|errors?)\s+(?:activation|run|build|deploy\w*|production|check|job|workflow|step"
     r"|test|switch|delivery|release|commit|merge)s?)\b", re.IGNORECASE)
 _LINE_SUFFIX = re.compile(r":[0-9][0-9,-]*$")
+SPEND_PART = "spend"
+_NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_SPEND_FIGURE = re.compile(
+    r"\$\s?" + _NUMBER
+    + r"|(?<![#\w.,])" + _NUMBER + r"\s?(?:[kmb]|thousand|million|billion)?\s?tokens?\b"
+    + r"|(?<![#\w.,])" + _NUMBER + r"\s?(?:dollars|usd)\b", re.IGNORECASE)
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
 
@@ -147,6 +167,22 @@ def cites(read_text: str | None, name: str) -> bool:
     named = [i for i, clause in enumerate(clauses) if _names(clause, name)]
     return bool(named) and not any(
         _FAILED_READ.search(_FAILED_RUN.sub(" ", clause)) for clause in clauses[named[0]:])
+
+
+def spend_figure(text: str | None) -> bool:
+    """Whether `text` holds a spend figure: a dollar amount or a number of tokens or dollars."""
+    return text is not None and _SPEND_FIGURE.search(text) is not None
+
+
+def cites_part(read_text: str | None, name: str, part: str) -> bool:
+    """Whether the Read section cites `name` and marks `part` in the parentheses right after that citation."""
+    if not cites(read_text, name):
+        return False
+    body = read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))
+    pattern = re.compile(r"(?:^|(?<=[\s/`'\"(\[<]))" + re.escape(name)
+                         + r"`?(?::[0-9][0-9,-]*)?`?\s*\(([^)]*)\)", re.MULTILINE)
+    return any(part.casefold() == token.casefold()
+               for found in pattern.finditer(body) for token in _TOKEN_SPLIT.split(found.group(1)))
 
 
 def _names(clause: str, name: str) -> bool:
@@ -237,14 +273,16 @@ def _locked(state_file: Path):
         os.close(descriptor)
 
 
-def _verdict(shown: dict | None, refused: bool) -> str:
+def _verdict(shown: dict | None, refused: bool, cost: bool = False) -> str:
     state = shown.get("state") if shown else None
     if state in ("failed", "timed_out"):
         return "failed"
     if state == "answered":
         answer = shown.get("answer")
-        if (isinstance(answer, str) and answer.strip()
-                and cites(shown.get("read_text"), str(shown.get("id")) + project_question.RECORDS_SUFFIX)):
+        name = str(shown.get("id")) + project_question.RECORDS_SUFFIX
+        if (isinstance(answer, str) and answer.strip() and cites(shown.get("read_text"), name)
+                and (not cost or (spend_figure(answer)
+                                  and cites_part(shown.get("read_text"), name, SPEND_PART)))):
             return "grounded"
         return "ungrounded"
     return "refused" if refused else "pending"
@@ -357,7 +395,8 @@ def main(argv: list[str] | None = None, *, state=None, post=None, now=None, slee
         if fresh is not None and _project_entry(fresh, args.project) is not None:
             current, entry, stale = fresh, _project_entry(fresh, args.project), False
 
-    verdicts = [_verdict(_shown(entry, keys[text]), posts.get(text, "").startswith("refused"))
+    verdicts = [_verdict(_shown(entry, keys[text]), posts.get(text, "").startswith("refused"),
+                         cost=(text == QUESTIONS[1]))
                 for text in texts]
     return _finish_result(finish, result_file, args.project, rev, now, _status(verdicts), texts, keys,
                           verdicts, posts, entry)
