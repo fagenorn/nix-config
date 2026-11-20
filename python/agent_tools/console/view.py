@@ -755,7 +755,7 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_QUESTION_ANSWERED,
-    PROJECT_QUESTION_ASKED, PROJECT_UNREGISTERED as UNREGISTERED)
+    PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, PROJECT_UNREGISTERED as UNREGISTERED)
 from agent_tools.console.manager import Wait, plain_reason, quota_wait, session_name
 from agent_tools.console.movement import NUDGE_REPLY_MS, ProjectMovement, SessionMovement
 from agent_tools.console.sessions import (
@@ -1004,7 +1004,7 @@ def project_states(
                 previous.open_work if previous else 0)
         elif event.kind == UNREGISTERED:
             result.pop(project, None)
-        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED):
+        elif event.kind in (PROJECT_QUESTION_ASKED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_KEYED):
             continue
         elif project in result:
             result[project] = replace(
@@ -1929,6 +1929,7 @@ def _question_threads(questions: Sequence[project_question.AskedQuestion]) -> di
             "back_text": None if parts is None else said(ASK_BACK_TEXT, parts.back),
             "back_choices": None if parts is None else list(parts.choices),
             "production_text": None if parts is None else parts.production,
+            "request_key": question.request_key,
         }
 
     threads = project_question.threads(questions)

@@ -286,6 +286,23 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual([(row[0], row[2]) for row in rows(self.store)],
                          [(3, "activation.started"), (4, "activation.finished")])
 
+    def test_the_registry_rows_that_start_and_end_a_roots_ownership_outlive_the_window(self):
+        # #1271: a kept activation row names a root, and who owned that root is told only by the
+        # registrations, so no registration of a project, nor the unregistration that ends one,
+        # is removed; an unregistration that ends no registration is.
+        log = self.open()
+        self.now = OLD
+        log.append([("project.registered", "o/a", {"root": "/srv/p"}),
+                    ("project.unregistered", "o/a", {}),
+                    ("project.registered", "o/b", {"root": "/srv/p"}),
+                    ("project.unregistered", "o/c", {}),
+                    ("old", "o/a", {})])
+        self.assertEqual(self.retain_at(log, NOW), 2)
+        self.assertEqual([(row[0], row[2], row[3]) for row in rows(self.store)],
+                         [(1, "project.registered", "o/a"), (2, "project.unregistered", "o/a"),
+                          (3, "project.registered", "o/b")])
+        self.assertEqual(self.retain_at(log, NOW), 0)
+
     def test_a_raw_delete_of_a_kept_row_is_refused_after_a_pass(self):
         log = self.three_rows()
         self.retain_at(log, NOW)
