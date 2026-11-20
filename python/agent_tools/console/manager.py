@@ -25,6 +25,14 @@ profile used most recently (as an instant; a never-used one ranks below every us
 the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
 service lists the named profiles, #1016), so the unprofiled client directory is never chosen. A
 name in `last_use` that is not an entry is ignored.
+A colleague's account (#1344, ADR-console-087 D1; an entry whose `owner` is the login that added it,
+which `capacity_view` carries) serves his own sprints first and anyone's when it has room.
+`starter` is the login that started the sprint (None for the owner's) and `waiting` the logins that
+have a sprint waiting for a profile. After the pin, which outranks both, an entry whose `owner` is
+in `waiting` and is not `starter` is dropped from the room rule and from the fallback below; among
+the rest, the entries `starter` owns that have room answer for him (by the rule above), and
+otherwise every entry with room is a candidate. The owner's own accounts have no `owner` and are
+chosen as before.
 Last use is folded from the log's session rows by `profile_use(events, use)` (a new `ProfileUse`
 of `last`, profile to the `at` of its latest `session.seen`, `session.hook` or `session.profile`
 row, and `owner`, live session id to profile) and outlives the session: a `session.gone` row only
@@ -144,7 +152,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -289,10 +297,11 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         seen_after=seen_after, permission=permission)
 
 
-def choose_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | Wait:
+def choose_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
+                   waiting: Collection[str] = frozenset()) -> str | Wait:
     if capacity["all_out"]:
         return Wait(capacity["resumes_at"])
-    chosen = session_profile(capacity, last_use)
+    chosen = session_profile(capacity, last_use, starter, waiting)
     return Wait(None) if chosen is None else chosen
 
 
@@ -348,14 +357,19 @@ def has_room(entry: Mapping) -> bool:
             and not entry.get("excluded"))
 
 
-def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
+def session_profile(capacity: Mapping, last_use: Mapping[str, str], starter: str | None = None,
+                    waiting: Collection[str] = frozenset()) -> str | None:
     entries = [entry for entry in capacity["profiles"]
                if not (entry.get("excluded") or entry.get("duplicate_of"))]
     for entry in entries:
         if entry.get("pinned") and has_room(entry):
             return entry["profile"]
+    entries = [entry for entry in entries
+               if entry.get("owner") in (None, starter) or entry["owner"] not in waiting]
     room = [entry for entry in entries if has_room(entry)]
     if room:
+        own = [entry for entry in room if starter is not None and entry.get("owner") == starter]
+        room = own or room
         def key(entry):
             return (entry["week_left"] if entry["week_left"] is not None else -1,
                     entry["five_hour_left"] if entry["five_hour_left"] is not None else -1)

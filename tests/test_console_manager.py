@@ -17,10 +17,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import exclusion, manager, permission, pin, revive_check, sessions
+from agent_tools.console import (
+    capacity, exclusion, manager, permission, pin, revive_check, sessions)
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 from . import console_test_support as support
+from .test_console_capacity import T, reading_of, report, window
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +45,7 @@ def alive(pid):
 
 
 def cap(*rows, all_out=False, resumes_at=None):
-    def entry(p, s, w, f, signin=None, excluded=False, pinned=False):
+    def entry(p, s, w, f, signin=None, excluded=False, pinned=False, owner=None):
         row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
                "next_reset": None, "out_until": None, "read_at": None}
         if signin is not None:
@@ -52,6 +54,8 @@ def cap(*rows, all_out=False, resumes_at=None):
             row["excluded"] = True
         if pinned:
             row["pinned"] = True
+        if owner is not None:
+            row["owner"] = owner
         return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
             "profiles": [entry(*row) for row in rows]}
@@ -644,7 +648,7 @@ class ProfileTest(unittest.TestCase):
     def test_the_binding_is_no_longer_an_input(self):
         self.assertFalse(hasattr(manager, "bound_profile"))
         self.assertEqual(list(inspect.signature(manager.choose_profile).parameters),
-                         ["capacity", "last_use"])
+                         ["capacity", "last_use", "starter", "waiting"])
 
     def test_quota_wait_reads_only_an_out_profile(self):
         until = "2026-11-13T00:00:00+00:00"
@@ -1104,5 +1108,99 @@ class PinTest(unittest.TestCase):
                 pin.parse_request(body)
 
 
+ALICE = "alice@example.invalid"
+BOB = "bob@example.invalid"
+
+
+class ColleagueAccountTest(unittest.TestCase):
+    """A colleague's account serves his own sprints first and anyone's when it has room (#1344, ADR-console-087 D1)."""
+
+    def test_his_own_sprint_takes_his_account_while_it_has_room_though_an_owner_account_has_more(self):
+        shown = cap(("work", "ok", 90, 90), ("colleague-1", "ok", 10, 10, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(shown, {}, ALICE), "colleague-1")
+        self.assertEqual(manager.choose_profile(shown, {}, ALICE), "colleague-1")
+        self.assertEqual(manager.session_profile(shown, {}), "work")
+
+    def test_his_own_sprint_chooses_among_his_accounts_by_the_usual_rule(self):
+        shown = cap(("work", "ok", 90, 90), ("c1", "ok", 10, 10, None, False, False, ALICE),
+                    ("c2", "ok", 40, 10, None, False, False, ALICE),
+                    ("b1", "ok", 99, 99, None, False, False, BOB))
+        self.assertEqual(manager.session_profile(shown, {}, ALICE), "c2")
+
+    def test_his_own_sprint_falls_to_the_usual_choice_when_his_account_has_no_room(self):
+        unknown = (None, None)
+        table = [
+            cap(("work", "ok", 20, 20), ("c1", "out", 0, 0, None, False, False, ALICE)),
+            cap(("work", "ok", 20, 20), ("c1", "ok", 90, 90, "signed_out", False, False, ALICE)),
+            cap(("work", "ok", 20, 20), ("c1", "ok", 90, 90, None, True, False, ALICE)),
+            cap(("work", "ok", 20, 20), ("c1", "unknown", *unknown, "signed_in", False, False, ALICE)),
+        ]
+        for shown in table:
+            with self.subTest(shown=shown["profiles"]):
+                self.assertEqual(manager.session_profile(shown, {}, ALICE), "work")
+
+    def test_another_sprint_takes_his_account_when_it_has_room_and_none_of_his_waits(self):
+        shown = cap(("work", "ok", 20, 20), ("c1", "ok", 90, 90, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(shown, {}), "c1")
+        self.assertEqual(manager.session_profile(shown, {}, BOB), "c1")
+        self.assertEqual(manager.session_profile(shown, {}, None, frozenset({BOB})), "c1")
+        self.assertEqual(manager.session_profile(shown, {}, BOB, frozenset({ALICE})), "work")
+        self.assertEqual(manager.session_profile(shown, {}, None, frozenset({ALICE})), "work")
+        self.assertEqual(manager.choose_profile(shown, {}, None, frozenset({ALICE})), "work")
+
+    def test_the_tight_pool_of_one_low_owner_account_and_two_out(self):
+        low = ("work", "ok", 5, 5)
+        out = ("home", "out", 0, 0)
+        colleague_out = ("c1", "out", 0, 0, None, False, False, ALICE)
+        shown = cap(low, out, colleague_out)
+        for starter in (None, ALICE, BOB):
+            self.assertEqual(manager.session_profile(shown, {}, starter), "work")
+        room = cap(low, out, ("c1", "ok", 50, 50, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(room, {}), "c1")
+        self.assertEqual(manager.session_profile(room, {}, None, frozenset({ALICE})), "work")
+        self.assertEqual(manager.session_profile(room, {}, ALICE, frozenset({ALICE})), "c1")
+
+    def test_a_barred_account_is_not_the_no_room_fallback_either(self):
+        unknown = (None, None)
+        shown = cap(("work", "out", 0, 0, "signed_in"),
+                    ("c1", "unknown", *unknown, "signed_in", False, False, ALICE))
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None), "c1")
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None, frozenset({ALICE})),
+                         "work")
+        only = cap(("c1", "ok", 90, 90, "signed_in", False, False, ALICE))
+        self.assertIsNone(manager.session_profile(only, {}, None, frozenset({ALICE})))
+        self.assertEqual(manager.choose_profile(only, {}, None, frozenset({ALICE})),
+                         manager.Wait(None))
+
+    def test_the_owners_pin_outranks_the_preference_and_the_reservation(self):
+        pinned = cap(("work", "ok", 20, 20, None, False, True),
+                     ("c1", "ok", 90, 90, None, False, False, ALICE))
+        self.assertEqual(manager.session_profile(pinned, {}, ALICE), "work")
+        theirs = cap(("work", "ok", 90, 90), ("c1", "ok", 20, 20, None, False, True, ALICE))
+        self.assertEqual(manager.session_profile(theirs, {}, None, frozenset({ALICE})), "c1")
+        self.assertEqual(manager.session_profile(theirs, {}, BOB, frozenset({ALICE})), "c1")
+
+    def test_the_owners_own_accounts_are_chosen_as_before_with_a_colleague_in_the_pool(self):
+        shown = cap(("a", "ok", 40, 90), ("b", "ok", 70, 10),
+                    ("c1", "out", 0, 0, None, False, False, ALICE))
+        for starter in (None, ALICE, BOB):
+            for waiting in (frozenset(), frozenset({ALICE})):
+                self.assertEqual(manager.session_profile(shown, {}, starter, waiting), "b")
+
+    def test_a_fold_with_one_owner_and_one_colleague_account(self):
+        def read(profile, used):
+            return reading_of(report(status="allowed", reset=T + 3600, binding="7d",
+                                     claim="seven_day",
+                                     windows={"7d": window("allowed", used, T + 3600)}), profile)
+        state = capacity.CapacityState({"work": read("work", 0.1),
+                                        "colleague-1": read("colleague-1", 0.7)}, {})
+        fold = capacity.capacity_view(["work", "colleague-1"], state, T,
+                                      owners={"colleague-1": ALICE})
+        self.assertEqual(manager.session_profile(fold, {}), "work")
+        self.assertEqual(manager.session_profile(fold, {}, ALICE), "colleague-1")
+        self.assertEqual(manager.choose_profile(fold, {}, ALICE), "colleague-1")
+
+
 if __name__ == "__main__":
     unittest.main()
+
