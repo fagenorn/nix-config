@@ -2251,11 +2251,116 @@ class QuestionRecordsServiceTest(QuestionCase):
                 _ask, records = self.records_of(svc)
                 self.assertIs(records["deliveries"][0]["live"], False)
 
-    def test_before_the_first_spend_read_the_records_hold_null_spend(self):
-        svc = self.arrange(with_spend=False)
+    def test_a_question_before_the_first_spend_poll_gets_its_projects_spend(self):
+        now = datetime(2026, 11, 17, 12, tzinfo=timezone.utc).timestamp()
+        sessions = self.store.parent.parent / "sessions"
+        run = sessions.parent / "projects" / "-srv-p01" / "s-1" / "subagents" / "workflows" / "wf_a"
+        run.mkdir(parents=True)
+        journal = run / "journal.jsonl"
+        journal.write_text(json.dumps(
+            {"type": "started", "agentId": "a1", "label": "impl-1", "phase": "Tasks"}) + "\n")
+        agent = run / "agent-a1.jsonl"
+        agent.write_text(json.dumps(
+            {"type": "assistant", "sessionId": "s-1", "cwd": "/srv/p01",
+             "timestamp": "2026-11-17T10:00:00.000Z",
+             "message": {"id": "msg_r1", "model": "claude-sonnet-4-6",
+                         "usage": {"input_tokens": 40}}}) + "\n")
+        for path in (journal, agent):
+            os.utime(path, (now, now))
+        svc = self.arrange(with_spend=False, session_dirs=[sessions], clock=lambda: now)
         _ask, records = self.records_of(svc)
+        held = records["spend"]
+        self.assertIsNotNone(held)
+        self.assertEqual(held["days"][-1]["day"], "2026-11-17")
+        self.assertEqual(held["days"][-1]["tokens"], 40)
+        self.assertEqual([(r["run_id"], r["tokens"]) for r in held["runs"]], [("wf_a", 40)])
+        self.assertEqual(held["runs"][0]["phases"]["implement"]["tokens"], 40)
+        self.assertEqual(list(held["runs"][0]["days"]), ["2026-11-17"])
+        self.assertEqual(held["runs"][0]["days"]["2026-11-17"]["tokens"], 40)
+        self.assertEqual([i["issue"] for i in held["issues"]], [7])
+
+    def test_the_jobs_spend_read_runs_under_the_spend_lock_and_only_without_a_view(self):
+        svc = self.arrange(with_spend=False)
+        held = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            held.append(svc._spend_lock.locked())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            self.records_of(svc)
+            self.records_of(svc)
+        self.assertEqual(held, [True])
+
+    def test_questions_started_together_before_the_first_poll_share_one_spend_read(self):
+        threads = []
+
+        def dispatch(job):
+            thread = threading.Thread(target=job)
+            threads.append(thread)
+            thread.start()
+
+        svc = self.arrange(with_spend=False, project_question_dispatch=dispatch)
+
+        class Recording:
+            lock = svc._spend_lock
+            attempts = []
+            both = threading.Event()
+
+            def __enter__(self):
+                self.attempts.append(1)
+                if len(self.attempts) == 2:
+                    self.both.set()
+                self.lock.acquire()
+
+            def __exit__(self, *exc):
+                self.lock.release()
+
+            def locked(self):
+                return self.lock.locked()
+
+        svc._spend_lock = Recording()
+        entered, release = threading.Event(), threading.Event()
+        reads = []
+        real = svc._spend.read
+
+        def read(*args, **kwargs):
+            reads.append(1)
+            if len(reads) == 1:
+                entered.set()
+                release.wait(5)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(svc._spend, "read", side_effect=read):
+            svc.ask_project_question(WHY, "what costs the most tokens per issue?")
+            self.assertTrue(entered.wait(5))
+            svc.ask_project_question("owner/p00", "what costs the most tokens per issue?")
+            self.assertTrue(svc._spend_lock.both.wait(5))
+            release.set()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertEqual(reads, [1])
+        self.assertEqual(len(self.asked), 2)
+        for ask, _cancel in self.asked:
+            self.assertIsNotNone(json.loads(ask.records)["spend"])
+
+    def test_a_spend_read_that_fails_leaves_null_spend_and_the_rest_written(self):
+        svc = self.arrange(with_spend=False)
+        stderr = io.StringIO()
+        with mock.patch.object(svc._spend, "read", side_effect=OSError(5, "boom")), \
+                contextlib.redirect_stderr(stderr):
+            ask, records = self.records_of(svc)
         self.assertIsNone(records["spend"])
         self.assertTrue(records["deliveries"])
+        self.assertTrue(any(line.startswith("console: spend_poll_failed OSError")
+                            for line in stderr.getvalue().splitlines()))
+        self.assertIs(ask, self.asked[-1][0])
+
+    def test_the_support_service_reads_no_host_ping_log(self):
+        svc = self.arrange(with_spend=False)
+        self.assertIsNot(svc._ping_log, spend.default_ping_log)
+        self.assertIsNone(svc._ping_log())
 
     def test_records_that_cannot_be_gathered_answer_failed_without_a_session(self):
         svc = self.arrange()
