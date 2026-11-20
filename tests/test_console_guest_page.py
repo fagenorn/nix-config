@@ -1171,6 +1171,18 @@ class OwnAccountPageTest(unittest.TestCase):
         self.assertEqual(len(own_of(opened, "guest-tick")), 1)
         self.assertIn("I agree", full(own_of(opened, "guest-account")[0]))
 
+    def test_the_tick_does_not_outlive_the_form_or_the_attempt(self) -> None:
+        reopened, failed, cancelled = (harness(steps, GUEST)[0] for steps in (
+            [*OPEN_OWN, TICK, {"click": "pool-add"}, {"click": "pool-add"}, SNAP],
+            [*OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"},
+             {"frame": own_run("failed", 7)}, SNAP],
+            [*OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"},
+             {"respond": NO_REPLY}, {"click": "guest-cancel"}, SNAP]))
+        for snap in (reopened, failed, cancelled):
+            self.assertEqual(len(own_of(snap, "guest-tick")), 1)
+            self.assertEqual([n["disabled"] for n in own_of(snap, "guest-signin")], [True])
+        self.assertEqual(own_writes(reopened), [])
+
     def test_a_ticked_sign_in_posts_the_consent_and_shows_the_link_and_the_code_box(self) -> None:
         linked, done = harness([
             *OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"}, SNAP,

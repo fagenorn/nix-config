@@ -6234,6 +6234,7 @@ async function guestCancel() {
     g.watched = g.held.attempt;
     g.held = null;
     g.draft = "";
+    g.ticked = false;
   }
   redraw();
 }
@@ -6253,6 +6254,7 @@ function renderOwnAccount(view) {
     }
     g.held = null;
     g.draft = "";
+    g.ticked = false;
   }
   const active = document.activeElement;
   const role = active !== null && typeof active.className === "string" ? active.className.split(" ")[0] : "";
@@ -6263,8 +6265,9 @@ function renderOwnAccount(view) {
     return node;
   };
   const toggle = make("pool-add", actionButton("pool-add btn-quiet", "Add your account", () => {
-    if (g.open && g.held === null && !g.posting) g.open = false;
-    else g.open = true;
+    const open = !(g.open && g.held === null && !g.posting);
+    if (open !== g.open) g.ticked = false;
+    g.open = open;
     redraw();
   }));
   toggle.setAttribute("aria-expanded", g.open ? "true" : "false");
