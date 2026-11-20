@@ -10880,6 +10880,8 @@ class LookHoldTest(unittest.TestCase):
         stale = prompt(calls, "look-stale")
         self.assertIn("gh api repos/owner/repo/issues/9/comments --paginate", stale)
         self.assertIn("gh api repos/owner/repo/issues/9/timeline --paginate", stale)
+        # #1356: AC ids are local to an issue, so a cross-referencing issue counts as a split of this one only by the merge commit its fence names.
+        self.assertIn(self.MERGE, stale)
 
     def test_a_replay_of_a_merge_stop_whose_pr_merged_at_another_head_reads_the_approval_at_that_head(self):
         other = "e" * 40
