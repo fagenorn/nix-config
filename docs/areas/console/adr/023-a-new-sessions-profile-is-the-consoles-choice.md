@@ -26,4 +26,5 @@
 - Exclusions (#1028) and the one pin (#1029) are inputs to the choice; per-project pins are not built.
 - After a switch of account a profile reads as having no reading until its next one.
 - The Hosts binding stays until the launcher stops reading it.
+- Amended by ADR-console-087 D1: a listed colleague's own account serves his own sprints first, and anyone's when it has room.
 - Related: ADR-console-015 (the profile rule), ADR-console-020 (the quota wait), ADR-console-022 (the sign-in reading).
