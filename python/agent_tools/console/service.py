@@ -115,7 +115,9 @@ by `X-Console-Probe` arrived as a login header, and never repeats a login. After
 owner-only route (`OWNER_ONLY`: every page write, manager write, hook and reading route, `/spend`,
 `/api/sprint-status`, `/api/profile`, `/api/excluded`) is `403` `guest.OWNER_ONLY_TEXT` for any method,
 its body never read; the guest reads (`GUEST_READS` and `GET /api/picture/<id>`) answer the guest's
-scoped view (`guest.scoped`, `guest.scrub`): `GET /` is the guest page (`GUEST_PAGE`: the page with its door meta set to `guest`, so it draws the
+scoped view (`guest.scoped`, `guest.scrub`; it carries the pool and each running sprint's account label,
+`guest.pool_view`, `guest.sprint_labels`): `GET /` is the guest page (`GUEST_PAGE`: the page with its
+door meta set to `guest`, so it draws the
 desk page with the guest's own controls only) carrying the guest token, `GET
 /api/state` the colleague's view (`403` `guest.NOT_SHARED_TEXT` when none), `GET /api/stream` the
 stream of it, which re-admits on every publish and ends when the colleague or the sharing is gone or the
@@ -3810,6 +3812,8 @@ class ConsoleService:
         self._profile_dirs = profile_dirs
         self._profiles: frozenset[str] = frozenset()
         self._capacity = capacity.CapacityState({}, {})
+        self._numbers_path = Path(store).with_name(guest.NUMBERS_FILE)
+        self._account_numbers = guest.read_numbers(self._numbers_path)
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
         self._pinned: str | None = None
@@ -4230,9 +4234,18 @@ class ConsoleService:
         """Derive and publish the views; `guests=False` publishes the owner's view alone.
 
         A guest view is derived from the clock (a sprint's age text), so recomputing it for a
-        guest-port reading would change a guest's bytes: the cached guest views are kept.
+        guest-port reading would change a guest's bytes: the cached guest views are kept. The account
+        numbers are kept in `account-numbers.json` beside the event log, written when they change,
+        and a failed write keeps them in memory (ADR-console-085). A view that lists no profile (the first
+        publish, before the profiles are read) leaves them as they are, so a restart does not forget them.
         """
         inputs = self._view_inputs()
+        numbers = (guest.account_numbers(inputs["capacity"], self._account_numbers)
+                   if inputs["capacity"]["profiles"] else self._account_numbers)
+        if numbers != self._account_numbers:
+            with contextlib.suppress(OSError):
+                guest.write_numbers(self._numbers_path, numbers)
+            self._account_numbers = numbers
         latest = self._registration
         apply_items = inputs["apply_items"]
         access = self._access
@@ -4257,9 +4270,13 @@ class ConsoleService:
         views: dict[str, bytes] = {}
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.shared and name is not None:
+            pool = guest.pool_view(inputs["capacity"], self._account_numbers)
+            running = guest.sprint_labels(
+                self._sprints, guest.profile_labels(self._account_numbers))
             for login, projects in access.colleagues.items():
                 derived = guest.mark_steer(
-                    guest.scrub(derive_view(**guest.scoped(inputs, projects))), login)
+                    guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running),
+                    login)
                 views[login] = encode_view(derived)
                 seen_pictures[login] = guest.picture_ids(derived)
         with self._published:

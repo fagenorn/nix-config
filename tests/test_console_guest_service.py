@@ -27,13 +27,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, guest, peer, serve_probe_check, service, write_guard
+from agent_tools.console import (
+    capacity, console, guest, peer, serve_probe_check, service, signin, write_guard)
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
-    SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
+    GOAL_STATED, MANAGER_STARTED, SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
 
 from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
+from .test_console_signin import SIGNED_IN
 from .test_console_stream import next_frame
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -43,6 +45,21 @@ OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 STRANGER = "stranger@example.invalid"
 FORGED = "forged-probe@example.invalid"
+READ_AT = int(time.time())
+
+
+def reading_rows(profile, week, session, week_in, session_in):
+    return capacity.report_entries(capacity.parse_report({
+        "http_status": 200, "status": "allowed", "reset": READ_AT + week_in, "binding": None,
+        "claim": None, "account": None, "session_id": None,
+        "windows": {"7d": {"status": "allowed", "utilization": week, "reset": READ_AT + week_in},
+                    "5h": {"status": "allowed", "utilization": session,
+                           "reset": READ_AT + session_in}}}), profile)
+
+
+def signed_in_row(profile, address):
+    document = {**json.loads(SIGNED_IN), "email": address, "orgName": "org-zq9"}
+    return signin.entry(profile, signin.parse_status(0, json.dumps(document).encode()))
 SELF_V4 = "100.64.0.10"
 SELF_V6 = "fd7a:115c:a1e0::a"
 OTHER_DEVICE_ADDRESS = "100.64.0.20"
@@ -513,6 +530,101 @@ class ScopedReadTest(GuestCase):
         self.assertEqual((status, body), (200, WIDE))
         status, _, body = self.guest(svc, "GET", "/api/picture/" + p0, headers=headers)
         self.assertEqual((status, body), (404, b"this picture is not known\n"))
+
+
+    def append(self, rows):
+        log = EventLog(self.store)
+        try:
+            log.append(rows)
+        finally:
+            log.close()
+
+    def labels(self, svc):
+        status, _, body = self.guest(svc, "GET", "/api/state")
+        self.assertEqual(status, 200)
+        seen = json.loads(body)
+        return ([row["label"] for row in seen["pool"]["accounts"]],
+                {node["sprint_id"]: node["account_label"]
+                 for entry in seen["entries"] for node in entry["sprints"]})
+
+    def test_a_guest_sees_the_pool_and_the_account_of_their_running_sprint(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p00", {"sprint_id": "s-p00", "goal": "other-goal-zq7"}),
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p00",
+             {"sprint_id": "s-p00", "profile": "work-zq5", "session_name": "m-p00"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "work-zq5", "session_name": "m-p01"}),
+            signed_in_row("work-zq5", "work-zq5@corp-zq.invalid"),
+            *reading_rows("work-zq5", 0.4, 0.25, 3 * 86400, 7200)])
+        profile = self.root / "accounts/profiles/work-zq5"
+        profile.mkdir(parents=True)
+        svc = self.start(profile_dirs=[profile])
+        svc.poll_sessions()
+        status, _, body = self.guest(svc, "GET", "/api/state")
+        mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
+        self.assertEqual(status, 200)
+        seen = json.loads(body)
+        self.assertEqual([row["label"] for row in seen["pool"]["accounts"]], ["Account 1"])
+        self.assertEqual(seen["pool"]["state"], "fine")
+        row = seen["pool"]["accounts"][0]
+        theirs = mine["capacity"]["profiles"][0]
+        for member in ("state", "week_left", "five_hour_left", "week_reset", "five_hour_reset",
+                       "next_reset", "out_until"):
+            with self.subTest(member=member):
+                self.assertEqual(row[member], theirs[member])
+        self.assertEqual((row["week_left"], row["five_hour_left"]), (60, 75))
+        self.assertIsNotNone(row["week_reset"])
+        self.assertIsNotNone(row["five_hour_reset"])
+        self.assertEqual(
+            [(node["sprint_id"], node["account_label"])
+             for entry in seen["entries"] for node in entry["sprints"]], [("s-p01", "Account 1")])
+        for marker in (b"s-p00", b"other-goal-zq7", b"work-zq5", b"corp-zq.invalid", b"org-zq9",
+                       b"m-p01"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, body)
+        self.assertIsNone(seen["spend"])
+        self.assertNotIn("pool", mine)
+        self.assertFalse([node for entry in mine["entries"] for node in entry["sprints"]
+                          if "account_label" in node])
+
+    def test_a_label_survives_another_account_leaving_and_a_restart(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "c-zq3", "session_name": "m-p01"})])
+        folder = self.root / "accounts/profiles"
+        a, b, c = (folder / name for name in ("a-zq1", "b-zq2", "c-zq3"))
+        for path in (a, b, c):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+        dirs = [a, b, c]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc),
+                         (["Account 1", "Account 2", "Account 3"], {"s-p01": "Account 3"}))
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 3"], {"s-p01": "Account 3"}))
+        self.assertTrue(self.store.with_name(guest.NUMBERS_FILE).exists())
+        svc.close()
+        again = self.start(profile_dirs=[a, c])
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1", "Account 3"], {"s-p01": "Account 3"}))
+
+    def test_a_numbers_file_that_cannot_be_written_still_serves_the_pool(self):
+        self.seed()
+        path = self.store.with_name(guest.NUMBERS_FILE)
+        path.mkdir(parents=True)
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        svc = self.start(profile_dirs=[a])
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc)[0], ["Account 1"])
+        self.assertTrue(path.is_dir())
 
 
 class DoorTest(GuestCase):
