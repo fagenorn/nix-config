@@ -10976,6 +10976,51 @@ class LookHoldTest(unittest.TestCase):
                 self.assertNotIn("hold", labels(calls))
                 self.assertNotIn("close-out", labels(calls))
 
+    def test_a_replay_resolves_the_landing_commit_of_a_pr_whose_merge_commit_is_its_own_head(self):
+        """#1356 C1: the forge records an indirectly merged PR with its head as merge commit, so a landing that is not the head is resolved for that shape too."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        self.assertEqual(result["stage"], "done")
+        head = prompt(calls, "look-head")
+        self.assertIn("or when its oid equals headRefOid", head)
+        self.assertIn("rev-list --first-parent <headRefOid>..origin/", head)
+        self.assertIn("has <headRefOid> as its first parent", head)
+        # the hold is given the landing commit the replay resolved, so it resolves nothing itself
+        self.assertNotIn("oid equals headRefOid", prompt(calls, "hold"))
+
+    def test_a_fence_that_spells_the_answered_check_in_lower_case_still_stops_the_landing(self):
+        """#1356 C2: the runner compares check ids upper-cased, so ac2 is the criterion AC2 for the stale read and the returned block."""
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        self.assertIn("compared ignoring case", prompt(calls, "look-stale"))
+        self.assertIn("an id compared ignoring case", prompt(calls, "hold"))
+        child = {"look-stale": stale({"issue": 50, "acs": ["ac2"], "results": False})}
+        result, calls = self.deliver(self.REWORDED, ordinary, replies=child)
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("hold", labels(calls))
+        both = {"v": 1, "merge": self.MERGE, "checks": [{"ac": "ac2", "kind": "human"}, {"ac": "AC3", "kind": "human"}]}
+        result, calls = self.deliver(self.REWORDED, ordinary, hold={"block": both})
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
+        split = {"blocks": [12], "split": [dict(HoldTest.CHILD, block=dict(both, checks=[{"ac": "AC3", "kind": "human"}, {"ac": "Ac2", "kind": "human"}]))],
+                 "issue_state": "CLOSED", "lint": None, "verify_run": None, "block": None}
+        result, calls = self.deliver(self.REWORDED, ordinary, hold=split, close="CLOSED")
+        self.assertEqual((result["stage"], result["look_checks"]), ("hold", ["AC2"]))
+        self.assertNotIn("close-out", labels(calls))
+
+    def test_the_stale_read_counts_what_the_runner_recorded_or_asked_for_the_selected_block_by_its_trusted_markers(self):
+        """#1356 I1 and I2: an owner answer to a prompt of a retained check is lost by a rewrite as a result is, and only a trusted marker of that block counts."""
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        read = prompt(calls, "look-stale")
+        self.assertNotIn("<!-- agent: verify-result", read)
+        self.assertNotIn("<!-- agent: marker", read)
+        self.assertIn("<!-- agent:KIND v1", read)
+        self.assertIn("author_association OWNER or MEMBER", read)
+        self.assertIn("block=<selected comment id>.<digest>", read)
+        self.assertIn("a prompt to the owner for one of its checks", read)
+        self.assertIn("names another block (or none) counts for nothing", read)
+        self.assertIn("discard those results and the owner's pending answers", read)
+
 
 LONG_BASH_TIMEOUT = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
                      "the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then "
