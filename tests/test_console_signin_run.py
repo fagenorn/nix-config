@@ -23,7 +23,8 @@ from agent_tools.console.event_log import Event
 from agent_tools.console.signin_run import (
     ACTED, ENDED, CODE_END, CODE_INPUT, LINK_WAIT, LOGIN_DEADLINE, MAX_CODE_CHARS, MAX_LINK_CHARS,
     Ended, NotRunning, SignIns, Started, StartFailed, acted, ended, ended_state, login_command,
-    login_environment, parse_code_request, parse_profile_request, runs_for, valid_link)
+    guest_answer_members, login_environment, parse_code_request, parse_guest_cancel_request,
+    parse_guest_code_request, parse_profile_request, runs_for, valid_link)
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .process_liveness import process_alive
 
@@ -279,6 +280,41 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(
             signin_run.answer_members(signin_run.Link(LINK, "unknown", None, None)),
             {"link": LINK, "route": "unknown", "port": None, "forward": None})
+
+
+A = "colleague@example.invalid"
+
+
+class GuestRecordTest(unittest.TestCase):
+    def test_a_colleagues_sign_in_row_names_his_login(self):
+        self.assertEqual(acted("colleague-1", "start", "started", by=A)[2],
+                         {"by": A, "profile": "colleague-1", "action": "start",
+                          "outcome": "started"})
+        with self.assertRaises(ValueError):
+            acted("w", "start", "started", by="nobody")
+
+    def test_the_guest_code_and_cancel_bodies_name_no_profile(self):
+        self.assertEqual(parse_guest_code_request(json.dumps({"code": CODE}).encode()), CODE)
+        self.assertIsNone(parse_guest_cancel_request(b"{}"))
+        for body in ({"code": CODE, "profile": "work"}, {"code": ""}, {"code": "a b"},
+                     {"code": "x" * 513}, {}):
+            with self.subTest(code=body), self.assertRaises(ValueError):
+                parse_guest_code_request(json.dumps(body).encode())
+        for body in (b'{"profile": "work"}', b'[]', b'{"a":1,"a":1}', b'\xff'):
+            with self.subTest(cancel=body), self.assertRaises(ValueError):
+                parse_guest_cancel_request(body)
+        with self.assertRaises(ValueError):
+            parse_guest_code_request(b'{"code": "a", "code": "a"}')
+
+    def test_the_guest_answer_hands_out_a_remote_link_only(self):
+        self.assertEqual(guest_answer_members(None), {"link": None, "route": None})
+        self.assertEqual(guest_answer_members(signin_run.Link(MANUAL_LINK, "manual", None, None)),
+                         {"link": MANUAL_LINK, "route": "manual"})
+        self.assertEqual(guest_answer_members(signin_run.Link(LINK, "unknown", None, None)),
+                         {"link": LINK, "route": "unknown"})
+        loopback = signin_run.Link(LOOPBACK_LINK, "loopback", 54545,
+                                   "ssh -N -L 54545:localhost:54545 console-host")
+        self.assertEqual(guest_answer_members(loopback), {"link": None, "route": "loopback"})
 
 
 class EntryTest(unittest.TestCase):

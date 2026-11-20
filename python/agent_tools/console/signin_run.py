@@ -89,8 +89,9 @@ client exited, else `exited`. `close()` kills every live run, joins every watche
 is not on `PATH`) or `unavailable` (any other `OSError`); the directory is removed and nothing
 stays in `running()`.
 
-Rows. `acted(profile, action, outcome)` is `("signin.acted", None, {"by": "owner", "profile",
-"action", "outcome"})`, `action` one of `ACTIONS` and `outcome` one of `START_OUTCOMES` for `start`,
+Rows. `acted(profile, action, outcome, by="owner")` is `("signin.acted", None, {"by": by, "profile",
+"action", "outcome"})` (`by` is `owner` or a colleague's login, `event_log.normal_login(by) == by`,
+else `ValueError`, #1343), `action` one of `ACTIONS` and `outcome` one of `START_OUTCOMES` for `start`,
 `sent` for `code`, `cancelled` for `cancel`. `ended(profile, outcome, attempt)` is `("signin.ended",
 None, {"profile", "outcome", "attempt"})`, `outcome` one of `OUTCOMES`, `attempt` the sequence
 number of the run's `signin.acted` start row (a positive `int`, never a `bool`). Both raise
@@ -106,7 +107,13 @@ later events onto an earlier fold gives the fold of all of them.
 Requests. `parse_profile_request(body)` takes a UTF-8 JSON object with exactly the member `profile`,
 a non-empty string, and returns it. `parse_code_request(body)` takes exactly `profile` (as above) and
 `code`, a string of 1 to `MAX_CODE_CHARS` (512) characters each in 0x21 to 0x7E, and returns
-`(profile, code)`. Both raise `ValueError` otherwise.
+`(profile, code)`. Both raise `ValueError` otherwise. A colleague's bodies name no profile (#1343):
+`parse_guest_code_request(body)` takes strict UTF-8 JSON (a repeated key or `NaN` is `ValueError`)
+of exactly `code`, under the same code rule, and returns it; `parse_guest_cancel_request(body)` takes
+exactly the empty object and returns None. `guest_answer_members(link)` is exactly `{"link", "route"}`:
+both None for no link, the url and route for `manual` and `unknown`, and `{"link": None, "route":
+"loopback"}` for a loopback link, whose return address is the owner's host's loopback that a colleague's
+browser cannot reach (ADR-console-080 D3).
 
 Secrecy. No return value, exception message or stderr line carries a link or a code, and neither is
 stored or logged: the link lives in memory for the run, the code goes to the client's input and
@@ -138,8 +145,9 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager, signin
-from agent_tools.console.event_log import SIGNIN_ACTED, SIGNIN_ENDED, Event
+from agent_tools.console.event_log import SIGNIN_ACTED, SIGNIN_ENDED, Event, normal_login
 
 ACTED = SIGNIN_ACTED
 ENDED = SIGNIN_ENDED
@@ -251,6 +259,14 @@ def answer_members(link: Link | None) -> dict[str, object]:
     return {"link": link.url, "route": link.route, "port": link.port, "forward": link.forward}
 
 
+def guest_answer_members(link: Link | None) -> dict[str, object]:
+    if link is None:
+        return {"link": None, "route": None}
+    if link.route == "loopback":
+        return {"link": None, "route": "loopback"}
+    return {"link": link.url, "route": link.route}
+
+
 def _object(body: bytes, members: set[str]) -> dict:
     try:
         value = json.loads(body.decode("utf-8"))
@@ -270,16 +286,42 @@ def parse_profile_request(body: bytes) -> str:
 
 def parse_code_request(body: bytes) -> tuple[str, str]:
     value = _object(body, {"profile", "code"})
-    code = value["code"]
-    if not isinstance(code, str) or not 1 <= len(code) <= MAX_CODE_CHARS or not _printable(code):
+    return value["profile"], _code(value["code"])
+
+
+def _code(value: object) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= MAX_CODE_CHARS or not _printable(value):
         raise ValueError("bad code")
-    return value["profile"], code
+    return value
 
 
-def acted(profile: str, action: str, outcome: str) -> tuple[str, None, dict]:
+def _guest_object(body: bytes, members: set[str]) -> dict:
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the body is nested too deeply") from error
+    except UnicodeDecodeError as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != members:
+        raise ValueError("wrong members")
+    return value
+
+
+def parse_guest_code_request(body: bytes) -> str:
+    return _code(_guest_object(body, {"code"})["code"])
+
+
+def parse_guest_cancel_request(body: bytes) -> None:
+    _guest_object(body, set())
+
+
+def acted(profile: str, action: str, outcome: str, by: str = "owner") -> tuple[str, None, dict]:
     if action not in ACTIONS or outcome not in _ACTION_OUTCOMES[action]:
         raise ValueError("bad sign-in action")
-    return (ACTED, None, {"by": "owner", "profile": profile, "action": action,
+    if by != "owner" and normal_login(by) != by:
+        raise ValueError("by is neither owner nor a login")
+    return (ACTED, None, {"by": by, "profile": profile, "action": action,
                           "outcome": outcome})
 
 

@@ -15,12 +15,16 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import account_add, event_log
+from agent_tools.console import account_add, account_remove, event_log, folder_trust
 from agent_tools.console.event_log import Event
 from agent_tools.console.account_add import AddFailed, Adder, adder_for, added, added_state
-from agent_tools.console.account_add import already_exists
-from agent_tools.console.account_add import parse_add_request, refusal
+from agent_tools.console.account_add import already_exists, guest_name, owners_state
+from agent_tools.console.account_add import parse_add_request, parse_guest_add_request, refusal
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_guest import LONG_AGO, NOW, LogCase
+
+A = "colleague@example.invalid"
+B = "second@example.invalid"
 
 LAUNCHER = (Path(__file__).resolve().parents[1]
             / "home/common/claude-code/accounts/bin/claude-account")
@@ -167,6 +171,81 @@ class AdderTest(unittest.TestCase):
         self.assertIsInstance(adder_for("linux"), Adder)
         self.assertIsInstance(adder_for("darwin"), Adder)
         self.assertIsNone(adder_for("win32"))
+
+
+def events_of(rows):
+    return [Event(n, "2026-11-11T00:00:00.000000+00:00", kind, None, payload)
+            for n, (kind, _, payload) in enumerate(rows, 1)]
+
+
+class OwnerRecordTest(unittest.TestCase):
+    def test_a_colleagues_add_row_names_his_login(self):
+        self.assertEqual(added("colleague-1", by=A),
+                         ("account.added", None, {"by": A, "profile": "colleague-1"}))
+        self.assertEqual(added("work")[2], {"by": "owner", "profile": "work"})
+        for by in ("Colleague@Example.invalid", "", "someone"):
+            with self.subTest(by=by), self.assertRaises(ValueError):
+                added("work", by=by)
+
+    def test_the_newest_added_row_decides_the_owner(self):
+        rows = events_of([
+            ("account.added", None, {"by": A, "profile": "colleague-1"}),
+            ("account.added", None, {"by": B, "profile": "colleague-2"}),
+            ("account.added", None, {"by": "owner", "profile": "colleague-2"}),
+            ("account.added", None, {"by": "x", "profile": "colleague-3"}),
+            ("account.added", None, {"by": A, "profile": "Bad Name"}),
+            ("signin.acted", None, {"by": A, "profile": "colleague-4"}),
+        ])
+        earlier = {"colleague-9": A}
+        self.assertEqual(owners_state(rows), {"colleague-1": A})
+        self.assertEqual(owners_state(rows[3:], owners_state(rows[:3])), {"colleague-1": A})
+        self.assertEqual(owners_state(rows[3:], earlier), {"colleague-9": A})
+        self.assertEqual(earlier, {"colleague-9": A})
+
+    def test_a_completed_removal_ends_the_ownership_and_a_failed_one_keeps_it(self):
+        rows = [added("colleague-1", by=A), added("colleague-2", by=A),
+                account_remove.removed("colleague-1", "removed", None),
+                account_remove.removed("colleague-2", "remove_failed", "failed"),
+                account_remove.removed("colleague-3", "removed_signed_out_already", "failed")]
+        self.assertEqual(owners_state(events_of(rows)), {"colleague-2": A})
+        rows.append(added("colleague-1", by=B))
+        self.assertEqual(owners_state(events_of(rows)), {"colleague-1": B, "colleague-2": A})
+
+    def test_the_gone_outcomes_are_the_folder_trust_ones(self):
+        self.assertEqual(account_add.GONE_OUTCOMES, folder_trust.GONE_OUTCOMES)
+        self.assertEqual(event_log.ACCOUNT_GONE_OUTCOMES, folder_trust.GONE_OUTCOMES)
+
+    def test_the_console_names_a_colleagues_profile_after_the_taken_names(self):
+        self.assertEqual(guest_name(()), "colleague-1")
+        self.assertEqual(guest_name({"colleague-1", "colleague-3", "work"}), "colleague-2")
+        self.assertIsNone(refusal(guest_name({"colleague-1"})))
+
+    def test_a_guest_add_body_is_exactly_a_consent_bool(self):
+        self.assertIs(parse_guest_add_request(b'{"consent": true}'), True)
+        self.assertIs(parse_guest_add_request(b'{"consent": false}'), False)
+        for body in (b'{}', b'{"consent": 1}', b'{"consent": "true"}',
+                     b'{"consent": true, "profile": "work"}', b'{"consent": true, "consent": true}',
+                     b'[]', b'\xff', b'{"consent": NaN}', b'[' * 100000):
+            with self.subTest(body=body[:30]), self.assertRaises(ValueError):
+                parse_guest_add_request(body)
+
+
+class OwnerRetentionTest(LogCase):
+    def test_retention_keeps_the_newest_colleague_added_row_and_drops_the_owners(self):
+        log = self.open()
+        self.now = LONG_AGO
+        log.append([added("colleague-1", by=A), added("fresh"), added("colleague-2", by=B),
+                    added("colleague-2"), added("colleague-3", by=A),
+                    account_remove.removed("colleague-3", "removed", None),
+                    added("colleague-4", by=B),
+                    account_remove.removed("colleague-4", "remove_failed", "failed")])
+        before = owners_state(log.events())
+        self.now = NOW
+        log.retain()
+        self.assertEqual([event.payload for event in log.events() if event.kind == "account.added"],
+                         [{"by": A, "profile": "colleague-1"}, {"by": B, "profile": "colleague-4"}])
+        self.assertEqual(owners_state(log.events()), before)
+        self.assertEqual(before, {"colleague-1": A, "colleague-4": B})
 
 
 if __name__ == "__main__":

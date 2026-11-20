@@ -109,8 +109,16 @@ folder-trust folds each drop what it names. `cancelled_registration(event)` read
 for exactly that payload, or exactly it plus `"restore": true` (#1334; `plan_id` null for a registration
 with none, a failed plan), else None.
 
-`ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
-`KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
+`ACCOUNT_ADDED` (`account.added`, one per account the owner or a listed colleague adds from the page,
+#1027, #1343) is not in `KEPT_KINDS` but is kept in part: the retention pass leaves, whatever its age,
+the `account.added` row whose `by` is a JSON string other than `owner` (a colleague's login), whose
+seq is the largest of the `account.added` rows of the same `profile`, and after which no
+`account.removal` row of that profile has an outcome in `ACCOUNT_GONE_OUTCOMES` (`removed`,
+`removed_signed_out_already`: the same two as `folder_trust.GONE_OUTCOMES`, which this module cannot
+import). A colleague's account must stay his after the window and end only with a completed removal,
+so the owner fold after a retention pass equals the fold before it; an owner-added row, an
+older row of a re-added profile and a row a completed removal ended all age out as before, and a
+failed removal leaves the row kept. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
 #1030) is not in `KEPT_KINDS`.
 `TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved or per registered project at the console's start, #1078, `folder_trust.granted_row`)
 is not in `KEPT_KINDS`.
@@ -206,6 +214,7 @@ SIGNIN_ACTED = "signin.acted"
 SIGNIN_ENDED = "signin.ended"
 ACCOUNT_ADDED = "account.added"
 ACCOUNT_REMOVAL = "account.removal"
+ACCOUNT_GONE_OUTCOMES = ("removed", "removed_signed_out_already")
 TRUST_GRANTED = "trust.granted"
 REGISTRATION_ENDED = "registration.ended"
 ADOPTION_STEP = "adoption.step"
@@ -485,13 +494,23 @@ class EventLog:
                     "WHERE newer.kind = events.kind)) "
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind IN (?, ?) AND "
-                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login')))",
+                    "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login'))) "
+                    "AND NOT (kind = ? AND json_type(payload, '$.by') = 'text' "
+                    "AND json_extract(payload, '$.by') != 'owner' "
+                    "AND seq = (SELECT MAX(newer.seq) FROM events AS newer WHERE newer.kind = ? "
+                    "AND json_extract(newer.payload, '$.profile') "
+                    "IS json_extract(events.payload, '$.profile')) "
+                    "AND NOT EXISTS (SELECT 1 FROM events AS gone WHERE gone.kind = ? "
+                    "AND gone.seq > events.seq AND json_extract(gone.payload, '$.outcome') IN (?, ?) "
+                    "AND json_extract(gone.payload, '$.profile') "
+                    "IS json_extract(events.payload, '$.profile')))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED, SHARING_TAILNET,
-                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED)).rowcount
+                     SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED,
+                     ACCOUNT_ADDED, ACCOUNT_ADDED, ACCOUNT_REMOVAL, *ACCOUNT_GONE_OUTCOMES)).rowcount
 
             return self._transaction(remove)
 

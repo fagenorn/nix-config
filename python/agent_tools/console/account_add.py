@@ -28,13 +28,31 @@ Failures. A failed run raises `AddFailed(kind)`, `str(error) == kind`, `kind` on
 `not_listed` is raised by the console service when the profile does not appear in the listing after
 a successful add.
 
-Row. `added(profile)` is `("account.added", None, {"by": "owner", "profile": profile})`, one per
-account the owner adds from the page; it raises `ValueError` when `refusal(profile)` is not None.
+Row. `added(profile, by="owner")` is `("account.added", None, {"by": by, "profile": profile})`, one per
+account the owner or a listed colleague adds from the page (#1343); `by` is `owner` or the colleague's
+login (`event_log.normal_login(by) == by`), and it raises `ValueError` when `refusal(profile)` is not
+None or `by` is neither. A row built with the default `by` is what it was before #1343.
 `ADDED` is `event_log.ACCOUNT_ADDED`. The kind is not in `KEPT_KINDS`. `added_state(events, state=None)`
 is `state` (default empty) united with the `payload["profile"]` of every `ADDED` event whose payload is
 a dict with a string `profile` that `refusal` accepts, as a frozenset: the view's `accounts_added`
 member, folded by the service and rebuilt from the retained log on a restart or a retention pass.
 An invalid payload is ignored.
+
+Owner. `owners_state(events, state=None)` is the profile -> colleague login map folded from
+`account.added` and `account.removal` rows in order, onto a copy of `state` (never mutated): an
+`account.added` row whose payload is a dict with a `profile` that `refusal` accepts and a string `by`
+sets the owner to `by` when `normal_login(by) == by`, removes the profile when `by == "owner"`, and is
+ignored otherwise; an `account.removal` row whose `outcome` is in `GONE_OUTCOMES` removes the profile
+(the removal succeeded, so a later directory of that name, made by the launcher with no console row,
+is not his), and any other outcome changes nothing; any other row is ignored. Folding later events
+onto an earlier fold gives the fold of all of them. `GONE_OUTCOMES` is `event_log.ACCOUNT_GONE_OUTCOMES`,
+the same two outcomes as `folder_trust.GONE_OUTCOMES` (folder_trust imports this module).
+
+Guest add. `GUEST_PREFIX` is `colleague-` and `guest_name(taken)` is `colleague-<n>` for the smallest
+`n >= 1` not among the `taken` names, a name `refusal` accepts: the console names a colleague's
+profile, never the colleague. `parse_guest_add_request(body)` reads strict UTF-8 JSON (a repeated
+key, `NaN` or nesting too deep is `ValueError`) whose value is an object of exactly the member
+`consent`, a `bool` (not `1`, not `"true"`), and returns it; anything else is `ValueError`.
 
 Platform. `adder_for(platform)` is `Adder()` where `manager.supported(platform)`, else None.
 """
@@ -45,11 +63,15 @@ import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import event_log, manager
 
 ADDED = event_log.ACCOUNT_ADDED
+REMOVAL = event_log.ACCOUNT_REMOVAL
+GONE_OUTCOMES = event_log.ACCOUNT_GONE_OUTCOMES
+GUEST_PREFIX = "colleague-"
 ADD_TIMEOUT = 30
 SKIP_TRUST_ENV = "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST"
 NAME = re.compile(r"[a-z0-9_-]+")
@@ -81,11 +103,13 @@ def parse_add_request(body: bytes) -> str:
     return value["name"]
 
 
-def added(profile: str) -> tuple[str, None, dict]:
+def added(profile: str, by: str = "owner") -> tuple[str, None, dict]:
     reason = refusal(profile)
     if reason is not None:
         raise ValueError(reason)
-    return (ADDED, None, {"by": "owner", "profile": profile})
+    if by != "owner" and event_log.normal_login(by) != by:
+        raise ValueError("by is neither owner nor a login")
+    return (ADDED, None, {"by": by, "profile": profile})
 
 
 def added_state(events: Iterable[event_log.Event],
@@ -98,6 +122,50 @@ def added_state(events: Iterable[event_log.Event],
         if isinstance(profile, str) and refusal(profile) is None:
             names.add(profile)
     return frozenset(names)
+
+
+def owners_state(events: Iterable[event_log.Event],
+                 state: Mapping[str, str] | None = None) -> dict[str, str]:
+    owners = dict(state or {})
+    for event in events:
+        payload = event.payload
+        if event.kind not in (ADDED, REMOVAL) or not isinstance(payload, dict):
+            continue
+        profile = payload.get("profile")
+        if not isinstance(profile, str) or refusal(profile) is not None:
+            continue
+        if event.kind == REMOVAL:
+            if payload.get("outcome") in GONE_OUTCOMES:
+                owners.pop(profile, None)
+            continue
+        by = payload.get("by")
+        if not isinstance(by, str):
+            continue
+        if by == "owner":
+            owners.pop(profile, None)
+        elif event_log.normal_login(by) == by:
+            owners[profile] = by
+    return owners
+
+
+def guest_name(taken: Collection[str]) -> str:
+    number = 1
+    while f"{GUEST_PREFIX}{number}" in taken:
+        number += 1
+    return f"{GUEST_PREFIX}{number}"
+
+
+def parse_guest_add_request(body: bytes) -> bool:
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the body is nested too deeply") from error
+    except UnicodeDecodeError as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != {"consent"} or type(value["consent"]) is not bool:
+        raise ValueError("the body must be an object of exactly a consent bool")
+    return value["consent"]
 
 
 class AddFailed(Exception):
