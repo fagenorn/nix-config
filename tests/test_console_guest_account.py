@@ -1,0 +1,540 @@
+"""A listed colleague adds and signs in his own account from the guest door (#1343, ADR-console-087).
+
+Run: just agent-workflow-tests
+"""
+import json
+import shutil
+import sys
+import threading
+import unittest
+from datetime import datetime, timezone
+
+from agent_tools.console import account_add, account_remove, guest, service, signin, signin_run, sprints
+
+from . import console_test_support as support
+from .test_console_account_service import NOW, Listing
+from .test_console_guest_actions import SECOND, GuestWriteCase
+from .test_console_guest_service import COLLEAGUE, JSON, STRANGER, TAILNET
+from .test_console_signin_run import (
+    CODE, FAKE, LOOPBACK_LINK, MANUAL_LINK, stderr_text, until)
+from .test_console_stream import next_frame
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+
+ADD = "/api/guest-account"
+CODE_ROUTE = "/api/guest-signin-code"
+CANCEL = "/api/guest-signin-cancel"
+ROUTES = (ADD, CODE_ROUTE, CANCEL)
+VALID = {ADD: {"consent": True}, CODE_ROUTE: {"code": CODE}, CANCEL: {}}
+PLANTED = "sk-ant-oat01-PLANTED-zq77"
+
+
+class GuestAccountCase(GuestWriteCase):
+    def setUp(self):
+        super().setUp()
+        self.profiles = self.store.parent.parent / "accounts" / "profiles"
+        support.profile_dir(self.store, "work")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        script = bin_dir / "claude-account"
+        script.write_text(FAKE % {"python": sys.executable})
+        script.chmod(0o755)
+        self.record = self.root / "record.jsonl"
+        self.environ = {"HOME": str(self.root), "PATH": f"{bin_dir}:/usr/bin:/bin",
+                        "FAKE_RECORD": str(self.record), "FAKE_MODE": "code",
+                        "FAKE_LINK": LOOPBACK_LINK, "FAKE_MANUAL": MANUAL_LINK}
+        self.now = [NOW]
+        self.status_of = {}
+        self.read_error = {}
+        self.added = []
+        self.add_error = None
+        self.after_add = None
+        self.remove_fails = False
+        self.link_wait = 5
+        self.end_gate = threading.Event()
+        self.end_gate.set()
+        self.responses = []
+
+    def read(self, one):
+        if one.profile in self.read_error:
+            raise self.read_error[one.profile]
+        return self.status_of.get(one.profile, signin.Status("signed_out", None))
+
+    def adder(self, name):
+        self.added.append(name)
+        if self.add_error is not None:
+            raise self.add_error
+        (self.profiles / name).mkdir(mode=0o700)
+        if self.after_add is not None:
+            self.after_add(name)
+
+    def remover(self, name):
+        if self.remove_fails:
+            raise account_remove.RemoveFailed("failed")
+        shutil.rmtree(self.profiles / name)
+
+    def gate(self, on_end):
+        def ended(*args):
+            self.end_gate.wait(10)
+            return on_end(*args)
+        return ended
+
+    def begin(self):
+        if not self.store.exists():
+            self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})
+
+        def factory(on_end):
+            return signin_run.SignIns(on_end=self.gate(on_end), environ=self.environ,
+                                      link_wait=self.link_wait, manual_grace=0.2,
+                                      host="console-host")
+        self.svc = self.start(
+            profile_dirs=Listing(self.profiles), signin_reader=self.read, signin_runs=factory,
+            account_adder=self.adder, signer_out=lambda one: None, account_remover=self.remover,
+            clock=lambda: self.now[0],
+            log_clock=lambda: datetime.fromtimestamp(self.now[0], timezone.utc).isoformat(
+                timespec="microseconds"),
+            session_poll_seconds=3600, probe_tick_seconds=3600,
+            probe_dispatch=lambda job: job())
+        self.svc.poll_sessions()
+        return self.svc
+
+    def names(self):
+        return {p.name for p in self.profiles.glob("*")}
+
+    def lines(self):
+        if not self.record.exists():
+            return []
+        return [json.loads(line) for line in self.record.read_text().splitlines()]
+
+    def code_records(self):
+        return [line["code"] for line in self.lines() if "code" in line]
+
+    def clients(self):
+        return [line for line in self.lines() if "argv" in line]
+
+    def owner_view(self):
+        return json.loads(self.svc.view_bytes)
+
+    def guest_view(self, login=COLLEAGUE):
+        return json.loads(self.svc.guest_view_bytes(login))
+
+    def owner_of(self, profile):
+        return next(entry["owner"] for entry in self.owner_view()["capacity"]["profiles"]
+                    if entry["profile"] == profile)
+
+    def own_state(self, login=COLLEAGUE):
+        own = self.guest_view(login)["own_signin"]
+        return None if own is None else own["state"]
+
+    def start_seqs(self):
+        return [row[0] for row in support.log_rows(self.store) if row[2] == "signin.acted"
+                and json.loads(row[4])["action"] == "start"]
+
+    def post(self, path, body, login=COLLEAGUE, **kwargs):
+        status, answer = self.guest_post(self.svc, path, body, logins=(login,), **kwargs)
+        self.responses.append((status, dict(self.last_headers), answer))
+        return status, answer
+
+    def get(self, path, login=COLLEAGUE):
+        got = self.guest(self.svc, "GET", path, logins=(login,))
+        self.responses.append(got)
+        return got
+
+    def add(self, login=COLLEAGUE):
+        return self.post(ADD, {"consent": True}, login)
+
+    def timed(self, call):
+        box = []
+        thread = threading.Thread(target=lambda: box.append(call()), daemon=True)
+        thread.start()
+        thread.join(10)
+        self.assertFalse(thread.is_alive(), "the call did not return")
+        return box[0]
+
+    def sent_code(self, login=COLLEAGUE):
+        status, _ = self.timed(lambda: self.post(CODE_ROUTE, {"code": CODE}, login))
+        self.assertEqual(status, 204)
+        self.assertEqual(self.timed(lambda: self.owner(self.svc, "GET", "/api/state"))[0], 200)
+
+    def signed_in(self, profile, login=COLLEAGUE):
+        self.status_of[profile] = signin.Status("signed_in", None, f"{profile}@corp-zq.invalid")
+        self.sent_code(login)
+        until(self, lambda: self.own_state(login) == "signed_in")
+
+    def cancelled(self, login=COLLEAGUE):
+        status, _ = self.timed(lambda: self.post(CANCEL, {}, login))
+        self.assertEqual(status, 204)
+        self.assertEqual(self.timed(lambda: self.owner(self.svc, "GET", "/api/state"))[0], 200)
+        until(self, lambda: self.own_state(login) == "cancelled")
+
+    def acted(self):
+        return self.rows("signin.acted")
+
+
+class GuestAccountTest(GuestAccountCase):
+    def test_a_listed_colleague_adds_a_profile_he_owns_and_signs_it_in_after_the_tick(self):
+        self.begin()
+        status, body = self.add()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"attempt": self.start_seqs()[0], "link": MANUAL_LINK,
+                                            "route": "manual"})
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.acted(), [{"by": COLLEAGUE, "profile": "colleague-1",
+                                         "action": "start", "outcome": "started"}])
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+        self.assertEqual(self.own_state(), "running")
+        self.status_of["colleague-1"] = signin.Status("signed_in", None, "c1@corp-zq.invalid")
+        self.sent_code()
+        until(self, lambda: self.own_state() == "signed_in")
+        self.assertEqual(self.code_records(), [CODE])
+        self.assertEqual([(row["action"], row["by"]) for row in self.acted()],
+                         [("start", COLLEAGUE), ("code", COLLEAGUE)])
+        yours = [row for row in self.guest_view()["pool"]["accounts"] if row["label"] == "yours"]
+        self.assertEqual([row["in_use"] for row in yours], [True])
+
+    def test_a_second_add_while_his_sign_in_runs_joins_it(self):
+        self.begin()
+        first = self.add()
+        second = self.add()
+        self.assertEqual((first[0], second[0]), (200, 200))
+        self.assertEqual(json.loads(first[1]), json.loads(second[1]))
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual([row["outcome"] for row in self.acted()], ["started", "running"])
+        self.assertEqual(len(self.clients()), 1)
+
+    def test_an_add_after_a_cancel_signs_in_the_same_profile_again(self):
+        self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.cancelled()
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual([row["by"] for row in self.acted() if row["action"] == "cancel"],
+                         [COLLEAGUE])
+        starts = [row for row in self.acted() if row["action"] == "start"]
+        self.assertEqual(starts[-1]["profile"], "colleague-1")
+        self.assertEqual(len(starts), 2)
+
+    def test_an_add_joins_his_live_sign_in_before_another_profile_not_signed_in(self):
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.signed_in("colleague-1")
+        self.assertEqual(self.add()[0], 200)
+        self.cancelled()
+        attempt, _ = svc.start_signin("colleague-1")
+        status, body = self.add()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["attempt"], attempt)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.acted()[-1]["profile"], "colleague-1")
+        self.assertEqual(len(self.clients()), 3)
+
+    def test_an_add_after_his_account_signed_in_creates_another(self):
+        self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.signed_in("colleague-1")
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+
+    def test_a_loopback_only_sign_in_hands_the_guest_no_link(self):
+        del self.environ["FAKE_MANUAL"]
+        self.begin()
+        status, body = self.add()
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"attempt": self.start_seqs()[0], "link": None,
+                                            "route": "loopback"})
+        for word in (b"localhost", b"ssh", b"console-host"):
+            self.assertNotIn(word, body)
+
+    def test_a_sign_in_with_no_link_yet_answers_none(self):
+        self.environ["FAKE_MODE"] = "nolink"
+        del self.environ["FAKE_MANUAL"]
+        self.link_wait = 0.5
+        self.begin()
+        first = self.add()
+        self.assertEqual(first[0], 200)
+        self.assertEqual(json.loads(first[1]),
+                         {"attempt": self.start_seqs()[0], "link": None, "route": None})
+        second = self.add()
+        self.assertEqual(json.loads(second[1])["attempt"], json.loads(first[1])["attempt"])
+
+
+class GuestAccountRefusalTest(GuestAccountCase):
+    def nothing_started(self):
+        self.assertEqual(self.added, [])
+        self.assertEqual(self.rows("account.added"), [])
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.clients(), [])
+
+    def test_each_guest_account_write_is_guarded_like_a_guest_write(self):
+        svc = self.begin()
+        origin = "https://" + TAILNET
+        guards = (
+            ("no token", {"token": None}, 403, "token refused"),
+            ("owner token", {"token": self.owner_token()}, 403, "token refused"),
+            ("http origin", {"origin": "http://" + TAILNET}, 403, "origin refused"),
+            ("no origin", {"origin": None}, 403, "origin refused"),
+            ("two origins", {"origin": [origin, origin]}, 403, "origin refused"),
+            ("no login", {"logins": ()}, 403, guest.NOT_SHARED_TEXT),
+            ("two logins", {"logins": (COLLEAGUE, SECOND)}, 403, guest.NOT_SHARED_TEXT),
+            ("one login twice", {"logins": (COLLEAGUE, COLLEAGUE)}, 403, guest.NOT_SHARED_TEXT),
+            ("unlisted login", {"logins": (STRANGER,)}, 403, guest.NOT_SHARED_TEXT))
+        for route in ROUTES:
+            for name, kwargs, status, text in guards:
+                with self.subTest(route=route, case=name):
+                    got = self.still(svc, lambda: self.guest_post(
+                        svc, route, b"", send_body=False, **kwargs))
+                    self.assertEqual(got, (status, text.encode() + b"\n"))
+            with self.subTest(route=route, case="a GET"):
+                got = self.still(svc, lambda: self.guest_post(
+                    svc, route, b"", send_body=False, method="GET"))
+                self.assertEqual(got, (405, b"method not allowed\n"))
+                self.assertEqual(self.last_headers["Allow"], "POST")
+        self.nothing_started()
+
+    def test_no_login_header_creates_and_starts_nothing(self):
+        svc = self.begin()
+        for route in ROUTES:
+            with self.subTest(route=route):
+                got = self.still(svc, lambda: self.guest_post(svc, route, VALID[route], logins=()))
+                self.assertEqual(got, (403, guest.NOT_SHARED_TEXT.encode() + b"\n"))
+        self.nothing_started()
+
+    def test_an_unlisted_login_creates_and_starts_nothing(self):
+        svc = self.begin()
+        for route in ROUTES:
+            with self.subTest(route=route):
+                got = self.still(svc, lambda: self.guest_post(
+                    svc, route, VALID[route], logins=(STRANGER,)))
+                self.assertEqual(got[0], 403)
+        self.nothing_started()
+
+    def test_two_login_headers_create_and_start_nothing(self):
+        svc = self.begin()
+        for route in ROUTES:
+            for logins in ((COLLEAGUE, COLLEAGUE), (COLLEAGUE, SECOND)):
+                with self.subTest(route=route, logins=logins):
+                    got = self.still(svc, lambda: self.guest_post(
+                        svc, route, VALID[route], logins=logins))
+                    self.assertEqual(got[0], 403)
+        self.nothing_started()
+
+    def test_a_sign_in_of_a_profile_not_his_is_refused(self):
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        first = self.own_signin_attempt()
+        owner_only = (403, guest.OWNER_ONLY_TEXT.encode() + b"\n")
+        for route, body in ((service.SIGNIN_PATH, {"profile": "colleague-1"}),
+                            (service.SIGNIN_PATH, {"profile": "work"}),
+                            (service.SIGNIN_CODE_PATH, {"profile": "colleague-1", "code": CODE})):
+            with self.subTest(route=route, body=body):
+                self.assertEqual(self.post(route, body, SECOND), owner_only)
+        no_run = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
+        self.assertEqual(self.post(CODE_ROUTE, {"code": CODE}, SECOND), no_run)
+        self.assertEqual(self.post(CANCEL, {}, SECOND), no_run)
+        theirs = guest.GuestActor(SECOND, TAILNET, svc._guest_epoch)
+        for profile in ("colleague-1", "work"):
+            with self.subTest(profile=profile):
+                with self.assertRaises(sprints.Refused) as raised:
+                    svc.start_signin(profile, by=theirs)
+                self.assertEqual(str(raised.exception), guest.NO_OWN_SIGNIN_TEXT)
+        self.assertEqual(self.code_records(), [])
+        self.assertEqual(len(self.clients()), 1)
+        self.assertEqual(self.guest_view()["own_signin"]["attempt"], first)
+        self.assertEqual(self.own_state(), "running")
+        self.assertEqual([row for row in self.acted() if row["by"] == SECOND], [])
+        self.assertEqual(self.add(SECOND)[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.owner_of("colleague-2"), SECOND)
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+
+    def own_signin_attempt(self):
+        return self.guest_view()["own_signin"]["attempt"]
+
+    def removed_and_made_again(self):
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.cancelled()
+        return svc
+
+    def test_a_profile_the_owner_removed_and_made_again_is_no_longer_his(self):
+        svc = self.removed_and_made_again()
+        svc.remove_account("colleague-1", "colleague-1")
+        (self.profiles / "colleague-1").mkdir()
+        svc.poll_sessions()
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual([row for row in self.guest_view()["pool"]["accounts"]
+                          if row["label"] == "yours"], [])
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual([line["account"] for line in self.clients()],
+                         ["colleague-1", "colleague-2"])
+        self.now[0] += 91 * 86400
+        svc.retain()
+        svc.close()
+        self.begin()
+        self.assertIsNone(self.owner_of("colleague-1"))
+
+    def test_a_failed_removal_leaves_the_profile_his(self):
+        svc = self.removed_and_made_again()
+        self.remove_fails = True
+        with self.assertRaises(account_remove.RemoveFailed):
+            svc.remove_account("colleague-1", "colleague-1")
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+        self.now[0] += 91 * 86400
+        svc.retain()
+        svc.close()
+        self.begin()
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+
+    def test_a_colleague_cannot_read_a_credential_or_a_sign_in_output(self):
+        self.begin()
+        owner_only = guest.OWNER_ONLY_TEXT.encode() + b"\n"
+        for path in ("/api/profile", "/api/excluded", "/spend"):
+            with self.subTest(path=path):
+                status, _, body = self.get(path)
+                self.assertEqual((status, body), (403, owner_only))
+        self.assertEqual(self.post(service.SIGNIN_LINK_PATH, {"profile": "colleague-1"}),
+                         (403, owner_only))
+
+    def test_a_start_without_the_tick_creates_and_starts_nothing(self):
+        self.begin()
+        self.assertEqual(self.post(ADD, {"consent": False}),
+                         (409, guest.CONSENT_TEXT.encode() + b"\n"))
+        for body in ({}, {"consent": "true"}, {"consent": True, "profile": "work"}):
+            with self.subTest(body=body):
+                self.assertEqual(self.post(ADD, body), (400, b"bad account\n"))
+        self.nothing_started()
+        self.assertFalse(self.record.exists())
+        self.assertEqual(self.names(), {"work"})
+
+    def test_a_colleague_removed_before_the_add_creates_nothing(self):
+        svc = self.begin()
+        self.in_flight(svc, lambda: svc.remove_colleague(COLLEAGUE))
+        status, body = self.add()
+        self.assertIn((status, body.decode().strip()),
+                      ((403, guest.NOT_SHARED_TEXT), (409, guest.NOT_SHARED_TEXT),
+                       (409, guest.REVOKED_TEXT), (403, guest.REVOKED_TEXT)))
+        self.assertEqual(self.added, [])
+        self.assertEqual(self.names(), {"work"})
+
+    def test_a_colleague_removed_during_the_add_keeps_the_created_profile_and_starts_nothing(self):
+        svc = self.begin()
+        self.after_add = lambda name: svc.remove_colleague(COLLEAGUE)
+        status, body = self.add()
+        self.assertEqual(status, 409)
+        self.assertIn(body.decode().strip(), (guest.REVOKED_TEXT, guest.NOT_SHARED_TEXT))
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.clients(), [])
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+
+    def test_a_code_or_cancel_after_the_client_ended_is_refused_in_fixed_words(self):
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.end_gate.clear()
+        try:
+            self.assertEqual(self.post(CODE_ROUTE, {"code": CODE})[0], 204)
+            until(self, lambda: "colleague-1" not in svc._signin_runs.running())
+            fixed = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
+            for route in (CODE_ROUTE, CANCEL):
+                with self.subTest(route=route):
+                    got = self.post(route, VALID[route])
+                    self.assertEqual(got, fixed)
+                    self.assertNotIn(b"colleague-1", got[1])
+        finally:
+            self.end_gate.set()
+
+    def test_the_owners_port_takes_no_guest_account_write(self):
+        svc = self.begin()
+        page = {"Origin": f"http://127.0.0.1:{svc.address[1]}", **JSON}
+        for route in ROUTES:
+            payload = json.dumps(VALID[route]).encode()
+            with self.subTest(route=route):
+                got = self.unchanged(svc, lambda: support.post_page(
+                    svc.address, route, {**page, "X-Console-Token": self.owner_token()}, payload))
+                self.assertEqual((got[0], got[2]), (404, b"not found\n"))
+                got = self.unchanged(svc, lambda: support.post_page(
+                    svc.address, route, page, payload))
+                self.assertEqual((got[0], got[2]), (403, b"token refused\n"))
+        self.nothing_started()
+
+    def test_no_guest_account_refusal_or_stderr_line_names_a_login_or_a_profile(self):
+        self.begin()
+        with stderr_text() as err:
+            self.post(ADD, {"consent": False})
+            self.post(ADD, {})
+            self.post(ADD, {"consent": True}, STRANGER)
+            self.post(CODE_ROUTE, {"code": CODE}, SECOND)
+            self.post(CANCEL, {}, SECOND)
+            self.add_error = account_add.AddFailed("failed")
+            failed = self.add()
+            self.assertEqual(failed[0], 502)
+            self.add_error = None
+            self.registry.write_text("not json")
+            self.read_error["colleague-1"] = signin.StatusFailed("boom")
+            self.assertEqual(self.add()[0], 200)
+            self.sent_code()
+            until(self, lambda: self.own_state() == "failed")
+        for status, headers, body in self.responses:
+            for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+                self.assertNotIn(word.encode(), body)
+        for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+            self.assertNotIn(word, err.text)
+        self.assertIn("signin_add_read_failed boom", err.text)
+        self.assertIn("trust_account_registry_unreadable", err.text)
+
+
+class GuestAccountTextTest(unittest.TestCase):
+    def test_only_the_guest_texts_pass_through(self):
+        for text in (guest.CONSENT_TEXT, guest.NO_OWN_SIGNIN_TEXT, guest.ACCOUNT_BUSY_TEXT,
+                     guest.ACCOUNT_UNAVAILABLE_TEXT, guest.NOT_SHARED_TEXT, guest.REVOKED_TEXT):
+            with self.subTest(text=text):
+                self.assertEqual(guest.account_text(text), text)
+        self.assertEqual(guest.account_text("no sign-in is running for work"),
+                         guest.ACCOUNT_BUSY_TEXT)
+        self.assertEqual(guest.account_text(account_remove.removing("work")),
+                         guest.ACCOUNT_BUSY_TEXT)
+
+
+class GuestAccountSecrecyTest(GuestAccountCase):
+    def test_no_guest_response_of_the_flow_carries_a_credential_or_the_clients_output(self):
+        self.environ.update(FAKE_BAD=PLANTED, FAKE_NOISE="SENTINEL-OUT-noise")
+
+        def plant(name):
+            (self.profiles / name / ".credentials.json").write_text(json.dumps(
+                {"claudeAiOauth": {"accessToken": PLANTED, "refreshToken": PLANTED}}))
+        self.after_add = plant
+        svc = self.begin()
+        self.get("/")
+        added = self.add()
+        self.assertEqual(added[0], 200)
+        self.assertEqual(json.loads(added[1])["link"], MANUAL_LINK)
+        self.get("/api/state")
+        self.assertEqual(json.loads(self.add()[1])["link"], MANUAL_LINK)
+        self.status_of["colleague-1"] = signin.Status(
+            "signed_in", None, "planted-zq@corp-zq.invalid")
+        self.sent_code()
+        until(self, lambda: self.own_state() == "signed_in")
+        self.get("/api/state")
+        stream = self.open_stream(svc)
+        self.responses.append((200, dict(stream.getheaders()), next_frame(stream)))
+        self.add()
+        self.cancelled()
+        self.post(ADD, {"consent": False})
+        self.post(ADD, {})
+        self.post(CODE_ROUTE, {"code": CODE}, SECOND)
+        self.post(CANCEL, {}, SECOND)
+        for status, headers, body in self.responses:
+            blob = (str(status) + json.dumps(headers)).encode() + body
+            for word in (PLANTED, "SENTINEL-OUT", "SENTINEL-ERR", self.owner_token(),
+                         "planted-zq", "colleague-1", CODE):
+                with self.subTest(status=status, word=word):
+                    self.assertNotIn(word.encode(), blob)
+        self.assertGreaterEqual(len(self.responses), 10)
+
+
+if __name__ == "__main__":
+    unittest.main()

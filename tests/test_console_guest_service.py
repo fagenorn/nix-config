@@ -97,6 +97,8 @@ TABLE = {
     "/api/sprint-status": "owner", "/api/profile": "owner", "/api/excluded": "owner",
     "/": "guest", "/api/state": "guest", "/api/stream": "guest", "/api/whoami": "guest",
     "/api/picture/": "guest",
+    "/api/guest-account": "guest-account", "/api/guest-signin-code": "guest-account",
+    "/api/guest-signin-cancel": "guest-account",
 }
 
 
@@ -304,6 +306,8 @@ class RouteTableTest(GuestCase):
                          service.OWNER_ONLY)
         self.assertEqual({route for route, side in TABLE.items() if side == "guest-write"},
                          service.GUEST_WRITES)
+        self.assertEqual({route for route, side in TABLE.items() if side == "guest-account"},
+                         service.GUEST_ACCOUNT_WRITES)
         for name, value in vars(service).items():
             if (name.endswith(("_PATH", "_PREFIX")) and isinstance(value, str)
                     and value.startswith("/")):
@@ -1625,11 +1629,13 @@ class AccessWriteTest(GuestCase):
         text = " ".join(adr.split())
         for needle in ("POST /api/share-tailnet", "POST /api/share-colleague",
                        "POST /api/share-remove", "#1237", "#1263", "bad colleague", "bad sharing",
-                       "turn sharing on or off", "ADR-console-078"):
+                       "turn sharing on or off", "ADR-console-078",
+                       "POST /api/guest-account", "/api/guest-signin-code",
+                       "/api/guest-signin-cancel", "GUEST_ACCOUNT_WRITES", "#1343"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         decided = next(row for row in adr.splitlines() if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1193, #1237, #1263, #1294, #1305"))
+        self.assertTrue(decided.endswith("#1193, #1237, #1263, #1294, #1305, #1343"))
         status = next(row for row in adr.splitlines() if row.startswith("- **Status:**"))
         self.assertTrue(status.endswith("ADR-console-076, ADR-console-078"))
 

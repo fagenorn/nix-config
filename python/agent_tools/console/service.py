@@ -172,6 +172,23 @@ sharing switch, the read tailnet name the request was admitted under, the access
 question marked `owner_only`); success is an empty `204`.
 A guest's row carries `"by": <login>`, an owner's carries none; no refusal body or stderr line names a login.
 
+Three more guest writes (#1343, ADR-console-087), the members of `GUEST_ACCOUNT_WRITES` (`POST /api/guest-account`,
+`/api/guest-signin-code` and `/api/guest-signin-cancel`), are taken the same way by `_guest_write` and are page
+writes: on the owner's port they pass `_page_write`'s guard and are then `404` `not found`, the body unread and nothing
+appended. The add reads `{"consent": <bool>}` (`MAX_ACCOUNT_BYTES`, 400 `bad account`; `false` is 409 `guest.CONSENT_TEXT`
+before anything else), the code `{"code"}` and the cancel `{}` (`MAX_SIGNIN_BYTES`, 400 `bad code` or `bad cancel`). Under
+`_adding` and one `_ingest` block the add checks the access and the epoch, then takes his own live sign-in, else his own profile
+not signed in, else a new `colleague-<n>`; once the adder returned and the name is listed, one block stores the listing and
+appends `account.added` with `by` his login together, then the trust grant, the status read and `start_signin(profile, by=...)`,
+which refuses a profile that is not his (`guest.NO_OWN_SIGNIN_TEXT`) or being removed (`guest.ACCOUNT_BUSY_TEXT`). The code and the
+cancel act on his own live sign-in, else `NO_OWN_SIGNIN_TEXT`. A refusal is 409 with `guest.account_text`, a fixed text that names
+no profile; the add answers `200` `{"attempt", "link", "route"}` (`signin_run.guest_answer_members`, no `port` or `forward`, the
+link null for a loopback-only run), the other two `204`; `AddFailed` is 502 `the account could not be created: <kind>`, a failed
+start 502 `the sign-in could not start: <kind>`, anything else 500. Stderr lines are `console: guest_account_refused <reason>` and
+`console: guest_signin_refused <reason>` (reason one of `consent`, `access`, `no_run`, `busy`, `unavailable`), `console:
+guest_account_failed <kind or Type>` and `console: guest_signin_failed <Type>`; the status read and the trust grant of his profile
+print no profile name. No line names a login, a profile, a link or a code.
+
 The owner's access-list writes (#1237) are three page writes, `POST /api/share-tailnet`, `POST
 /api/share-colleague` and `POST /api/share-remove` (`SHARE_TAILNET_PATH`, `SHARE_COLLEAGUE_PATH`,
 `SHARE_REMOVE_PATH`), each behind the `_page_write` guard and then `_json_body(MAX_SHARE_BYTES)`
@@ -214,7 +231,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
 `POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
 `POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
-`POST /api/share-tailnet`, `POST /api/share-colleague` and `POST /api/share-remove`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code` and `POST /api/guest-signin-cancel` (the last three are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -1732,6 +1749,9 @@ SHARE_TAILNET_PATH = "/api/share-tailnet"
 SHARE_COLLEAGUE_PATH = "/api/share-colleague"
 SHARE_REMOVE_PATH = "/api/share-remove"
 MAX_SHARE_BYTES = 4096
+GUEST_ACCOUNT_PATH = "/api/guest-account"
+GUEST_SIGNIN_CODE_PATH = "/api/guest-signin-code"
+GUEST_SIGNIN_CANCEL_PATH = "/api/guest-signin-cancel"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
@@ -1739,7 +1759,8 @@ PAGE_WRITES: frozenset[str] = frozenset({
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
     ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
-    LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH})
+    LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
+    GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1805,9 +1826,12 @@ OWNER_READS: frozenset[str] = frozenset({SPEND_PAGE_PATH, STATUS_PATH, PROFILE_P
 GUEST_READS: frozenset[str] = frozenset({PAGE_PATH, STATE_PATH, STREAM_PATH, WHOAMI_PATH})
 GUEST_WRITES: frozenset[str] = frozenset({GOAL_PATH, APPROVE_PATH, REPLY_PATH, ROUND_ANSWER_PATH,
                                           MESSAGE_PATH})
-OWNER_ONLY: frozenset[str] = ((PAGE_WRITES - GUEST_WRITES) | MANAGER_WRITES
+GUEST_ACCOUNT_WRITES: frozenset[str] = frozenset({GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH,
+                                                  GUEST_SIGNIN_CANCEL_PATH})
+OWNER_ONLY: frozenset[str] = ((PAGE_WRITES - GUEST_WRITES - GUEST_ACCOUNT_WRITES) | MANAGER_WRITES
                               | frozenset(POST_LIMITS) | OWNER_READS)
-ROUTES: frozenset[str] = OWNER_ONLY | GUEST_WRITES | GUEST_READS | {PICTURE_PREFIX}
+ROUTES: frozenset[str] = (OWNER_ONLY | GUEST_WRITES | GUEST_ACCOUNT_WRITES | GUEST_READS
+                          | {PICTURE_PREFIX})
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
@@ -3114,6 +3138,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
         if refusal is not None:
             return self._refuse(*refusal)
+        if route in GUEST_ACCOUNT_WRITES:
+            self.close_connection = True
+            return self._refuse(404, "not found")
         if route in (ANSWER_PATH, CHECK_PATH):
             self.close_connection = True
             if not self._answer_request(console, route):
@@ -3382,7 +3409,7 @@ class GuestHandler(ConsoleHandler):
         login, text = guest.admit(policy.access, policy.name, hosts, forwarded_hosts, logins)
         if text is not None:
             return self._refuse(403, text)
-        if route in GUEST_WRITES:
+        if route in GUEST_WRITES or route in GUEST_ACCOUNT_WRITES:
             if self.command != "POST":
                 return self._send(405, "text/plain", b"method not allowed\n", ("Allow", "POST"))
             return self._guest_write(route, policy, login, snapshot.epoch)
@@ -3407,8 +3434,75 @@ class GuestHandler(ConsoleHandler):
         else:
             self._refuse(404, "not found")
 
+    def _guest_account_request(self, console: "ConsoleService", by: "guest.GuestActor") -> bool:
+        """Carry out a colleague's add-account write; it answers itself, so this is always False."""
+        body = self._json_body(MAX_ACCOUNT_BYTES)
+        if body is None:
+            return False
+        try:
+            consent = account_add.parse_guest_add_request(body)
+        except ValueError:
+            self._refuse(400, "bad account")
+            return False
+        try:
+            attempt, link = console.add_guest_account(by, consent)
+        except sprints.Refused as error:
+            print(f"console: guest_account_refused {guest.account_reason(str(error))}",
+                  file=sys.stderr)
+            self._refuse(409, guest.account_text(str(error)))
+            return False
+        except account_add.AddFailed as error:
+            print(f"console: guest_account_failed {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account could not be created: {error.kind}")
+            return False
+        except signin_run.StartFailed as error:
+            print(f"console: guest_signin_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(502, f"the sign-in could not start: {error.kind}")
+            return False
+        except Exception as error:
+            print(f"console: guest_account_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "adding the account failed")
+            return False
+        answer = json.dumps({"attempt": attempt, **signin_run.guest_answer_members(link)},
+                            sort_keys=True, separators=(",", ":")).encode()
+        try:
+            self._send(200, "application/json", answer, ("Connection", "close"))
+            self.wfile.flush()
+        except OSError:
+            pass
+        return False
+
+    def _guest_signin_request(self, console: "ConsoleService", route: str,
+                              by: "guest.GuestActor") -> bool:
+        """Carry out a colleague's code or cancel write; True when the shared empty 204 is still to be sent."""
+        name = "code" if route == GUEST_SIGNIN_CODE_PATH else "cancel"
+        body = self._json_body(MAX_SIGNIN_BYTES)
+        if body is None:
+            return False
+        try:
+            code = (signin_run.parse_guest_code_request(body) if route == GUEST_SIGNIN_CODE_PATH
+                    else signin_run.parse_guest_cancel_request(body))
+        except ValueError:
+            self._refuse(400, f"bad {name}")
+            return False
+        try:
+            if route == GUEST_SIGNIN_CODE_PATH:
+                console.guest_signin_code(by, code)
+            else:
+                console.guest_signin_cancel(by)
+        except sprints.Refused as error:
+            print(f"console: guest_signin_refused {guest.account_reason(str(error))}",
+                  file=sys.stderr)
+            self._refuse(409, guest.account_text(str(error)))
+            return False
+        except Exception as error:
+            print(f"console: guest_signin_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "sign-in failed")
+            return False
+        return True
+
     def _guest_write(self, route: str, policy: "guest.Policy", login: str, epoch: int):
-        """One of the five guest writes (#1263): the owner's guard shape, the guest token and origin."""
+        """One of the eight guest writes (#1263, #1343): the owner's guard shape, the guest token and origin."""
         console = self.server.console
         refusal = write_guard.refusal(
             policy.name, self.headers.get_all("Origin") or [],
@@ -3418,7 +3512,11 @@ class GuestHandler(ConsoleHandler):
             return self._refuse(*refusal)
         by = guest.GuestActor(login, policy.name, epoch)
         self.close_connection = True
-        if route == GOAL_PATH:
+        if route == GUEST_ACCOUNT_PATH:
+            done = self._guest_account_request(console, by)
+        elif route in (GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH):
+            done = self._guest_signin_request(console, route, by)
+        elif route == GOAL_PATH:
             done = self._goal_request(console, route, by)
         elif route in (APPROVE_PATH, REPLY_PATH):
             done = self._decision_request(console, route, by)
@@ -4860,24 +4958,27 @@ class ConsoleService:
         except _ProfileRemoving as error:
             raise manager.StopFailed(str(error)) from None
 
-    def _read_signin_now(self, profile: str, when: str) -> signin.Status | None:
+    def _read_signin_now(self, profile: str, when: str, *,
+                         named: bool = True) -> signin.Status | None:
         """The status read at once (`when` is "end", "add" or "remove"); a failed read records nothing.
 
         The removal's own read ("remove") is the only one that runs while the profile is marked as
         being removed; any other is held in the profile's client-run count and is not run (None)
-        once the mark is set.
+        once the mark is set. With `named` False the stderr line carries no profile name (a
+        colleague's profile, #1343).
         """
         ticket = self._signin_ticket(profile)
+        label = f"{profile} " if named else ""
         try:
             with (contextlib.nullcontext() if when == "remove" else self._client_run(profile)):
                 status = self._signin_reader(probe.Probe(profile, str(uuid.uuid4()), self._stop))
         except _ProfileRemoving:
             return None
         except signin.StatusFailed as error:
-            print(f"console: signin_{when}_read_failed {profile} {error.kind}", file=sys.stderr)
+            print(f"console: signin_{when}_read_failed {label}{error.kind}", file=sys.stderr)
             return None
         except Exception as error:
-            print(f"console: signin_{when}_read_failed {profile} {type(error).__name__}",
+            print(f"console: signin_{when}_read_failed {label}{type(error).__name__}",
                   file=sys.stderr)
             return None
         self._record_signin(profile, status, ticket)
@@ -4894,7 +4995,8 @@ class ConsoleService:
         attempt = found[1]
         status = None
         if self._signin_reader is not None:
-            status = self._read_signin_now(profile, "end")
+            status = self._read_signin_now(profile, "end",
+                                           named=profile not in self._account_owners)
         if end != "exited":
             outcome = end
         elif returncode == 0 and status is not None and status.state == "signed_in":
@@ -4916,29 +5018,42 @@ class ConsoleService:
             raise sprints.Refused("unknown profile")
         return self._signin_runs
 
-    def _record_signin_action(self, profile: str, action: str, outcome: str) -> Event:
-        appended = self.log.append([signin_run.acted(profile, action, outcome)])
+    def _record_signin_action(self, profile: str, action: str, outcome: str,
+                              by: str = "owner") -> Event:
+        appended = self.log.append([signin_run.acted(profile, action, outcome, by)])
         self._fold(appended)
         return appended[0]
 
-    def start_signin(self, profile: str) -> tuple[int, signin_run.Link | None]:
-        """Start the profile's client login, or join the live one; the attempt and the routed link."""
+    def start_signin(self, profile: str, *, by: "guest.GuestActor | None" = None
+                     ) -> tuple[int, signin_run.Link | None]:
+        """Start the profile's client login, or join the live one; the attempt and the routed link.
+
+        With `by` (a colleague, #1343) the profile must be one he added and its client is started
+        only for him; his refusals carry no profile name.
+        """
         runs = self._signin_refuse_unless_listed(profile)
+        who = "owner" if by is None else by.login
         with self._ingest:
-            if profile in self._removing:
+            if by is not None:
+                self._guest_account_refusal(by)
+                if self._account_owners.get(profile) != by.login:
+                    raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
+                if profile in self._removing:
+                    raise sprints.Refused(guest.ACCOUNT_BUSY_TEXT)
+            elif profile in self._removing:
                 raise sprints.Refused(account_remove.removing(profile))
             try:
                 started = runs.start(profile)
             except signin_run.StartFailed:
-                self._record_signin_action(profile, "start", "failed")
+                self._record_signin_action(profile, "start", "failed", who)
                 self._publish()
                 raise
             if started.fresh:
-                attempt = self._record_signin_action(profile, "start", "started").seq
+                attempt = self._record_signin_action(profile, "start", "started", who).seq
                 self._signin_live[profile] = attempt
                 self._signin_by_run[started.run] = (profile, attempt)
             else:
-                self._record_signin_action(profile, "start", "running")
+                self._record_signin_action(profile, "start", "running", who)
                 attempt = self._signin_live[profile]
             self._publish()
         return attempt, runs.wait_link(profile)
@@ -4979,7 +5094,64 @@ class ConsoleService:
         self._read_signin_now(name, "add")
         return self.start_signin(name)
 
-    def _grant_registered_projects(self, name: str) -> None:
+    def _guest_account_refusal(self, by: "guest.GuestActor") -> None:
+        """Under the ingest lock: refuse a colleague whose access is gone or changed since his request was admitted."""
+        text = guest.account_refusal(guest.Policy(self._access, self._tailnet_name), by)
+        if text is not None:
+            raise sprints.Refused(text)
+        if by.epoch is not None and by.epoch != self._guest_epoch:
+            raise sprints.Refused(guest.REVOKED_TEXT)
+
+    def _own_profiles(self, by: "guest.GuestActor") -> list[str]:
+        """Under the ingest lock: the listed profiles `by` added and still owns, sorted."""
+        return sorted(profile for profile, owner in self._account_owners.items()
+                      if owner == by.login and profile in self._profiles)
+
+    def add_guest_account(self, by: "guest.GuestActor", consent: bool
+                          ) -> tuple[int, signin_run.Link | None]:
+        """A colleague's add: sign in again a profile of his, else create one he owns; the attempt and link.
+
+        `consent` False is refused before anything else. The choice of profile and the checks are
+        made under one `_ingest` block; the creation and the ownership row take effect together in
+        another with no access check between (#1343, ADR-console-087).
+        """
+        if not consent:
+            raise sprints.Refused(guest.CONSENT_TEXT)
+        if self._account_adder is None or self._signin_runs is None or self._signin_reader is None:
+            raise sprints.Refused(guest.ACCOUNT_UNAVAILABLE_TEXT)
+        runs = self._signin_runs
+        created = False
+        with self._adding:
+            with self._ingest:
+                self._guest_account_refusal(by)
+                own = self._own_profiles(by)
+                target = next((p for p in own if p in self._signin_live
+                               and p in runs.running()), None)
+                if target is None:
+                    target = next((p for p in own if getattr(
+                        self._signins.get(p), "state", None) != "signed_in"), None)
+                if target is None:
+                    name = account_add.guest_name(set(self._read_profiles())
+                                                  | set(self._account_owners)
+                                                  | set(self._accounts_added))
+            if target is None:
+                self._account_adder(name)
+                listed = self._read_profiles()
+                if name not in listed:
+                    raise account_add.AddFailed("not_listed")
+                with self._ingest:
+                    self._profiles = listed
+                    self._profiles_read = True
+                    self._fold(self.log.append([account_add.added(name, by=by.login)]))
+                    self._publish()
+                target = name
+                created = True
+        if created:
+            self._grant_registered_projects(target, named=False)
+            self._read_signin_now(target, "add", named=False)
+        return self.start_signin(target, by=by)
+
+    def _grant_registered_projects(self, name: str, *, named: bool = True) -> None:
         """Grant a page-added profile every registered project's folder trust (#1078).
 
         Runs after the adder returned, so the add deadline bounds creation only, and before the
@@ -4988,7 +5160,8 @@ class ConsoleService:
         entries = read_fleet(self.registry)
         if entries is None:
             if os.path.lexists(self.registry):
-                print(f"console: trust_account_registry_unreadable {name}", file=sys.stderr)
+                print(f"console: trust_account_registry_unreadable{' ' + name if named else ''}",
+                      file=sys.stderr)
             return
         found = [d for d in self._dirs() if sessions.account_name(d) == name]
         if not found:
@@ -4998,8 +5171,8 @@ class ConsoleService:
                 self._grant_trust("account", entry["root"], entry["project_id"],
                                   profiles=[(name, found[0] / ".claude.json")])
             except Exception as error:
-                print(f"console: trust_account_failed {name} {type(error).__name__}",
-                      file=sys.stderr)
+                print(f"console: trust_account_failed {name + ' ' if named else ''}"
+                      f"{type(error).__name__}", file=sys.stderr)
 
     def _grant_at_start(self) -> None:
         """Grant every registered project's folder trust in every target, once (#1183).
@@ -5843,17 +6016,28 @@ class ConsoleService:
             self._fold(self.log.append([account_remove.removed(profile, outcome, kind)]))
             self._publish()
 
+    def _send_code_locked(self, profile: str, runs: signin_run.SignIns, code: str,
+                          by_login: str) -> None:
+        """Under the ingest lock: pass the code to the live client and record it; NotRunning escapes."""
+        runs.send_code(profile, code)
+        self._record_signin_action(profile, "code", "sent", by_login)
+        self._publish()
+
+    def _cancel_locked(self, profile: str, runs: signin_run.SignIns, by_login: str) -> None:
+        """Under the ingest lock: cancel the live client and record it; NotRunning escapes."""
+        runs.cancel(profile)
+        self._record_signin_action(profile, "cancel", "cancelled", by_login)
+        self._publish()
+
     def send_signin_code(self, profile: str, code: str) -> None:
         runs = self._signin_refuse_unless_listed(profile)
         with self._ingest:
             if profile not in runs.running():
                 raise sprints.Refused(f"no sign-in is running for {profile}")
             try:
-                runs.send_code(profile, code)
+                self._send_code_locked(profile, runs, code, "owner")
             except signin_run.NotRunning:
                 raise sprints.Refused(f"no sign-in is running for {profile}") from None
-            self._record_signin_action(profile, "code", "sent")
-            self._publish()
 
     def cancel_signin(self, profile: str) -> None:
         runs = self._signin_refuse_unless_listed(profile)
@@ -5861,11 +6045,42 @@ class ConsoleService:
             if profile not in runs.running():
                 raise sprints.Refused(f"no sign-in is running for {profile}")
             try:
-                runs.cancel(profile)
+                self._cancel_locked(profile, runs, "owner")
             except signin_run.NotRunning:
                 raise sprints.Refused(f"no sign-in is running for {profile}") from None
-            self._record_signin_action(profile, "cancel", "cancelled")
-            self._publish()
+
+    def _own_live_signin(self, by: "guest.GuestActor", runs: signin_run.SignIns) -> str:
+        """Under the ingest lock: the live sign-in profile of a colleague's own, else the fixed refusal."""
+        for profile in self._own_profiles(by):
+            if profile in self._signin_live and profile in runs.running():
+                return profile
+        raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
+
+    def guest_signin_code(self, by: "guest.GuestActor", code: str) -> None:
+        """Pass a colleague's code to his own live sign-in; refusals carry only fixed texts."""
+        runs = self._signin_runs
+        if runs is None:
+            raise sprints.Refused(guest.ACCOUNT_UNAVAILABLE_TEXT)
+        with self._ingest:
+            self._guest_account_refusal(by)
+            profile = self._own_live_signin(by, runs)
+            try:
+                self._send_code_locked(profile, runs, code, by.login)
+            except signin_run.NotRunning:
+                raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
+
+    def guest_signin_cancel(self, by: "guest.GuestActor") -> None:
+        """Cancel a colleague's own live sign-in; refusals carry only fixed texts."""
+        runs = self._signin_runs
+        if runs is None:
+            raise sprints.Refused(guest.ACCOUNT_UNAVAILABLE_TEXT)
+        with self._ingest:
+            self._guest_account_refusal(by)
+            profile = self._own_live_signin(by, runs)
+            try:
+                self._cancel_locked(profile, runs, by.login)
+            except signin_run.NotRunning:
+                raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT) from None
 
     def expire_signins(self) -> list[str]:
         """End every sign-in run past its deadline; the profiles ended."""

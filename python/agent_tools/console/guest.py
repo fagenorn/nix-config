@@ -178,6 +178,18 @@ and stays the owner's (`is_look` for the pair, `OWNER_LOOK_TEXT`; ADR-console-07
 production holds) are never steerable. The service answers a write refused on these merits as
 `409`. No text names a project or a login.
 
+Three more guest writes (#1343, ADR-console-087), `POST /api/guest-account`, `/api/guest-signin-code` and
+`/api/guest-signin-cancel`, let a listed colleague add his own account and sign it in. The first four checks of
+`write_refusal` are `account_refusal(policy, actor)`, which they use alone (sharing off, no name read, another
+name, login not listed). The add takes `{"consent": true}` and nothing else: without the tick it is refused
+with `CONSENT_TEXT` before anything is created. The service picks the profile: the colleague's own live
+sign-in, else one of his own profiles that is not signed in, else a new `colleague-<n>` it names itself; no
+body names a profile, and no sign-in of a profile that is not his own is ever started, passed a code or
+cancelled. A refusal is read by a guest only as one of the fixed texts `CONSENT_TEXT`, `NO_OWN_SIGNIN_TEXT`,
+`ACCOUNT_BUSY_TEXT`, `ACCOUNT_UNAVAILABLE_TEXT`, `NOT_SHARED_TEXT` or `REVOKED_TEXT` (`account_text` maps any
+other text, such as one that names a profile, to `ACCOUNT_BUSY_TEXT`). No answer names a profile, a login, a
+code or the client's output.
+
 `mark_steer(view, login)` returns a copy of a scrubbed guest view in which every sprint mapping
 gains `steer` (started by that login) and every `inbox.open` and `inbox.answered` item gains `steer`
 (a brief or a question started by that login that is neither a look (a before-and-after pair or a
@@ -246,6 +258,10 @@ NOT_YOUR_PROJECT_TEXT = "That project is not shared with you."
 NOT_YOUR_SPRINT_TEXT = "You can steer only the sprints you started."
 OWNER_LOOK_TEXT = "Only the console's owner answers a look before merge."
 REVOKED_TEXT = "Your access changed while you were sending that. Reload the page and try again."
+CONSENT_TEXT = "Tick that you agree before you sign in."
+NO_OWN_SIGNIN_TEXT = "No sign-in of yours is running."
+ACCOUNT_BUSY_TEXT = "That cannot be done right now. Try again in a moment."
+ACCOUNT_UNAVAILABLE_TEXT = "Adding an account is not available on this host."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
                    "Point Tailscale Serve at the console's guest socket.")
 
@@ -479,7 +495,12 @@ def admit(access: Access, name: str | None, hosts: Sequence[str], forwarded_host
     return login, None
 
 
-def write_refusal(policy: Policy, actor: GuestActor, project_id: str) -> str | None:
+ACCESS_TEXTS = frozenset({SHARING_OFF_TEXT, NAME_UNREAD_TEXT, HOST_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT})
+ACCOUNT_TEXTS = frozenset({CONSENT_TEXT, NO_OWN_SIGNIN_TEXT, ACCOUNT_BUSY_TEXT,
+                           ACCOUNT_UNAVAILABLE_TEXT, NOT_SHARED_TEXT, REVOKED_TEXT})
+
+
+def account_refusal(policy: Policy, actor: GuestActor) -> str | None:
     if not policy.access.shared:
         return SHARING_OFF_TEXT
     if policy.name is None:
@@ -488,6 +509,25 @@ def write_refusal(policy: Policy, actor: GuestActor, project_id: str) -> str | N
         return HOST_TEXT
     if actor.login not in policy.access.colleagues:
         return NOT_SHARED_TEXT
+    return None
+
+
+def account_text(text: str) -> str:
+    """The text a guest reads for a refusal of an account write: only a fixed guest text, else the busy text."""
+    return text if text in ACCOUNT_TEXTS else ACCOUNT_BUSY_TEXT
+
+
+def account_reason(text: str) -> str:
+    """The stderr reason of a refused account write: one of consent, access, no_run, busy, unavailable."""
+    return {CONSENT_TEXT: "consent", NO_OWN_SIGNIN_TEXT: "no_run",
+            ACCOUNT_UNAVAILABLE_TEXT: "unavailable", ACCOUNT_BUSY_TEXT: "busy"}.get(
+                text, "access" if text in ACCESS_TEXTS else "busy")
+
+
+def write_refusal(policy: Policy, actor: GuestActor, project_id: str) -> str | None:
+    text = account_refusal(policy, actor)
+    if text is not None:
+        return text
     if project_id not in policy.access.colleagues[actor.login]:
         return NOT_YOUR_PROJECT_TEXT
     return None
