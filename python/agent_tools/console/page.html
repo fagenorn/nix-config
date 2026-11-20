@@ -2827,6 +2827,8 @@ function settledPool(pool) {
       next.state = ahead.length ? "ok" : "reset";
       next.out_until = null;
       if (row.in_use === true) freed = true;
+    } else if (row.state === "ok" && !ahead.length) {
+      next.state = "reset";
     }
     return next;
   });

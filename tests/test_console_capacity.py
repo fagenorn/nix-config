@@ -126,6 +126,16 @@ class ProfileCapacityTest(unittest.TestCase):
                 self.assertEqual(result["state"], "out")
                 self.assertIsNone(result["out_until"])
 
+    def test_a_refusal_whose_own_reset_is_unknown_leaves_the_return_unknown(self):
+        refused = reading_of(report(
+            http_status=429, status="rejected", reset=None, binding="5h",
+            windows={"7d": window("rejected", 1.0, T + 100)}))
+        for now in (T, T + 50):
+            with self.subTest(now=now):
+                result = profile_capacity("work", refused, now)
+                self.assertEqual(result["state"], "out")
+                self.assertIsNone(result["out_until"])
+
     def test_a_window_without_its_own_reset_uses_the_top_level_reset(self):
         refused = reading_of(report(
             http_status=429, status="rejected", binding="7d", claim="seven_day", reset=T + 100,

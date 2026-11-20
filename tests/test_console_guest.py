@@ -798,6 +798,58 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(guest.sprint_labels(running, guest.profile_labels(merged)),
                          {"s": "Account 2"})
 
+    def test_an_alias_that_moves_between_two_accounts_that_stay_keeps_both_labels(self):
+        readings = {name: reading_of(report(reset=T + 3600, windows={
+            "7d": window("allowed", 0.3, T + 86400)}), name, seq, "t")
+            for seq, name in enumerate(("awork", "home", "zalias"), 1)}
+
+        def cv(zalias_at):
+            def mine(address):
+                return SignIn("signed_in", None, "t", True, address)
+            return capacity_module.capacity_view(
+                ["awork", "home", "zalias"], CapacityState(readings, {}), T,
+                {"awork": mine(WORK_AT), "home": mine(HOME_AT), "zalias": mine(zalias_at)})
+
+        previous = {"home": 1, "zalias": 1, "awork": 2}
+        moved = cv(WORK_AT)
+        for established in ({"home", "zalias", "awork"},
+                            {"home": HOME_AT, "zalias": HOME_AT, "awork": WORK_AT}):
+            with self.subTest(established=type(established).__name__):
+                self.assertEqual(guest.account_numbers(moved, previous, established),
+                                 {"home": 1, "awork": 2, "zalias": 2})
+
+    def test_a_profile_that_leaves_a_shared_account_for_a_new_address_does_not_take_its_label(self):
+        readings = {name: reading_of(report(reset=T + 3600, windows={
+            "7d": window("allowed", 0.3, T + 86400)}), name, seq, "t")
+            for seq, name in enumerate(("a", "z"), 1)}
+
+        def cv(a_at):
+            def mine(address):
+                return SignIn("signed_in", None, "t", True, address)
+            return capacity_module.capacity_view(
+                ["a", "z"], CapacityState(readings, {}), T,
+                {"a": mine(a_at), "z": mine(HOME_AT)})
+
+        self.assertEqual(guest.account_numbers(cv(HOME_AT), {}), {"a": 1, "z": 1})
+        left = guest.account_numbers(
+            cv(WORK_AT), {"a": 1, "z": 1}, {"a": HOME_AT, "z": HOME_AT})
+        self.assertEqual(left, {"a": 2, "z": 1})
+
+    def test_a_recorded_stall_reason_never_reaches_a_guest(self):
+        reason = "zalias-zq4 is being removed"
+        inputs = running_inputs()
+        inputs["sprints"] = {**inputs["sprints"], "s-p01": dataclasses.replace(
+            inputs["sprints"]["s-p01"], stalled=reason, stalled_at=at(7))}
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        self.assertIn(reason, json.dumps(derived))
+        encoded = encode_view(guest.scrub(derived))
+        self.assertNotIn(b"zalias-zq4", encoded)
+        self.assertNotIn(b"being removed", encoded)
+        seen = json.loads(encoded)
+        self.assertEqual({node["manager_text"] for node in sprint_nodes(seen)}, {guest.STALLED_TEXT})
+        cards = [item for item in seen["inbox"]["open"] if item["reason"] == "manager"]
+        self.assertEqual([card["last_reason"] for card in cards], [guest.MANAGER_REASON_TEXT])
+
     def test_a_stop_failure_reason_never_reaches_a_guest(self):
         inputs = running_inputs()
         reason = "zalias-zq4 is being removed"

@@ -47,7 +47,8 @@ the reset of the window the refusal names (`binding`, else the first of "7d", "5
 (or there is no window and the report's reset has passed); else "ok"; a profile with no reading is
 "unknown" with every other member null. `out_until` is the latest known reset among the out windows
 and, when refused, the refusal reset (null when none is known, when an out window's own reset is
-unknown, since the account is then out past every known reset, or when not out); `next_reset` the
+unknown, since the account is then out past every known reset, when the refusal's own reset is
+unknown, or when not out); `next_reset` the
 earliest reset still ahead.
 
 `left_candidate(state, profile, folded)` is the reading the profile took under the account it is
@@ -315,7 +316,8 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
         "five_hour_reset": five_hour_reset,
         "next_reset": _iso(min(ahead)) if ahead else None,
         "out_until": (_iso(max(known_out))
-                      if out and known_out and None not in out_resets else None),
+                      if out and known_out and None not in out_resets
+                      and not (refused and stopped is None) else None),
         "read_at": reading.at,
     }
 

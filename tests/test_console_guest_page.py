@@ -1030,6 +1030,23 @@ class GuestPoolTest(unittest.TestCase):
         self.assertTrue(full(span(two, "pool-session")).startswith("90% of the session left"))
         self.assertEqual(titles(span(two, "pool-session")), ["2050-01-01 03:00"])
 
+    def test_an_ok_account_whose_last_window_resets_reads_reset_without_a_frame(self) -> None:
+        clock = 2524608000000
+        ok = {"label": "Account 1", "state": "ok", "week_left": 40, "week_reset": "2050-01-01T02:00:00+00:00",
+              "five_hour_left": 60, "five_hour_reset": "2050-01-01T01:00:00+00:00",
+              "next_reset": "2050-01-01T01:00:00+00:00", "out_until": None, "in_use": True}
+        pool = {"state": "fine", "tight": False, "all_out": False, "resumes_at": None,
+                "no_reading": None, "accounts": [ok]}
+        start, mid, late = harness([
+            {"start": {"focused": False, "clock": clock}}, {"frame": {**SCOPED, "pool": pool}}, SNAP,
+            {"clock": clock + 90 * 60000}, SNAP, {"clock": clock + 150 * 60000}, SNAP], GUEST)
+        self.assertIsNone(span(pool_rows(start)[0], "pool-status"))
+        self.assertIsNone(span(pool_rows(mid)[0], "pool-status"))
+        one = pool_rows(late)[0]
+        self.assertEqual(full(span(one, "pool-status")), "reset, not yet used")
+        self.assertEqual(full(span(one, "pool-week")), "100% of the week left")
+        self.assertEqual(full(span(one, "pool-session")), "100% of the session left")
+
     def test_the_running_sprint_shows_its_account_on_the_guest_page_only(self) -> None:
         frame = with_sprints([{**SPRINT, "account_label": "Account 2"}])
         guest_page = page_of(GUEST, [START, {"frame": frame}])

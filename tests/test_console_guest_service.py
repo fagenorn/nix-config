@@ -46,12 +46,14 @@ COLLEAGUE = "colleague@example.invalid"
 STRANGER = "stranger@example.invalid"
 FORGED = "forged-probe@example.invalid"
 READ_AT = int(time.time())
+PROXY_ID = "proxy-acct-zq77"
+SPEND_TOKENS = 987654321
 
 
-def reading_rows(profile, week, session, week_in, session_in):
+def reading_rows(profile, week, session, week_in, session_in, account=None):
     return capacity.report_entries(capacity.parse_report({
         "http_status": 200, "status": "allowed", "reset": READ_AT + week_in, "binding": None,
-        "claim": None, "account": None, "session_id": None,
+        "claim": None, "account": account, "session_id": None,
         "windows": {"7d": {"status": "allowed", "utilization": week, "reset": READ_AT + week_in},
                     "5h": {"status": "allowed", "utilization": session,
                            "reset": READ_AT + session_in}}}), profile)
@@ -557,13 +559,25 @@ class ScopedReadTest(GuestCase):
             (MANAGER_STARTED, "owner/p01",
              {"sprint_id": "s-p01", "profile": "work-zq5", "session_name": "m-p01"}),
             signed_in_row("work-zq5", "work-zq5@corp-zq.invalid"),
-            *reading_rows("work-zq5", 0.4, 0.25, 3 * 86400, 7200)])
+            *reading_rows("work-zq5", 0.4, 0.25, 3 * 86400, 7200, account=PROXY_ID)])
         profile = self.root / "accounts/profiles/work-zq5"
         profile.mkdir(parents=True)
-        svc = self.start(profile_dirs=[profile])
+        sessions = self.root / "sessions"
+        svc = self.start(profile_dirs=[profile], session_dirs=[sessions])
         svc.poll_sessions()
+        transcript = sessions.parent / "projects" / "-srv-p01" / "spend-zq.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({
+            "type": "assistant", "sessionId": "spend-zq", "cwd": "/srv/p01",
+            "timestamp": time.strftime("%Y-%m-%dT10:00:00.000Z", time.gmtime()),
+            "message": {"id": "msg_zq", "model": "claude-sonnet-4-6",
+                        "usage": {"input_tokens": SPEND_TOKENS}}}) + "\n")
+        svc.poll_spend()
         status, _, body = self.guest(svc, "GET", "/api/state")
         mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
+        spent = mine["spend"]["days"][-1]["total"]
+        self.assertEqual(spent["input"], SPEND_TOKENS)
+        self.assertGreater(spent["dollars"], 0)
         self.assertEqual(status, 200)
         seen = json.loads(body)
         self.assertEqual([row["label"] for row in seen["pool"]["accounts"]], ["Account 1"])
@@ -581,7 +595,8 @@ class ScopedReadTest(GuestCase):
             [(node["sprint_id"], node["account_label"])
              for entry in seen["entries"] for node in entry["sprints"]], [("s-p01", "Account 1")])
         for marker in (b"s-p00", b"other-goal-zq7", b"work-zq5", b"corp-zq.invalid", b"org-zq9",
-                       b"m-p01"):
+                       b"m-p01", PROXY_ID.encode(), str(SPEND_TOKENS).encode(),
+                       str(spent["dollars"]).encode()):
             with self.subTest(marker=marker):
                 self.assertNotIn(marker, body)
         self.assertIsNone(seen["spend"])
@@ -640,6 +655,65 @@ class ScopedReadTest(GuestCase):
         path.rmdir()
         svc.poll_sessions()
         self.assertEqual(guest.read_numbers(path), {"a-zq1": 1})
+
+    def test_a_running_sprint_keeps_its_label_when_its_profile_goes_and_its_account_stays(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        dirs.clear()
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), ([], {"s-p01": None}))
+
+    def test_a_profiles_directory_that_cannot_be_read_does_not_end_the_numbering(self):
+        self.seed()
+        a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
+        for path in (a, c):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+
+        class Listing(list):
+            readable = True
+
+            def __iter__(self):
+                if not self.readable:
+                    raise PermissionError(errno.EACCES, "denied")
+                return super().__iter__()
+
+        dirs = Listing([a, c])
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        numbers = self.store.with_name(guest.NUMBERS_FILE)
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "c-zq3": 2})
+        dirs.readable = False
+        svc.poll_sessions()
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "c-zq3": 2})
+        dirs.readable = True
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc)[0], ["Account 1", "Account 2"])
+
+    def test_a_profiles_directory_that_cannot_be_listed_is_not_an_empty_one(self):
+        accounts = self.root / "accounts"
+        with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+            self.assertEqual(service.default_profile_dirs(), [])
+            (accounts / "profiles/a-zq1").mkdir(parents=True)
+            self.assertEqual(service.default_profile_dirs(), [accounts / "profiles/a-zq1"])
+            with mock.patch("os.scandir", side_effect=PermissionError(errno.EACCES, "denied")):
+                with self.assertRaises(OSError):
+                    service.default_profile_dirs()
 
     def test_removing_the_last_profile_ends_its_numbering(self):
         self.seed()

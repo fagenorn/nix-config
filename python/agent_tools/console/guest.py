@@ -90,11 +90,17 @@ profile name, and every other account takes the smallest positive integer none h
 a pin or a removal never moves a label. When several profiles of one account hold numbers (a profile
 numbered before it signed in, then signed in to an address another already holds), the number of a
 profile in `established` (those that had an address at the previous numbering) is kept over a
-smaller one, so the established account and its running sprints keep their label; the numbering lives in `NUMBERS_FILE`, beside the event
+smaller one, so the established account and its running sprints keep their label. When several
+accounts claim one number (an alias moved from one account to another, or a profile left a shared
+account for a new address), it goes to the account whose profiles holding it kept their address
+(`established` given as a Mapping of profile to the address it had), then to the one with more
+holders, then to the one whose counted profile held it, then by the order above; the others keep
+another number they held or take a free one. The numbering lives in `NUMBERS_FILE`, beside the event
 log (`read_numbers`, `write_numbers`; an unreadable file numbers afresh). `sprint_labels` gives the
-label of the account each running sprint's manager is on, and `scrub` adds it as `account_label` to
+label of the account each running sprint's manager is on (the service also lends it the numbers of a
+removed profile whose account another profile still holds, kept in memory), and `scrub` adds it as `account_label` to
 every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
-`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. No profile name, address, organisation or
+`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). No profile name, address, organisation or
 proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
 per account or per project would show work on projects the colleague is not listed for.
 `picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
@@ -191,7 +197,8 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
     LOGIN_MAX, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event, normal_login)
-from agent_tools.console.sprints import NUDGE_ACTION_TEXT, STARTED, SprintState, ended_at
+from agent_tools.console.sprints import (
+    NUDGE_ACTION_TEXT, STALLED_TEXT, STARTED, SprintState, ended_at)
 from agent_tools.console.view import project_for
 
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
@@ -576,32 +583,41 @@ ACCOUNT_MEMBERS = ("label", "state", "week_left", "five_hour_left", "week_reset"
 POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
 NUMBERS_FILE = "account-numbers.json"
 STOP_FAILED_TEXT = "could not stop the manager; trying again"
+MANAGER_REASON_TEXT = "the owner has the details"
 UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped; trying again"
 
 
-def _accounts(capacity: Mapping) -> list[tuple[bool, list[str]]]:
-    """Each account as (has an address, its profiles sorted), in no particular order."""
+def _accounts(capacity: Mapping) -> list[tuple[bool, list[str], str]]:
+    """Each account as (has an address, its profiles sorted, its counted profile), in no order."""
     accounts = []
     for entry in capacity["profiles"]:
         if entry["duplicate_of"] is None:
             accounts.append((entry["account"] is not None,
-                             sorted({entry["profile"], *entry["same_account_as"]})))
+                             sorted({entry["profile"], *entry["same_account_as"]}),
+                             entry["profile"]))
     return accounts
 
 
 def account_numbers(capacity: Mapping, previous: Mapping[str, int],
                     established: Collection[str] = ()) -> dict[str, int]:
     accounts = sorted(_accounts(capacity), key=lambda account: (not account[0], account[1][0]))
+    address = {entry["profile"]: entry["account"] for entry in capacity["profiles"]}
+    before = established if isinstance(established, Mapping) else {}
+    claims = []
+    for index, (_, profiles, counted) in enumerate(accounts):
+        for number in {previous[name] for name in profiles if name in previous}:
+            holders = [name for name in profiles if previous.get(name) == number]
+            claims.append((
+                not any(name in established for name in holders),
+                -sum(address[name] is not None and before.get(name) == address[name]
+                     for name in holders),
+                -len(holders), previous.get(counted) != number, number, index))
+    numbered: dict[int, int] = {}
     taken: set[int] = set()
-    kept: dict[int, int] = {}
-    for index, (_, profiles) in enumerate(accounts):
-        held = sorted((name not in established, previous[name]) for name in profiles
-                      if name in previous and previous[name] not in taken)
-        held = [number for _, number in held]
-        if held:
-            kept[index] = held[0]
-            taken.add(held[0])
-    numbered = dict(kept)
+    for *_, number, index in sorted(claims):
+        if index not in numbered and number not in taken:
+            numbered[index] = number
+            taken.add(number)
     for index, _ in sorted(enumerate(accounts), key=lambda item: item[1][1][0]):
         if index not in numbered:
             number = 1
@@ -609,7 +625,7 @@ def account_numbers(capacity: Mapping, previous: Mapping[str, int],
                 number += 1
             numbered[index] = number
             taken.add(number)
-    return {name: numbered[index] for index, (_, profiles) in enumerate(accounts)
+    return {name: numbered[index] for index, (_, profiles, _) in enumerate(accounts)
             for name in profiles}
 
 
@@ -679,6 +695,10 @@ def scrub(view: Mapping, pool: Mapping | None = None,
                 result["account_label"] = accounts.get(node.get("sprint_id"))
                 if result.get("stop_text") is not None:
                     result["stop_text"] = STOP_FAILED_TEXT
+                if node.get("manager_state") == "stalled":
+                    result["manager_text"] = STALLED_TEXT
+            if node.get("type") == "inbox_item" and node.get("reason") == "manager":
+                result["last_reason"] = MANAGER_REASON_TEXT
             return result
         if isinstance(node, list):
             return [labelled(member) for member in node]
