@@ -978,6 +978,19 @@ class PoolTest(unittest.TestCase):
         self.assertEqual(guest.sprint_labels({"old": sprint}, {}, {"old": "Account 1"}),
                          {"old": "Account 1"})
 
+    def test_a_detached_sprint_has_no_label_even_when_its_profile_name_is_numbered_again(self):
+        sprint = dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                     manager=Manager(STARTED, at(5), "b", "m"))
+        self.assertEqual(guest.sprint_labels({"old": sprint}, guest.profile_labels({"b": 2}),
+                                             {"old": None}), {})
+
+    def test_the_numbers_file_keeps_a_detached_sprint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / guest.NUMBERS_FILE
+            guest.write_numbers(path, {"a": 1}, {"s-1": (None, "h@corp.invalid"), "s-2": (None, "")})
+            self.assertEqual(guest.read_retired(path),
+                             {"s-1": (None, "h@corp.invalid"), "s-2": (None, "")})
+
 
 class DoorTest(unittest.TestCase):
     def test_the_door_refusal_table(self):

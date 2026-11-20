@@ -97,11 +97,13 @@ account for a new address), it goes to the account whose profiles holding it kep
 holders, then to the one whose counted profile held it, then by the order above; the others keep
 another number they held or take a free one. The numbering lives in `NUMBERS_FILE`, beside the event
 log (`read_numbers`, `read_retired`, `write_numbers`; an unreadable file numbers afresh). The file
-holds the numbers and, for each running sprint whose profile was removed while an account address it
-had is still held by another profile, the number and address its sprint keeps (`retired`, by sprint
-id, so a restart keeps the label and a profile name given to another account later never moves it).
+holds the numbers and, for each running sprint whose profile was removed, the number and address
+its sprint keeps while another profile still holds that address (`retired`, by sprint id, so a
+restart keeps the label and a profile name given to another account later never moves it); once no
+profile holds the address, or none did, the entry stays with a None number, so the sprint is
+detached from the name for good and has no label.
 `sprint_labels` gives the label of the account each running sprint's manager is on, a `retired` one
-first, and `scrub` adds it as `account_label` to
+first (a detached one has none), and `scrub` adds it as `account_label` to
 every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
 `STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). No profile name, address, organisation or
 proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
@@ -664,15 +666,19 @@ def running_managers(sprints: Mapping[str, SprintState]) -> dict[str, str]:
 
 
 def sprint_labels(sprints: Mapping[str, SprintState], labels: Mapping[str, str],
-                  retired: Mapping[str, str] = MappingProxyType({})) -> dict[str, str]:
+                  retired: Mapping[str, str | None] = MappingProxyType({})) -> dict[str, str]:
     """The account label of each running sprint: `retired[sprint_id]` when the sprint's profile left
-    while it ran (a profile name can be given to another account since), else its profile's label."""
-    return {sprint_id: retired[sprint_id] if sprint_id in retired else labels[profile]
-            for sprint_id, profile in running_managers(sprints).items()
-            if sprint_id in retired or profile in labels}
+    while it ran (a profile name can be given to another account since; a None one is detached and
+    has no label, never its name's), else its profile's label."""
+    found = {}
+    for sprint_id, profile in running_managers(sprints).items():
+        label = retired[sprint_id] if sprint_id in retired else labels.get(profile)
+        if label is not None:
+            found[sprint_id] = label
+    return found
 
 
-def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int, str]]]:
+def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int | None, str]]]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"),
                               object_pairs_hook=reject_duplicate_keys,
@@ -688,7 +694,7 @@ def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int, st
     if (not isinstance(numbers, dict) or not isinstance(retired, dict)
             or not all(isinstance(key, str) and number(value) for key, value in numbers.items())
             or not all(isinstance(key, str) and isinstance(value, list) and len(value) == 2
-                       and number(value[0]) and isinstance(value[1], str)
+                       and (value[0] is None or number(value[0])) and isinstance(value[1], str)
                        for key, value in retired.items())):
         return {}, {}
     return dict(numbers), {key: (value[0], value[1]) for key, value in retired.items()}
@@ -698,12 +704,12 @@ def read_numbers(path: Path) -> dict[str, int]:
     return _read_numbering(path)[0]
 
 
-def read_retired(path: Path) -> dict[str, tuple[int, str]]:
+def read_retired(path: Path) -> dict[str, tuple[int | None, str]]:
     return _read_numbering(path)[1]
 
 
 def write_numbers(path: Path, numbers: Mapping[str, int],
-                  retired: Mapping[str, tuple[int, str]] = MappingProxyType({})) -> None:
+                  retired: Mapping[str, tuple[int | None, str]] = MappingProxyType({})) -> None:
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:

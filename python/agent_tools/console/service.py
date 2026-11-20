@@ -4259,7 +4259,9 @@ class ConsoleService:
         directory is not a list (`_scan_profiles`) and leaves them as they are. The number of a
         removed profile that a sprint still runs on is kept for that sprint, with the address the
         profile had, while a profile still on that address holds the number, so the sprint keeps
-        its account label and a number given to another account never labels it. It is kept in
+        its account label and a number given to another account never labels it; when none does,
+        or none had, the sprint is kept detached (a None number) so a profile name recreated for
+        another account never labels it. It is kept in
         `account-numbers.json` too, so a restart keeps the label, and by sprint, so a profile name
         given to another account later does not move it. A write that fails and a profiles directory
         that cannot be listed are each named once on stderr until the next good one (`numbers_unwritten`,
@@ -4274,16 +4276,17 @@ class ConsoleService:
                 entry["profile"]: entry["account"] for entry in inputs["capacity"]["profiles"]
                 if entry["account"] is not None}
             managers = guest.running_managers(self._sprints)
-            gone = {**self._retired_numbers,
-                    **{sprint_id: (self._account_numbers[name], before[name])
+            gone = {**{sprint_id: (
+                         (self._account_numbers[name], before[name])
+                         if name in self._account_numbers and name in before else (None, ""))
                        for sprint_id, name in managers.items()
-                       if name not in numbers and name in self._account_numbers
-                       and name in before}}
+                       if name not in numbers and sprint_id not in self._retired_numbers},
+                    **self._retired_numbers}
             self._retired_numbers = {
-                sprint_id: (number, address) for sprint_id, (number, address) in gone.items()
-                if sprint_id in managers
-                and any(numbers[other] == number and now == address
-                        for other, now in self._numbers_established.items())}
+                sprint_id: (number, address) if number is not None and any(
+                    numbers[other] == number and now == address
+                    for other, now in self._numbers_established.items()) else (None, address)
+                for sprint_id, (number, address) in gone.items() if sprint_id in managers}
             self._account_numbers = numbers
         if (self._account_numbers, self._retired_numbers) != self._numbers_saved:
             try:
@@ -4322,8 +4325,8 @@ class ConsoleService:
             pool = guest.pool_view(inputs["capacity"], self._account_numbers)
             running = guest.sprint_labels(
                 self._sprints, guest.profile_labels(self._account_numbers),
-                guest.profile_labels(
-                    {sprint_id: number for sprint_id, (number, _) in self._retired_numbers.items()}))
+                {sprint_id: None if number is None else f"Account {number}"
+                 for sprint_id, (number, _) in self._retired_numbers.items()})
             for login, projects in access.colleagues.items():
                 derived = guest.mark_steer(
                     guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running),
@@ -5787,8 +5790,8 @@ class ConsoleService:
                 except account_remove.RemoveFailed as error:
                     self._record_removal(profile, "remove_failed", error.kind)
                     raise
-                listed = self._read_profiles()
-                if profile in listed:
+                listed = self._scan_profiles()
+                if listed is None or profile in listed:
                     self._record_removal(profile, "remove_failed", "still_listed")
                     raise account_remove.RemoveFailed("still_listed")
                 with self._ingest:

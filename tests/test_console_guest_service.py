@@ -28,7 +28,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    capacity, console, guest, peer, pin, serve_probe_check, service, signin, write_guard)
+    account_remove, capacity, console, guest, peer, pin, serve_probe_check, service, signin,
+    write_guard)
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
     GOAL_STATED, MANAGER_STARTED, SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
@@ -697,6 +698,66 @@ class ScopedReadTest(GuestCase):
         dirs[:] = [a, c]
         svc.poll_sessions()
         self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": None}))
+
+    def test_a_removed_only_profile_recreated_on_another_address_does_not_label_its_sprint(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", "h-zq@corp-zq.invalid"),
+            signed_in_row("b-zq2", "w-zq@corp-zq.invalid")])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": "Account 2"}))
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": None}))
+        svc._fold(svc.log.append([signed_in_row("b-zq2", "other-zq@corp-zq.invalid")]))
+        dirs.append(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": None}))
+        svc.close()
+        again = self.start(profile_dirs=[a, b])
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1", "Account 2"], {"s-p01": None}))
+
+    def test_a_removal_whose_listing_fails_is_not_recorded_and_leaves_the_numbering(self):
+        self.seed()
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+
+        class Listing:
+            failing = False
+
+            def __iter__(self):
+                if self.failing:
+                    raise PermissionError("profiles")
+                return iter([a, b])
+
+        listing = Listing()
+
+        def remover(name):
+            listing.failing = True
+
+        svc = self.start(profile_dirs=listing, signin_reader=lambda one: signin.Status(
+            "signed_in", None), signer_out=lambda one: None, account_remover=remover)
+        svc.poll_sessions()
+        numbers = self.store.with_name(guest.NUMBERS_FILE)
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "b-zq2": 2})
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(account_remove.RemoveFailed):
+                svc.remove_account("b-zq2", "b-zq2")
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "b-zq2": 2})
+        listing.failing = False
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc)[0], ["Account 1", "Account 2"])
 
     def test_a_removed_profiles_label_ends_when_the_profile_holding_its_account_leaves_it(self):
         self.seed()
