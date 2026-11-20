@@ -63,7 +63,7 @@ export const meta = {
 // probe, no lock), syncs a branch that is behind the integration branch outside any lock (a conflict resolved and reviewed first), pushes the synced head in a look-push call and stops at
 // awaiting-look { issue, pr, head, reason, covers, pictures? (the before/after pictures verify wrote), flaky?, outside_fixes?, ways, cont } with cont.look = {pr, head}; it holds no lock and merges nothing.
 // A read with neither verdict stops at stage look after verify (in ship and ready mode alike), and ready mode reports look: {verdict, covers}.
-// A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186).
+// A landing under a recorded approval ticks the look marker in step 0 of its close-out call (look-approval tick); a reply that did not tick is logged, never a stop (#1186). The same landing leaves out of the hold the criterion that the setup's look read names in acs (the issue's own marker line, found by its place, never by the plan's wording), so no owner check is posted for it (#1356).
 //
 // FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
 // the first poll into the pr call, a moved round's renew into its push call, its lock move into its checks call, and the look tick into the close-out call (#1186). Kept separate, each with a program
@@ -202,7 +202,7 @@ const sameSha = (a, b) => {
 const fuller = (a, b) => { const x = normSha(a), y = normSha(b); return y.length > x.length ? y : x }
 const REVIEW_STATE = { type: 'string', enum: ['available', 'blocked', 'unsupported', 'absent'] }
 // #1139: the look-approval marked verdict the setup reads once per run; error carries the detail of its failure.
-const LOOK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['marked', 'unmarked', 'error'] }, covers: STRS, detail: { type: 'string' } }, required: ['verdict'] }
+const LOOK_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['marked', 'unmarked', 'error'] }, covers: STRS, acs: STRS, detail: { type: 'string' } }, required: ['verdict'] }
 const SETUP_SCHEMA = {
   type: 'object',
   properties: {
@@ -446,7 +446,7 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - review: the command ids at bindings.workflow.review.code and .plan (omit an absent one); review_state: for code and plan, the state of the capability review.code and review.plan (available, blocked or unsupported; absent if the capability is missing).
 - knowledge: bindings.paths.standards, bindings.paths.hints and bindings.paths.rejections, each as given (empty when absent).
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).
-Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked) and covers as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
+Then run alone and exactly: look-approval marked --repo <slug> --issue ${ISSUE} and return its verdict (marked or unmarked), covers and acs as look; on a non-zero exit return look with verdict error and the error and detail of its JSON line as detail.`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
 // #992: labels of reviews that answered twice with no usable review (readReview). Not dead agents: the breaker does not count them.
@@ -734,6 +734,8 @@ const LOOK = isEntry(setup.look) ? setup.look : null
 const LOOK_READ = !!LOOK && (LOOK.verdict === 'marked' || LOOK.verdict === 'unmarked')
 const MARKED = LOOK_READ && LOOK.verdict === 'marked'
 const COVERS = MARKED && Array.isArray(LOOK.covers) ? LOOK.covers.filter(c => typeof c === 'string' && c.trim()) : []
+// #1356: the ids of the criteria the issue's own look-marker lines name (look-approval marked, acs); a plan may reword that criterion, so its id, never its text, finds it.
+const LOOK_ACS = MARKED && Array.isArray(LOOK.acs) ? LOOK.acs.filter(a => typeof a === 'string' && a.trim()).map(a => a.trim().toUpperCase()) : []
 const LOOK_REASON = `issue ${ISSUE} needs the owner's look before merge`
 const LOOK_WAYS = `Resume with cont and look {answer: approve, head: <head>, message?} to land on the approval recorded for that head (the owner records it where they answered; this program never posts one, so an approve with none recorded stops), or look {answer: fix, head: <head>, words: <the owner's words>, message?} to approve that head with one fix, or look {answer: changes, words: <the owner's words>} to ask for a change.`
 // #1139: the head the owner's approval was recorded for (an approved cont carries it); a marked delivery stops at awaiting-look until it holds one.
@@ -831,7 +833,9 @@ const covers = (checks, ids) => ids.filter(id => !checks.some(c => c && c.ac ===
 // The folded release reply of this run's hold call, or null (#801).
 let landRelease = null
 const closeOut = async (PR, mergeCommit, W, prHead, lock = null) => {
-  const acceptance = plan ? plan.acceptance : null
+  const planned = plan ? plan.acceptance : null
+  // #1356: a landing under a recorded approval answers the criterion the issue's look-marker line names: the close-out ticks it, so the hold leaves it out and raises no second ask.
+  const acceptance = planned && MARKED && approvedHead ? planned.filter(a => !(a && typeof a.id === 'string' && LOOK_ACS.includes(a.id.toUpperCase()))) : planned
   if (!acceptance) return stop('close-out', { pr: PR, details: 'merged, but no plan acceptance to grade the issue against; close out by hand' })
   const unknown = badKinds(acceptance)
   if (unknown.length) return stop('close-out', { pr: PR, details: 'merged, but a plan criterion has a kind that is not code, evidence, human or note; close out by hand', bad_kinds: unknown })
@@ -895,7 +899,7 @@ ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType
   if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true || (notes.length && co.notes_posted !== true)) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
   const lookTick = tickStep ? (co.look_tick || null) : null
   if (tickStep && !(lookTick && ['ticked', 'already', 'unmarked'].includes(lookTick.verdict))) log(`close-out: the look marker of issue ${ISSUE} was not ticked: ${lookTick ? lookTick.verdict : 'no reply'}`)
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance, fix_waves: fixWaves }
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, ...(tickStep ? { look_tick: lookTick } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: planned, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {

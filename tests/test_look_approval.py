@@ -212,15 +212,25 @@ class MarkedTest(unittest.TestCase):
         self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
         code, out = run(*self.MARKED)
         self.assertEqual((code, out), (0, {"command": "look-approval", "action": "marked", "repo": SLUG,
-                                           "issue": 7, "verdict": "marked", "covers": [WHAT]}))
+                                           "issue": 7, "verdict": "marked", "covers": [WHAT],
+                                           "acs": ["AC1"]}))
         self.assertEqual([call["argv"] for call in self.world.calls()], [ISSUE_ARGV])
+
+    def test_marked_names_the_criteria_of_the_marker_lines_by_their_place_in_the_issue(self):
+        """#1356: a plan may reword the look criterion, so the issue's own marker line is named by its AC id."""
+        body = ("## Problem\n\n- [ ] not a criterion\n\n## Acceptance criteria\n\n- [ ] [code] a test\n"
+                "- [ ] [human] before merge: " + WHAT + " \u2014 measured: the owner, on the console\n"
+                "- [ ] [human] the owner reads the notes \u2014 measured: the owner\n")
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+        code, out = run(*self.MARKED)
+        self.assertEqual((code, out["verdict"], out["acs"]), (0, "marked", ["AC2"]))
 
     def test_an_unmarked_or_fenced_body_is_unmarked(self):
         for body in ("plain", None, "```\n" + BODY + "```\n"):
             with self.subTest(body=body):
                 self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
                 code, out = run(*self.MARKED)
-                self.assertEqual((code, out["verdict"], out["covers"]), (0, "unmarked", []))
+                self.assertEqual((code, out["verdict"], out["covers"], out["acs"]), (0, "unmarked", [], []))
 
     def test_an_issue_with_no_body_key_is_a_forge_error(self):
         self.world.respond_json("gh", ISSUE_ARGV, {"number": 7})

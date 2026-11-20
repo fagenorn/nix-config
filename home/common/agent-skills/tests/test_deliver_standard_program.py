@@ -10714,6 +10714,53 @@ class LookTickTest(unittest.TestCase):
         self.assertTrue([l for l in silent["logs"] if "was not ticked: no reply" in l])
 
 
+class LookHoldTest(unittest.TestCase):
+    """#1356: the hold leaves out the criterion the issue's own look-marker line names, whatever the plan reworded it to."""
+
+    REWORDED = {"id": "AC2", "text": "Before merge, the owner judges the settings page", "kind": "human",
+                "verify": {"ac": "AC2", "kind": "human", "host": "h1", "when": {"days_after": {"event": "deployed", "days": 1}},
+                           "run": {"ask": "Does the settings page look right"}, "reason": "senses"},
+                "lint": OK_LINT}
+    LOOKED = {"verdict": "marked", "covers": ["the settings page"], "acs": ["AC2"]}
+    MERGE = "c0ffee" + "0" * 34
+
+    def deliver(self, *criteria, hold=None, look=None, close="OPEN"):
+        look = look or self.LOOKED
+        replies = {"plan": with_criteria(*criteria)}
+        args = dict(ARGS, cont=run(patch={"setup": {"look": look}}, replies=replies)[0]["cont"],
+                    look={"answer": "approve", "head": SHA})
+        held = [c for c in with_criteria(*criteria)["acceptance"] if c["id"] not in look.get("acs", []) and c["kind"] != "code"]
+        covering = {"v": 1, "merge": self.MERGE, "checks": [{"ac": c["id"], "kind": c["kind"]} for c in held]}
+        replies["hold"] = dict(HoldTest.HOLD, **dict({"block": covering}, **(hold or {})))
+        return run(args=args, replies=replies, patch={"setup": {"look": look, "head": SHA},
+                                                      "merge": {"merge_commit": self.MERGE},
+                                                      "close-out": {"issue_state": close}})
+
+    def test_an_approved_reworded_look_criterion_is_not_held(self):
+        result, calls = self.deliver(self.REWORDED, close="CLOSED")
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        self.assertNotIn("Before merge, the owner judges", hold)
+        self.assertNotIn("verify-pending run", hold)
+        self.assertIn("Every criterion is of kind code or note: post nothing", hold)
+        self.assertIn("look-approval tick", prompt(calls, "close-out"))
+        self.assertEqual(result["acceptance"][-1]["id"], "AC2")
+
+    def test_an_ordinary_human_criterion_is_still_held(self):
+        ordinary = dict(HUMAN, id="AC3")
+        result, calls = self.deliver(self.REWORDED, ordinary)
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        self.assertIn("looks right", hold)
+        self.assertNotIn("Before merge, the owner judges", hold)
+        self.assertEqual(hold.count("verify-pending run --host h1 --repo owner/repo --issue 9"), 1)
+
+    def test_a_look_read_that_names_no_criterion_holds_every_human_criterion(self):
+        result, calls = self.deliver(self.REWORDED, look={"verdict": "marked", "covers": ["the settings page"]})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("Before merge, the owner judges", prompt(calls, "hold"))
+
+
 LONG_BASH_TIMEOUT = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
                      "the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then "
                      "answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background.")

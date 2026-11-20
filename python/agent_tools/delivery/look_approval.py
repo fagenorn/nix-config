@@ -37,10 +37,13 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `base.ref`, a `commit.sha` that is not 40 lowercase hex) or a malformed successful answer
    (`look_marker.Unreadable`) is a forge error (`payload_invalid` for the last two), never `needed`.
 3. `marked` reads the issue body only (no comment, nothing posted) and prints `verdict` `marked` or
-   `unmarked` and `covers` (the criteria text), exit 0, with the same `payload_invalid` rule as
+   `unmarked`, `covers` (the criteria text) and `acs` (the `AC<n>` id of each acceptance criterion whose
+   body line is a look marker, `n` its 1-based place among the checkbox lines of the first
+   `Acceptance criteria` section, the id a plan and a verify block give it; a plan that rewords the
+   criterion is still named by its place), exit 0, with the same `payload_invalid` rule as
    `status`: an issue object with no `body` key is a forge error. The delivery programs (issue
    1139) use it to decide whether a delivery stops at awaiting look. Output keys: `repo`, `issue`,
-   `verdict`, `covers`.
+   `verdict`, `covers`, `acs`.
 4. `judge` reads `{"pr": <positive int>, "head": <40 lowercase hex or null>, "issues":
    [{"number": <positive int>, "body": <string or null>, "comments": [<REST issue comment>, ...]}]}`
    from stdin and prints `verdict` `admit` (exit 0) with `marked` (the numbers of the marked issues
@@ -90,6 +93,7 @@ from collections.abc import Callable
 from typing import Any, NoReturn
 
 from agent_tools.claims import forge_markers
+from agent_tools.console import inbox
 from agent_tools.delivery import look_marker as lm
 from agent_tools.system import forge_api
 
@@ -191,10 +195,18 @@ def _issue_body(args: argparse.Namespace) -> str | None:
 
 
 def marked(args: argparse.Namespace) -> int:
-    look = lm.read_look(_issue_body(args))
+    body = _issue_body(args)
+    look = lm.read_look(body)
     emit({"command": COMMAND, "action": "marked", "repo": args.repo, "issue": args.issue,
-          "verdict": "marked" if look.marked else "unmarked", "covers": list(look.covers)})
+          "verdict": "marked" if look.marked else "unmarked", "covers": list(look.covers),
+          "acs": _look_acs(body)})
     return 0
+
+
+def _look_acs(body: str) -> list[str]:
+    """The AC ids of the acceptance criteria whose body line is a look marker, in body order."""
+    lines = (body or "").split("\n")
+    return [inbox.ac_id(c) for c in inbox.acceptance_criteria(body or "") if lm.marker_line(lines[c.line])]
 
 
 def _reader(repo: str) -> Callable[[str], Any]:

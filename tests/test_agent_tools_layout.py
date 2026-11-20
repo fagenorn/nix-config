@@ -39,6 +39,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.hosts.model_pricing",  # spend
     }),
     "delivery": frozenset({
+        "agent_tools.console.inbox",  # look_approval
         "agent_tools.claims.forge_markers",  # look_marker, look_approval
         "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
     }),
