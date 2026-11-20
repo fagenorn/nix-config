@@ -287,6 +287,17 @@ class ProjectRecordsTest(unittest.TestCase):
         self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [100, 60])
         self.assertEqual(r, records())
 
+    def test_a_project_registered_after_another_keeps_its_own_spend_on_the_registration_day(self):
+        # Nothing shows the earlier project ever held this root: no activation row of the root
+        # precedes this project's registration, so the other project's registration under its own
+        # root cuts nothing from this project's spend.
+        events = [Event(-2, f"{DAY1}T09:00:00+00:00", "project.registered", O, {"root": O_ROOT}),
+                  Event(-1, f"{DAY1}T10:00:00+00:00", "project.registered", P, {"root": P_ROOT}),
+                  *EVENTS]
+        r = records(events=events)
+        self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [100, 60])
+        self.assertEqual([a["commit"] for a in r["activations"]], ["c" * 40])
+
     def test_no_spend_view_is_null_spend_and_the_rest_is_still_written(self):
         r = records(spend=None)
         self.assertIsNone(r["spend"])

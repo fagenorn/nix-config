@@ -100,14 +100,18 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
     unregistration names the root it ended in its payload, else the root the fold holds for the project.
     A registration names only the new root, so when retention pruned the registration that put the
     other project at `root`, its move away is told only by being the newest registration of another
-    project under a different root before `project_id`'s own earliest registration at `root`.
+    project under a different root before `project_id`'s own earliest registration at `root`, and only
+    when an activation row of `root` precedes that registration: nothing else shows that anyone held
+    `root` first, and without it a project registered after another owes that one nothing.
     """
     roots: dict[str, str] = {}
     left = None
     moved = before_own = None
-    own_seen = False
+    own_seen = root_used = False
     for event in rows:
         other = event.project
+        if event.kind in (ACTIVATION_STARTED, ACTIVATION_FINISHED):
+            root_used = root_used or (isinstance(event.payload, dict) and event.payload.get("root") == root)
         if event.kind == REGISTERED and isinstance(other, str):
             now = event.payload.get("root") if isinstance(event.payload, dict) else None
             if other != project_id and roots.get(other) == root and now != root:
@@ -115,7 +119,7 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
             if other != project_id and isinstance(now, str) and now != root:
                 moved = event
             elif other == project_id and now == root and not own_seen:
-                own_seen, before_own = True, moved
+                own_seen, before_own = True, moved if root_used else None
             if isinstance(now, str):
                 roots[other] = now
         elif event.kind == PROJECT_UNREGISTERED and isinstance(other, str):
