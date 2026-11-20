@@ -54,10 +54,12 @@ def step_event(seq, at, **kwargs):
     return Event(seq, at, approve.STEP, None, step_payload(**kwargs))
 
 
-def pull_event(seq, at, plan_id, number, state, head=None):
+def pull_event(seq, at, plan_id, number, state, head=None, base="develop"):
     payload = {"plan_id": plan_id, "number": number, "url": "u", "state": state}
     if head is not None:
         payload["head"] = head
+    if base is not None:
+        payload["base"] = base
     return Event(seq, at, approve.PULL, None, payload)
 
 
@@ -133,7 +135,7 @@ class RowTest(unittest.TestCase):
         kind, project, payload = approve.pull_row("p", 7, "u", "ready")
         self.assertEqual((kind, project), ("adoption.pull_request", None))
         self.assertEqual(payload, {"plan_id": "p", "number": 7, "url": "u", "state": "ready",
-                                   "head": None})
+                                   "head": None, "base": None})
         for args in (("p", 7, "u", "draft"), ("p", 0, "u", "ready"), ("p", True, "u", "ready")):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 approve.pull_row(*args)
@@ -154,10 +156,10 @@ class MergeRefusalTest(unittest.TestCase):
     def test_the_refusals_keep_their_order(self):
         other = "d" * 40
 
-        def folded(state, head, pull_request=MADE, step="opened"):
+        def folded(state, head, pull_request=MADE, step="opened", base="develop"):
             events = [step_event(1, "a1", plan_id="p1", step=step, pull_request=pull_request)]
             if state is not None:
-                events.append(pull_event(2, "a2", "p1", 7, state, head=head))
+                events.append(pull_event(2, "a2", "p1", 7, state, head=head, base=base))
             return approve.adoptions(events)["p1"]
 
         legacy = {"number": 7, "url": "https://example.test/pull/7"}
@@ -165,6 +167,10 @@ class MergeRefusalTest(unittest.TestCase):
             (folded("ready", other), approve.MOVED),
             (folded("failing", COMMIT), approve.FAILING),
             (folded("failing", other), approve.MOVED),
+            (folded("ready", COMMIT, base="release"), approve.RETARGETED),
+            (folded("failing", COMMIT, base="release"), approve.RETARGETED),
+            (folded("ready", COMMIT, base=None), approve.UNREAD),
+            (folded("ready", other, base="release"), approve.MOVED),
             (folded("open", COMMIT), approve.NOT_READY_PULL),
             (folded("ready", COMMIT, legacy), approve.FOUND),
             (folded("ready", other, {**MADE, "created": False}), approve.FOUND),
@@ -199,7 +205,12 @@ class MergeRefusalTest(unittest.TestCase):
             approve.pull_row("p", 7, "u", "ready", "abc")
         self.assertEqual(
             approve.pull_row("p", 7, "u", "failing", "e" * 40)[2],
-            {"plan_id": "p", "number": 7, "url": "u", "state": "failing", "head": "e" * 40})
+            {"plan_id": "p", "number": 7, "url": "u", "state": "failing", "head": "e" * 40,
+             "base": None})
+        for base in ("", 5):
+            with self.subTest(base=base), self.assertRaises(ValueError):
+                approve.pull_row("p", 7, "u", "ready", "e" * 40, base)
+        self.assertEqual(approve.pull_row("p", 7, "u", "ready", None, "main")[2]["base"], "main")
 
     def test_an_opened_step_records_whether_the_console_made_its_pull_request(self):
         for pull in (MADE, {**MADE, "created": False}, {"number": 7, "url": "https://x.test/7"}):
@@ -1284,10 +1295,45 @@ class InboxEntryTest(unittest.TestCase):
         self.assertEqual(by["p2"]["headline"], "Merge is not offered for the adoption of o/r")
         self.assertEqual(by["p4"]["why"], approve.MOVED_WHY)
         self.assertEqual(by["p7"]["why"], approve.CLOSED_WHY)
-        self.assertNotIn("closed", [found[e["plan_id"]]["pull_state"]
-                                    for e in approve.inbox_entries(found)])
         self.assertEqual([e["plan_id"] for e in approve.inbox_entries(found)],
-                         ["p1", "p2", "p4"])
+                         ["p1", "p2", "p4", "p7"])
+
+    def test_a_retargeted_pull_request_keeps_its_card_without_merge(self):
+        events = [step_event(1, "a1", plan_id="p1", pull_request=MADE),
+                  pull_event(2, "b1", "p1", 7, "ready", head=COMMIT, base="release"),
+                  step_event(3, "a2", plan_id="p2", pull_request=MADE),
+                  pull_event(4, "b2", "p2", 7, "open", head=COMMIT, base="release"),
+                  step_event(5, "a3", plan_id="p3", pull_request=MADE),
+                  pull_event(6, "b3", "p3", 7, "open", head=COMMIT)]
+        items = approve.inbox_entries(approve.adoptions(events))
+        self.assertEqual([(e["plan_id"], e["merge"], e["why"]) for e in items],
+                         [("p1", False, approve.RETARGETED_WHY),
+                          ("p2", False, approve.RETARGETED_WHY)])
+
+    def test_a_closed_card_survives_the_shown_registration_going_away(self):
+        found = approve.adoptions([step_event(1, "a1", plan_id="p1", pull_request=MADE),
+                                   pull_event(2, "b1", "p1", 7, "closed", head=COMMIT)])
+        for shown in (None, "/srv/b"):
+            with self.subTest(shown=shown):
+                self.assertEqual([e["plan_id"] for e in approve.inbox_entries(found, shown)],
+                                 ["p1"])
+        self.assertEqual(approve.inbox_entries(found, "/srv/r"), [])
+
+    def test_a_closed_card_is_superseded_by_a_later_opened_plan_of_the_same_root(self):
+        events = [step_event(1, "a1", plan_id="x", pull_request=MADE),
+                  pull_event(2, "b1", "x", 7, "closed", head=COMMIT),
+                  step_event(3, "a2", plan_id="x2", pull_request=MADE),
+                  pull_event(4, "b2", "x2", 7, "merged", head=COMMIT),
+                  step_event(5, "a3", plan_id="y", root="/srv/c", pull_request=MADE),
+                  pull_event(6, "b3", "y", 7, "closed", head=COMMIT),
+                  step_event(7, "a0", plan_id="z", root="/srv/c", pull_request=MADE),
+                  pull_event(8, "b4", "z", 7, "closed", head=COMMIT)]
+        found = approve.adoptions(events)
+        self.assertEqual([e["plan_id"] for e in approve.inbox_entries(found, "/srv/b")], ["y"])
+        later = approve.adoptions([step_event(9, "a4", plan_id="x3", pull_request=MADE),
+                                   pull_event(10, "b5", "x3", 7, "ready", head=COMMIT)], found)
+        self.assertEqual([e["plan_id"] for e in approve.inbox_entries(later, "/srv/b")],
+                         ["y", "x3"])
 
 
 class RetainedTest(unittest.TestCase):
@@ -1578,27 +1624,41 @@ class GitHubForgeTest(unittest.TestCase):
                 forge = self.forge({"state": "open", "merged": False,
                                     "mergeable_state": mergeable, "head": {"sha": head}})
                 self.assertEqual(forge.pull_request_reading("o/r", 7),
-                                 {"state": "ready", "head": head})
+                                 {"state": "ready", "head": head, "base": None,
+                                  "checks_error": None})
                 self.assertEqual([argv for argv, _ in self.calls], [["api", "repos/o/r/pulls/7"]])
-        for mergeable in ("behind", "dirty", "unknown", "draft", None):
+        for mergeable in ("dirty", "unknown", "draft", None):
             with self.subTest(mergeable=mergeable):
                 answer = {"state": "open", "merged": False, "head": {"sha": head}}
                 if mergeable:
                     answer["mergeable_state"] = mergeable
                 self.assertEqual(self.forge(answer).pull_request_reading("o/r", 7),
-                                 {"state": "open", "head": head})
+                                 {"state": "open", "head": head, "base": None,
+                                  "checks_error": None})
                 self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.forge({"state": "closed", "merged": True, "head": {"sha": head}})
-                         .pull_request_reading("o/r", 7), {"state": "merged", "head": head})
+                         .pull_request_reading("o/r", 7),
+                         {"state": "merged", "head": head, "base": None, "checks_error": None})
         self.assertEqual(self.forge({"state": "closed", "merged": False, "head": {"sha": head}})
-                         .pull_request_reading("o/r", 7), {"state": "closed", "head": head})
+                         .pull_request_reading("o/r", 7),
+                         {"state": "closed", "head": head, "base": None, "checks_error": None})
         for answer in ({}, []):
             with self.subTest(answer=answer), self.assertRaises(ForgeError) as bad:
                 self.forge(answer).pull_request_reading("o/r", 7)
             self.assertEqual(bad.exception.code, "payload_invalid")
         reading = self.forge(self.blocked("abc")).pull_request_reading("o/r", 7)
-        self.assertEqual(reading, {"state": "open", "head": None})
+        self.assertEqual(reading, {"state": "open", "head": None, "base": None,
+                                   "checks_error": None})
         self.assertEqual(len(self.calls), 1)
+
+    def test_the_reading_names_the_branch_the_pull_request_targets(self):
+        head = "e" * 40
+        for base, named in (({"ref": "release"}, "release"), ({"ref": ""}, None),
+                            ({"ref": 5}, None), ("release", None), (None, None)):
+            with self.subTest(base=base):
+                answer = {"state": "open", "merged": False, "mergeable_state": "clean",
+                          "head": {"sha": head}, "base": base}
+                self.assertEqual(self.forge(answer).pull_request_reading("o/r", 7)["base"], named)
 
     def test_a_blocked_pull_request_with_a_failed_check_reads_failing(self):
         head = "e" * 40
@@ -1608,27 +1668,66 @@ class GitHubForgeTest(unittest.TestCase):
                 forge = self.forge(self.blocked(), [{"check_runs": [
                     {"conclusion": "success"}, {"conclusion": conclusion}]}])
                 self.assertEqual(forge.pull_request_reading("o/r", 7),
-                                 {"state": "failing", "head": head})
+                                 {"state": "failing", "head": head, "base": None,
+                                  "checks_error": None})
                 self.assertEqual(len(self.calls), 2)
                 self.assertEqual(self.calls[1][0], ["api", "--paginate", "--slurp", pages])
         forge = self.forge(self.blocked(), [{"check_runs": [
             {"conclusion": None}, {"conclusion": "success"}, {"conclusion": "skipped"}]}],
             {"state": "pending"})
-        self.assertEqual(forge.pull_request_reading("o/r", 7), {"state": "open", "head": head})
+        self.assertEqual(forge.pull_request_reading("o/r", 7),
+                         {"state": "open", "head": head, "base": None, "checks_error": None})
         self.assertEqual([argv for argv, _ in self.calls][2],
                          ["api", f"repos/o/r/commits/{head}/status"])
         self.assertEqual(len(self.calls), 3)
+
+    def test_a_behind_pull_request_with_a_failed_check_reads_failing(self):
+        head = "e" * 40
+        behind = {**self.blocked(head), "mergeable_state": "behind"}
+        forge = self.forge(behind, [{"check_runs": [{"conclusion": "failure"}]}])
+        self.assertEqual(forge.pull_request_reading("o/r", 7),
+                         {"state": "failing", "head": head, "base": None, "checks_error": None})
+        forge = self.forge(behind, [{"check_runs": [{"conclusion": "success"}]}],
+                           {"state": "success"})
+        self.assertEqual(forge.pull_request_reading("o/r", 7),
+                         {"state": "open", "head": head, "base": None, "checks_error": None})
+        self.assertEqual(len(self.calls), 3)
+
+    def test_an_unreadable_check_result_still_returns_the_head_and_target_it_saw(self):
+        head = "e" * 40
+        answer = {**self.blocked(head), "base": {"ref": "main"}}
         for answers in ([{}], [[1]], [[{"check_runs": {}}]], [[{"x": 1}]],
-                        [[{"check_runs": []}], {}], [[{"check_runs": []}], {"state": 1}]):
-            with self.subTest(answers=answers), self.assertRaises(ForgeError) as bad:
-                self.forge(self.blocked(), *answers).pull_request_reading("o/r", 7)
-            self.assertEqual(bad.exception.code, "payload_invalid")
+                        [[{"check_runs": []}], {}], [[{"check_runs": []}], {"state": 1}],
+                        [ForgeError("gh_timeout", "api")]):
+            with self.subTest(answers=answers):
+                queue = [answer, *answers]
+
+                def gh_json(argv, cancel=None):
+                    found = queue.pop(0)
+                    if isinstance(found, BaseException):
+                        raise found
+                    return found
+                reading = approve.GitHubForge(gh_json=gh_json).pull_request_reading("o/r", 7)
+                self.assertEqual((reading["state"], reading["head"], reading["base"]),
+                                 ("open", head, "main"))
+                self.assertIsInstance(reading["checks_error"], Exception)
+
+    def test_a_cancelled_check_read_is_not_swallowed(self):
+        queue = [self.blocked()]
+
+        def gh_json(argv, cancel=None):
+            if queue:
+                return queue.pop(0)
+            raise approve.Cancelled()
+        with self.assertRaises(approve.Cancelled):
+            approve.GitHubForge(gh_json=gh_json).pull_request_reading("o/r", 7)
 
     def test_a_failure_on_a_later_page_or_in_a_commit_status_reads_failing(self):
         head = "e" * 40
         ok = {"check_runs": [{"conclusion": "success"}] * 100}
         forge = self.forge(self.blocked(), [ok, {"check_runs": [{"conclusion": "failure"}]}])
-        self.assertEqual(forge.pull_request_reading("o/r", 7), {"state": "failing", "head": head})
+        self.assertEqual(forge.pull_request_reading("o/r", 7),
+                         {"state": "failing", "head": head, "base": None, "checks_error": None})
         self.assertEqual(len(self.calls), 2)
         for status, state in (({"state": "failure"}, "failing"), ({"state": "error"}, "failing"),
                               ({"state": "pending"}, "open")):
@@ -1636,7 +1735,8 @@ class GitHubForgeTest(unittest.TestCase):
                 runs = [{"check_runs": [{"conclusion": "success" if state == "failing" else None}]}]
                 forge = self.forge(self.blocked(), runs, status)
                 self.assertEqual(forge.pull_request_reading("o/r", 7),
-                                 {"state": state, "head": head})
+                                 {"state": state, "head": head, "base": None,
+                                  "checks_error": None})
 
     def test_merge_puts_the_recorded_head_with_the_merge_method(self):
         event = threading.Event()

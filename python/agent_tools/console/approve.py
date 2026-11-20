@@ -22,9 +22,10 @@ matching `HOOK`, `why` None or a string, `lines` a list of at most `EVIDENCE_LIN
 most `LINE_CHARS` characters; a stored step without `evidence` reads as None, so rows of an earlier
 release still fold). A step in `RESUMABLE` (`applied`, `push_failed`, `open_failed`) or `opened` needs
 a string `branch` and `commit`; `opened` also needs a `pull_request` and a string `base`.
-`pull_row(plan_id, number, url, state, head=None)` returns `(PULL, None, {plan_id, number, url,
-state, head})` and raises `ValueError` unless `state` is one of `PULL_STATES` (`open`, `ready`,
-`failing`, `merged`, `closed`), `number` is a positive int and `head` is None or 40 lowercase hex. `registration_row(payload)` returns `(REGISTRATION, None, dict(payload))`
+`pull_row(plan_id, number, url, state, head=None, base=None)` returns `(PULL, None, {plan_id, number,
+url, state, head, base})` and raises `ValueError` unless `state` is one of `PULL_STATES` (`open`, `ready`,
+`failing`, `merged`, `closed`), `number` is a positive int, `head` is None or 40 lowercase hex and
+`base` is None or a non-empty string (the branch the pull request targets as read). `registration_row(payload)` returns `(REGISTRATION, None, dict(payload))`
 and raises `ValueError` unless the members are exactly `REGISTRATION_MEMBERS` (`plan_id`, `number`,
 `result`, `project_id`, `reason`, `note`), `plan_id` is a non-empty string, `number` a positive int,
 `result` one of `REGISTRATION_RESULTS` (`waiting`, `registered`, `refused`), `project_id`, `reason`
@@ -36,15 +37,17 @@ raises `ValueError` otherwise.
 Fold. `adoptions(events, state=None)` folds over a copy of `state` (never mutated): a valid step row
 sets `result[plan_id]` to the payload with `at` (the event's), `pull_state` (`open` for an `opened`
 step, else None), `pull_at` (the event's `at` for an `opened` step, else None) and `pull_head`
-(None: the head is unknown until a reading names it); a valid pull row changes `pull_state`,
-`pull_at` and `pull_head` (the row's `head`, None when the stored row has none) only when the
+and `pull_base` (None: the head and the target branch are unknown until a reading names them); a
+valid pull row changes `pull_state`, `pull_at`, `pull_head` and `pull_base` (the row's `head` and
+`base`, None when the stored row has none) only when the
 folded entry's step is `opened` and its `pull_request` number equals the row's. Invalid rows are
 skipped. `waiting(adoptions)` lists the entries with step `opened` and `pull_state` `open`, `ready`
 or `failing`, ordered by `plan_id`. `merge_refusal(adoption)` is None when Merge is offered, only
 for an `opened` entry whose `pull_request.created` is True, whose `pull_state` is `ready` and
-whose `pull_head` equals its `commit`; else the first of `NO_PULL` (none, or not `opened`),
-`MERGED`, `CLOSED_PULL`, `FOUND` (`created` not True), `UNREAD` (no head read), `MOVED` (the head
-is not the recorded commit), `FAILING`, `NOT_READY_PULL`. Every folded
+whose `pull_head` equals its `commit` and whose `pull_base` equals its `base`; else the first of
+`NO_PULL` (none, or not `opened`), `MERGED`, `CLOSED_PULL`, `FOUND` (`created` not True), `UNREAD`
+(no head or no target branch read), `MOVED` (the head is not the recorded commit), `RETARGETED`
+(the pull request no longer targets the recorded base), `FAILING`, `NOT_READY_PULL`. Every folded
 entry also has `registration`: None, or `{result, project_id, reason, note, at}` of the latest
 registration row, which folds only onto an `opened` entry whose pull request number equals the
 row's and whose `pull_state` is `merged` (any other row is ignored); a new step row resets it to
@@ -55,15 +58,17 @@ one `inbox_item` of reason `register_retry` (a question card with the single opt
 `refused` and whose plan id is not in `running`, ordered by `(registration at, plan_id)`.
 `inbox_entries(adoptions, shown_root=None)` lists one `inbox_item` of reason `adoption` per
 `opened` entry whose `pull_state` is `ready` or `failing`, or `open` with a read head that is not
-its `commit`, or `closed` while `shown_root` is not None and is not its `root`, never `merged`,
+its `commit` or a read target that is not its `base`, or `closed` while its `root` is not
+`shown_root` (None when no registration is shown) and no later `opened` entry of that root exists
+(a plan opened again is the adoption now, so the earlier closed one is superseded), never `merged`,
 ordered by `(pull_at, plan_id)`, keyed `adoption/<plan_id>`, headed `The adoption of <project_id or
 name> is ready to merge` when Merge is offered and `Merge is not offered for the adoption of
 <project_id or name>` when not, with the pull request's `url` and `number`, `answered` False,
 `waiting_since` the `pull_at`, `plan_id`, `commit`, `merge` (whether `merge_refusal` is None) and
 `why` (None, else the `*_WHY` words of the refusal: `MOVED_WHY`, `FAILING_WHY`, `FOUND_WHY`,
-`UNREAD_WHY`, `CLOSED_WHY`). `signature(plan_id)` is the sentence the pull request's body ends
+`UNREAD_WHY`, `RETARGETED_WHY`, `CLOSED_WHY`). `signature(plan_id)` is the sentence the pull request's body ends
 its plan with, `console_made(found, name, plan_id)` is true only when a found pull request's
-`title` is `title(name)` and its `body` carries that signature, and `parse_merge_request(body)`
+`title` is `title(name)` and its `body` carries that signature (the service asks only of one found after its own open failed: a pull request found before it tried to open one is never the console's), and `parse_merge_request(body)`
 takes a UTF-8 JSON object of exactly `{plan_id, number, commit}` (a non-empty plan id as
 `parse_approve_request` reads it, a positive int and 40 lowercase hex) and fails as it does. The
 words `MERGE_UNAVAILABLE`, `STALE_CARD`, `MERGING` and `MERGED_ELSEWHERE` are the service's
@@ -187,10 +192,13 @@ is the console's cancellable `gh` runner: it runs `gh` in its own group with no 
 head, base, cancel=None)` (the open pull request of that head and base as `{number, url, title,
 body}`, the title and body as the listing gives them and None when not text, else None),
 `open_pull_request(slug, head, base, title, body, cancel=None)`,
-`pull_request_reading(slug, number, cancel=None)` (`{state, head}`: `merged`, `closed`, `ready` for
-an open pull request whose `mergeable_state` is in `READY_MERGEABLE`, `failing` for a `blocked` one
-whose head has a check run of any page concluded in `FAILED_CONCLUSIONS` or a combined status in
-`FAILED_STATUSES`, else `open`; `head` is the forge's head when it is 40 hex, else None),
+`pull_request_reading(slug, number, cancel=None)` (`{state, head, base, checks_error}`: `merged`,
+`closed`, `ready` for an open pull request whose `mergeable_state` is in `READY_MERGEABLE`, `failing`
+for a `blocked` or `behind` one whose head has a check run of any page concluded in
+`FAILED_CONCLUSIONS` or a combined status in `FAILED_STATUSES`, else `open`; `head` is the forge's
+head when it is 40 hex and `base` its target branch when a non-empty string, else None; when the
+check read of such a pull request fails, the reading is still returned, `open`, with the exception
+as `checks_error` (None otherwise) so the head and target it saw are not lost),
 `merge_pull_request(slug, number, head, cancel=None)` (a merge of that head only, with the merge
 method, refusing a head that is not 40 lowercase hex before any call); the link of a pull request is
 built here from the slug and number, never read from the forge's answer. `forge_for(platform)` is
@@ -259,6 +267,7 @@ CLOSED_PULL = "the pull request of this plan was closed without merging"
 FOUND = "the console did not open this pull request"
 UNREAD = "the console has not read the pull request's head yet"
 MOVED = "the pull request's branch holds commits the console did not push"
+RETARGETED = "the pull request no longer targets the branch the console opened it against"
 FAILING = "a check of the pull request failed"
 NOT_READY_PULL = "the pull request is not ready to merge yet"
 MERGING = "the pull request of this plan is being merged"
@@ -266,6 +275,8 @@ MERGED_ELSEWHERE = ("the pull request was merged on the forge with commits the c
                     "push")
 MOVED_WHY = ("Its branch holds commits the console did not push. Review them on the forge and "
              "merge it there, or close it and choose Apply it again.")
+RETARGETED_WHY = ("Its target branch is no longer the one the console opened it against. Review it on "
+                  "the forge, or close it and choose Apply it again.")
 FAILING_WHY = "A check of its pull request failed. Open the pull request to see which one."
 FOUND_WHY = "The console did not open this pull request. Review it on the forge and merge it there."
 UNREAD_WHY = "The console has not read its pull request's head yet; Merge is offered once it has."
@@ -443,14 +454,15 @@ def step_row(payload: Mapping) -> tuple[str, None, dict]:
     return (STEP, None, dict(payload))
 
 
-def pull_row(plan_id: str, number: int, url: str, state: str,
-             head: str | None = None) -> tuple[str, None, dict]:
+def pull_row(plan_id: str, number: int, url: str, state: str, head: str | None = None,
+             base: str | None = None) -> tuple[str, None, dict]:
     if (state not in PULL_STATES or not _positive(number)
             or (head is not None and (not isinstance(head, str)
-                                      or COMMIT.fullmatch(head) is None))):
+                                      or COMMIT.fullmatch(head) is None))
+            or (base is not None and not _text(base))):
         raise ValueError("not an adoption pull request row")
     return (PULL, None, {"plan_id": plan_id, "number": number, "url": url, "state": state,
-                         "head": head})
+                         "head": head, "base": base})
 
 
 def registration_row(payload: Mapping) -> tuple[str, None, dict]:
@@ -514,16 +526,18 @@ def adoptions(events: Iterable[Event], state: dict | None = None) -> dict[str, d
                 result[payload["plan_id"]] = {
                     **payload, "at": event.at, "pull_state": "open" if opened else None,
                     "pull_at": event.at if opened else None, "pull_head": None,
-                    "registration": None}
+                    "pull_base": None, "registration": None}
             elif event.kind == PULL:
                 payload = event.payload
                 _, _, row = pull_row(payload["plan_id"], payload["number"], payload["url"],
-                                     payload["state"], payload.get("head"))
+                                     payload["state"], payload.get("head"),
+                                     payload.get("base"))
                 found = result.get(row["plan_id"])
                 if (found is not None and found["step"] == "opened"
                         and found["pull_request"]["number"] == row["number"]):
                     result[row["plan_id"]] = {**found, "pull_state": row["state"],
-                                              "pull_at": event.at, "pull_head": row["head"]}
+                                              "pull_at": event.at, "pull_head": row["head"],
+                                              "pull_base": row["base"]}
             elif event.kind == REGISTRATION:
                 _, _, row = registration_row(event.payload)
                 found = result.get(row["plan_id"])
@@ -642,10 +656,12 @@ def merge_refusal(adoption: Mapping | None) -> str | None:
     if adoption["pull_request"].get("created") is not True:
         return FOUND
     head = adoption["pull_head"]
-    if head is None:
+    if head is None or adoption["pull_base"] is None:
         return UNREAD
     if head != adoption["commit"]:
         return MOVED
+    if adoption["pull_base"] != adoption["base"]:
+        return RETARGETED
     if state == "failing":
         return FAILING
     if state != "ready":
@@ -653,25 +669,28 @@ def merge_refusal(adoption: Mapping | None) -> str | None:
     return None
 
 
-REFUSAL_WHY = {MOVED: MOVED_WHY, FAILING: FAILING_WHY, FOUND: FOUND_WHY, UNREAD: UNREAD_WHY,
-               CLOSED_PULL: CLOSED_WHY}
+REFUSAL_WHY = {MOVED: MOVED_WHY, RETARGETED: RETARGETED_WHY, FAILING: FAILING_WHY,
+               FOUND: FOUND_WHY, UNREAD: UNREAD_WHY, CLOSED_PULL: CLOSED_WHY}
 
 
-def _on_card(found: Mapping, shown_root: str | None) -> bool:
+def _on_card(found: Mapping, shown_root: str | None, adoptions: Mapping[str, Mapping]) -> bool:
     if found["step"] != "opened":
         return False
     state = found["pull_state"]
     if state in ("ready", "failing"):
         return True
     if state == "open":
-        return found["pull_head"] is not None and found["pull_head"] != found["commit"]
+        return ((found["pull_head"] is not None and found["pull_head"] != found["commit"])
+                or (found["pull_base"] is not None and found["pull_base"] != found["base"]))
     if state == "closed":
-        return shown_root is not None and found["root"] != shown_root
+        return found["root"] != shown_root and not any(
+            other["root"] == found["root"] and other["step"] == "opened"
+            and other["at"] > found["at"] for other in adoptions.values())
     return False
 
 
 def inbox_entries(adoptions: Mapping[str, Mapping], shown_root: str | None = None) -> list[dict]:
-    cards = [found for found in adoptions.values() if _on_card(found, shown_root)]
+    cards = [found for found in adoptions.values() if _on_card(found, shown_root, adoptions)]
     cards.sort(key=lambda found: (found["pull_at"], found["plan_id"]))
     items = []
     for found in cards:
@@ -1173,18 +1192,27 @@ class GitHubForge:
         head = answer.get("head")
         sha = head.get("sha") if isinstance(head, dict) else None
         sha = sha if isinstance(sha, str) and COMMIT.fullmatch(sha) else None
+        target = answer.get("base")
+        target = target.get("ref") if isinstance(target, dict) else None
+        seen = {"head": sha, "base": target if _text(target) else None, "checks_error": None}
         if answer.get("merged") is True:
-            return {"state": "merged", "head": sha}
+            return {"state": "merged", **seen}
         if answer.get("state") == "closed":
-            return {"state": "closed", "head": sha}
+            return {"state": "closed", **seen}
         if answer.get("state") != "open":
             raise ForgeError("payload_invalid", "the pull request answer has no state")
         mergeable = answer.get("mergeable_state")
         if mergeable in READY_MERGEABLE:
-            return {"state": "ready", "head": sha}
-        if mergeable == "blocked" and sha is not None and self._failed(slug, sha, cancel):
-            return {"state": "failing", "head": sha}
-        return {"state": "open", "head": sha}
+            return {"state": "ready", **seen}
+        if mergeable in ("blocked", "behind") and sha is not None:
+            try:
+                if self._failed(slug, sha, cancel):
+                    return {"state": "failing", **seen}
+            except Cancelled:
+                raise
+            except Exception as error:
+                return {"state": "open", **{**seen, "checks_error": error}}
+        return {"state": "open", **seen}
 
     def _failed(self, slug: str, head: str, cancel) -> bool:
         pages = self._gh_json(["api", "--paginate", "--slurp",

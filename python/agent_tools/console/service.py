@@ -620,7 +620,7 @@ closes the log. When the call returned, `_record_reading` appends the `merged` r
 (any exception but `approve.Cancelled`, which refuses `register.STOPPING`) is first one line
 `console: adoption_merge_error <json>` (the plan, the number, the exception and, for a `ForgeError`,
 its code, detail and transience), then one `forge.pull_request_reading`, recorded as read, never as
-requested: `merged` at the folded commit is success as above, `merged` at another head is 409
+requested, and only while no other reading was recorded since it began (a `merged` one always): `merged` at the folded commit is success as above, `merged` at another head is 409
 `approve.MERGED_ELSEWHERE` (`merged` with no readable head is `approve.merge_failure(error)`) with
 `register_merged` still dispatched, any other reading refuses with `approve.merge_refusal` of the
 refolded adoption, else `approve.merge_failure(error)`; a failed re-read is one line `console:
@@ -1133,18 +1133,20 @@ is in `KEPT_KINDS`, but retention leaves the newest row of each kind whatever it
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
 (`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_reading(slug, number,
-cancel=...)` (the state and the head), the pull request of each adoption whose step is `opened` and
+cancel=...)` (the state, the head and the target branch), the pull request of each adoption whose step is `opened` and
 whose state is still `open`, `ready` or `failing` (`approve.waiting`), in the repository its recorded link names
 (`approve.pull_slug`, never the checkout's origin of the day), one after another and never inside the ingest lock; the
 stop flag cancels the call in flight and a read finished after the stop appends nothing. Only a
-state or head that differs from the folded one is appended (`_record_reading`), as one
+state, head or target that differs from the folded one is appended (`_record_reading`), as one
 `adoption.pull_request` row, and the view is published, so a ready or failing pull request is one
 inbox item (`approve.inbox_entries`, see `view.py`) until it is merged, closed or reads open again;
 a merged or closed one is read no more. Each plan has a mark bumped by every row appended; the poll
 takes it under the lock before its read and its reading is recorded only while the mark is
 unchanged, and nothing is recorded over `merged`, so a reading made before a click merged cannot
 bring the card back. A failed read is one stderr line `console: adoption_poll_failed <plan_id> <Type>:
-<message>` and the item stays as it was. An exception escaping a round is one stderr line
+<message>` and the item stays as it was; a pull request whose head was read but whose checks were
+not (`checks_error`) records that head and target with one such line, as `open` unless it was
+`failing`, so a moved head never keeps its Merge. An exception escaping a round is one stderr line
 `console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console merges only
 on the owner's Merge (`POST /api/adoption-merge`, ADR-console-086).
 
@@ -5728,7 +5730,12 @@ class ConsoleService:
 
     def _pull_request(self, slug: str, branch: str, base: str, name: str, shown: Mapping,
                       stop: threading.Event, where: dict) -> tuple[dict | None, Exception | None]:
-        """The branch's pull request, found or opened; (None, the failure) when neither worked."""
+        """The branch's pull request, found or opened; (None, the failure) when neither worked.
+
+        One found before the console tried to open any is not the console's, whatever its words say
+        (a person can open one with the same title and plan sentence); one found after its own open
+        failed is the console's only when it carries the console's title and plan sentence.
+        """
         try:
             found = self._forge.find_pull_request(slug, branch, base, cancel=stop)
         except approve.Cancelled:
@@ -5738,7 +5745,7 @@ class ConsoleService:
             return None, error
         plan_id = shown["plan_id"]
         if found is not None:
-            return self._recorded(found, approve.console_made(found, name, plan_id)), None
+            return self._recorded(found, False), None
         try:
             return self._recorded(self._forge.open_pull_request(
                 slug, branch, base, approve.title(name), approve.body(shown), cancel=stop),
@@ -8282,20 +8289,34 @@ class ConsoleService:
 
         A reading is refused for a plan whose pull request is not that number, is already
         merged, already reads the same, or (when `mark` is given) has recorded another reading
-        since the mark was taken: a poll that read before a click merged must not undo it.
+        since the mark was taken: a poll that read before a click merged must not undo it, and a
+        read that finished after a newer one was recorded must not replace it (a `merged` reading
+        is final and is never refused for that). A reading whose checks could not be read keeps a
+        `failing` pull request failing, and still records the head and target it saw.
         """
+        unread = reading.get("checks_error")
+        if unread is not None:
+            print(f"console: adoption_poll_failed {plan_id} "
+                  f"{type(unread).__name__}: {unread}", file=sys.stderr)
         with self._ingest:
             found = self._adoptions.get(plan_id)
-            if (found is None or found["step"] != "opened"
+            if found is None:
+                return False
+            state = reading["state"]
+            if unread is not None and found["pull_state"] == "failing":
+                state = "failing"
+            base = reading.get("base")
+            if (found["step"] != "opened"
                     or found["pull_request"]["number"] != number
                     or found["pull_state"] == "merged"
-                    or (found["pull_state"], found["pull_head"])
-                    == (reading["state"], reading["head"])
-                    or (mark is not None and self._pull_marks.get(plan_id, 0) != mark)):
+                    or (found["pull_state"], found["pull_head"], found["pull_base"])
+                    == (state, reading["head"], base)
+                    or (mark is not None and state != "merged"
+                        and self._pull_marks.get(plan_id, 0) != mark)):
                 return False
             appended = self.log.append(
                 [approve.pull_row(plan_id, number, found["pull_request"]["url"],
-                                  reading["state"], reading["head"])])
+                                  state, reading["head"], base)])
             self._pull_marks[plan_id] = self._pull_marks.get(plan_id, 0) + 1
             self._fold(appended)
             self._publish()
@@ -8357,6 +8378,8 @@ class ConsoleService:
               file=sys.stderr)
         if not isinstance(error, ForgeError):
             traceback.print_exception(error, file=sys.stderr)
+        with self._ingest:
+            mark = self._pull_marks.get(plan_id, 0)
         try:
             reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
         except approve.Cancelled:
@@ -8365,7 +8388,7 @@ class ConsoleService:
             print(f"console: adoption_poll_failed {plan_id} {type(again).__name__}: {again}",
                   file=sys.stderr)
             raise sprints.Refused(approve.merge_failure(error)) from None
-        self._record_reading(plan_id, number, reading)
+        self._record_reading(plan_id, number, reading, mark)
         if reading["state"] == "merged":
             if reading["head"] == commit:
                 return

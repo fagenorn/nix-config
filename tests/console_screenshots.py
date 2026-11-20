@@ -747,7 +747,8 @@ def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
         "pull_request": pull, "reason": None, "note": None, "kept": None, "evidence": None})
     seed.put(MINUTE / 2, event_log.ADOPTION_PULL, None, {
         "plan_id": REGISTER_PLAN_ID, "number": 7, "url": pull["url"], "state": "ready",
-        "head": ADOPTION_COMMIT if state == "adoption-merge" else ADOPTION_MOVED_HEAD})
+        "head": ADOPTION_COMMIT if state == "adoption-merge" else ADOPTION_MOVED_HEAD,
+        "base": "main"})
 
 
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
@@ -1077,7 +1078,7 @@ class _AdoptionForge:
         self._head = head
 
     def pull_request_reading(self, slug, number, cancel=None) -> dict:
-        return {"state": "ready", "head": self._head}
+        return {"state": "ready", "head": self._head, "base": "main", "checks_error": None}
 
     def pull_request_state(self, slug, number, cancel=None) -> str:
         return "ready"

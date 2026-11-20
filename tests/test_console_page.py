@@ -161,14 +161,16 @@ class PageTest(unittest.TestCase):
             with self.subTest(pattern=pattern):
                 self.assertEqual(re.findall(pattern, self.data), [])
 
-    def test_the_page_is_under_63_kb_compressed(self) -> None:
+    def test_the_page_is_under_64_kb_compressed(self) -> None:
         # Raised from 60 KB by #1260: main sat 5 bytes under the old cap, so the look card's own code could
         # only fit by dropping ten of the page's explanatory comments, which a merge did silently.
         # Raised from 61 KB by #1323: the route sentence, its three wordings and the forward-command check
         # (about 700 bytes compressed) did not fit the 439 bytes the cap had left.
         # Raised from 62 KB by #1263: its guest controls and actor marks on both pages, merged with #1323's
         # route sentence, came to 64126 bytes against the 63488 the two caps held.
-        self.assertLess(len(gzip.compress(self.data, 9)), 64512)
+        # Raised from 63 KB by #1338: the notice that keeps a refused merge's words once its card is gone
+        # (a merge that found another head merged) took the 63 bytes the cap had left.
+        self.assertLess(len(gzip.compress(self.data, 9)), 65536)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
@@ -9292,6 +9294,28 @@ class SigninPageTest(unittest.TestCase):
         (fail,) = of_class(card, "span", "fail")
         self.assertEqual(full(fail), "Could not merge: the console did not answer")
         self.assertNotIn("HTTP", full(card))
+
+    def test_a_refusal_outlives_a_card_the_forge_state_removed_until_dismissed(self) -> None:
+        refusal = "the pull request was merged on the forge with commits the console did not push\n"
+        steps = [START, {"frame": frame([ADOPTION_ITEM])},
+                 {"respond": {"status": 409, "text": refusal}}, {"click": "adoption-merge"},
+                 {"frame": frame([])}, {"snapshot": True}]
+        (gone,) = render(steps)
+        self.assertEqual([n for n in nodes(gone["inbox"]) if has_class(n, "adoption")], [])
+        (notice,) = [n for n in nodes(gone["inbox"]) if has_class(n, "adoption-failed")]
+        self.assertIn("Could not merge the adoption of o/r", full(notice))
+        self.assertIn(refusal.strip(), full(notice))
+        (kept,) = render(steps[:-1] + [{"frame": frame([])}, {"snapshot": True}])
+        self.assertEqual(len([n for n in nodes(kept["inbox"]) if has_class(n, "adoption-failed")]), 1)
+        (done,) = render(steps[:-1] + [{"click": "adoption-failed-dismiss"}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(done["inbox"]) if has_class(n, "adoption-failed")], [])
+
+    def test_a_refusal_shows_no_notice_while_the_plans_card_is_still_listed(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": "no\n"}}, {"click": "adoption-merge"},
+            {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")], [])
 
     def test_a_replaced_pull_requests_card_shows_no_old_refusal(self) -> None:
         (snap,) = render([
