@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import service
+from agent_tools.console import approve, service
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
@@ -27,7 +27,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering")
+    paths = [value for field in dataclasses.fields(fixture) if field.name not in ("holding", "deaf", "activating", "registering", "adopting")
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -119,8 +119,8 @@ def fake_browser(present):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_forty_six_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 46)
+    def test_the_set_is_forty_eight_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 48)
         self.assertEqual(shots.STATES[-7:], ("sharing-panel", "sharing-off", "sharing-unreadable",
                                              "sharing-reached", "guest-page", "guest-steer",
                                              "owner-actors"))
@@ -135,7 +135,9 @@ class ScreenshotFixtureTest(unittest.TestCase):
                          shots.STATES.index("desk-spend") + 1)
         self.assertEqual(shots.STATES[shots.STATES.index("register-draft") + 1:][:2],
                          ("register-reconcile-apply", "register-reconcile-draft"))
-        self.assertEqual(shots.STATES[-28:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
+        self.assertEqual(shots.STATES[shots.STATES.index("register-reconcile-draft") + 1:][:2],
+                         ("adoption-merge", "adoption-moved"))
+        self.assertEqual(shots.STATES[-30:-7], ("goal-open", "goal-near", "goal-over", "inbox-card",
                                               "question-words", "question-refused",
                                               "look-card", "look-moved", "look-failed",
                                               "accounts-panel", "ask-box", "questions-closed",
@@ -143,7 +145,8 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                               "activation-tooling", "activation-host",
                                               "register-apply", "register-draft",
                                               "register-reconcile-apply",
-                                              "register-reconcile-draft"))
+                                              "register-reconcile-draft",
+                                              "adoption-merge", "adoption-moved"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -1236,6 +1239,12 @@ class ScreenshotFixtureTest(unittest.TestCase):
                         rows = {row["field"]: row["line"] for row in registration["draft"]}
                         self.assertEqual(rows.get("commit-environment"),
                                          shots.PROPOSAL_LINE if shots.proposes_environment() else None)
+                elif state in shots.ADOPTION_STATES:
+                    (card,) = [i for i in view["inbox"]["open"] if i["reason"] == "adoption"]
+                    if state == "adoption-merge":
+                        self.assertEqual((card["merge"], card["why"]), (True, None))
+                    else:
+                        self.assertEqual((card["merge"], card["why"]), (False, approve.MOVED_WHY))
                 elif state in ("question-words", "question-refused"):
                     (asked,) = view["inbox"]["open"]
                     (look,) = asked["questions"]

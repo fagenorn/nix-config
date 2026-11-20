@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty-six screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-eight screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -168,6 +168,11 @@ Contract:
   column, the question once); any other reading fails with the same line. The jargon count is not
   checked (the text is the session's, not the page's labels); every other check still applies. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
+- `adoption-merge` and `adoption-moved` are the adoption card of a pull request the console opened
+  and read ready, seeded through a stand-in forge that reads it as it is: the first at the head
+  the console pushed, so the card offers Merge, the second at another head, so the card says why
+  it does not (#1338). On a page with no merge the opened step's `created` member is left out (a
+  base console refuses it) and both shots wait only for the card, which is the before picture.
 - The before pictures are the base commit's service, view and page together: this module imports
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
@@ -194,7 +199,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -211,7 +216,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
-          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "sharing-panel",
+          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -232,6 +237,11 @@ SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
 REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply",
                    "register-reconcile-draft")
+ADOPTION_STATES = ("adoption-merge", "adoption-moved")
+ADOPTION_BRANCH = "adopt-" + "5" * 12
+ADOPTION_COMMIT = "a" * 40
+ADOPTION_MOVED_HEAD = "d" * 40
+ADOPTION_CARD = "#inbox .adoption"
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
@@ -433,6 +443,7 @@ class Fixture:
     deaf: bool = False
     activating: tuple[str, ...] = ()
     registering: bool = False
+    adopting: bool = False
 
 
 @dataclass(frozen=True)
@@ -714,12 +725,40 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
         seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
 
 
+def offers_merge() -> bool:
+    """Whether this page's adoption card can offer Merge; a base commit's forge has no such method."""
+    return hasattr(approve.GitHubForge, "merge_pull_request")
+
+
+def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
+    """An adoption pull request of `root` the console opened, read ready at the head it pushed or at another.
+
+    Both rows are payload dicts, as a base commit's `approve` refuses the `head` argument and the
+    `created` member; a base console ignores the head and refuses the opened step's `created`
+    member, so the member is written only when this page offers Merge (the before picture shows
+    the card without it).
+    """
+    pull = {"number": 7, "url": f"https://github.com/owner/{REGISTER_NAME}/pull/7"}
+    if offers_merge():
+        pull["created"] = True
+    seed.put(MINUTE, event_log.ADOPTION_STEP, None, {
+        "by": "owner", "plan_id": REGISTER_PLAN_ID, "root": root, "project_id": f"owner/{REGISTER_NAME}",
+        "step": "opened", "branch": ADOPTION_BRANCH, "commit": ADOPTION_COMMIT, "base": "main",
+        "pull_request": pull, "reason": None, "note": None, "kept": None, "evidence": None})
+    seed.put(MINUTE / 2, event_log.ADOPTION_PULL, None, {
+        "plan_id": REGISTER_PLAN_ID, "number": 7, "url": pull["url"], "state": "ready",
+        "head": ADOPTION_COMMIT if state == "adoption-merge" else ADOPTION_MOVED_HEAD})
+
+
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
                 read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> tuple[str, ...]:
     """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
     web, api = PROJECTS[0], PROJECTS[1]
     if state in REGISTER_STATES:
         _seed_registration(seed, state, str(Path(web_root).parent / REGISTER_NAME))
+        return ()
+    if state in ADOPTION_STATES:
+        _seed_adoption(seed, state, web_root)
         return ()
     if state == "live-several":
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
@@ -972,7 +1011,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
-        activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES)
+        activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES,
+        adopting=state in ADOPTION_STATES)
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -1027,6 +1067,30 @@ def _activation_reader(paths: tuple[str, ...]):
         other = {"other": paths} if reads_other() else {}
         return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
     return read
+
+
+class _AdoptionForge:
+    """A stand-in forge of the adoption states: it reads the seeded pull request as it is, so a poll
+    changes nothing; it has no `merge_pull_request` and is never clicked."""
+
+    def __init__(self, head: str):
+        self._head = head
+
+    def pull_request_reading(self, slug, number, cancel=None) -> dict:
+        return {"state": "ready", "head": self._head}
+
+    def pull_request_state(self, slug, number, cancel=None) -> str:
+        return "ready"
+
+
+def _seeded_head(fixture: Fixture) -> str:
+    """The head the fixture's adoption pull request row records."""
+    log = EventLog(fixture.store)
+    try:
+        return [event.payload["head"] for event in log.events()
+                if event.kind == event_log.ADOPTION_PULL][-1]
+    finally:
+        log.close()
 
 
 class _Inert:
@@ -1114,6 +1178,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         forge["activation_reader"] = _activation_reader(fixture.activating)
     if fixture.registering:
         forge.update(adopter=_Inert(), forge=_Inert())
+    if fixture.adopting:
+        forge["forge"] = _AdoptionForge(_seeded_head(fixture))
     bound: list = []
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
@@ -1418,6 +1484,10 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state == "owner-actors" and reads_actors():
             for selector in (".started-by", "text=Answered by"):
                 page.wait_for_selector(selector)
+        if state in ADOPTION_STATES:
+            page.wait_for_selector(
+                ADOPTION_CARD + (" button.adoption-merge" if state == "adoption-merge" else " .reason")
+                if offers_merge() else ADOPTION_CARD)
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')
