@@ -1860,6 +1860,12 @@ function signinLive(profile) {
   const run = runs[profile];
   return (run !== null && run !== undefined && typeof run === "object" && run.state === "running") || signinLinks.has(profile);
 }
+// The profiles of the newest capacity that a colleague added (#1361: an entry's `owner` is his login).
+function colleagueProfiles(view) {
+  const cap = view.capacity;
+  const listed = cap !== null && typeof cap === "object" && Array.isArray(cap.profiles) ? cap.profiles : [];
+  return new Set(listed.filter((p) => typeof p.owner === "string" && p.owner !== "").map((p) => p.profile));
+}
 function signinListed(profile) {
   const cap = lastView === null ? null : lastView.capacity;
   return cap !== null && typeof cap === "object" && Array.isArray(cap.profiles) && cap.profiles.some((p) => p.profile === profile);
@@ -2962,7 +2968,10 @@ function renderCapacity(view) {
       if (owner !== null) acct.appendChild(owner);
       if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
       if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
-      if (signedOut(p)) acct.appendChild(el("span", "cap-signin", "signed out"));
+      if (signedOut(p)) {
+        const waits = typeof p.owner === "string" && p.owner !== "";
+        acct.appendChild(el("span", "cap-signin", waits ? "waits for " + p.owner + " to sign in" : "signed out"));
+      }
       else if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
       nodes.push(acct);
       continue;
@@ -3056,7 +3065,9 @@ function accountRow(shown, view) {
   pinControls(act, p);
   const elsewhere = accountSignin === name && accountCont !== null;
   const live = signinLive(name);
-  if (!elsewhere && !live) {
+  // The service refuses the owner a sign-in of a profile a colleague added (#1361), so the row offers none.
+  const colleagues = typeof p.owner === "string" && p.owner !== "";
+  if (!elsewhere && !live && !colleagues) {
     act.appendChild(signinStartButton(item, "acct-signin btn-quiet"));
     const failed = signinPosts.get("start\n" + name);
     if (failed !== undefined && failed.phase === "failed") {
@@ -4807,6 +4818,8 @@ function drawInbox(view, guest = null) {
   for (const [profile, run] of Object.entries(signinRuns)) {
     if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
     if (profile === accountSignin || signins.some((item) => item.profile === profile)) continue;
+    // A profile a colleague added is signed in by him (#1361): his running attempt raises no card here.
+    if (colleagueProfiles(view).has(profile)) continue;
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }

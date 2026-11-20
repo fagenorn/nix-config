@@ -274,7 +274,8 @@ class GuestAccountTest(GuestAccountCase):
         self.signed_in("colleague-1")
         self.assertEqual(self.add()[0], 200)
         self.cancelled()
-        attempt, _ = svc.start_signin("colleague-1")
+        attempt, _ = svc.start_signin(
+            "colleague-1", by=guest.GuestActor(COLLEAGUE, TAILNET, svc._guest_epoch))
         status, body = self.add()
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["attempt"], attempt)
@@ -376,6 +377,58 @@ class GuestAccountRefusalTest(GuestAccountCase):
                         svc, route, VALID[route], logins=logins))
                     self.assertEqual(got[0], 403)
         self.nothing_started()
+
+    def test_the_owner_is_refused_a_sign_in_of_a_profile_a_colleague_added(self):
+        """#1361, ADR-console-087 D3: the owner's start for his account starts no run and writes no row."""
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.cancelled()
+        before = (self.acted(), len(self.clients()))
+        headers = {"Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": self.owner_token(), **JSON}
+        status, _, answer = support.post_page(
+            svc.address, service.SIGNIN_PATH, headers, json.dumps({"profile": "colleague-1"}).encode())
+        self.assertEqual(status, 409)
+        self.assertEqual(answer, guest.colleague_signin_text("colleague-1", COLLEAGUE).encode() + b"\n")
+        self.assertIn(COLLEAGUE.encode(), answer)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.start_signin("colleague-1")
+        self.assertEqual(str(raised.exception), guest.colleague_signin_text("colleague-1", COLLEAGUE))
+        self.assertEqual((self.acted(), len(self.clients())), before)
+        self.assertEqual(self.own_state(), "cancelled")
+        attempt, _ = svc.start_signin("work")
+        self.assertGreater(attempt, 0)
+
+    def test_the_owner_cannot_start_the_first_profile_of_an_empty_pool_while_its_trust_is_granted(self):
+        """#1361: the row is published with the marked identity, so the owner's start is refused at once."""
+        shutil.rmtree(self.profiles / "work")
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, stdin=subprocess.DEVNULL)
+        entered, release = threading.Event(), threading.Event()
+        real = self.granter
+
+        def gated(path, key):
+            entered.set()
+            release.wait(10)
+            return real(path, key)
+        self.granter = gated
+        svc = self.begin()
+        support.write_registry(self.registry, [{"project_id": "repo", "root": str(repo)}])
+        answers = []
+        adding = threading.Thread(target=lambda: answers.append(self.add()), daemon=True)
+        adding.start()
+        try:
+            self.assertTrue(entered.wait(10))
+            with self.assertRaises(sprints.Refused) as raised:
+                svc.start_signin("colleague-1")
+            self.assertEqual(str(raised.exception), guest.colleague_signin_text("colleague-1", COLLEAGUE))
+            self.assertEqual(self.clients(), [])
+        finally:
+            release.set()
+            adding.join(10)
+        self.assertEqual([status for status, _ in answers], [200])
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
 
     def test_a_sign_in_of_a_profile_not_his_is_refused(self):
         svc = self.begin()

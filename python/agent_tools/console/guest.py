@@ -262,6 +262,11 @@ OWNER_LOOK_TEXT = "Only the console's owner answers a look before merge."
 REVOKED_TEXT = "Your access changed while you were sending that. Reload the page and try again."
 CONSENT_TEXT = "Tick that you agree before you sign in."
 NO_OWN_SIGNIN_TEXT = "No sign-in of yours is running."
+
+
+def colleague_signin_text(profile: str, login: str) -> str:
+    """The owner's refusal to start a sign-in of a profile a colleague added (#1361, ADR-console-087 D3)."""
+    return f"{profile} is {login}'s account, so only {login} can sign it in. You can sign it out or remove it."
 ACCOUNT_BUSY_TEXT = "That cannot be done right now. Try again in a moment."
 ACCOUNT_UNAVAILABLE_TEXT = "Adding an account is not available on this host."
 OWNER_PORT_TEXT = ("This is the console owner's port. "
