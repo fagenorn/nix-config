@@ -179,6 +179,63 @@ class ScreenshotFixtureTest(unittest.TestCase):
         self.assertTrue(steer["brief"])
         self.assertFalse(steer["verify-approve"])
 
+    def test_the_guest_seed_holds_a_colleagues_own_account(self) -> None:
+        for state in ("guest-page", "guest-steer", "owner-actors"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                fixture = shots.build_fixture(Path(tmp).resolve(), state, time.time())
+                log = shots.EventLog(fixture.store)
+                try:
+                    events = log.events()
+                finally:
+                    log.close()
+                added = [e.payload for e in events if e.kind == "account.added"]
+                self.assertEqual(added, [{"by": shots.COLLEAGUE, "profile": "colleague-1"}])
+                readings = [e.payload for e in events
+                            if e.kind == "signin.reading" and e.payload.get("profile") == "colleague-1"]
+                self.assertEqual([r["state"] for r in readings], ["signed_in"])
+                self.assertTrue((fixture.accounts / "profiles" / "colleague-1").is_dir())
+
+    def test_the_guest_page_shot_opens_the_consent_only_on_a_page_that_has_it(self) -> None:
+        door = "#console-door"
+        for state in ("guest-page", "guest-steer"):
+            for width in (1440, 480):
+                for has in (True, False):
+                    with self.subTest(state=state, width=width, has=has), \
+                            tempfile.TemporaryDirectory() as tmp:
+                        present = {door, "#pool"} | ({".pool-add"} if has else set())
+                        browser, page = fake_browser(present)
+                        order = []
+                        page.screenshot = lambda path, full_page: order.append("shot")
+                        wait = page.wait_for_selector
+                        page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                        shots._shoot(browser, "http://console.test/", state, width, Path(tmp))
+                        if has:
+                            self.assertEqual(page.clicks, [".pool-add"])
+                            self.assertIn(".guest-consent", page.waits)
+                            self.assertIn(".guest-signin:disabled", page.waits)
+                            self.assertLess(order.index(".guest-signin:disabled"), order.index("shot"))
+                        else:
+                            self.assertEqual(page.clicks, [])
+                            self.assertNotIn(".guest-consent", page.waits)
+                            self.assertNotIn(".guest-signin:disabled", page.waits)
+
+    def test_the_owner_actors_shot_waits_for_the_login_in_the_tightest_node(self) -> None:
+        for width in (1440, 480):
+            for has in (True, False):
+                with self.subTest(width=width, has=has), tempfile.TemporaryDirectory() as tmp:
+                    browser, page = fake_browser({"#console-door"} | ({".cap-owner"} if has else set()))
+                    order = []
+                    page.screenshot = lambda path, full_page: order.append("shot")
+                    wait = page.wait_for_selector
+                    page.wait_for_selector = lambda s: (wait(s), order.append(s))
+                    shots._shoot(browser, "http://console.test/", "owner-actors", width, Path(tmp))
+                    wanted = ".cap-tightest .cap-owner"
+                    if has:
+                        self.assertIn(wanted, page.waits)
+                        self.assertLess(order.index(wanted), order.index("shot"))
+                    else:
+                        self.assertNotIn(wanted, page.waits)
+
     def test_capture_shoots_the_guest_steer_state_through_the_guest_door(self) -> None:
         class Browser:
             def close(self):
@@ -871,14 +928,16 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     return datetime.fromtimestamp(int(now_s) + seconds, timezone.utc).isoformat()
 
                 rows = state["pool"]["accounts"]
-                self.assertEqual([r["label"] for r in rows], ["Account 1", "Account 2"])
+                self.assertEqual([r["label"] for r in rows], ["yours", "Account 2", "Account 3"])
                 self.assertEqual(
                     [(r["week_left"], r["five_hour_left"], r["week_reset"], r["five_hour_reset"])
                      for r in rows],
-                    [(60, 75, at(3 * 86400), at(2 * 3600)), (10, 40, at(5 * 86400), at(4 * 3600))])
+                    [(5, 50, at(2 * 86400), at(3 * 3600)), (60, 75, at(3 * 86400), at(2 * 3600)),
+                     (10, 40, at(5 * 86400), at(4 * 3600))])
                 labelled = [s["account_label"] for s in all_sprints(state)
                             if s.get("account_label") is not None]
-                self.assertEqual(labelled, ["Account 1"])
+                self.assertEqual(labelled, ["Account 2"])
+                self.assertNotIn(b"colleague-1", body)
                 self.assertNotIn(b"work-main", body)
                 self.assertNotIn(b"work-spare", body)
                 status, body = get(serve.address, "/")
@@ -888,8 +947,11 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(json.loads(body)["sharing"]["colleagues"],
                                  [{"login": shots.COLLEAGUE, "projects": ["owner/web"]}])
-                self.assertEqual([p["profile"] for p in json.loads(body)["capacity"]["profiles"]],
-                                 ["work-main", "work-spare"])
+                profiles = json.loads(body)["capacity"]["profiles"]
+                self.assertEqual([p["profile"] for p in profiles],
+                                 ["colleague-1", "work-main", "work-spare"])
+                self.assertEqual(profiles[0]["owner"], shots.COLLEAGUE)
+                self.assertEqual(min(profiles, key=lambda p: p["week_left"])["profile"], "colleague-1")
             finally:
                 if serve is not None:
                     serve.close()
