@@ -9,6 +9,7 @@ import sys
 import threading
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 
 from agent_tools.console import (
     account_add, account_remove, folder_trust, guest, service, signin, signin_run, sprints)
@@ -601,6 +602,17 @@ class GuestAccountTextTest(unittest.TestCase):
                          guest.ACCOUNT_BUSY_TEXT)
         self.assertEqual(guest.account_text(account_remove.removing("work")),
                          guest.ACCOUNT_BUSY_TEXT)
+
+
+class GuestAccountDocsTest(unittest.TestCase):
+    def test_adr_008_gives_the_code_and_cancel_bodies_their_attempt(self):
+        adr = (Path(__file__).resolve().parents[1] / "docs/areas/console/adr/"
+               "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
+        text = " ".join(adr.split())
+        self.assertIn('`/api/guest-signin-code` takes `{"attempt", "code"}`', text)
+        self.assertIn('`/api/guest-signin-cancel` takes `{"attempt"}`', text)
+        self.assertNotIn('`/api/guest-signin-code` takes `{"code"}`', text)
+        self.assertNotIn('`/api/guest-signin-cancel` takes `{}`', text)
 
 
 class GuestAccountSecrecyTest(GuestAccountCase):
