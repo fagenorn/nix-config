@@ -93,11 +93,19 @@ Contract:
   can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
   and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
   draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed.
-  `guest-page`, `guest-steer` and `owner-actors` also hold the pool's two accounts, `work-main` and
-  `work-spare`, each with a week and a 5h window, and every manager runs on `work-main`, so the guest
-  page shows `Account 1` and `Account 2` and the sprint's account. On a page with `#pool` the
+  `guest-page`, `guest-steer` and `owner-actors` also hold the pool's three accounts, `work-main` and
+  `work-spare`, each with a week and a 5h window, and `colleague-1`, which COLLEAGUE added himself (an
+  `account.added` row `{"by": COLLEAGUE, "profile": "colleague-1"}` written straight to the log) and
+  whose week is the tightest of the three (5% left against `work-spare`'s 10% and `work-main`'s 60%);
+  every manager runs on `work-main`, so the guest page shows `yours`, `Account 2` and `Account 3` and
+  the sprint's account, `Account 2`, and the owner's strip shows COLLEAGUE beside `colleague-1` in
+  its tightest node, the one the 480 px width keeps. On a page with `#pool` the
   guest shots wait for the pool, a session reset and the sprint's account (`.sprint-account`); on a
-  page without it they wait for none of them. With `--sheets` `capture` also writes
+  page without it they wait for none of them. On a page with `.pool-add` the `guest-page` and
+  `guest-steer` shots click it at each width and wait for `.guest-consent` and a disabled
+  `.guest-signin` (the consent open, nothing ticked, nothing posted); on a page without it they click
+  nothing. `owner-actors` also waits for `.cap-tightest .cap-owner` on a page that has a `.cap-owner`
+  and for none on a page that has not. With `--sheets` `capture` also writes
   `<state>-sheet.png` after each state's widths, the shots side by side in one PNG that must stay
   under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
@@ -825,6 +833,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         if state in ("guest-page", "guest-steer", "owner-actors"):
             seed.account("work-main", 0.4, session=0.25, week_in=3 * 86400, session_in=2 * 3600)
             seed.account("work-spare", 0.9, session=0.6, week_in=5 * 86400, session_in=4 * 3600)
+            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, {"by": COLLEAGUE, "profile": "colleague-1"})
+            seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -1051,7 +1061,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
     finally:
         log.close()
     if state in ("accounts-panel", "guest-page", "guest-steer", "owner-actors"):
-        for name in ("work-main", "work-spare"):
+        colleague = ("colleague-1",) if state != "accounts-panel" else ()
+        for name in ("work-main", "work-spare", *colleague):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
     if state == "manager-cannot-hear":
         _write_held_manager(fixture, now_s)
@@ -1531,12 +1542,18 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
         if state in ("guest-page", "guest-steer") and page.query_selector("#pool") is not None:
             for selector in ("#pool:not([hidden])", "#pool .pool-session time", ".sprint-account"):
                 page.wait_for_selector(selector)
+        if state in ("guest-page", "guest-steer") and page.query_selector(".pool-add") is not None:
+            page.click(".pool-add")
+            for selector in (".guest-consent", ".guest-signin:disabled"):
+                page.wait_for_selector(selector)
         if state == "guest-steer" and reads_actors():
             for selector in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
                 page.wait_for_selector(selector)
         if state == "owner-actors" and reads_actors():
             for selector in (".started-by", "text=Answered by"):
                 page.wait_for_selector(selector)
+        if state == "owner-actors" and page.query_selector(".cap-owner") is not None:
+            page.wait_for_selector(".cap-tightest .cap-owner")
         if state in ADOPTION_STATES:
             page.wait_for_selector(
                 ADOPTION_CARD + (" .reason" if state == "adoption-moved" else " button.adoption-merge")

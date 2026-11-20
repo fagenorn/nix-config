@@ -574,8 +574,8 @@ class DuplicateAccountCapacityTest(unittest.TestCase):
                    "spare": SignIn("unknown", None, "t", False, "x@example.invalid", 0)}
         shown = capacity_view(["home", "spare", "work"], state, T, signins)
         by = by_name(shown)
-        self.assertEqual(list(by["work"])[-6:], ["signin", "excluded", "pinned", "account",
-                                                 "same_account_as", "duplicate_of"])
+        self.assertEqual(list(by["work"])[-7:], ["signin", "excluded", "pinned", "account",
+                                                 "same_account_as", "duplicate_of", "owner"])
         self.assertEqual(by["work"]["account"], "w@example.invalid")
         self.assertEqual(by["spare"]["account"], "x@example.invalid")
         self.assertIsNone(by["home"]["account"])
@@ -694,6 +694,21 @@ class AccountIdentityCapacityTest(unittest.TestCase):
         self.assertEqual(manager.choose_profile(shown, {}), manager.Wait(iso(T + 100)))
 
 
+class OwnerCapacityTest(unittest.TestCase):
+    def test_each_entry_names_the_login_that_owns_it(self):
+        first = capacity_view(["colleague-1", "work"], CapacityState({}, {}), T,
+                              owners={"colleague-1": "a@example.invalid"})
+        second = capacity_view(["colleague-1", "work"], CapacityState({}, {}), T)
+        self.assertEqual([e["owner"] for e in first["profiles"]], ["a@example.invalid", None])
+        self.assertEqual([e["owner"] for e in second["profiles"]], [None, None])
+        self.assertEqual(list(first["profiles"][0])[-1], "owner")
+        self.assertEqual(
+            [{k: v for k, v in e.items() if k != "owner"} for e in first["profiles"]],
+            [{k: v for k, v in e.items() if k != "owner"} for e in second["profiles"]])
+        for key in ("tight", "all_out", "resumes_at", "no_reading"):
+            self.assertEqual(first[key], second[key])
+
+
 class PinCapacityTest(unittest.TestCase):
     def test_the_pinned_entry_is_marked_and_changes_no_aggregate(self):
         state = CapacityState({"work": open_reading(), "home": refused_reading(T + 100, "home")}, {})
@@ -702,7 +717,7 @@ class PinCapacityTest(unittest.TestCase):
         self.assertEqual({e["profile"]: e["pinned"] for e in marked["profiles"]},
                          {"home": True, "work": False})
         self.assertEqual({e["pinned"] for e in plain["profiles"]}, {False})
-        self.assertEqual(list(marked["profiles"][0])[-6:-3], ["signin", "excluded", "pinned"])
+        self.assertEqual(list(marked["profiles"][0])[-7:-4], ["signin", "excluded", "pinned"])
         for key in ("tight", "all_out", "resumes_at", "no_reading"):
             self.assertEqual(marked[key], plain[key])
         self.assertEqual(
@@ -724,7 +739,7 @@ class ExclusionCapacityTest(unittest.TestCase):
         for name in ("home", "work"):
             without = {k: v for k, v in by_marked[name].items() if k != "excluded"}
             self.assertEqual(without, {k: v for k, v in by_plain[name].items() if k != "excluded"})
-        self.assertEqual(list(by_marked["work"])[-6:-4], ["signin", "excluded"])
+        self.assertEqual(list(by_marked["work"])[-7:-5], ["signin", "excluded"])
 
     def test_an_excluded_profile_never_gives_room(self):
         out = CapacityState({"work": open_reading(), "spare": refused_reading(T + 100, "spare")}, {})

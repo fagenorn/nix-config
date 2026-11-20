@@ -295,6 +295,7 @@ agent-workflow-tests *args:
     tests/test_console_guest_service.py \
     tests/test_console_guest_page.py \
     tests/test_console_guest_actions.py \
+    tests/test_console_guest_account.py \
     tests/test_console_units.py \
     tests/test_owner_services_units.py \
     tests/test_system_packages.py \

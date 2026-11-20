@@ -14,7 +14,8 @@ first argument and a newline into the `link` FIFO beside it. The console opens t
 without blocking, before it starts the client. `valid_link(text)` is true for text that starts with
 `https://`, is at most `MAX_LINK_CHARS` (4096) characters long and has only characters 0x21 to 0x7E.
 The first line of the FIFO that passes is the browser link; a line that does not is dropped, with one
-stderr line `console: signin_link_refused <profile>` and no part of the line.
+stderr line `console: signin_link_refused <profile>` and no part of the line. The line carries no profile
+when `SignIns.named(profile)` is false (the service sets it false for a profile a colleague added, #1343).
 
 The client also writes its manual link to its standard output (client 2.1.322, stdin not a terminal:
 `If the browser didn't open, visit: <link>`, the link possibly wrapped in OSC 8 escapes). The runner
@@ -89,8 +90,9 @@ client exited, else `exited`. `close()` kills every live run, joins every watche
 is not on `PATH`) or `unavailable` (any other `OSError`); the directory is removed and nothing
 stays in `running()`.
 
-Rows. `acted(profile, action, outcome)` is `("signin.acted", None, {"by": "owner", "profile",
-"action", "outcome"})`, `action` one of `ACTIONS` and `outcome` one of `START_OUTCOMES` for `start`,
+Rows. `acted(profile, action, outcome, by="owner")` is `("signin.acted", None, {"by": by, "profile",
+"action", "outcome"})` (`by` is `owner` or a colleague's login, `event_log.normal_login(by) == by`,
+else `ValueError`, #1343), `action` one of `ACTIONS` and `outcome` one of `START_OUTCOMES` for `start`,
 `sent` for `code`, `cancelled` for `cancel`. `ended(profile, outcome, attempt)` is `("signin.ended",
 None, {"profile", "outcome", "attempt"})`, `outcome` one of `OUTCOMES`, `attempt` the sequence
 number of the run's `signin.acted` start row (a positive `int`, never a `bool`). Both raise
@@ -106,7 +108,32 @@ later events onto an earlier fold gives the fold of all of them.
 Requests. `parse_profile_request(body)` takes a UTF-8 JSON object with exactly the member `profile`,
 a non-empty string, and returns it. `parse_code_request(body)` takes exactly `profile` (as above) and
 `code`, a string of 1 to `MAX_CODE_CHARS` (512) characters each in 0x21 to 0x7E, and returns
-`(profile, code)`. Both raise `ValueError` otherwise.
+`(profile, code)`. Both raise `ValueError` otherwise. A colleague's bodies name no profile but the
+attempt of the sign-in the page displays (#1343): `parse_guest_code_request(body)` takes strict UTF-8
+JSON (a repeated key or `NaN` is `ValueError`) of exactly `attempt`, a positive `int` (never a `bool`),
+and `code`, under the same code rule, and returns `(attempt, code)`; `parse_guest_cancel_request(body)`
+takes exactly `attempt` and returns it. `guest_answer_members(link)` is exactly `{"link", "route"}`:
+both None for no link, the url and route for `manual` and `unknown`, and `{"link": None, "route":
+"loopback"}` for a loopback link, whose return address is the owner's host's loopback that a colleague's
+browser cannot reach (ADR-console-080 D3). A link a colleague receives must also pass `guest_link(url)`:
+an `https` URL on one of the client's own authorization endpoints (`GUEST_AUTHORIZE`, a host and path pair:
+`claude.com` `/cai/oauth/authorize`, `claude.ai` `/oauth/authorize`, `platform.claude.com` `/oauth/authorize`),
+the host written bare (no user information or port), with no fragment,
+and a query of the OAuth authorization request's members only, each once
+(`GUEST_LINK_MEMBERS`: `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`,
+`code_challenge_method`, `state`), all of them present but `scope` (`GUEST_REQUIRED`), in which `code` is exactly `true` (the manual flag: a callback URL
+carrying an authorization code has another value) and `redirect_uri` is present and is exactly the manual
+return address (`GUEST_CALLBACK`: `https://platform.claude.com/oauth/code/callback`, bare, with no
+query or fragment), so no address or path of a printed URL carries a value to the colleague. A
+printed URL that fails it, such as a diagnostic one carrying an access token, is handed out as no link:
+`{"link": None, "route": None}`. The run's manual link is the first manual-route candidate that passes
+`guest_link`; the first one that does not is kept apart and served only when none passes by the end of the
+wait, so a diagnostic URL printed first never takes the real link's place; one served that way and kept as the run's
+link is replaced by the first link that passes `guest_link`, which arrives later, so a retry is handed it. Each
+member a link may carry is also of the client's own shape (`GUEST_VALUES`, `GUEST_FIXED`): `client_id` a UUID,
+`response_type` `code`, `code_challenge_method` `S256`, `scope` lowercase words joined by `:` and spaces,
+`code_challenge` and `state` URL-safe opaque strings of at most 128 characters; a link with any other value of a member it
+carries is handed out as no link.
 
 Secrecy. No return value, exception message or stderr line carries a link or a code, and neither is
 stored or logged: the link lives in memory for the run, the code goes to the client's input and
@@ -138,8 +165,9 @@ from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import parse_qs, urlsplit
 
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import manager, signin
-from agent_tools.console.event_log import SIGNIN_ACTED, SIGNIN_ENDED, Event
+from agent_tools.console.event_log import SIGNIN_ACTED, SIGNIN_ENDED, Event, normal_login
 
 ACTED = SIGNIN_ACTED
 ENDED = SIGNIN_ENDED
@@ -251,6 +279,65 @@ def answer_members(link: Link | None) -> dict[str, object]:
     return {"link": link.url, "route": link.route, "port": link.port, "forward": link.forward}
 
 
+def guest_answer_members(link: Link | None) -> dict[str, object]:
+    if link is None:
+        return {"link": None, "route": None}
+    if link.route == "loopback":
+        return {"link": None, "route": "loopback"}
+    if not guest_link(link.url):
+        return {"link": None, "route": None}
+    return {"link": link.url, "route": link.route}
+
+
+# The client's own endpoints (client 2.1.322, from its binary): the claude.ai and console authorization
+# addresses and the manual return address its console shows the code on.
+GUEST_AUTHORIZE = frozenset({("claude.com", "/cai/oauth/authorize"), ("claude.ai", "/oauth/authorize"),
+                             ("platform.claude.com", "/oauth/authorize")})
+GUEST_CALLBACK = ("platform.claude.com", "/oauth/code/callback")
+GUEST_LINK_MEMBERS = frozenset({"code", "client_id", "response_type", "redirect_uri", "scope",
+                                "code_challenge", "code_challenge_method", "state"})
+# The shape of each value a member may carry (the client's own: a UUID client id, `code`, `S256`, scopes of
+# lowercase words joined by `:`, and URL-safe opaque challenge and state strings), so no member of a printed
+# address carries free text to the colleague.
+GUEST_CLIENT_ID = re.compile(r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}")
+GUEST_SCOPE = re.compile(r"[a-z_]+(:[a-z_]+)*( [a-z_]+(:[a-z_]+)*)*")
+GUEST_OPAQUE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+GUEST_VALUES = {"client_id": GUEST_CLIENT_ID, "scope": GUEST_SCOPE, "code_challenge": GUEST_OPAQUE,
+                "state": GUEST_OPAQUE}
+GUEST_FIXED = {"response_type": "code", "code_challenge_method": "S256"}
+# The members every authorization request of the client carries (`scope` alone may be left out).
+GUEST_REQUIRED = frozenset({"code", "client_id", "response_type", "redirect_uri", "code_challenge",
+                            "code_challenge_method", "state"})
+
+
+def guest_link(url: str) -> bool:
+    """True when `url` is only the OAuth authorization request a colleague may be handed."""
+    try:
+        link = urlsplit(url)
+        if link.scheme != "https" or (link.hostname, link.path) not in GUEST_AUTHORIZE:
+            return False
+        if link.netloc != link.hostname or link.fragment:
+            return False
+        query = parse_qs(link.query, keep_blank_values=True)
+        if (set(query) - GUEST_LINK_MEMBERS or not GUEST_REQUIRED <= set(query)
+                or query.get("code") != ["true"]
+                or any(len(values) != 1 for values in query.values())):
+            return False
+        if any(not pattern.fullmatch(query[name][0]) for name, pattern in GUEST_VALUES.items()
+               if name in query):
+            return False
+        if any(query[name] != [value] for name, value in GUEST_FIXED.items() if name in query):
+            return False
+        target = urlsplit(query.get("redirect_uri", [""])[0])
+        if (target.scheme, target.netloc, target.path) != ("https", GUEST_CALLBACK[0], GUEST_CALLBACK[1]):
+            return False
+        if target.query or target.fragment:
+            return False
+    except ValueError:
+        return False
+    return True
+
+
 def _object(body: bytes, members: set[str]) -> dict:
     try:
         value = json.loads(body.decode("utf-8"))
@@ -270,16 +357,49 @@ def parse_profile_request(body: bytes) -> str:
 
 def parse_code_request(body: bytes) -> tuple[str, str]:
     value = _object(body, {"profile", "code"})
-    code = value["code"]
-    if not isinstance(code, str) or not 1 <= len(code) <= MAX_CODE_CHARS or not _printable(code):
+    return value["profile"], _code(value["code"])
+
+
+def _code(value: object) -> str:
+    if not isinstance(value, str) or not 1 <= len(value) <= MAX_CODE_CHARS or not _printable(value):
         raise ValueError("bad code")
-    return value["profile"], code
+    return value
 
 
-def acted(profile: str, action: str, outcome: str) -> tuple[str, None, dict]:
+def _guest_object(body: bytes, members: set[str]) -> dict:
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the body is nested too deeply") from error
+    except UnicodeDecodeError as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != members:
+        raise ValueError("wrong members")
+    return value
+
+
+def _guest_attempt(value: object) -> int:
+    if not _attempt(value):
+        raise ValueError("bad attempt")
+    return value  # type: ignore[return-value]
+
+
+def parse_guest_code_request(body: bytes) -> tuple[int, str]:
+    value = _guest_object(body, {"attempt", "code"})
+    return _guest_attempt(value["attempt"]), _code(value["code"])
+
+
+def parse_guest_cancel_request(body: bytes) -> int:
+    return _guest_attempt(_guest_object(body, {"attempt"})["attempt"])
+
+
+def acted(profile: str, action: str, outcome: str, by: str = "owner") -> tuple[str, None, dict]:
     if action not in ACTIONS or outcome not in _ACTION_OUTCOMES[action]:
         raise ValueError("bad sign-in action")
-    return (ACTED, None, {"by": "owner", "profile": profile, "action": action,
+    if by != "owner" and normal_login(by) != by:
+        raise ValueError("by is neither owner nor a login")
+    return (ACTED, None, {"by": by, "profile": profile, "action": action,
                           "outcome": outcome})
 
 
@@ -430,6 +550,7 @@ class _Run:
         self.fifo_link: str | None = None
         self.fifo_at: float | None = None
         self.manual: str | None = None
+        self.manual_other: str | None = None
         self.chosen: Link | None = None
         self.done = False
         self.cond = threading.Condition()
@@ -455,6 +576,7 @@ class SignIns:
         self._link_wait = link_wait
         self._manual_grace = manual_grace
         self._host = default_host() if host is None else host
+        self.named: Callable[[str], bool] = lambda profile: True
         self._lock = threading.Lock()
         self._runs: dict[str, _Run] = {}
         self._serial = 0
@@ -530,6 +652,8 @@ class SignIns:
     def _pick(self, run: _Run) -> Link | None:
         if run.manual is not None:
             return Link(run.manual, "manual", None, None)
+        if run.manual_other is not None:
+            return Link(run.manual_other, "manual", None, None)
         if run.fifo_link is None:
             return None
         route = link_route(run.fifo_link)
@@ -658,13 +782,13 @@ class SignIns:
         except UnicodeDecodeError:
             text = ""
         if not valid_link(text):
-            print(f"console: signin_link_refused {run.profile}", file=sys.stderr)
+            label = f" {run.profile}" if self.named(run.profile) else ""
+            print(f"console: signin_link_refused{label}", file=sys.stderr)
             return
         with run.cond:
             run.fifo_link = text
             run.fifo_at = time.monotonic()
-            if run.manual is None and link_route(text) == ("manual", None):
-                run.manual = text
+            self._offer_manual(run, text)
             run.cond.notify_all()
 
     def _output_lines(self, run: _Run, lines: list[bytes]) -> None:
@@ -673,13 +797,29 @@ class SignIns:
                 return
             try:
                 for token in output_links(line):
-                    if link_route(token) == ("manual", None):
-                        with run.cond:
-                            run.manual = token
-                            run.cond.notify_all()
+                    with run.cond:
+                        self._offer_manual(run, token)
+                        run.cond.notify_all()
+                    if run.manual is not None:
                         break
             except Exception:
                 continue
+
+    @staticmethod
+    def _offer_manual(run: _Run, text: str) -> None:
+        """Under `run.cond`: keep a manual-route candidate. The run's manual link is the first one a
+        colleague may be handed (`guest_link`); the first other one waits in `manual_other`, so a
+        printed diagnostic address never takes the place of the real link (#1343)."""
+        if link_route(text) != ("manual", None):
+            return
+        if guest_link(text):
+            if run.manual is None:
+                run.manual = text
+                chosen = run.chosen
+                if chosen is not None and chosen.route == "manual" and not guest_link(chosen.url):
+                    run.chosen = Link(text, "manual", None, None)  # a retry gets the real link, not the cached diagnostic
+        elif run.manual_other is None:
+            run.manual_other = text
 
 
 _TOKEN_BYTES = bytes(range(0x21, 0x7F))
