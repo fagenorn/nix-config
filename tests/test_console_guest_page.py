@@ -895,3 +895,150 @@ class GuestSteerPageTest(unittest.TestCase):
                          {"project_id": "owner/p01", "goal": "Make the importer resumable"})
         self.assertEqual((post["method"], post["headers"]), ("POST", HEADERS))
         self.assertEqual(len(sent["posts"]), 1)
+
+
+A1 = {"label": "Account 1", "state": "ok", "week_left": 62, "five_hour_left": 80,
+      "week_reset": "2099-01-06T14:00:00+00:00", "five_hour_reset": "2099-01-01T15:00:00+00:00",
+      "next_reset": "2099-01-01T15:00:00+00:00", "out_until": None, "in_use": True}
+A2 = {"label": "Account 2", "state": "out", "week_left": 0, "five_hour_left": 100,
+      "week_reset": "2099-01-03T09:00:00+00:00", "five_hour_reset": "2099-01-01T18:00:00+00:00",
+      "next_reset": "2099-01-01T18:00:00+00:00", "out_until": "2099-01-03T09:00:00+00:00", "in_use": True}
+A3 = {"label": "Account 3", "state": "unknown", "week_left": None, "five_hour_left": None,
+      "week_reset": None, "five_hour_reset": None, "next_reset": None, "out_until": None, "in_use": False}
+POOL_TIGHT = {"state": "tight", "tight": True, "all_out": False, "resumes_at": None, "no_reading": None,
+              "accounts": [A1, A2, A3]}
+
+
+def pool_rows(snap: dict) -> list:
+    return [n for n in nodes(snap["pool"]) if n["tag"] == "li" and has_class(n, "pool-account")]
+
+
+def span(row: dict, cls: str) -> dict | None:
+    found = [n for n in nodes(row) if has_class(n, cls)]
+    return found[0] if found else None
+
+
+def titles(node: dict) -> list:
+    return [n["title"] for n in nodes(node) if n["tag"] == "time"]
+
+
+def pool_page(pool: dict) -> dict:
+    return page_of(GUEST, [START, {"frame": {**SCOPED, "pool": pool}}])
+
+
+class GuestPoolTest(unittest.TestCase):
+    def test_the_guest_page_draws_the_pool_line_and_each_account(self) -> None:
+        snap = pool_page(POOL_TIGHT)
+        self.assertIs(snap["pool"]["hidden"], False)
+        rows = pool_rows(snap)
+        self.assertEqual([next(n["text"] for n in nodes(r) if n["tag"] == "b") for r in rows],
+                         ["Account 1", "Account 2", "Account 3"])
+        self.assertIsNone(span(rows[0], "pool-status"))
+        self.assertTrue(full(span(rows[0], "pool-week")).startswith("62% of the week left"))
+        self.assertTrue(full(span(rows[0], "pool-session")).startswith("80% of the session left"))
+        self.assertEqual(span(rows[2], "pool-status")["text"], "not in use")
+        self.assertIsNone(span(rows[2], "pool-week"))
+        self.assertFalse([n for n in nodes(snap["pool"]) if n["tag"] in CONTROLS])
+        self.assertNotIn("@", full(snap["pool"]))
+        self.assertIn("The pool is tight: one account has room.", full(snap["pool"]))
+
+    def test_each_window_shows_its_own_figure_and_reset(self) -> None:
+        a4 = {**A1, "label": "Account 4", "state": "reset", "week_left": 100, "five_hour_left": 100,
+              "week_reset": None, "five_hour_reset": None, "next_reset": None}
+        a5 = {**A1, "label": "Account 5", "week_left": 35, "in_use": False}
+        snap = pool_page({**POOL_TIGHT, "accounts": [A2, a4, a5]})
+        r2, r4, r5 = pool_rows(snap)
+        self.assertTrue(full(span(r2, "pool-status")).startswith("out until"))
+        self.assertEqual(titles(span(r2, "pool-status")), ["2099-01-03 09:00"])
+        self.assertTrue(full(span(r2, "pool-week")).startswith("0% of the week left, resets"))
+        self.assertEqual(titles(span(r2, "pool-week")), ["2099-01-03 09:00"])
+        self.assertTrue(full(span(r2, "pool-session")).startswith("100% of the session left, resets"))
+        self.assertEqual(titles(span(r2, "pool-session")), ["2099-01-01 18:00"])
+        self.assertEqual(full(span(r4, "pool-status")), "reset, not yet used")
+        self.assertEqual(full(span(r4, "pool-week")), "100% of the week left")
+        self.assertEqual(full(span(r4, "pool-session")), "100% of the session left")
+        self.assertEqual(titles(span(r4, "pool-week")) + titles(span(r4, "pool-session")), [])
+        self.assertEqual(full(span(r5, "pool-status")), "not in use")
+        self.assertTrue(full(span(r5, "pool-week")).startswith("35% of the week left, resets"))
+        self.assertEqual(titles(span(r5, "pool-week")), ["2099-01-06 14:00"])
+
+    def test_the_pool_line_takes_the_strips_state_word(self) -> None:
+        rows = [A2, {**A2, "label": "Account 4"}]
+        for state, cls in (("fine", "cap-fine"), ("tight", "cap-tight"), ("out", "cap-out"), (None, None)):
+            with self.subTest(state=state):
+                out = state == "out"
+                snap = pool_page({"state": state, "tight": state == "tight", "all_out": out,
+                                  "resumes_at": "2099-01-03T09:00:00+00:00" if out else None,
+                                  "no_reading": None, "accounts": rows})
+                words = [n for n in nodes(snap["pool"]) if has_class(n, "cap-state")]
+                if cls is None:
+                    self.assertEqual(words, [])
+                    continue
+                (word,) = words
+                self.assertTrue(has_class(word, cls))
+                if out:
+                    self.assertIn("Every account is out until", full(snap["pool"]))
+
+    def test_a_pool_with_no_account_in_use_says_so(self) -> None:
+        excluded = {"state": None, "tight": False, "all_out": False, "resumes_at": None, "no_reading": None,
+                    "accounts": [{**A1, "in_use": False}, {**A1, "label": "Account 2", "week_left": 30,
+                                                           "in_use": False}]}
+        waiting = {**excluded, "no_reading": "1 with no reading yet", "accounts": [{**A3, "in_use": True}]}
+        first, second = pool_page(excluded), pool_page(waiting)
+        for snap in (first, second):
+            self.assertEqual([n for n in nodes(snap["pool"]) if has_class(n, "cap-state")], [])
+        self.assertIn("No account is in use.", full(first["pool"]))
+        self.assertNotIn("reading", full(first["pool"]))
+        rows = pool_rows(first)
+        self.assertEqual([full(span(r, "pool-status")) for r in rows], ["not in use", "not in use"])
+        self.assertEqual([full(span(r, "pool-week")).split("%")[0] for r in rows], ["62", "30"])
+        self.assertIn("No account in use has a reading yet.", full(second["pool"]))
+        self.assertIn("1 with no reading yet", full(second["pool"]))
+
+    def test_a_session_reset_keeps_the_week_and_a_lapsed_out_account_frees_the_line_without_a_frame(self) -> None:
+        clock = 2524608000000
+        b1 = {"label": "Account 1", "state": "out", "week_left": 0, "week_reset": "2050-01-01T02:00:00+00:00",
+              "five_hour_left": 40, "five_hour_reset": "2050-01-01T01:00:00+00:00",
+              "next_reset": "2050-01-01T01:00:00+00:00", "out_until": "2050-01-01T02:00:00+00:00",
+              "in_use": True}
+        b2 = {"label": "Account 2", "state": "out", "week_left": 0, "week_reset": "2050-01-05T00:00:00+00:00",
+              "five_hour_left": 90, "five_hour_reset": "2050-01-01T03:00:00+00:00",
+              "next_reset": "2050-01-01T03:00:00+00:00", "out_until": "2050-01-05T00:00:00+00:00",
+              "in_use": True}
+        pool = {"state": "out", "tight": False, "all_out": True, "resumes_at": "2050-01-01T02:00:00+00:00",
+                "no_reading": None, "accounts": [b1, b2]}
+        start, mid, late = harness([
+            {"start": {"focused": False, "clock": clock}}, {"frame": {**SCOPED, "pool": pool}}, SNAP,
+            {"clock": clock + 90 * 60000}, SNAP, {"clock": clock + 150 * 60000}, SNAP], GUEST)
+
+        def line(snap: dict) -> list:
+            return [n["cls"] for n in nodes(snap["pool"]) if has_class(n, "cap-state")]
+        self.assertTrue(has_class(next(n for n in nodes(start["pool"]) if has_class(n, "cap-state")), "cap-out"))
+        self.assertEqual(titles(span(pool_rows(start)[0], "pool-session")), ["2050-01-01 01:00"])
+        one = pool_rows(mid)[0]
+        self.assertEqual(full(span(one, "pool-session")), "100% of the session left")
+        self.assertEqual(titles(span(one, "pool-session")), [])
+        self.assertTrue(full(span(one, "pool-week")).startswith("0% of the week left, resets"))
+        self.assertEqual(titles(span(one, "pool-week")), ["2050-01-01 02:00"])
+        self.assertTrue(full(span(one, "pool-status")).startswith("out until"))
+        self.assertTrue(any("cap-out" in cls for cls in line(mid)))
+        one, two = pool_rows(late)
+        self.assertEqual(full(span(one, "pool-status")), "reset, not yet used")
+        self.assertEqual(full(span(one, "pool-week")), "100% of the week left")
+        self.assertTrue(any("cap-tight" in cls for cls in line(late)))
+        self.assertEqual(titles(span(two, "pool-week")), ["2050-01-05 00:00"])
+        self.assertTrue(full(span(two, "pool-session")).startswith("90% of the session left"))
+        self.assertEqual(titles(span(two, "pool-session")), ["2050-01-01 03:00"])
+
+    def test_the_running_sprint_shows_its_account_on_the_guest_page_only(self) -> None:
+        frame = with_sprints([{**SPRINT, "account_label": "Account 2"}])
+        guest_page = page_of(GUEST, [START, {"frame": frame}])
+        owner_page = page_of(PAGE.read_bytes(), [START, {"frame": frame}])
+        marks = [n for n in nodes(guest_page["projects"]) if has_class(n, "sprint-account")]
+        self.assertEqual([full(n) for n in marks], ["on Account 2"])
+        self.assertEqual([n for n in nodes(owner_page["projects"]) if has_class(n, "sprint-account")], [])
+
+    def test_the_owner_page_keeps_the_pool_hidden(self) -> None:
+        snap = page_of(PAGE.read_bytes(), [START, {"frame": {**view([project(1, [])]), "pool": POOL_TIGHT}}])
+        self.assertIs(snap["pool"]["hidden"], True)
+        self.assertEqual(snap["pool"]["children"], [])

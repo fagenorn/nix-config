@@ -251,7 +251,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-messages { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
 .sprint-messages li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; color: var(--sub0); }
 .message-state, .message-reply { color: var(--ov2); }
-.started-by { color: var(--ov2); }
+.started-by, .sprint-account { color: var(--ov2); }
+.pool { margin-bottom: 24px; font-size: .8125rem; color: var(--sub0); }
+.pool-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.pool-accounts { list-style: none; margin: 8px 0 0; padding: 0; }
+.pool-account { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 4px 0; }
+.pool-account b { font-weight: 600; color: var(--text); }
+.pool-status { color: var(--ov2); }
+.pool-week, .pool-session { flex: 1 0 100%; padding-left: 16px; }
 .message-reply { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .manager-line .message-reply { flex: 1 1 auto; padding-left: 0; }
 .message-action { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); }
@@ -538,6 +545,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
 <section id="digest" aria-label="Since you last looked"></section>
 </main>
 <aside class="side" aria-label="Projects">
+<section class="pool" id="pool" aria-label="Accounts" hidden></section>
 <section id="projects"></section>
 <section id="unmanaged"></section>
 <section class="register" id="register" aria-label="Register project"></section>
@@ -1046,6 +1054,7 @@ function drawSprint(item, entry, sprint) {
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
   words.appendChild(age);
   if (typeof sprint.started_by === "string") words.appendChild(el("span", "started-by", "started by " + sprint.started_by));
+  if (guestDoor && typeof sprint.account_label === "string") words.appendChild(el("span", "sprint-account", "on " + sprint.account_label));
   head.appendChild(words);
   item.appendChild(head);
   const spendBox = spendLine("sprint", sprint.sprint_id);
@@ -2796,10 +2805,53 @@ function settledCapacity(source) {
   cap.resumes_at = cap.all_out && until.length ? until[0] : null;
   return cap;
 }
+function stampLapsed(stamp) {
+  if (typeof stamp !== "string") return false;
+  const at = Date.parse(stamp);
+  return Number.isFinite(at) && at <= Date.now();
+}
+// The guest pool settles each window on its own, as capacity.profile_capacity does on the server.
+function settledPool(pool) {
+  let freed = false;
+  const accounts = pool.accounts.map((row) => {
+    const weekGone = stampLapsed(row.week_reset);
+    const sessionGone = stampLapsed(row.five_hour_reset);
+    const outGone = row.state === "out" && stampLapsed(row.out_until);
+    if (!weekGone && !sessionGone && !outGone) return row;
+    const next = {...row};
+    if (weekGone) { next.week_left = 100; next.week_reset = null; }
+    if (sessionGone) { next.five_hour_left = 100; next.five_hour_reset = null; }
+    const ahead = [next.week_reset, next.five_hour_reset].filter((stamp) => typeof stamp === "string").sort();
+    next.next_reset = ahead.length ? ahead[0] : null;
+    if (outGone) {
+      next.state = ahead.length ? "ok" : "reset";
+      next.out_until = null;
+      if (row.in_use === true) freed = true;
+    }
+    return next;
+  });
+  if (!freed) return {...pool, accounts};
+  const considered = accounts.filter((row) => row.in_use === true);
+  const room = considered.filter((row) => row.state === "ok" || row.state === "reset").length;
+  const allOut = considered.length > 0 && considered.every((row) => row.state === "out");
+  const tight = considered.length >= 2 && room === 1
+    && considered.every((row) => row.state === "ok" || row.state === "reset" || row.state === "out");
+  const until = considered.map((row) => row.out_until).filter((stamp) => typeof stamp === "string").sort();
+  const read = considered.some((row) => row.state !== "unknown");
+  return {...pool, accounts, all_out: allOut, tight, resumes_at: allOut && until.length ? until[0] : null,
+    state: !read ? null : allOut ? "out" : tight ? "tight" : "fine"};
+}
 let lapsedDrawn = "";
 function lapsedNow(view) {
   const profiles = view !== null && view.capacity && Array.isArray(view.capacity.profiles) ? view.capacity.profiles : [];
-  return profiles.filter(lapsedReset).map((p) => p.profile + "\n" + (p.state === "out" ? p.out_until : p.next_reset)).join("\n");
+  const lapsed = profiles.filter(lapsedReset).map((p) => p.profile + "\n" + (p.state === "out" ? p.out_until : p.next_reset));
+  const rows = view !== null && view.pool && Array.isArray(view.pool.accounts) ? view.pool.accounts : [];
+  for (const row of rows) {
+    for (const key of ["week_reset", "five_hour_reset", "out_until"]) {
+      if (stampLapsed(row[key])) lapsed.push(row.label + "\n" + row[key]);
+    }
+  }
+  return lapsed.join("\n");
 }
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
@@ -6030,6 +6082,60 @@ function sweepGuest() {
     }
   }
 }
+function poolWindow(cls, left, name, reset) {
+  const parts = [left !== null && left !== undefined ? left + "% of the " + name + " left" : name + " unknown"];
+  if (typeof reset === "string") parts.push(", resets ", timeEl("weekday", reset, ""));
+  return phrase("span", cls, ...parts);
+}
+function renderPool(view) {
+  const box = document.getElementById("pool");
+  if (box === null) return;
+  if (view.pool === null || typeof view.pool !== "object" || !Array.isArray(view.pool.accounts)) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  const pool = settledPool(view.pool);
+  const line = el("p", "pool-line");
+  const tones = {fine: ["cap-fine", "tick-icon"], tight: ["cap-tight", "clock-icon"], out: ["cap-out", "stop-icon"]};
+  if (pool.state === "fine" || pool.state === "tight" || pool.state === "out") {
+    const [tone, mark] = tones[pool.state];
+    const word = el("span", "cap-state " + tone);
+    word.appendChild(icon(mark));
+    word.appendChild(el("span", "", pool.state));
+    line.appendChild(word);
+    if (pool.state === "fine") line.appendChild(el("span", "", "The pool has room."));
+    else if (pool.state === "tight") line.appendChild(el("span", "", "The pool is tight: one account has room."));
+    else if (typeof pool.resumes_at === "string") {
+      line.appendChild(phrase("span", "", "Every account is out until ", timeEl("weekday", pool.resumes_at, ""), "."));
+    } else line.appendChild(el("span", "", "Every account is out; when one comes back is unknown."));
+  } else {
+    line.appendChild(el("span", "", pool.accounts.length === 0 ? "No accounts in the pool."
+      : !pool.accounts.some((row) => row.in_use === true) ? "No account is in use."
+        : "No account in use has a reading yet."));
+  }
+  if (pool.no_reading) line.appendChild(el("span", "cap-none", pool.no_reading));
+  const nodes = [line];
+  if (pool.accounts.length) {
+    const list = el("ul", "pool-accounts");
+    for (const row of pool.accounts) {
+      const item = el("li", "pool-account");
+      item.appendChild(el("b", "", row.label));
+      if (row.in_use !== true) item.appendChild(el("span", "pool-status", "not in use"));
+      else if (row.state === "out") item.appendChild(outWords(row, "pool-status"));
+      else if (row.state === "reset") item.appendChild(el("span", "pool-status", "reset, not yet used"));
+      else if (row.state === "unknown") item.appendChild(el("span", "pool-status", "no reading yet"));
+      if (row.state !== "unknown") {
+        item.appendChild(poolWindow("pool-week", row.week_left, "week", row.week_reset));
+        item.appendChild(poolWindow("pool-session", row.five_hour_left, "session", row.five_hour_reset));
+      }
+      list.appendChild(item);
+    }
+    nodes.push(list);
+  }
+  box.replaceChildren(...nodes);
+  box.hidden = false;
+}
 function renderGuest(view) {
   holdPictures(() => {
     const wasOpen = new Set();
@@ -6042,6 +6148,7 @@ function renderGuest(view) {
     drawInbox(view, { fresh });
     renderGuestInbox(view);
     renderProjects(view);
+    renderPool(view);
     for (const fold of document.querySelectorAll("details")) {
       if (wasOpen.has(fold.dataset.key)) fold.open = true;
     }
