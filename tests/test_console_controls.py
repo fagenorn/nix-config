@@ -17,7 +17,8 @@ from .test_console_page import (
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
     look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints)
-from .test_console_guest_page import SHARED_FRAME, UNSHARED_OPEN
+from .test_console_guest_page import (
+    GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -70,6 +71,10 @@ DESK_CONTROLS: dict = {
              "notice-text", "register-path", "goal-filter", "goal-text", "share-login"),
     **_roles(CODE_ONLY, "signin-code", "account-code"),
 }
+# The guest page's own-account controls (#1343): drawn only on the guest door, so the desk scenarios never reach them.
+GUEST_CONTROLS: dict = {"pool-add": QUIET_ONLY, "guest-signin": PRIMARY_ONLY, "guest-code": QUIET_ONLY,
+                        "guest-cancel": QUIET_ONLY}
+GUEST_CHECKBOXES = frozenset({"guest-tick"})  # a native tick has no kind: it is neither a button nor a typed field
 SPEND_CONTROLS: dict = {"span": QUIET_ONLY}
 BARE_BUTTONS = frozenset({"cap", "pic-thumb", "sprint-check", "draft-pick", "thread-open"})
 BARE_FIELDS = frozenset({"goal-text"})
@@ -315,6 +320,25 @@ class ControlInventoryTest(unittest.TestCase):
                  if n["tag"] != "a" or "btn-primary" in n["cls"].split()}
         self.assertEqual(sorted(set(DESK_CONTROLS) - drawn), [])
 
+    def test_the_guest_page_draws_every_own_account_control_with_one_kind(self) -> None:
+        start, linked = harness([*OPEN_OWN, SNAP, TICK, attempt_reply(7, MANUAL, "manual"),
+                                 {"click": "guest-signin"}, SNAP], GUEST)
+        drawn, wrong = set(), []
+        for snap in (start, linked):
+            for node, parent in _walk(snap["own_account"], None):
+                if not _is_control(node, parent):
+                    continue
+                key = role(node["cls"])
+                drawn.add(key)
+                if key in GUEST_CHECKBOXES:
+                    continue
+                kinds = set(node["cls"].split()) & set(KINDS)
+                allowed = GUEST_CONTROLS.get(key, DESK_CONTROLS.get(key))
+                if len(kinds) != 1 or allowed is None or not kinds <= allowed:
+                    wrong.append(node["cls"])
+        self.assertEqual(wrong, [])
+        self.assertEqual(sorted((set(GUEST_CONTROLS) | GUEST_CHECKBOXES) - drawn), [])
+
     def test_every_creation_site_names_a_listed_role(self) -> None:
         script = page_script()
         problems = []
@@ -329,9 +353,10 @@ class ControlInventoryTest(unittest.TestCase):
                     continue
                 dynamic = literal == "ans-" and re.match(r'\s*"ans-"\s*\+', expression)
                 name = literal.split()[0] if literal.split() else ""
-                if not dynamic and name not in DESK_CONTROLS:
+                if not dynamic and name not in DESK_CONTROLS and name not in GUEST_CONTROLS \
+                        and name not in GUEST_CHECKBOXES:
                     problems.append(f"unlisted role {name!r} in {expression!r}")
-                if not kind_in(literal) and not suffixed:
+                if not kind_in(literal) and not suffixed and name not in GUEST_CHECKBOXES:
                     problems.append(f"no kind in {expression!r}")
         for literal in summary_literals(script):
             if "btn-" in literal:

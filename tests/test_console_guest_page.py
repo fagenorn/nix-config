@@ -23,9 +23,9 @@ from .test_console_inbox import C1, approve, comment_node, decision, issue_node
 from .test_console_inbox import page as tracker_page, read as tracker_read
 from .test_console_page import (
     ACTIVATION, APPROVED_TEXT, APPROVING_TEXT, BRIEF, CHECK, CHECK_ITEM, DONE_SPRINT, F3, HANDOFF_W, HARNESS,
-    HEADSUP_W, OWNER_W, PAGE, REPORTED, SENT_TEXT, SPRINT, START, UNDATED_WAIT,
-    box_open, full, has_class, message_entry, nodes, posted, project, question, role, view, with_check,
-    with_notices, with_sprints)
+    HEADSUP_W, NOW_S, OWNER_W, PAGE, REPORTED, SENT_TEXT, SPRINT, START, UNDATED_WAIT,
+    box_open, full, has_class, message_entry, nodes, posted, project, question, real_capacity, role, view,
+    with_check, with_notices, with_sprints)
 
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_TAILNET = "other.invented-tailnet.ts.net"
@@ -435,7 +435,7 @@ class GuestPageTest(unittest.TestCase):
         self.assertIsNotNone(snap["goal"])
         self.assertFalse(snap["goal"]["hidden"])
         shown = [n for child in snap["page"]["children"] if child != snap["viewer"] for n in nodes(child)]
-        in_goal = nodes(snap["goal"])
+        in_goal = nodes(snap["goal"]) + nodes(snap["own_account"])
         roles = {role(n["cls"]) for n in shown if n["cls"]}
         for banned in ("activation", "ask-open", "ask-box", "ask-text", "register-open", "sprint-acts", "sprint-more"):
             self.assertNotIn(banned, roles)
@@ -1090,3 +1090,158 @@ class GuestPoolTest(unittest.TestCase):
         snap = page_of(PAGE.read_bytes(), [START, {"frame": {**view([project(1, [])]), "pool": POOL_TIGHT}}])
         self.assertIs(snap["pool"]["hidden"], True)
         self.assertEqual(snap["pool"]["children"], [])
+
+
+GUEST_CONSENT = "Your sign-in is kept on the owner's host under the owner's user, so any process the owner runs can use it."
+GUEST_LOOPBACK = (
+    "This sign-in can only finish on the owner's machine, so it cannot finish from here. "
+    "Cancel it and tell the owner.")
+GUEST_NO_LINK = "No sign-in link came yet. Press Sign in again to fetch it, or Cancel."
+MANUAL_WORDS = "Sign in on that page; it then shows a code. Paste the code here and press Send code."
+UNKNOWN_WORDS = (
+    "The console could not tell where this sign-in returns, so a browser on another machine may not finish it.")
+RUNNING_WORDS = "A sign-in is running."
+FAILED_WORDS = "The sign-in did not finish."
+MANUAL = "https://claude.ai/oauth/authorize?code=true&client_id=invented"
+OWN_FRAME = {**SCOPED, "pool": POOL_TIGHT, "own_signin": None}
+OPEN_OWN = [START, {"frame": OWN_FRAME}, {"click": "pool-add"}]
+TICK = {"check": {"cls": "guest-tick", "checked": True}}
+UNTICK = {"check": {"cls": "guest-tick", "checked": False}}
+
+
+def attempt_reply(attempt: int, link: str | None, route: str | None) -> dict:
+    return {"respond": {"status": 200, "text": json.dumps({"attempt": attempt, "link": link, "route": route})}}
+
+
+def own_run(state: str, attempt: int) -> dict:
+    return {**OWN_FRAME, "own_signin": {"state": state, "at": None if state == "running" else "2026-11-10T08:30:00+00:00",
+                                        "attempt": attempt}}
+
+
+def own_writes(snap: dict) -> list:
+    return [(url, json.loads(body)) for url, body in writes(snap) if url.startswith("/api/guest-")]
+
+
+def own_of(snap: dict, cls: str) -> list:
+    return named(snap["own_account"], cls)
+
+
+class OwnAccountPageTest(unittest.TestCase):
+    def test_the_owner_page_names_the_login_beside_a_colleagues_account(self) -> None:
+        cap = real_capacity(NOW_S, [
+            {"name": "work", "week": .6, "five": .5, "week_reset": NOW_S + 4 * 86400, "five_reset": NOW_S + 3600},
+            {"name": "colleague-1", "week": .3, "five": .4, "week_reset": NOW_S + 5 * 86400,
+             "five_reset": NOW_S + 3600}])
+        cap = {**cap, "profiles": [{**p, "owner": COLLEAGUE if p["profile"] == "colleague-1" else None}
+                                   for p in cap["profiles"]]}
+        (snap,) = harness([START, {"frame": {**view([]), "capacity": cap}}, {"click": "cap"}, SNAP], PAGE.read_bytes())
+        accts = [n for n in snap["capacity"]["children"] if has_class(n, "cap-acct")]
+        by_name = {next(c["text"] for c in nodes(n) if c["tag"] == "b"): n for n in accts}
+        self.assertEqual([full(c) for c in named(by_name["colleague-1"], "cap-owner")], [COLLEAGUE])
+        self.assertEqual(named(by_name["work"], "cap-owner"), [])
+        row = next(n for n in nodes(snap["accounts_body"]) if n["tag"] == "li" and has_class(n, "acct-row")
+                   and any(c["text"] == "colleague-1" for c in nodes(n)))
+        self.assertEqual([full(c) for c in named(row, "acct-owner")], [COLLEAGUE])
+        work = next(n for n in nodes(snap["accounts_body"]) if n["tag"] == "li" and has_class(n, "acct-row")
+                    and any(c["text"] == "work" for c in nodes(n)))
+        self.assertEqual(named(work, "acct-owner"), [])
+
+    def test_the_guest_pool_reads_yours_for_his_account(self) -> None:
+        snap = pool_page({**POOL_TIGHT, "accounts": [{**A1, "label": "yours"}, A2, A3]})
+        rows = pool_rows(snap)
+        self.assertEqual([next(n["text"] for n in nodes(r) if n["tag"] == "b") for r in rows],
+                         ["yours", "Account 2", "Account 3"])
+        self.assertEqual([has_class(r, "pool-yours") for r in rows], [True, False, False])
+        self.assertNotIn("@", full(snap["pool"]))
+
+    def test_sign_in_stays_disabled_until_the_tick(self) -> None:
+        closed, opened, pressed, ticked, unticked = harness([
+            START, {"frame": OWN_FRAME}, SNAP, {"click": "pool-add"}, SNAP, {"click": "guest-signin"}, SNAP,
+            TICK, SNAP, UNTICK, SNAP], GUEST)
+        self.assertEqual(own_of(closed, "guest-account"), [])
+        self.assertEqual([full(n) for n in own_of(opened, "guest-consent")], [GUEST_CONSENT])
+        self.assertEqual([n["disabled"] for n in own_of(opened, "guest-signin")], [True])
+        self.assertEqual([n["disabled"] for n in own_of(pressed, "guest-signin")], [True])
+        self.assertEqual(own_writes(pressed), [])
+        self.assertEqual([n["disabled"] for n in own_of(ticked, "guest-signin")], [False])
+        self.assertEqual([n["disabled"] for n in own_of(unticked, "guest-signin")], [True])
+        self.assertEqual(own_writes(unticked), [])
+        self.assertEqual(len(own_of(opened, "pool-add")), 1)
+        self.assertEqual(named(opened["pool"], "pool-add"), [])
+        self.assertEqual(len(own_of(opened, "guest-tick")), 1)
+        self.assertIn("I agree", full(own_of(opened, "guest-account")[0]))
+
+    def test_a_ticked_sign_in_posts_the_consent_and_shows_the_link_and_the_code_box(self) -> None:
+        linked, done = harness([
+            *OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"}, SNAP,
+            {"type": {"class": "signin-code", "text": "  abc#def "}}, {"respond": NO_REPLY},
+            {"click": "guest-code"}, {"respond": NO_REPLY}, {"click": "guest-cancel"}, SNAP], GUEST)
+        (link,) = own_of(linked, "signin-link")
+        self.assertEqual(link["href"], MANUAL)
+        self.assertEqual([full(n) for n in own_of(linked, "signin-route")], [MANUAL_WORDS])
+        self.assertEqual(len(own_of(linked, "signin-code")), 1)
+        self.assertEqual(len(own_of(linked, "guest-cancel")), 1)
+        self.assertEqual(own_writes(done), [
+            ("/api/guest-account", {"consent": True}),
+            ("/api/guest-signin-code", {"code": "abc#def"}),
+            ("/api/guest-signin-cancel", {})])
+        for post in done["posts"]:
+            if post["url"] != "/api/looked":
+                self.assertEqual((post["method"], post["headers"]), ("POST", HEADERS))
+
+    def test_each_route_tells_the_guest_how_to_go_on(self) -> None:
+        unknown, loopback, nolink = (harness([*OPEN_OWN, TICK, attempt_reply(7, link, route),
+                                              {"click": "guest-signin"}, SNAP], GUEST)[0]
+                                     for link, route in ((MANUAL, "unknown"), (None, "loopback"), (None, None)))
+        self.assertEqual(own_of(unknown, "signin-link")[0]["href"], MANUAL)
+        self.assertEqual([full(n) for n in own_of(unknown, "signin-route")], [UNKNOWN_WORDS])
+        self.assertEqual(len(own_of(unknown, "signin-code")), 1)
+        self.assertEqual(len(own_of(unknown, "guest-cancel")), 1)
+        self.assertEqual([full(n) for n in own_of(loopback, "guest-loopback")], [GUEST_LOOPBACK])
+        self.assertEqual(len(own_of(loopback, "guest-cancel")), 1)
+        self.assertEqual(own_of(loopback, "signin-link"), [])
+        self.assertEqual(own_of(loopback, "signin-code"), [])
+        self.assertEqual([full(n) for n in own_of(nolink, "guest-nolink")], [GUEST_NO_LINK])
+        self.assertEqual([n["disabled"] for n in own_of(nolink, "guest-signin")], [False])
+        self.assertEqual(len(own_of(nolink, "guest-cancel")), 1)
+        again = harness([*OPEN_OWN, TICK, attempt_reply(7, None, None), {"click": "guest-signin"},
+                         attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"}, SNAP], GUEST)[0]
+        self.assertEqual(own_writes(again), [("/api/guest-account", {"consent": True})] * 2)
+        self.assertEqual(own_of(again, "signin-link")[0]["href"], MANUAL)
+
+    def test_a_refused_sign_in_shows_its_reason(self) -> None:
+        (snap,) = harness([
+            *OPEN_OWN, TICK, {"respond": {"status": 409, "text": "Tick that you agree before you sign in.\n"}},
+            {"click": "guest-signin"}, SNAP], GUEST)
+        (failed,) = own_of(snap, "signin-failed")
+        self.assertTrue(full(failed).startswith("Could not start the sign-in: Tick that you agree"))
+        self.assertEqual(own_of(snap, "signin-link"), [])
+
+    def test_a_frame_while_typing_keeps_the_code_and_its_focus(self) -> None:
+        (snap,) = harness([
+            *OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"},
+            {"type": {"class": "signin-code", "text": "abc"}}, {"frame": own_run("running", 7)}, SNAP], GUEST)
+        (code,) = own_of(snap, "signin-code")
+        self.assertEqual(code["value"], "abc")
+        self.assertEqual(role(snap["active"]), "signin-code")
+
+    def test_a_newer_attempt_drops_the_old_link_and_draft(self) -> None:
+        (snap,) = harness([
+            *OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"},
+            {"type": {"class": "signin-code", "text": "abc"}}, {"frame": own_run("running", 9)}, SNAP], GUEST)
+        self.assertEqual(own_of(snap, "signin-link"), [])
+        self.assertEqual(own_of(snap, "signin-code"), [])
+        self.assertIn(RUNNING_WORDS, full(snap["own_account"]))
+        self.assertEqual(len(own_of(snap, "guest-signin")), 1)
+
+    def test_the_run_ending_drops_the_link(self) -> None:
+        (snap,) = harness([
+            *OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"},
+            {"frame": own_run("failed", 7)}, SNAP], GUEST)
+        self.assertEqual(own_of(snap, "signin-link"), [])
+        self.assertIn(FAILED_WORDS, full(snap["own_account"]))
+
+    def test_the_owner_page_has_no_add_your_account(self) -> None:
+        (snap,) = harness([START, {"frame": {**view([project(1, [])]), "pool": POOL_TIGHT}}, {"snapshot": "page"}],
+                          PAGE.read_bytes())
+        self.assertEqual([n for n in nodes(snap["page"]) if has_class(n, "pool-add")], [])

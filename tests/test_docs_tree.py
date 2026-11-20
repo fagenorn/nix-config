@@ -816,7 +816,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
-                 "ADR-console-086"),
+                 "ADR-console-086, ADR-console-087"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025, ADR-console-075, "
                  "ADR-console-080")):
@@ -867,7 +867,7 @@ class DocsTreeTest(unittest.TestCase):
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
-                                          "ADR-console-086")):
+                                          "ADR-console-086, ADR-console-087")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)

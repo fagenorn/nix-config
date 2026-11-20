@@ -170,7 +170,9 @@ class PageTest(unittest.TestCase):
         # route sentence, came to 64126 bytes against the 63488 the two caps held.
         # Raised from 63 KB by #1341: the guest pool's line, rows and settling (about 1.4 KB compressed) did
         # not fit the 302 bytes the cap had left.
-        self.assertLess(len(gzip.compress(self.data, 9)), 66560)
+        # Raised from 65 KB by #1343: the guest page's own-account form (consent, tick, sign-in, link, code box and
+        # their redraws, about 2.1 KB compressed) did not fit the 840 bytes the cap had left.
+        self.assertLess(len(gzip.compress(self.data, 9)), 69632)
 
     def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
@@ -327,7 +329,8 @@ class PageTest(unittest.TestCase):
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
-             "/api/share-remove"},
+             "/api/share-remove", "/api/guest-account", "/api/guest-signin-code",
+             "/api/guest-signin-cancel"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -336,7 +339,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 46)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 49)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
