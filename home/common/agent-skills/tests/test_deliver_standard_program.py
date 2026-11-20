@@ -10992,7 +10992,11 @@ class LookHoldTest(unittest.TestCase):
         result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
         head = prompt(calls, "look-head")
         self.assertNotIn("merge commit is <headRefOid>", head)
-        self.assertIn("so it landed as itself (a fast-forward): no commit before the head names the tip of dev before the landing, so return merge null and stop here", head)
+        self.assertIn("so it landed as itself (a fast-forward): no commit before the head names the tip of dev before the landing, and the first commit that contains the head is the head's own child, never a landing commit, so return merge null and stop here", head)
+        # #1356: the first-parent check does not wait for the forge's oid to equal the head: a null mergeCommit reaches the same child of the head
+        self.assertIn("when the last commit of the first list has <headRefOid> as its first parent", head)
+        self.assertIn("whatever mergeCommit is (null or the head's own oid)", head)
+        self.assertNotIn("when the oid equals headRefOid and the last commit", head)
         self.assertIn("is the head itself and it landed as itself: return merge null and stop here", head)
         self.assertNotIn("merge commit is <headRefOid>", prompt(calls, "hold"))
         stopped, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED,
