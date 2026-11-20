@@ -325,7 +325,7 @@ class PageTest(unittest.TestCase):
              "/api/trust-check", "/api/register-cancel", "/api/picture/",
              "/api/owner-notice", "/api/owner-notice-withdraw", "/api/project-question",
              "/api/activate", "/api/look-retry", "/api/share-tailnet", "/api/share-colleague",
-             "/api/share-remove"},
+             "/api/share-remove", "/api/adoption-merge"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -334,7 +334,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 46)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 47)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -9245,6 +9245,62 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(full(link), "Open the pull request")
         self.assertEqual(link["href"], ADOPTION_ITEM["url"])
 
+    def test_a_ready_adoption_card_offers_merge_and_posts_its_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])}, {"click": "adoption-merge"}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (button,) = of_class(card, "button", "adoption-merge")
+        self.assertEqual(full(button), "Merge")
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/adoption-merge")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "number": 7, "commit": "a" * 40})
+        self.assertIn("X-Console-Token", post["headers"])
+
+    def test_an_adoption_card_without_merge_says_why_and_offers_no_button(self) -> None:
+        (snap,) = render([START, {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (reason,) = of_class(card, "span", "reason")
+        self.assertEqual(full(reason), MOVED_ITEM["why"])
+        self.assertEqual(of_class(card, "button", "adoption-merge"), [])
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "button"], [])
+        self.assertEqual(len(of_class(card, "a", "pr-link")), 1)
+
+    def test_a_refused_merge_says_why_through_a_redraw_and_can_be_tried_again(self) -> None:
+        refusal = "the pull request's branch holds commits the console did not push\n"
+        first, second = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": refusal}}, {"click": "adoption-merge"},
+            {"frame": frame([ADOPTION_ITEM])}, {"snapshot": True},
+            {"respond": {"status": 204, "text": ""}}, {"click": "adoption-merge"},
+            {"snapshot": True}])
+        (card,) = [n for n in nodes(first["inbox"]) if has_class(n, "adoption")]
+        (fail,) = of_class(card, "span", "fail")
+        self.assertEqual(
+            full(fail),
+            "Could not merge: the pull request's branch holds commits the console did not push")
+        self.assertEqual(
+            [p["url"] for p in second["posts"]], ["/api/adoption-merge", "/api/adoption-merge"])
+        (card,) = [n for n in nodes(second["inbox"]) if has_class(n, "adoption")]
+        self.assertEqual(of_class(card, "span", "fail"), [])
+
+    def test_an_empty_error_answer_says_plain_words(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 500, "text": ""}}, {"click": "adoption-merge"},
+            {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (fail,) = of_class(card, "span", "fail")
+        self.assertEqual(full(fail), "Could not merge: the console did not answer")
+        self.assertNotIn("HTTP", full(card))
+
+    def test_a_replaced_pull_requests_card_shows_no_old_refusal(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ADOPTION_ITEM])},
+            {"respond": {"status": 409, "text": "no\n"}}, {"click": "adoption-merge"},
+            {"frame": frame([{**ADOPTION_ITEM, "number": 8}])}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        self.assertEqual(of_class(card, "span", "fail"), [])
+
 
 LATER = [START, {"respond": {"status": 200, "text": ANSWER}},
          {"frame": frame([with_run(SIGNIN, "running", 7)])}]
@@ -10457,7 +10513,12 @@ ADOPTION_ITEM = {
     "type": "inbox_item", "reason": "adoption", "key": "adoption/" + PLAN_A, "project_id": "o/r",
     "name": "r", "headline": "The adoption of o/r is ready to merge",
     "url": "https://github.com/o/r/pull/7", "number": 7, "answered": False,
-    "waiting_since": "2026-11-15T08:00:00+00:00"}
+    "waiting_since": "2026-11-15T08:00:00+00:00",
+    "plan_id": PLAN_A, "commit": "a" * 40, "merge": True, "why": None}
+MOVED_ITEM = {**ADOPTION_ITEM, "merge": False,
+              "headline": "Merge is not offered for the adoption of o/r",
+              "why": "Its branch holds commits the console did not push. Review them on the forge "
+                     "and merge it there, or close it and choose Apply it again."}
 READY = [START, {"frame": {**frame([]), "registration": READY_SHOWN}}]
 R_PLAN = PLAN_A
 
