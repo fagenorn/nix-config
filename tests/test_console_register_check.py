@@ -15,16 +15,19 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
-from agent_tools.console import folder_trust, register, register_check
+from agent_tools.console import approve, event_log, folder_trust, register, register_check
+from agent_tools.console.view import derive_view
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from .test_console_register_service import Fake
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTRACT = str(ROOT / register_check.CONTRACT_SOURCE)
@@ -33,6 +36,38 @@ WRAPPER = ROOT / "home/common/verify-pending/checks/console-register"
 
 def view(registration):
     return 200, json.dumps({"registration": registration, "entries": []}).encode()
+
+
+T = "2026-11-19T17:00:00+00:00"
+DISMISSED = {"root": "/elsewhere/r", "status": "done", "result": "failed",
+             "note": register.LATER_NOTE, "at": T}
+
+
+def open_documents() -> dict:
+    """The views the owner's page shows for an open registration, derived by the console's own code."""
+    ready = {**register.DEFAULTS, "root": "/elsewhere/r", "project_id": None, "result": "planned",
+             "outcome": "changes", "headline": "What adopting r would change.",
+             "lines": ["writes the project contract"], "note": "The plan is ready.",
+             "plan_id": "P", "state": "ready", "questions": [], "remote": None, "at": T}
+    waiting = {**register.DEFAULTS, "root": "/elsewhere/r", "project_id": None,
+               "result": "not_registered", "outcome": "no_change",
+               "headline": "r is already adopted and is not registered yet.", "lines": [],
+               "note": register.CONFIRM_NOTE, "at": T}
+    draft = {**ready, "state": "draft", "note": "The plan is a draft."}
+    return {
+        "running": derive_view([], registration=register.view_entry("/elsewhere/r", None)),
+        "register card": derive_view(
+            [], registration=register.view_entry(None, waiting),
+            confirm_items=register.confirm_items(waiting, running=False)),
+        "apply card": derive_view(
+            [], registration=register.view_entry(None, ready),
+            apply_items=approve.apply_items(ready, None, None, "approve", deferred=set())),
+        "ended and shown": derive_view([], registration=register.view_entry(None, draft)),
+    }
+
+
+def sent(document) -> tuple:
+    return 200, json.dumps(document).encode()
 
 
 def seeded(entries) -> bytes:
@@ -69,44 +104,113 @@ class Case(unittest.TestCase):
 
 
 class RealConsoleTest(Case):
-    def test_the_check_registers_then_restores_the_registry(self):
+    PID = "console-check/register-real"
+
+    def arrange(self):
+        """A registry with one project and one profile; what the test needs of them."""
         keep = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, keep, True)
         seeded([{"project_id": "owner/keep", "root": str(keep)}])
-        store = agent_platform.state_root() / "console" / "events.sqlite3"
+        self.keep = keep
+        self.store = agent_platform.state_root() / "console" / "events.sqlite3"
         accounts = self.home / "accounts"
-        work = accounts / "profiles" / "work"
-        work.mkdir(parents=True)
-        arranged = {"oauthAccount": {"a": 1}}
-        (work / ".claude.json").write_text(json.dumps(arranged), "utf-8")
+        self.work = accounts / "profiles" / "work"
+        self.work.mkdir(parents=True)
+        self.arranged = {"oauthAccount": {"a": 1}}
+        (self.work / ".claude.json").write_text(json.dumps(self.arranged), "utf-8")
         patched = unittest.mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(accounts)})
         patched.start()
         self.addCleanup(patched.stop)
-        svc = support.service(self, store, agent_platform.registry_path(),
-                              adopter=register.Adopter(), dispatch=None, profile_dirs=[work],
-                              trust_home=self.home)
-        code, out = self.run_check(
+
+    def own_registration(self):
+        """The owner's dismissed registration, in the log before the service starts; its entry."""
+        other = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, other, True)
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = event_log.EventLog(self.store)
+        log.append([register.ended(register.dismissed(register.failed(str(other), "failed")))])
+        log.close()
+        return other
+
+    def shown(self, svc):
+        return json.loads(support.request(svc.address, "GET", "/api/state")[2])["registration"]
+
+    def service(self, **kwargs):
+        return support.service(self, self.store, agent_platform.registry_path(),
+                               dispatch=None, profile_dirs=[self.work], trust_home=self.home,
+                               **kwargs)
+
+    def check(self, svc, **kwargs):
+        return self.run_check(
             ["--url", f"http://127.0.0.1:{svc.address[1]}", "--contract", CONTRACT,
-             "--wait", "120"])
+             "--wait", "120"], **kwargs)
+
+    def test_the_check_registers_then_restores_the_registry(self):
+        self.arrange()
+        svc = self.service(adopter=register.Adopter())
+        code, out = self.check(svc)
         self.assertEqual((code, out["status"], out["restored"]), (0, "met", True))
         registry = json.loads(agent_platform.registry_path().read_text())
-        self.assertEqual(registry["projects"], [{"project_id": "owner/keep", "root": str(keep)}])
+        self.assertEqual(registry["projects"],
+                         [{"project_id": "owner/keep", "root": str(self.keep)}])
         self.assertFalse(Path(out["root"]).exists())
         self.assertEqual(list(self.tmp_root.iterdir()), [])
         for plan in (agent_platform.state_root() / "adopt/plans").glob("*.json"):
             handoff = json.loads(plan.read_text()).get("handoff", {})
             self.assertNotEqual(handoff.get("repo_root"), out["root"])
-        results = [json.loads(row[4])["result"] for row in support.log_rows(store)
+        results = [json.loads(row[4])["result"] for row in support.log_rows(self.store)
                    if row[2] == "registration.ended"]
         self.assertIn("registered", results)
-        (grant,) = [json.loads(row[4]) for row in support.log_rows(store)
+        (grant,) = [json.loads(row[4]) for row in support.log_rows(self.store)
                     if row[2] == "trust.granted"]
         self.assertEqual(grant["cause"], "register")
         key = os.path.realpath(out["root"])
-        for path, expected in ((work / ".claude.json", arranged), (self.home / ".claude.json", {})):
+        for path, expected in ((self.work / ".claude.json", self.arranged),
+                               (self.home / ".claude.json", {})):
             document = json.loads(path.read_text("utf-8"))
             self.assertNotIn(key, document.pop("projects", {}))
             self.assertEqual(document, expected)
+
+    def test_the_registration_shown_before_the_run_is_shown_after_it(self):
+        self.arrange()
+        other = self.own_registration()
+        svc = self.service(adopter=register.Adopter(), poll_seconds=3600)
+        shown = self.shown(svc)
+        self.assertEqual(shown["root"], str(other))
+        self.assertEqual(shown["note"], register.LATER_NOTE)
+        seen, stale = [], []
+
+        def fetch(url):
+            holds = any(entry["project_id"] == self.PID for entry in
+                        register_check.service.read_fleet(agent_platform.registry_path()) or [])
+            if holds:
+                seen.append(True)
+            answer = register_check.default_fetch(url)
+            if seen and not holds and not stale and not any(self.tmp_root.iterdir()):
+                stale.append(json.loads(answer[1]))
+                svc.refresh()
+            return answer
+
+        code, out = self.check(svc, project_id=self.PID, fetch=fetch, poll=0.05)
+        self.assertEqual((code, out["status"]), (0, "met"))
+        self.assertEqual(len(stale), 1)
+        self.assertNotEqual(stale[0]["registration"], shown)
+        self.assertEqual(self.shown(svc), shown)
+
+    def test_a_failed_run_gives_the_page_back_the_registration_it_ran_over(self):
+        self.arrange()
+        self.own_registration()
+        adopter = Fake(raises=register.RunFailed("timed_out"))
+        svc = self.service(adopter=adopter)
+        shown = self.shown(svc)
+        code, out = self.check(svc, project_id=self.PID, poll=0.05)
+        self.assertEqual((code, out["status"]), (1, "not_met"))
+        self.assertTrue(out["reason"].startswith("The adoption plan for repo failed"))
+        self.assertEqual(self.shown(svc), shown)
+        (cancel,) = [json.loads(row[4]) for row in support.log_rows(self.store)
+                     if row[2] == "registration.cancelled"]
+        self.assertTrue(cancel["restore"])
+        self.assertEqual(cancel["root"], adopter.calls[0][1])
 
 
 class SettleTest(Case):
@@ -123,14 +227,23 @@ class SettleTest(Case):
             written.set()
         return late
 
-    def late_run(self, status):
+    def late_run(self, status, cancel_status=204, shown=5, trust=False):
         keep = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, keep, True)
         before = seeded([{"project_id": "owner/keep", "root": str(keep)}])
         self.token()
         root_box, written, timers = [None], threading.Event(), []
+        cancels, checks, gone = [], [], threading.Event()
 
         def post(url, headers, body):
+            if url.endswith("/api/register-cancel"):
+                cancels.append((json.loads(body), dict(headers)))
+                if cancel_status == 204:
+                    gone.set()
+                return cancel_status, b""
+            if url.endswith("/api/trust-check"):
+                checks.append(json.loads(body))
+                return 204, b""
             root_box[0] = json.loads(body)["path"]
             timer = threading.Timer(1.0, self.late_writer(root_box, written))
             timers.append(timer)
@@ -143,20 +256,54 @@ class SettleTest(Case):
             if not written.is_set():
                 return view({"root": root_box[0], "status": "running", "result": None,
                              "headline": "Planning…"})
-            return view({"root": root_box[0], "status": "done", "result": "not_registered",
-                         "headline": "r was not registered: x"})
+            if gone.is_set():
+                return view(None)
+            document = {"registration": {
+                "root": root_box[0], "status": "done", "result": "not_registered",
+                "headline": "r was not registered: x", "cancel": True,
+                "at": "2026-11-15T08:00:00+00:00"}, "entries": []}
+            if trust:
+                document["inbox"] = {"open": [{"reason": "trust_failed", "root": root_box[0],
+                                               "profile": "work"}]}
+            return sent(document)
 
         code, out = self.run_check(["--wait", "0.2", "--contract", CONTRACT], fetch=fetch,
-                                   post=post, project_id=self.PID, poll=0.05, settle=30)
+                                   post=post, project_id=self.PID, poll=0.05, settle=30,
+                                   shown=shown)
         for timer in timers:
             timer.join()
-        self.assertEqual((code, out["status"], out["reason"]), (1, "not_met", "no result"))
+        self.root_box, self.cancels, self.checks = root_box, cancels, checks
         self.assertEqual(agent_platform.registry_path().read_bytes(), before)
         self.assertFalse((agent_platform.state_root() / "adopt/plans/late.json").exists())
         self.assertEqual(list(self.tmp_root.iterdir()), [])
+        if cancel_status == 204:
+            self.assertEqual((code, out["status"], out["reason"]), (1, "not_met", "no result"))
+        return code, out
 
     def test_a_late_write_is_restored_because_the_check_waits_for_the_run(self):
         self.late_run(204)
+
+    def test_a_failed_run_cancels_its_own_registration(self):
+        self.late_run(204)
+        self.assertEqual([body for body, _ in self.cancels],
+                         [{"root": self.root_box[0], "restore": True}])
+        headers = self.cancels[0][1]
+        self.assertEqual(headers["Origin"], "http://127.0.0.1:27184")
+        self.assertEqual(headers[register_check.write_guard.TOKEN_HEADER], "t" * 43)
+        self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_a_failed_run_left_shown_keeps_its_verdict(self):
+        code, out = self.late_run(204, cancel_status=409, shown=0.3)
+        self.assertEqual((code, out), (1, {
+            "status": "not_restored", "leftovers": ["registration"],
+            "verdict": {"status": "not_met", "reason": "no result"}}))
+        self.assertEqual(len(self.cancels), 1)
+
+    def test_a_trust_card_its_cancel_removed_is_not_a_leftover(self):
+        code, out = self.late_run(204, trust=True)
+        self.assertEqual((code, out), (1, {"status": "not_met", "reason": "no result"}))
+        self.assertEqual(len(self.checks), 1)
+        self.assertEqual(len(self.cancels), 1)
 
     def test_an_unanswered_post_still_waits_for_the_run(self):
         self.late_run(None)
@@ -190,16 +337,19 @@ class SettleTest(Case):
         self.assertEqual(register_check.parser().parse_args([]).wait,
                          register_check.SETTLE_SECONDS)
         self.assertGreater(register_check.POST_TIMEOUT, register.GIT_TIMEOUT)
+        self.assertEqual(register_check.SHOWN_SECONDS, 30)
 
 
 class RestoreTest(Case):
     PID = "console-check/register-leftover"
 
-    def registered_run(self, cards=(), stays=False):
+    def registered_run(self, cards=(), stays=False, left=False, final=None):
         """A stubbed console that registers, leaving one stored plan behind; the output.
 
         `cards` are the profiles whose Check again card the run left for the fixture's root, plus
-        one card of another root; a trust check clears the fixture's unless `stays`.
+        one card of another root; a trust check clears the fixture's unless `stays`. Confirming
+        registers the fixture's project; with `left` the page then keeps showing a done registration
+        of it, and with `final` the page answers that once the registry no longer holds it.
         """
         seeded([])
         self.token()
@@ -219,6 +369,7 @@ class RestoreTest(Case):
                 return 204, b""
             if url.endswith("/api/register-confirm"):
                 confirmed.append(True)
+                agent_platform.write_registry([{"project_id": self.PID, "root": box[0]}])
                 return 204, b""
             box[0] = json.loads(body)["path"]
             plans.mkdir(parents=True, exist_ok=True)
@@ -228,12 +379,19 @@ class RestoreTest(Case):
         def fetch(url):
             if box[0] is None:
                 return view(None)
-            registration = None if confirmed else {
+            holds = any(entry["project_id"] == self.PID for entry in
+                        register_check.service.read_fleet(agent_platform.registry_path()) or [])
+            if final is not None and confirmed and not holds:
+                return 200, final
+            registration = {
+                "root": box[0], "status": "done", "result": "registered", "note": None,
+                "cancel": False, "at": "2026-11-15T08:01:00+00:00"} if confirmed and left else (
+                None if confirmed else {
                 "root": box[0], "status": "done", "result": "not_registered",
                 "outcome": "no_change",
                 "headline": "r is already adopted and is not registered yet.",
                 "line": "Register r: needs you", "lines": [], "note": None, "adoption": None,
-                "at": "2026-11-15T08:00:00+00:00"}
+                "at": "2026-11-15T08:00:00+00:00"})
             key = os.path.realpath(box[0])
             open_cards = [{"reason": "trust_failed", "root": "/elsewhere", "profile": "other"}]
             if not confirmed:
@@ -243,11 +401,21 @@ class RestoreTest(Case):
                                for name in cards]
             return 200, json.dumps({
                 "registration": registration,
-                "entries": [{"project_id": self.PID}] if confirmed else [],
+                "entries": [{"project_id": self.PID}] if holds else [],
                 "inbox": {"open": open_cards}}).encode()
 
         return self.run_check(["--wait", "1", "--contract", CONTRACT], fetch=fetch, post=post,
-                              project_id=self.PID, poll=0.05, settle=5)
+                              project_id=self.PID, poll=0.05, settle=5, shown=0.3)
+
+    def test_a_registration_left_shown_is_not_restored_and_named(self):
+        code, out = self.registered_run(left=True)
+        self.assertEqual((code, out), (1, {"status": "not_restored",
+                                           "leftovers": ["registration"]}))
+
+    def test_a_view_without_its_members_never_proves_the_restore(self):
+        code, out = self.registered_run(final=b"{}")
+        self.assertEqual((code, out), (1, {"status": "not_restored",
+                                           "leftovers": ["registration"]}))
 
     def test_a_plan_that_cannot_be_deleted_is_not_restored_and_is_named(self):
         real = Path.unlink
@@ -334,6 +502,200 @@ class StubTest(Case):
             post=lambda url, headers, body: (409, b"... is not the top of a git checkout\n"))
         self.assertEqual((code, out["status"]), (1, "not_met"))
         self.assertTrue(out["reason"].startswith("refused 409 "))
+
+    def test_an_open_registration_makes_the_check_busy_and_posts_nothing(self):
+        before = seeded([{"project_id": "owner/keep", "root": "/somewhere"}])
+        self.token()
+        for name, document in open_documents().items():
+            with self.subTest(name):
+                posts = []
+
+                def post(url, headers, body):
+                    posts.append((url, body))
+                    return 500, b"posted"
+
+                code, out = self.run_check(["--contract", CONTRACT],
+                                           fetch=lambda url, d=document: sent(d), post=post)
+                self.assertEqual((code, out), (75, {"status": "busy"}))
+                self.assertEqual(posts, [])
+                self.assertEqual(list(self.tmp_root.iterdir()), [])
+                self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+
+    def test_the_fixtures_of_the_open_states_are_what_the_console_shows(self):
+        documents = open_documents()
+        (card,) = documents["apply card"]["inbox"]["open"]
+        self.assertEqual(card["reason"], "register_apply")
+        self.assertIsNone(documents["apply card"]["registration"]["note"])
+        self.assertEqual(documents["ended and shown"]["inbox"]["open"], [])
+        self.assertEqual(documents["ended and shown"]["registration"]["note"],
+                         "The plan is a draft.")
+
+    def test_a_dismissed_registration_does_not_make_the_check_busy(self):
+        seeded([])
+        self.token()
+        posts = []
+
+        def post(url, headers, body):
+            posts.append((url, json.loads(body)))
+            return 409, b"... is not the top of a git checkout\n"
+
+        code, out = self.run_check(["--contract", CONTRACT], fetch=lambda url: view(DISMISSED),
+                                   post=post)
+        self.assertEqual((code, out["status"]), (1, "not_met"))
+        (url, body), = posts
+        self.assertTrue(url.endswith("/api/register-project"))
+        self.assertIs(body["unless_open"], True)
+
+    def test_an_open_registration_is_busy_before_the_token_is_read(self):
+        seeded([])
+        code, out = self.run_check(["--contract", CONTRACT],
+                                   fetch=lambda url: sent(open_documents()["running"]))
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+
+    def changed_while_building(self, first, later):
+        before = seeded([{"project_id": "owner/keep", "root": "/somewhere"}])
+        self.token()
+        reads, posts = [], []
+
+        def fetch(url):
+            reads.append(url)
+            return first if len(reads) == 1 else later
+
+        def post(url, headers, body):
+            posts.append(url)
+            return 204, b""
+
+        code, out = self.run_check(["--contract", CONTRACT], fetch=fetch, post=post)
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(posts, [])
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+        self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+
+    def test_a_registration_opened_while_the_fixture_is_built_is_busy(self):
+        self.changed_while_building(view(None), sent(open_documents()["register card"]))
+
+    def test_a_dismissed_registration_cancelled_while_the_fixture_is_built_is_busy(self):
+        self.changed_while_building(view(DISMISSED), view(None))
+
+    def test_an_open_refusal_is_busy(self):
+        before = seeded([{"project_id": "owner/keep", "root": "/somewhere"}])
+        self.token()
+        code, out = self.run_check(
+            ["--contract", CONTRACT], fetch=lambda url: view(None),
+            post=lambda url, headers, body: (409, (register.OPEN_SHOWN + "\n").encode()))
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_a_refusal_leaves_another_checkouts_entry_of_the_same_id_alone(self):
+        other = [{"project_id": "console-check/register-x", "root": "/other/checkout"}]
+        before = seeded(other)
+        self.token()
+        code, out = self.run_check(
+            ["--contract", CONTRACT], fetch=lambda url: view(None),
+            post=lambda url, headers, body: (409, (register.OPEN_SHOWN + "\n").encode()),
+            project_id="console-check/register-x")
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_a_changed_view_leaves_another_checkouts_entry_of_the_same_id_alone(self):
+        before = seeded([{"project_id": "console-check/register-x", "root": "/other/checkout"}])
+        self.token()
+        reads = []
+
+        def fetch(url):
+            reads.append(url)
+            return view(None) if len(reads) == 1 else sent(open_documents()["register card"])
+
+        code, out = self.run_check(["--contract", CONTRACT], fetch=fetch,
+                                   post=lambda *a: (204, b""),
+                                   project_id="console-check/register-x")
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(agent_platform.registry_path().read_bytes(), before)
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_an_unrelated_registry_change_does_not_alter_a_refusal(self):
+        seeded([])
+        self.token()
+
+        def post(url, headers, body):
+            agent_platform.write_registry([{"project_id": "owner/new", "root": "/elsewhere"}])
+            return 409, (register.OPEN_SHOWN + "\n").encode()
+
+        code, out = self.run_check(["--contract", CONTRACT], fetch=lambda url: view(None),
+                                   post=post)
+        self.assertEqual((code, out), (75, {"status": "busy"}))
+        self.assertEqual(list(self.tmp_root.iterdir()), [])
+
+    def test_a_possible_dispatch_removes_the_entry_of_its_id_and_root_only(self):
+        pid = "console-check/register-x"
+        for name, root, kept in (("other root", "/other/checkout", True), ("own root", None, False)):
+            with self.subTest(name):
+                tmp = Path(tempfile.mkdtemp(dir=self.tmp_root))
+                fixture = tmp / "repo"
+                fixture.mkdir()
+                entry = {"project_id": pid, "root": root or str(fixture)}
+                seeded([entry])
+                left = register_check._restore(tmp, fixture, pid, [entry] if kept else [])
+                self.assertEqual(left, [])
+                held = register_check.service.read_fleet(agent_platform.registry_path())
+                self.assertEqual(held, [entry] if kept else [])
+
+    def test_a_quiet_group_without_its_projects_proves_nothing(self):
+        seeded([])
+        self.token()
+        document = {"registration": None, "entries": [{"type": "quiet_group"}]}
+        code, out = self.run_check(
+            ["--wait", "0.2", "--contract", CONTRACT], fetch=lambda url: sent(document),
+            post=lambda *a: (204, b""), poll=0.05, settle=2, shown=0.2)
+        self.assertEqual((code, out), (1, {
+            "status": "not_restored", "leftovers": ["registration"],
+            "verdict": {"status": "not_met", "reason": "no result"}}))
+
+    def test_the_restore_wait_never_sleeps_past_its_bound(self):
+        started = time.monotonic()
+        result = register_check._restore_view(
+            lambda url: view({"root": "/elsewhere", "status": "done", "at": "x"}),
+            lambda *a: (204, b""), "http://127.0.0.1:1", "t", Path("/r"), "p", None, 5.0, 0.2)
+        self.assertEqual(result, (["registration"], False))
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_a_changed_entry_of_the_same_root_status_and_time_is_not_the_saved_one(self):
+        saved = {"root": "/elsewhere/r", "status": "done", "result": "failed",
+                 "note": register.LATER_NOTE, "line": "x", "adoption": None, "at": T}
+        changed = {**saved, "note": "Choose Try again.", "line": "y",
+                   "adoption": {"headline": "h", "note": None}}
+        for shown, expected in ((changed, (["registration"], False)), (saved, ([], False))):
+            with self.subTest(note=shown["note"]):
+                self.assertEqual(register_check._restore_view(
+                    lambda url, d=shown: view(d), lambda *a: (204, b""), "http://127.0.0.1:1",
+                    "t", Path("/r"), "p", saved, 0.01, 0.2), expected)
+
+    def test_a_read_that_ends_past_the_deadline_posts_no_cancel(self):
+        now, fetches, posts = [0.0], [], []
+
+        def fetch(url):
+            fetches.append(url)
+            now[0] += 1.0
+            return view({"root": "/r", "status": "done", "result": "failed", "note": None,
+                         "cancel": True, "at": "x"})
+
+        def post(url, headers, body):
+            posts.append(url)
+            return 204, b""
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        with unittest.mock.patch.object(register_check.time, "monotonic", lambda: now[0]), \
+                unittest.mock.patch.object(register_check.time, "sleep", sleep):
+            result = register_check._restore_view(
+                fetch, post, "http://127.0.0.1:1", "t", Path("/r"), "p", None, 0.1, 0.5)
+        self.assertEqual(result, (["registration"], False))
+        self.assertEqual(posts, [])
+        self.assertEqual(len(fetches), 1)
 
     def test_a_foreign_url_is_a_usage_error(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:

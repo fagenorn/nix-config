@@ -249,8 +249,8 @@ class RegistryChangesTest(unittest.TestCase):
              [(REGISTERED, "a", {"root": "/new"})]),
             ({"c": c, "a": a}, [{"project_id": "b", "root": "/b"}],
              [(REGISTERED, "b", {"root": "/b"}),
-              (UNREGISTERED, "a", {}),
-              (UNREGISTERED, "c", {})]),
+              (UNREGISTERED, "a", {"root": "/srv/a"}),
+              (UNREGISTERED, "c", {"root": "/srv/c"})]),
         ]
         for states, entries, expected in table:
             with self.subTest(states=sorted(states), entries=entries):

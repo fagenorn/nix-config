@@ -24,7 +24,7 @@ import unittest.mock
 from pathlib import Path
 
 from agent_tools.console import (
-    checkout_remote, event_log, folder_trust, manager, register, register_check, sprints)
+    approve, checkout_remote, event_log, folder_trust, manager, register, register_check, sprints)
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -915,6 +915,102 @@ class CancelChecks:
         self.assertEqual(self.captured(repo), before)
 
 
+class RegisterAdmissionTest(Case):
+    """A conditional registration is admitted only while none is open on the page (#1334, ADR-console-084)."""
+
+    def test_an_open_registration_refuses_a_conditional_registration(self):
+        fake = Fake(plan=NO_CHANGE)
+        self.begin(fake)
+        owner = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(owner)})[0], 204)
+        self.assertEqual(self.settled_row(owner)["note"], register.CONFIRM_NOTE)
+        other = git_repo(self.parent / "r2")
+        rows = len(self.rows("registration.ended"))
+        status, _, body = self.post({"path": str(other), "unless_open": True})
+        self.assertEqual((status, body), (409, (register.OPEN_SHOWN + "\n").encode()))
+        self.assertEqual(fake.calls, [("plan", str(owner.resolve()))])
+        self.assertEqual(len(self.rows("registration.ended")), rows)
+        self.assertEqual(self.view()["registration"]["root"], str(owner.resolve()))
+        self.assertEqual(self.post({"path": str(other)})[0], 204)
+
+    def test_a_registration_that_is_not_open_admits_a_conditional_one(self):
+        fake = Fake(plan=RegisterFailureCardTest.FAILED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        self.assertEqual(self.view()["registration"]["note"], register.LATER_NOTE)
+        other = git_repo(self.parent / "r2")
+        self.assertEqual(self.post({"path": str(other), "unless_open": True})[0], 204)
+
+    def test_a_registration_opened_before_admission_refuses_the_conditional_one(self):
+        fake = Fake(plan=NO_CHANGE)
+        self.begin(fake)
+        other = git_repo(self.parent / "r2")
+        waiting = {**register.failed(str(self.parent / "owner"), "failed"),
+                   "result": "not_registered", "outcome": "no_change",
+                   "note": register.CONFIRM_NOTE}
+        real_lock = self.svc._ingest
+        armed = [None]
+        svc = self.svc
+
+        class Wrapper:
+            def __enter__(self):
+                real_lock.acquire()
+                if armed[0] == threading.get_ident():
+                    armed[0] = None
+                    svc._fold(svc.log.append([register.ended(waiting)]))
+                return self
+
+            def __exit__(self, *exc):
+                real_lock.release()
+
+        svc._ingest = Wrapper()
+        self.addCleanup(setattr, svc, "_ingest", real_lock)
+        real = register.refusal
+
+        def arm(*args, **kwargs):
+            armed[0] = threading.get_ident()
+            return real(*args, **kwargs)
+
+        with unittest.mock.patch.object(register, "refusal", side_effect=arm):
+            with self.assertRaises(sprints.Refused) as raised:
+                svc.register_project(str(other), unless_open=True)
+        self.assertEqual(str(raised.exception), register.OPEN_SHOWN)
+        self.assertIsNone(armed[0])
+        self.assertEqual(fake.calls, [])
+        self.assertIsNone(svc._registering)
+
+    def test_a_card_that_opens_over_a_dismissed_registration_refuses_the_conditional_one(self):
+        fake = Fake(plan=RegisterFailureCardTest.FAILED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        dismissed = self.view()["registration"]
+        self.assertEqual(dismissed["note"], register.LATER_NOTE)
+        card = {
+            "type": "inbox_item", "reason": "register_retry", "key": "register-retry/P/t",
+            "project_id": None, "root": dismissed["root"], "name": register.name_of(dismissed["root"]),
+            "title": "Register r", "plan_id": "P", "id": None, "subject": None,
+            "headline": "Registering r was refused.", "why": "Try again.", "refusal": None,
+            "more_questions": 0,
+            "questions": [{"question": "Registering r was refused.", "options": ["Retry"],
+                           "chosen": None, "recommended": None, "recommended_index": None}],
+            "values": ["retry"], "items": [], "answers": [], "answered": False,
+            "waiting_since": "t"}
+        calls = list(fake.calls)
+        rows = len(self.rows("registration.ended"))
+        other = git_repo(self.parent / "r2")
+        with unittest.mock.patch.object(approve, "retry_entries", return_value=[card]):
+            status, _, body = self.post({"path": str(other), "unless_open": True})
+        self.assertEqual((status, body), (409, (register.OPEN_SHOWN + "\n").encode()))
+        self.assertEqual(fake.calls, calls)
+        self.assertEqual(len(self.rows("registration.ended")), rows)
+
+
 class RegisterCancelTest(CancelChecks, Case):
     """Cancel registration of a plan or a failure that was never applied (#1088, ADR-console-037)."""
 
@@ -961,6 +1057,27 @@ class RegisterCancelTest(CancelChecks, Case):
         self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
         self.assertEqual(self.inbox_of(repo), [])
         self.assert_cancelled(repo)
+
+    def test_a_restoring_cancel_gives_back_the_registration_it_ran_over(self):
+        self.start(Fake(plan=self.FAILED))
+        y = git_repo(self.parent / "y")
+        self.assertEqual(self.post({"path": str(y)})[0], 204)
+        self.settled_row(y)
+        self.assertEqual(self.confirm({"root": str(y), "choice": "not_now"})[0], 204)
+        shown = self.view()["registration"]
+        self.assertEqual((shown["status"], shown["note"]), ("done", register.LATER_NOTE))
+        repo = git_repo(self.parent / "fail-app")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["result"], "failed")
+        self.assertTrue(self.view()["registration"]["cancel"])
+        self.assertEqual(self.cancel({"root": str(repo), "restore": True})[::2], (204, b""))
+        self.assertEqual(self.view()["registration"], shown)
+        self.assertEqual(self.rows("registration.cancelled")[-1][1],
+                         {"by": "owner", "root": str(repo), "plan_id": None, "restore": True})
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.cancel({"root": str(repo)})[::2], (204, b""))
+        self.assertIsNone(self.view()["registration"])
 
     def test_cancel_survives_a_restart(self):
         self.start(Fake(plan=DRAFT))

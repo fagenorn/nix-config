@@ -106,7 +106,8 @@ on an apply card) is not in `KEPT_KINDS` either.
 `REGISTRATION_CANCELLED` (`registration.cancelled`, #1088, `{"by": "owner", "root", "plan_id"}`, one per
 Cancel registration the owner chooses, plus one per other failed apply of the same root) is not in `KEPT_KINDS`; the registration, deferral, adoption and
 folder-trust folds each drop what it names. `cancelled_registration(event)` reads it: `(root, plan_id)`
-for exactly that payload (`plan_id` null for a registration with none, a failed plan), else None.
+for exactly that payload, or exactly it plus `"restore": true` (#1334; `plan_id` null for a registration
+with none, a failed plan), else None.
 
 `ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
 `KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
@@ -314,13 +315,17 @@ class Event:
 def cancelled_registration(event: Event) -> tuple[str, str] | None:
     """`(root, plan_id)` of a `REGISTRATION_CANCELLED` row with exactly the owner's payload, else None.
 
+    The payload may also carry `"restore": true` (a restoring Cancel, #1334) and no other member.
+
     The plan id is a non-empty string, or JSON null for a registration that has none (a failed plan).
     """
     payload = event.payload
     if event.kind != REGISTRATION_CANCELLED or not isinstance(payload, Mapping):
         return None
     root, plan_id = payload.get("root"), payload.get("plan_id")
-    if (payload != {"by": "owner", "root": root, "plan_id": plan_id}
+    owner = {"by": "owner", "root": root, "plan_id": plan_id}
+    if (payload not in (owner, {**owner, "restore": True})
+            or payload.get("restore", True) is not True
             or not isinstance(root, str) or not root
             or not (plan_id is None or (isinstance(plan_id, str) and plan_id))):
         return None
