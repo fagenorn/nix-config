@@ -4251,7 +4251,7 @@ class ConsoleService:
         guest-port reading would change a guest's bytes: the cached guest views are kept. The account
         numbers are kept in `account-numbers.json` beside the event log, written when they change,
         and a failed write keeps them in memory and is retried on every publish while they differ from
-        the last numbers written (ADR-console-085). A view that lists no profile before the profiles are
+        the last numbers written (ADR-console-086). A view that lists no profile before the profiles are
         first read leaves them as they are, so a restart does not forget them; once they are read, an
         empty list is a confirmed empty pool and ends the numbering, but a failed read of the profiles
         directory is not a list (`_scan_profiles`) and leaves them as they are. A removed profile's

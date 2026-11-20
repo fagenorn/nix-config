@@ -610,7 +610,7 @@ class DocsTreeTest(unittest.TestCase):
         status = next(row for row in (adr_dir / "066-a-named-colleague-reaches-the-console-only-"
                                       "through-tailscale-serve-on-a-guest-port.md"
                                       ).read_text().splitlines() if row.startswith("- **Status:**"))
-        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077, ADR-console-085")
+        self.assertEqual(status, "- **Status:** accepted; amended by ADR-console-077, ADR-console-086")
 
     def test_the_tailnet_name_source_is_recorded_as_adr_078(self):
         adr_dir = REPO_ROOT / "docs/areas/console/adr"
@@ -816,7 +816,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
-                 "ADR-console-085"),
+                 "ADR-console-086"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025, ADR-console-075, "
                  "ADR-console-080")):
@@ -867,7 +867,7 @@ class DocsTreeTest(unittest.TestCase):
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
-                                          "ADR-console-085")):
+                                          "ADR-console-086")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)

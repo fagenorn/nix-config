@@ -76,7 +76,7 @@ is refused with `ValueError("unscoped view input <name>")`, so a view input adde
 classified before a guest can see it. `scrub(view, pool, sprint_accounts)` then drops what the inputs
 cannot: the `sharing` member, the unmanaged list, the per-profile session counts, the sign-in,
 account, pin and registration members, the digest, the activation line, the spend view and the
-capacity profiles, and puts in their place the `pool` member (#1341, ADR-console-085). `pool_view`
+capacity profiles, and puts in their place the `pool` member (#1341, ADR-console-086). `pool_view`
 builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `all_out`,
 `resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
 neutral `label` (`Account <n>`), `state`, the percent left and reset of the week and the session,
