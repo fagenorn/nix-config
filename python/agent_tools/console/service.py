@@ -3821,7 +3821,7 @@ class ConsoleService:
         self._account_numbers = guest.read_numbers(self._numbers_path)
         self._numbers_saved: dict[str, int] = dict(self._account_numbers)
         self._numbers_established: dict[str, str] = {}
-        self._retired_numbers: dict[str, int] = {}
+        self._retired_numbers: dict[str, tuple[int, str]] = {}
         self._profiles_read = False
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
@@ -4249,22 +4249,27 @@ class ConsoleService:
         the last numbers written (ADR-console-085). A view that lists no profile before the profiles are
         first read leaves them as they are, so a restart does not forget them; once they are read, an
         empty list is a confirmed empty pool and ends the numbering, but a failed read of the profiles
-directory is not a list (`_scan_profiles`) and leaves them as they are. A removed profile's number is
-kept in memory while another profile still holds it, so a sprint still running on it keeps its
-account label.
+        directory is not a list (`_scan_profiles`) and leaves them as they are. A removed profile's
+        number is kept in memory, with the address it had, while a profile still on that address
+        holds the number, so a sprint still running on it keeps its account label and a number given
+        to another account never does.
         """
         inputs = self._view_inputs()
         if inputs["capacity"]["profiles"] or self._profiles_read:
             numbers = guest.account_numbers(
                 inputs["capacity"], self._account_numbers, self._numbers_established)
+            before = self._numbers_established
             self._numbers_established = {
                 entry["profile"]: entry["account"] for entry in inputs["capacity"]["profiles"]
                 if entry["account"] is not None}
-            held = set(numbers.values())
+            gone = {**self._retired_numbers,
+                    **{name: (number, before[name])
+                       for name, number in self._account_numbers.items()
+                       if name not in numbers and name in before}}
             self._retired_numbers = {
-                name: number for name, number in {**self._retired_numbers,
-                                                  **self._account_numbers}.items()
-                if name not in numbers and number in held}
+                name: (number, address) for name, (number, address) in gone.items()
+                if any(numbers[other] == number and now == address
+                       for other, now in self._numbers_established.items())}
             self._account_numbers = numbers
         if self._account_numbers != self._numbers_saved:
             try:
@@ -4299,7 +4304,8 @@ account label.
         if self._guest_server is not None and access.shared and name is not None:
             pool = guest.pool_view(inputs["capacity"], self._account_numbers)
             running = guest.sprint_labels(self._sprints, guest.profile_labels(
-                {**self._retired_numbers, **self._account_numbers}))
+                {**{name: number for name, (number, _) in self._retired_numbers.items()},
+                 **self._account_numbers}))
             for login, projects in access.colleagues.items():
                 derived = guest.mark_steer(
                     guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running),

@@ -678,6 +678,47 @@ class ScopedReadTest(GuestCase):
         svc.poll_sessions()
         self.assertEqual(self.labels(svc), ([], {"s-p01": None}))
 
+    def test_a_removed_accounts_number_given_to_a_new_account_does_not_label_its_sprint(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", "h-zq@corp-zq.invalid"),
+            signed_in_row("b-zq2", "w-zq@corp-zq.invalid")])
+        a, b, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2", "c-zq3"))
+        for path in (a, b, c):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc),
+                         (["Account 1", "Account 2"], {"s-p01": "Account 2"}))
+        dirs[:] = [a, c]
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": None}))
+
+    def test_a_removed_profiles_label_ends_when_the_profile_holding_its_account_leaves_it(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        svc._fold(svc.log.append([signed_in_row("a-zq1", "elsewhere-zq@corp-zq.invalid")]))
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": None}))
+
     def test_a_profiles_directory_that_cannot_be_read_does_not_end_the_numbering(self):
         self.seed()
         a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
