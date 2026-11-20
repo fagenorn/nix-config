@@ -67,8 +67,8 @@ name> is ready to merge` when Merge is offered and `Merge is not offered for the
 `waiting_since` the `pull_at`, `plan_id`, `commit`, `merge` (whether `merge_refusal` is None) and
 `why` (None, else the `*_WHY` words of the refusal: `MOVED_WHY`, `FAILING_WHY`, `FOUND_WHY`,
 `UNREAD_WHY`, `RETARGETED_WHY`, `CLOSED_WHY`). `signature(plan_id)` is the sentence the pull request's body ends
-its plan with, `console_made(found, name, plan_id)` is true only when a found pull request's
-`title` is `title(name)` and its `body` carries that signature (the service asks only of one found after its own open failed: a pull request found before it tried to open one is never the console's), and `parse_merge_request(body)`
+its plan with, `attempt_marker(attempt)` is the invisible line (an HTML comment) that `body(latest, attempt)` ends with when the console opens a pull request, `attempt` being a token the service makes fresh for each create attempt and keeps only in memory, and `console_made(found, name, plan_id, attempt)` is true only when a found pull request's
+`title` is `title(name)` and its `body` carries that signature and that attempt's marker (the service asks only of one found after its own open failed: a pull request found before it tried to open one is never the console's), and `parse_merge_request(body)`
 takes a UTF-8 JSON object of exactly `{plan_id, number, commit}` (a non-empty plan id as
 `parse_approve_request` reads it, a positive int and 40 lowercase hex) and fails as it does. The
 words `MERGE_UNAVAILABLE`, `STALE_CARD`, `MERGING` and `MERGED_ELSEWHERE` are the service's
@@ -194,7 +194,7 @@ body}`, the title and body as the listing gives them and None when not text, els
 `open_pull_request(slug, head, base, title, body, cancel=None)`,
 `pull_request_reading(slug, number, cancel=None)` (`{state, head, base, checks_error}`: `merged`,
 `closed`, `ready` for an open pull request whose `mergeable_state` is in `READY_MERGEABLE`, `failing`
-for a `blocked` or `behind` one whose head has a check run of any page concluded in
+for a `blocked`, `behind` or `dirty` one whose head has a check run of any page concluded in
 `FAILED_CONCLUSIONS` or a combined status in `FAILED_STATUSES`, else `open`; `head` is the forge's
 head when it is 40 hex and `base` its target branch when a non-empty string, else None; when the
 check read of such a pull request fails, the reading is still returned, `open`, with the exception
@@ -1032,16 +1032,21 @@ def signature(plan_id: str) -> str:
     return f"Plan {plan_id}, approved by the owner on the console."
 
 
-def console_made(found: Mapping, name: str, plan_id: str) -> bool:
+def attempt_marker(attempt: str) -> str:
+    return f"<!-- console-attempt {attempt} -->"
+
+
+def console_made(found: Mapping, name: str, plan_id: str, attempt: str) -> bool:
     text = found.get("body")
     return (found.get("title") == title(name) and isinstance(text, str)
-            and signature(plan_id) in text)
+            and signature(plan_id) in text and attempt_marker(attempt) in text)
 
 
-def body(latest: Mapping) -> str:
+def body(latest: Mapping, attempt: str | None = None) -> str:
     bullets = "\n".join(f"- {line}" for line in latest["lines"])
-    return (f"{latest['headline']}\n\n{bullets}\n\n{signature(latest['plan_id'])} Merge it "
+    text = (f"{latest['headline']}\n\n{bullets}\n\n{signature(latest['plan_id'])} Merge it "
             "once its required checks pass.")
+    return text if attempt is None else f"{text}\n\n{attempt_marker(attempt)}"
 
 
 def retained(plan_id: str) -> dict | None:
@@ -1204,7 +1209,7 @@ class GitHubForge:
         mergeable = answer.get("mergeable_state")
         if mergeable in READY_MERGEABLE:
             return {"state": "ready", **seen}
-        if mergeable in ("blocked", "behind") and sha is not None:
+        if mergeable in ("blocked", "behind", "dirty") and sha is not None:
             try:
                 if self._failed(slug, sha, cancel):
                     return {"state": "failing", **seen}

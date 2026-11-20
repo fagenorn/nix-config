@@ -72,6 +72,12 @@ ERROR_LINE = "console: plan_approve_error "
 PLAIN_WORDS = ("adopt.", "verification_failed", "HTTP", "422", "gh_failed", "Traceback")
 
 
+def attempt_of(text):
+    """The attempt token the console put in the body of the pull request it opened."""
+    (found,) = re.findall(r"<!-- console-attempt ([0-9a-f]{32}) -->$", text)
+    return found
+
+
 class StandInForge:
     def __init__(self, states=None, open_raises=None, lost=None, find_raises=None,
                  open_block=False, linger=0.0):
@@ -94,7 +100,11 @@ class StandInForge:
         self.merge_block = None
         self.merge_entered = threading.Event()
         self.read_pause = None
+        self.pause_after = 0
+        self.paused = False
+        self.reads = 0
         self.read_entered = threading.Event()
+        self.before_merge = None
 
     def find_pull_request(self, slug, head, base, cancel=None):
         self.calls.append(("find", slug, head, base))
@@ -141,13 +151,17 @@ class StandInForge:
         reading = {"state": found, "head": self.heads.get(number, COMMIT),
                    "base": self.bases.get(number, "develop"),
                    "checks_error": self.unread.get(number)}
-        if self.read_pause is not None:
+        self.reads += 1
+        if self.read_pause is not None and self.reads > self.pause_after and not self.paused:
+            self.paused = True
             self.read_entered.set()
             self.read_pause.wait(10)
         return reading
 
     def merge_pull_request(self, slug, number, head, cancel=None):
         self.calls.append(("merge", slug, number, head))
+        if self.before_merge is not None:
+            self.before_merge()
         self.merge_entered.set()
         if self.merge_block is not None:
             self.merge_block.wait(10)
@@ -157,6 +171,16 @@ class StandInForge:
 
     def mark_closed(self, number):
         self.closed.add(number)
+
+
+class RacingForge(StandInForge):
+    """A forge whose create attempt fails while a person opens a pull request with the console's words."""
+
+    def open_pull_request(self, slug, head, base, title, body, cancel=None):
+        self.calls.append(("open", slug, head, base, title, body))
+        self.pulls[(head, base)] = 7
+        self.texts[7] = (title, body.split("\n\n<!--")[0])
+        raise ForgeError("gh_timeout", "api")
 
 
 class Pusher:
@@ -774,7 +798,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(self.forge.calls, [
             ("find", "fixture/r", BRANCH, "develop"),
             ("open", "fixture/r", BRANCH, "develop", "Adopt reconcile onto the agent platform",
-             approve.body(self.planned))])
+             approve.body(self.planned, attempt_of(self.forge.calls[1][5])))])
         self.assertEqual(self.steps(), ["applied", "opened"])
         self.assertEqual(shown["adoption"], {
             "status": "done", "step": "opened", "state": "open",
@@ -1193,6 +1217,58 @@ class AdoptionMergeTest(ApproveCase):
         self.assertEqual((item["merge"], item["why"]), (False, approve.FOUND_WHY))
         self.refused_merge(approve.FOUND)
 
+    def test_a_pull_request_with_the_consoles_words_but_not_its_attempt_is_not_the_consoles(self):
+        self.forge = RacingForge()
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.assertEqual(len(self.opens()), 1)
+        self.assertEqual(self.svc._adoptions[PID_B]["pull_request"],
+                         {"number": 7, "url": URL, "created": False})
+        self.poll("ready")
+        (item,) = self.items()
+        self.assertEqual((item["merge"], item["why"]), (False, approve.FOUND_WHY))
+        self.refused_merge(approve.FOUND)
+
+    def test_a_pull_request_retargeted_after_the_last_poll_is_not_merged_into_its_new_branch(self):
+        self.opened()
+        self.poll("ready")
+        self.assertIs(self.items()[0]["merge"], True)
+        self.forge.bases[7] = "release"
+        errors = self.refused_merge(approve.RETARGETED)
+        self.assertIn("console: adoption_merge_refused", errors)
+        self.assertEqual((self.last_pull()["state"], self.last_pull()["base"]),
+                         ("ready", "release"))
+        (item,) = self.items()
+        self.assertEqual((item["merge"], item["why"]), (False, approve.RETARGETED_WHY))
+
+    def test_a_click_on_a_card_whose_step_was_applied_again_is_refused_in_words(self):
+        self.opened()
+        self.poll("ready")
+        self.poll("closed")
+        self.forge.mark_closed(7)
+        self.registered(self.repo)
+        self.forge.open_raises = [ForgeError("gh_failed", "gh: Unprocessable (HTTP 422)")]
+        self.run_approval("open_failed")
+        self.assertIsNone(self.svc._adoptions[PID_B]["pull_request"])
+        self.refused_merge(approve.NO_PULL, number=7, commit=COMMIT)
+
+    def test_a_registration_that_cannot_be_dispatched_does_not_undo_an_acknowledged_merge(self):
+        def refusing(job):
+            raise RuntimeError("no thread")
+
+        self.green()
+        self.poll("ready")
+        dispatch, self.svc._approval_dispatch = self.svc._approval_dispatch, refusing
+        (status, body), errors = self.logged_merge()
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual((self.last_pull()["state"], self.last_pull()["head"]), ("merged", COMMIT))
+        self.assertIn("console: adoption_register_dispatch_failed RuntimeError", errors)
+        self.assertEqual(self.register_calls(), [])
+        self.svc._approval_dispatch = dispatch
+        self.svc.poll_adoptions()
+        self.settled(1)
+        self.assertEqual(len(self.register_calls()), 1)
+
     def test_a_pull_request_retargeted_since_it_was_opened_offers_no_merge(self):
         self.opened()
         self.forge.bases[7] = "release"
@@ -1220,7 +1296,7 @@ class AdoptionMergeTest(ApproveCase):
         self.opened()
         self.poll("ready")
         self.forge.merge_raises = [ForgeError("gh_failed", "gh: Head branch was modified (HTTP 409)")]
-        self.forge.heads[7] = "d" * 40
+        self.forge.before_merge = lambda: self.forge.heads.update({7: "d" * 40})
         (status, body), errors = self.logged_merge()
         self.assertEqual((status, body), (409, approve.MOVED.encode() + b"\n"))
         self.assertEqual(self.merged_calls(), [("merge", "fixture/r", 7, COMMIT)])
@@ -1235,7 +1311,7 @@ class AdoptionMergeTest(ApproveCase):
         self.green()
         self.poll("ready")
         self.forge.merge_raises = [ForgeError("gh_timeout", "api")]
-        self.forge.states[7] = "merged"
+        self.forge.before_merge = lambda: self.forge.states.update({7: "merged"})
         self.assertEqual(self.merge(), (204, b""))
         self.assertEqual((self.last_pull()["state"], self.last_pull()["head"]), ("merged", COMMIT))
         self.settled(1)
@@ -1245,8 +1321,8 @@ class AdoptionMergeTest(ApproveCase):
         self.green()
         self.poll("ready")
         self.forge.merge_raises = [ForgeError("gh_failed", "gh: Head branch was modified (HTTP 409)")]
-        self.forge.states[7] = "merged"
-        self.forge.heads[7] = "d" * 40
+        self.forge.before_merge = lambda: (self.forge.states.update({7: "merged"}),
+                                           self.forge.heads.update({7: "d" * 40}))
         self.assertEqual(self.merge(), (409, approve.MERGED_ELSEWHERE.encode() + b"\n"))
         self.assertEqual((self.last_pull()["state"], self.last_pull()["head"]), ("merged", "d" * 40))
         self.assertFalse([p for _, p in self.pulls()
@@ -1258,7 +1334,8 @@ class AdoptionMergeTest(ApproveCase):
         self.poll("ready")
         pulls = self.pulls()
         self.forge.merge_raises = [ForgeError("gh_timeout", "api")]
-        self.forge.states[7] = ForgeError("gh_timeout", "api")
+        self.forge.before_merge = lambda: self.forge.states.update(
+            {7: ForgeError("gh_timeout", "api")})
         (status, body), errors = self.logged_merge()
         self.assertEqual((status, body), (409, b"the forge took too long to answer\n"))
         self.assertIn("console: adoption_poll_failed", errors)
@@ -1319,6 +1396,7 @@ class AdoptionMergeTest(ApproveCase):
         self.poll("ready")
         self.forge.merge_raises = [ForgeError("gh_failed", "gh: not mergeable (HTTP 405)")]
         self.forge.read_pause = threading.Event()
+        self.forge.pause_after = self.forge.reads + 1
         answers = []
         clicker = threading.Thread(target=lambda: answers.append(self.logged_merge()))
         clicker.start()
@@ -1337,6 +1415,7 @@ class AdoptionMergeTest(ApproveCase):
         self.green()
         self.poll("ready")
         self.forge.read_pause = threading.Event()
+        self.forge.pause_after = self.forge.reads
         poller = threading.Thread(target=self.svc.poll_adoptions)
         poller.start()
         self.assertTrue(self.forge.read_entered.wait(10))
@@ -2156,7 +2235,8 @@ class PlanApproveRealTest(ApproveCase):
                          sorted([f"refs/heads/main {self.main0}", f"refs/heads/{branch} {tip}"]))
         self.assertEqual(self.opens(), [
             ("open", "fixture/console-approve", branch, "main",
-             "Adopt repo onto the agent platform", approve.body(self.planned))])
+             "Adopt repo onto the agent platform",
+             approve.body(self.planned, attempt_of(self.opens()[0][5])))])
 
     def test_a_real_apply_and_its_pull_request_run_no_linux_only_command(self):
         shims = self.parent / "shims"

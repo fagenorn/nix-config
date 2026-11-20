@@ -610,12 +610,21 @@ service refuses, each as 409 with the words, one stderr line `console: adoption_
 `_merging`, `approve.MERGING`; when the folded adoption is `opened` and its pull request number or
 commit differs from the body's (a card of a replaced pull request), `approve.STALE_CARD`; then
 `approve.merge_refusal` of the folded adoption (no pull request the console opened, merged, closed,
-not made by the console, unread head, moved head, failing, not ready). Otherwise
+not made by the console, unread head, moved head, failing, not ready); the refusal for a plan with
+no pull request (a re-applied step) is computed before any slug is read. Then, still outside the
+ingest lock, one `forge.pull_request_reading` is taken (the forge's merge call pins only the head, so
+a pull request retargeted since the page polled would land the same commit elsewhere): it is
+recorded as a poll's reading is, and `approve.merge_refusal` of the folded adoption with that
+reading's state, head and target decides again (a failed read refuses `approve.merge_failure`, and a
+`merged` one also dispatches registration); the target can still move between that read and the
+merge call, which the forge cannot pin. Otherwise
 `forge.merge_pull_request(slug, number, commit, cancel=<stop>)` runs outside the ingest lock with
 the folded commit, never a head the forge showed; `_merging` holds the plan id from the check until
 the outcome is recorded and registration dispatched, and `close` waits for it to be empty before it
 closes the log. When the call returned, `_record_reading` appends the `merged` row at that commit,
-`register_merged` is dispatched on the approval worker unless the stop is set, the answer is an empty
+`register_merged` is dispatched on the approval worker unless the stop is set (a dispatch that raises is one
+line `console: adoption_register_dispatch_failed <Type>` and does not change the answer: the poll's
+`register_merged` registers the recorded merge), the answer is an empty
 `204` and one line `console: adoption_merge_ended <plan_id> merged` ends it. A call that failed
 (any exception but `approve.Cancelled`, which refuses `register.STOPPING`) is first one line
 `console: adoption_merge_error <json>` (the plan, the number, the exception and, for a `ForgeError`,
@@ -5734,7 +5743,10 @@ class ConsoleService:
 
         One found before the console tried to open any is not the console's, whatever its words say
         (a person can open one with the same title and plan sentence); one found after its own open
-        failed is the console's only when it carries the console's title and plan sentence.
+        failed is the console's only when it carries the console's title, its plan sentence and the
+        marker of this create attempt (a token made here, fresh for the attempt, and never stored: a
+        person's pull request opened at the same time cannot carry it, and a restart before the
+        console recorded the pull request leaves it not established, so Merge is not offered).
         """
         try:
             found = self._forge.find_pull_request(slug, branch, base, cancel=stop)
@@ -5746,10 +5758,11 @@ class ConsoleService:
         plan_id = shown["plan_id"]
         if found is not None:
             return self._recorded(found, False), None
+        attempt = uuid.uuid4().hex
         try:
             return self._recorded(self._forge.open_pull_request(
-                slug, branch, base, approve.title(name), approve.body(shown), cancel=stop),
-                True), None
+                slug, branch, base, approve.title(name), approve.body(shown, attempt),
+                cancel=stop), True), None
         except approve.Cancelled:
             raise
         except Exception as error:
@@ -5764,7 +5777,7 @@ class ConsoleService:
             found = None
         if found is None:
             return None, failure
-        return self._recorded(found, approve.console_made(found, name, plan_id)), None
+        return self._recorded(found, approve.console_made(found, name, plan_id, attempt)), None
 
     @staticmethod
     def _recorded(pull: Mapping, created: bool) -> dict:
@@ -8336,11 +8349,11 @@ class ConsoleService:
                     and (found["pull_request"]["number"] != number or found["commit"] != commit)):
                 raise sprints.Refused(approve.STALE_CARD)
             refusal = approve.merge_refusal(found)
-            slug = None if found is None else approve.pull_slug(found["pull_request"])
-            if refusal is None and slug is None:
-                refusal = approve.NO_PULL
             if refusal is not None:
                 raise sprints.Refused(refusal)
+            slug = approve.pull_slug(found["pull_request"])
+            if slug is None:
+                raise sprints.Refused(approve.NO_PULL)
             self._merging.add(plan_id)
         try:
             self._merge_and_record(plan_id, number, commit, slug)
@@ -8349,7 +8362,36 @@ class ConsoleService:
                 self._merging.discard(plan_id)
                 self._runs_done.notify_all()
 
+    def _read_before_merging(self, plan_id: str, number: int, commit: str, slug: str) -> None:
+        """Refuse unless the forge shows, now, a ready pull request at `commit` and the recorded base.
+
+        The forge's merge call pins only the head, so a pull request retargeted since the page
+        polled would land the same commit on the new branch; this read is the check that the
+        target is still the recorded one. What it read is recorded like a poll's reading.
+        """
+        with self._ingest:
+            mark = self._pull_marks.get(plan_id, 0)
+        try:
+            reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as error:
+            print(f"console: adoption_poll_failed {plan_id} {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            raise sprints.Refused(approve.merge_failure(error)) from None
+        self._record_reading(plan_id, number, reading, mark)
+        if reading["state"] == "merged":
+            self._dispatch_registration()
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            refusal = (approve.NO_PULL if found is None else approve.merge_refusal(
+                {**found, "pull_state": reading["state"], "pull_head": reading["head"],
+                 "pull_base": reading["base"]}))
+        if refusal is not None:
+            raise sprints.Refused(refusal)
+
     def _merge_and_record(self, plan_id: str, number: int, commit: str, slug: str) -> None:
+        self._read_before_merging(plan_id, number, commit, slug)
         try:
             self._forge.merge_pull_request(slug, number, commit, cancel=self._stop)
         except approve.Cancelled:
@@ -8401,8 +8443,13 @@ class ConsoleService:
 
     def _dispatch_registration(self) -> None:
         """Register what the forge merged, on the approval worker, unless the console is stopping."""
-        if not self._stop.is_set():
+        if self._stop.is_set():
+            return
+        try:
             self._approval_dispatch(self.register_merged)
+        except Exception as error:
+            print(f"console: adoption_register_dispatch_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
 
     def register_merged(self) -> None:
         """One round of merged registrations; see the module docstring."""

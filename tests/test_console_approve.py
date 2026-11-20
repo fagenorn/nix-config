@@ -228,21 +228,29 @@ class MergeRefusalTest(unittest.TestCase):
 
 
 class ConsoleMadeTest(unittest.TestCase):
-    def test_only_the_consoles_title_and_plan_signature_count(self):
+    def test_only_the_consoles_title_plan_signature_and_attempt_count(self):
         plan = "sha256:" + "1" * 64
-        made = {"title": approve.title("r"), "body": "x\n\n" + approve.signature(plan)}
-        self.assertTrue(approve.console_made(made, "r", plan))
+        attempt = "a" * 32
+        made = {"title": approve.title("r"),
+                "body": "x\n\n" + approve.signature(plan) + "\n\n" + approve.attempt_marker(attempt)}
+        self.assertTrue(approve.console_made(made, "r", plan, attempt))
+        copied = "x\n\n" + approve.signature(plan)
         for found in ({**made, "title": "Adopt it"},
-                      {**made, "body": "x\n\n" + approve.signature("sha256:" + "2" * 64)},
+                      {**made, "body": "x\n\n" + approve.signature("sha256:" + "2" * 64)
+                       + approve.attempt_marker(attempt)},
+                      {**made, "body": copied},
+                      {**made, "body": copied + approve.attempt_marker("b" * 32)},
                       {**made, "body": None},
                       {"body": made["body"]}):
             with self.subTest(found=found):
-                self.assertFalse(approve.console_made(found, "r", plan))
+                self.assertFalse(approve.console_made(found, "r", plan, attempt))
         latest = {"headline": "H", "lines": ["a", "b"], "plan_id": plan}
         self.assertIn(approve.signature(plan), approve.body(latest))
-        self.assertEqual(approve.body(latest),
-                         f"H\n\n- a\n- b\n\nPlan {plan}, approved by the owner on the console. "
-                         "Merge it once its required checks pass.")
+        plain = (f"H\n\n- a\n- b\n\nPlan {plan}, approved by the owner on the console. "
+                 "Merge it once its required checks pass.")
+        self.assertEqual(approve.body(latest), plain)
+        self.assertEqual(approve.body(latest, attempt),
+                         plain + "\n\n<!-- console-attempt " + attempt + " -->")
 
     def test_a_merge_request_names_its_plan_pull_request_and_commit(self):
         good = json.dumps({"plan_id": "p", "number": 7, "commit": "e" * 40}).encode()
@@ -1627,7 +1635,7 @@ class GitHubForgeTest(unittest.TestCase):
                                  {"state": "ready", "head": head, "base": None,
                                   "checks_error": None})
                 self.assertEqual([argv for argv, _ in self.calls], [["api", "repos/o/r/pulls/7"]])
-        for mergeable in ("dirty", "unknown", "draft", None):
+        for mergeable in ("unknown", "draft", None):
             with self.subTest(mergeable=mergeable):
                 answer = {"state": "open", "merged": False, "head": {"sha": head}}
                 if mergeable:
@@ -1679,6 +1687,18 @@ class GitHubForgeTest(unittest.TestCase):
                          {"state": "open", "head": head, "base": None, "checks_error": None})
         self.assertEqual([argv for argv, _ in self.calls][2],
                          ["api", f"repos/o/r/commits/{head}/status"])
+        self.assertEqual(len(self.calls), 3)
+
+    def test_a_conflicting_pull_request_with_a_failed_check_reads_failing(self):
+        head = "e" * 40
+        dirty = {**self.blocked(head), "mergeable_state": "dirty"}
+        forge = self.forge(dirty, [{"check_runs": [{"conclusion": "failure"}]}])
+        self.assertEqual(forge.pull_request_reading("o/r", 7),
+                         {"state": "failing", "head": head, "base": None, "checks_error": None})
+        forge = self.forge(dirty, [{"check_runs": [{"conclusion": "success"}]}],
+                           {"state": "success"})
+        self.assertEqual(forge.pull_request_reading("o/r", 7),
+                         {"state": "open", "head": head, "base": None, "checks_error": None})
         self.assertEqual(len(self.calls), 3)
 
     def test_a_behind_pull_request_with_a_failed_check_reads_failing(self):
