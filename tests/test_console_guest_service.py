@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, capacity, console, guest, peer, pin, serve_probe_check, service, signin,
+    account_add, account_remove, capacity, console, guest, peer, pin, serve_probe_check, service, signin,
     write_guard)
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
@@ -44,6 +44,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TAILNET = "desk.invented-tailnet.ts.net"
 OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
+SECOND = "second@example.invalid"
 STRANGER = "stranger@example.invalid"
 FORGED = "forged-probe@example.invalid"
 READ_AT = int(time.time())
@@ -97,6 +98,8 @@ TABLE = {
     "/api/sprint-status": "owner", "/api/profile": "owner", "/api/excluded": "owner",
     "/": "guest", "/api/state": "guest", "/api/stream": "guest", "/api/whoami": "guest",
     "/api/picture/": "guest",
+    "/api/guest-account": "guest-account", "/api/guest-signin-code": "guest-account",
+    "/api/guest-signin-cancel": "guest-account",
 }
 
 
@@ -169,6 +172,13 @@ class GuestCase(unittest.TestCase):
                 [(SHARING_TAILNET, None, {"shared": True})] if shared else [])
             rows += [(SHARING_COLLEAGUE, None, {"login": login, "projects": projects})
                      for login, projects in colleagues.items()]
+            log.append(rows)
+        finally:
+            log.close()
+
+    def append(self, rows):
+        log = EventLog(self.store)
+        try:
             log.append(rows)
         finally:
             log.close()
@@ -297,6 +307,8 @@ class RouteTableTest(GuestCase):
                          service.OWNER_ONLY)
         self.assertEqual({route for route, side in TABLE.items() if side == "guest-write"},
                          service.GUEST_WRITES)
+        self.assertEqual({route for route, side in TABLE.items() if side == "guest-account"},
+                         service.GUEST_ACCOUNT_WRITES)
         for name, value in vars(service).items():
             if (name.endswith(("_PATH", "_PREFIX")) and isinstance(value, str)
                     and value.startswith("/")):
@@ -535,13 +547,6 @@ class ScopedReadTest(GuestCase):
         status, _, body = self.guest(svc, "GET", "/api/picture/" + p0, headers=headers)
         self.assertEqual((status, body), (404, b"this picture is not known\n"))
 
-
-    def append(self, rows):
-        log = EventLog(self.store)
-        try:
-            log.append(rows)
-        finally:
-            log.close()
 
     def labels(self, svc):
         status, _, body = self.guest(svc, "GET", "/api/state")
@@ -995,6 +1000,117 @@ class ScopedReadTest(GuestCase):
         svc.poll_sessions()
         self.assertEqual(self.labels(svc), ([], {"s-p01": None}))
         self.assertEqual(guest.read_numbers(self.store.with_name(guest.NUMBERS_FILE)), {})
+
+
+class OwnAccountServiceTest(GuestCase):
+    def numbers(self):
+        return guest.read_numbers(self.store.with_name(guest.NUMBERS_FILE))
+
+    def pool(self, svc, login):
+        status, _, body = self.guest(svc, "GET", "/api/state", logins=(login,))
+        self.assertEqual(status, 200)
+        return body, json.loads(body)
+
+    def listing(self, *names):
+        paths = [self.root / "accounts/profiles" / name for name in names]
+        for path in paths:
+            path.mkdir(parents=True)
+        return paths
+
+    def two_colleagues(self):
+        self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})
+        self.append([
+            account_add.added("colleague-1", by=COLLEAGUE),
+            signed_in_row("colleague-1", "c1-zq@corp-zq.invalid"),
+            signed_in_row("work-zq5", "work-zq5@corp-zq.invalid"),
+            *reading_rows("colleague-1", 0.3, 0.2, 3 * 86400, 7200),
+            *reading_rows("work-zq5", 0.4, 0.25, 3 * 86400, 7200)])
+        return self.listing("colleague-1", "work-zq5")
+
+    def test_two_colleagues_and_the_owner_see_whose_account_it_is(self):
+        svc = self.start(profile_dirs=self.two_colleagues())
+        svc.poll_sessions()
+        numbers = self.numbers()
+        mine, other = f"Account {numbers['work-zq5']}", f"Account {numbers['colleague-1']}"
+        first, first_view = self.pool(svc, COLLEAGUE)
+        second, second_view = self.pool(svc, SECOND)
+        labels = [row["label"] for row in first_view["pool"]["accounts"]]
+        self.assertEqual(sorted(labels), sorted(["yours", mine]))
+        self.assertEqual(labels.index("yours"), numbers["colleague-1"] - 1)
+        self.assertEqual([row["label"] for row in second_view["pool"]["accounts"]],
+                         [f"Account {n}" for n in sorted(numbers.values())])
+        self.assertIn(other, [row["label"] for row in second_view["pool"]["accounts"]])
+        self.assertNotIn(b"yours", second)
+        for marker in (COLLEAGUE, "colleague-1", "corp-zq.invalid"):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker.encode(), second)
+        self.assertNotIn(b"colleague-1", first)
+        self.assertIsNone(first_view["own_signin"])
+        self.assertIsNone(second_view["own_signin"])
+        owned = {entry["profile"]: entry["owner"] for entry in json.loads(
+            self.owner(svc, "GET", "/api/state")[2])["capacity"]["profiles"]}
+        self.assertEqual(owned, {"colleague-1": COLLEAGUE, "work-zq5": None})
+        svc.close()
+        again = self.start(profile_dirs=[self.root / "accounts/profiles/colleague-1",
+                                         self.root / "accounts/profiles/work-zq5"])
+        again.poll_sessions()
+        owned = {entry["profile"]: entry["owner"] for entry in json.loads(
+            self.owner(again, "GET", "/api/state")[2])["capacity"]["profiles"]}
+        self.assertEqual(owned, {"colleague-1": COLLEAGUE, "work-zq5": None})
+        again._fold(again.log.append([account_add.added("work-zq5", by=SECOND)]))
+        again.poll_sessions()
+        owned = {entry["profile"]: entry["owner"] for entry in json.loads(
+            self.owner(again, "GET", "/api/state")[2])["capacity"]["profiles"]}
+        self.assertEqual(owned, {"colleague-1": COLLEAGUE, "work-zq5": SECOND})
+
+    def retired_case(self):
+        self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address),
+            account_add.added("a-zq1", by=COLLEAGUE)])
+        a, b = self.listing("a-zq1", "b-zq2")
+        return [a, b], b
+
+    def test_a_retired_sprint_reads_yours_for_the_colleague_holding_its_account(self):
+        dirs, b = self.retired_case()
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+
+        def seen(login):
+            _, view = self.pool(svc, login)
+            return ([row["label"] for row in view["pool"]["accounts"]],
+                    {node["sprint_id"]: node["account_label"]
+                     for entry in view["entries"] for node in entry["sprints"]})
+
+        self.assertEqual(seen(COLLEAGUE), (["yours"], {"s-p01": "yours"}))
+        self.assertEqual(seen(SECOND), (["Account 1"], {"s-p01": "Account 1"}))
+
+    def test_a_colleagues_running_sprint_reads_yours_on_his_page_only(self):
+        self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})
+        self.append([
+            account_add.added("colleague-1", by=COLLEAGUE),
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "colleague-1", "session_name": "m-p01"}),
+            signed_in_row("colleague-1", "c1-zq@corp-zq.invalid"),
+            signed_in_row("work-zq5", "work-zq5@corp-zq.invalid")])
+        svc = self.start(profile_dirs=self.listing("colleague-1", "work-zq5"))
+        svc.poll_sessions()
+        number = self.numbers()["colleague-1"]
+
+        def label(login):
+            _, view = self.pool(svc, login)
+            return [node["account_label"] for entry in view["entries"]
+                    for node in entry["sprints"]]
+
+        self.assertEqual(label(COLLEAGUE), ["yours"])
+        self.assertEqual(label(SECOND), [f"Account {number}"])
 
 
 class DoorTest(GuestCase):

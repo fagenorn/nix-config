@@ -107,7 +107,10 @@ class GuestWriteCase(GuestCase):
                 for member in value if isinstance(value, list) else [value]:
                     connection.putheader(name, member)
             connection.putheader("Content-Length", str(len(raw)) if send_body else "100")
-            connection.endheaders(raw if send_body else b"")
+            try:
+                connection.endheaders(raw if send_body else b"")
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # refused before the body was read: the answer is already written
             response = connection.getresponse()
             self.last_headers = dict(response.getheaders())
             got = response.status, response.read()
@@ -301,6 +304,13 @@ class GuestWriteTableTest(GuestWriteCase):
         self.assertLessEqual(service.GUEST_WRITES, service.PAGE_WRITES)
         self.assertFalse(service.GUEST_WRITES & service.OWNER_ONLY)
 
+    def test_the_guest_account_writes_are_exactly_three(self):
+        self.assertEqual(service.GUEST_ACCOUNT_WRITES, {
+            "/api/guest-account", "/api/guest-signin-code", "/api/guest-signin-cancel"})
+        self.assertLessEqual(service.GUEST_ACCOUNT_WRITES, service.PAGE_WRITES)
+        self.assertFalse(service.GUEST_ACCOUNT_WRITES & service.GUEST_WRITES)
+        self.assertFalse(service.GUEST_ACCOUNT_WRITES & service.OWNER_ONLY)
+
     def world(self, svc):
         """Sprints of every owner and project, each with a waiting brief or an open question."""
         made = {}
@@ -332,7 +342,8 @@ class GuestWriteTableTest(GuestWriteCase):
         self.seed(colleagues={COLLEAGUE: ["owner/p01"], SECOND: ["owner/p01"]})
         svc = self.start()
         made = self.world(svc)
-        for route in sorted(service.PAGE_WRITES - service.GUEST_WRITES):
+        for route in sorted(service.PAGE_WRITES - service.GUEST_WRITES
+                             - service.GUEST_ACCOUNT_WRITES):
             with self.subTest(route=route):
                 status, body = self.still(svc, lambda: self.guest_post(
                     svc, route, b"", send_body=False))

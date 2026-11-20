@@ -994,6 +994,83 @@ class PoolTest(unittest.TestCase):
                              {"s-1": (None, "h@corp.invalid", "b"), "s-2": (None, "", "c")})
 
 
+class OwnAccountTest(unittest.TestCase):
+    A = "a@example.invalid"
+    B = "b@example.invalid"
+
+    def cap(self, names, addresses, owners=()):
+        signins = {name: SignIn("signed_in", None, "t", True, address)
+                   for name, address in addresses.items()}
+        return capacity_module.capacity_view(
+            names, CapacityState({}, {}), NOW, signins=signins, owners=dict(owners))
+
+    def test_two_colleagues_see_yours_and_account_n_and_the_owner_sees_the_login(self):
+        cap = self.cap(["colleague-1", "colleague-2", "work"],
+                       {"colleague-1": "a-zq1@corp-zq.invalid", "colleague-2": "b-zq2@corp-zq.invalid",
+                        "work": "w-zq3@corp-zq.invalid"},
+                       {"colleague-1": self.A, "colleague-2": self.B})
+        numbers = guest.account_numbers(cap, {})
+        pool_a = guest.pool_view(cap, numbers, {"colleague-1"})
+        pool_b = guest.pool_view(cap, numbers, {"colleague-2"})
+        self.assertEqual([row["label"] for row in pool_a["accounts"]],
+                         ["yours", "Account 2", "Account 3"])
+        self.assertEqual([row["label"] for row in pool_b["accounts"]],
+                         ["Account 1", "yours", "Account 3"])
+        self.assertEqual({e["profile"]: e["owner"] for e in cap["profiles"]},
+                         {"colleague-1": self.A, "colleague-2": self.B, "work": None})
+        encoded = encode_view(guest.scrub(derive_view(**guest.scoped(
+            guest_inputs(), frozenset({"owner/p01"}))), pool_b))
+        for secret in (self.A.encode(), b"colleague-1", b"colleague-2", b"corp-zq.invalid"):
+            self.assertNotIn(secret, encoded)
+
+    def test_a_profile_signed_in_to_his_account_reads_yours(self):
+        cap = self.cap(["colleague-1", "work"],
+                       {"colleague-1": "same-zq@corp-zq.invalid", "work": "same-zq@corp-zq.invalid"},
+                       {"colleague-1": self.A})
+        numbers = guest.account_numbers(cap, {})
+        mine = guest.pool_view(cap, numbers, {"colleague-1"})
+        other = guest.pool_view(cap, numbers, ())
+        self.assertEqual([row["label"] for row in mine["accounts"]], ["yours"])
+        self.assertEqual([row["label"] for row in other["accounts"]], ["Account 1"])
+        self.assertEqual(set(mine["accounts"][0]), set(guest.ACCOUNT_MEMBERS))
+
+    def test_a_running_sprint_on_his_account_is_labelled_yours(self):
+        base = guest_inputs()["sprints"]["s-p00"]
+        running = {name: dataclasses.replace(base, manager=Manager(STARTED, at(5), profile, "m"))
+                   for name, profile in (("s-a", "colleague-1"), ("s-w", "work"))}
+        numbers = {"colleague-1": 1, "work": 2}
+        self.assertEqual(
+            guest.sprint_labels(running, guest.profile_labels(numbers, {"colleague-1"})),
+            {"s-a": "yours", "s-w": "Account 2"})
+        self.assertEqual(guest.sprint_labels(running, guest.profile_labels(numbers)),
+                         {"s-a": "Account 1", "s-w": "Account 2"})
+
+    def test_a_retired_sprint_label_reads_yours_for_his_account(self):
+        retired = {"s-a": (1, "x", "gone-1"), "s-b": (2, "y", "gone-2"), "s-c": (None, "", "gone-3")}
+        numbers = {"colleague-1": 1, "work": 2}
+        self.assertEqual(guest.retired_labels(retired, numbers, {"colleague-1"}),
+                         {"s-a": "yours", "s-b": "Account 2", "s-c": None})
+        self.assertEqual(guest.retired_labels(retired, numbers),
+                         {"s-a": "Account 1", "s-b": "Account 2", "s-c": None})
+
+    def test_own_signin_is_his_latest_run_and_names_no_profile(self):
+        runs = {"colleague-1": {"state": "failed", "at": "t1", "attempt": 3},
+                "colleague-3": {"state": "running", "at": None, "attempt": 9},
+                "work": {"state": "running", "at": None, "attempt": 12}}
+        owners = {"colleague-1": self.A, "colleague-3": self.A}
+        own = guest.own_signin(runs, owners, self.A)
+        self.assertEqual(own, {"state": "running", "at": None, "attempt": 9})
+        self.assertIsNot(own, runs["colleague-3"])
+        self.assertIsNone(guest.own_signin(runs, owners, self.B))
+        self.assertNotIn(b"colleague", json.dumps(own).encode())
+        ended_later = {**runs, "colleague-1": {"state": "failed", "at": "t2", "attempt": 10}}
+        self.assertEqual(guest.own_signin(ended_later, owners, self.A),
+                         {"state": "running", "at": None, "attempt": 9})
+        shown = derive_view(**guest.scoped(guest_inputs(), frozenset({"owner/p01"})))
+        self.assertEqual(guest.scrub(shown, own_signin=own)["own_signin"], own)
+        self.assertIsNone(guest.scrub(shown)["own_signin"])
+
+
 class DoorTest(unittest.TestCase):
     def test_the_door_refusal_table(self):
         def st(mode, uid):
