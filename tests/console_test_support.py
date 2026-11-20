@@ -108,7 +108,9 @@ def post_reading(address, body, headers=None, host=None):
 def post_page(address, path, headers=None, body=b"", host=None):
     """A POST that sends exactly the headers given, plus Host and Content-Length.
 
-    A header's value may be a list: the header is then sent once per member.
+    A header's value may be a list: the header is then sent once per member. A server that refuses
+    a request before it reads the body may close the connection while the body is still being sent
+    (http.client sends headers and body separately); the answer it already wrote is still read.
     """
     connection = http.client.HTTPConnection(*address, timeout=5)
     try:
@@ -118,7 +120,10 @@ def post_page(address, path, headers=None, body=b"", host=None):
             for each in value if isinstance(value, list) else [value]:
                 connection.putheader(name, each)
         connection.putheader("Content-Length", str(len(body)))
-        connection.endheaders(body)
+        try:
+            connection.endheaders(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         response = connection.getresponse()
         return response.status, dict(response.getheaders()), response.read()
     finally:

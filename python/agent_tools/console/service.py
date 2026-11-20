@@ -4026,6 +4026,8 @@ class ConsoleService:
         self._project_questions_done = threading.Condition(self._ingest)
         self._runs_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
+        if self._signin_runs is not None:
+            self._signin_runs.named = lambda profile: profile not in self._account_owners
         self._published = threading.Condition()
         self._view = b""
         self._version = 0
@@ -5169,7 +5171,7 @@ class ConsoleService:
         for entry in entries:
             try:
                 self._grant_trust("account", entry["root"], entry["project_id"],
-                                  profiles=[(name, found[0] / ".claude.json")])
+                                  profiles=[(name, found[0] / ".claude.json")], named=named)
             except Exception as error:
                 print(f"console: trust_account_failed {name + ' ' if named else ''}"
                       f"{type(error).__name__}", file=sys.stderr)
@@ -5721,7 +5723,8 @@ class ConsoleService:
 
     def _grant_trust(self, cause: str, root: str, project: str,
                      profiles: Sequence[tuple[str, Path]] | None = None,
-                     slot: str | None = None, epoch: int | None = None) -> list[tuple[str, str]]:
+                     slot: str | None = None, epoch: int | None = None,
+                     named: bool = True) -> list[tuple[str, str]]:
         """Grant the folder's client trust in every target and log one `trust.granted` row.
 
         The key is read from `root` every time. The row names the key, or `slot` when the caller
@@ -5731,6 +5734,9 @@ class ConsoleService:
 
         The row is kept even when `close` has begun, the files being written already; a grant that
         starts after `close` began writes nothing. `close` waits for every grant under way.
+
+        With `named` False the stderr line of a failed write carries no profile name (a colleague's
+        profile, #1343).
 
         A retry passes the `epoch` it read of the root's cancellations (#1088): once the owner has
         cancelled the root's registration, nothing is written and no row is logged, so a Check again
@@ -5758,7 +5764,8 @@ class ConsoleService:
                 try:
                     results.append((name, self._trust_granter(path, key)))
                 except Exception as error:
-                    print(f"console: trust_grant_error {name} {type(error).__name__}",
+                    print(f"console: trust_grant_error {name + ' ' if named else ''}"
+                          f"{type(error).__name__}",
                           file=sys.stderr)
                     results.append((name, folder_trust.FAILED))
             named = slot if slot is not None else (

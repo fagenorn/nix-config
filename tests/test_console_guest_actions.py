@@ -107,7 +107,10 @@ class GuestWriteCase(GuestCase):
                 for member in value if isinstance(value, list) else [value]:
                     connection.putheader(name, member)
             connection.putheader("Content-Length", str(len(raw)) if send_body else "100")
-            connection.endheaders(raw if send_body else b"")
+            try:
+                connection.endheaders(raw if send_body else b"")
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # refused before the body was read: the answer is already written
             response = connection.getresponse()
             self.last_headers = dict(response.getheaders())
             got = response.status, response.read()

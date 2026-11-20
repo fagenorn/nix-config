@@ -14,7 +14,8 @@ first argument and a newline into the `link` FIFO beside it. The console opens t
 without blocking, before it starts the client. `valid_link(text)` is true for text that starts with
 `https://`, is at most `MAX_LINK_CHARS` (4096) characters long and has only characters 0x21 to 0x7E.
 The first line of the FIFO that passes is the browser link; a line that does not is dropped, with one
-stderr line `console: signin_link_refused <profile>` and no part of the line.
+stderr line `console: signin_link_refused <profile>` and no part of the line. The line carries no profile
+when `SignIns.named(profile)` is false (the service sets it false for a profile a colleague added, #1343).
 
 The client also writes its manual link to its standard output (client 2.1.322, stdin not a terminal:
 `If the browser didn't open, visit: <link>`, the link possibly wrapped in OSC 8 escapes). The runner
@@ -497,6 +498,7 @@ class SignIns:
         self._link_wait = link_wait
         self._manual_grace = manual_grace
         self._host = default_host() if host is None else host
+        self.named: Callable[[str], bool] = lambda profile: True
         self._lock = threading.Lock()
         self._runs: dict[str, _Run] = {}
         self._serial = 0
@@ -700,7 +702,8 @@ class SignIns:
         except UnicodeDecodeError:
             text = ""
         if not valid_link(text):
-            print(f"console: signin_link_refused {run.profile}", file=sys.stderr)
+            label = f" {run.profile}" if self.named(run.profile) else ""
+            print(f"console: signin_link_refused{label}", file=sys.stderr)
             return
         with run.cond:
             run.fifo_link = text

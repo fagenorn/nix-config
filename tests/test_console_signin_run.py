@@ -529,6 +529,17 @@ class RunTest(unittest.TestCase):
         self.assertEqual(err.getvalue(), "console: signin_link_refused work\n")
         self.assertNotIn("SENTINEL-BAD", err.getvalue())
 
+    def test_an_unusable_link_of_an_unnamed_profile_is_dropped_without_its_name(self):
+        self.arrange("code", FAKE_LINK="javascript:SENTINEL-BAD")
+        runs = self.make(link_wait=0.5)
+        runs.named = lambda profile: False
+        err = io.StringIO()
+        with redirect_stderr(err):
+            runs.start("work")
+            self.assertIsNone(runs.wait_link("work"))
+            until(self, lambda: err.getvalue())
+        self.assertEqual(err.getvalue(), "console: signin_link_refused\n")
+
     def test_a_client_offering_a_manual_link_hands_back_the_manual_route(self):
         self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_MANUAL=MANUAL_LINK)
         runs = self.make()

@@ -4,12 +4,14 @@ Run: just agent-workflow-tests
 """
 import json
 import shutil
+import subprocess
 import sys
 import threading
 import unittest
 from datetime import datetime, timezone
 
-from agent_tools.console import account_add, account_remove, guest, service, signin, signin_run, sprints
+from agent_tools.console import (
+    account_add, account_remove, folder_trust, guest, service, signin, signin_run, sprints)
 
 from . import console_test_support as support
 from .test_console_account_service import NOW, Listing
@@ -49,6 +51,7 @@ class GuestAccountCase(GuestWriteCase):
         self.add_error = None
         self.after_add = None
         self.remove_fails = False
+        self.grant_error = None
         self.link_wait = 5
         self.end_gate = threading.Event()
         self.end_gate.set()
@@ -72,6 +75,11 @@ class GuestAccountCase(GuestWriteCase):
             raise account_remove.RemoveFailed("failed")
         shutil.rmtree(self.profiles / name)
 
+    def granter(self, path, key):
+        if self.grant_error is not None:
+            raise self.grant_error
+        return folder_trust.grant(path, key)
+
     def gate(self, on_end):
         def ended(*args):
             self.end_gate.wait(10)
@@ -89,6 +97,7 @@ class GuestAccountCase(GuestWriteCase):
         self.svc = self.start(
             profile_dirs=Listing(self.profiles), signin_reader=self.read, signin_runs=factory,
             account_adder=self.adder, signer_out=lambda one: None, account_remover=self.remover,
+            trust_granter=self.granter,
             clock=lambda: self.now[0],
             log_clock=lambda: datetime.fromtimestamp(self.now[0], timezone.utc).isoformat(
                 timespec="microseconds"),
@@ -485,6 +494,24 @@ class GuestAccountRefusalTest(GuestAccountCase):
             self.assertNotIn(word, err.text)
         self.assertIn("signin_add_read_failed boom", err.text)
         self.assertIn("trust_account_registry_unreadable", err.text)
+
+    def test_a_failed_trust_grant_or_a_refused_link_of_his_own_profile_names_nothing(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, stdin=subprocess.DEVNULL)
+        self.grant_error = OSError("planted-grant-failure")
+        self.environ["FAKE_LINK"] = "javascript:SENTINEL-BAD"
+        del self.environ["FAKE_MANUAL"]
+        self.link_wait = 0.5
+        self.begin()
+        support.write_registry(self.registry, [{"project_id": "repo", "root": str(repo)}])
+        with stderr_text() as err:
+            self.assertEqual(self.add()[0], 200)
+        for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+            self.assertNotIn(word, err.text)
+        self.assertIn("console: trust_grant_error OSError", err.text)
+        self.assertIn("console: signin_link_refused\n", err.text)
+        self.assertNotIn("planted-grant-failure", err.text)
 
 
 class GuestAccountTextTest(unittest.TestCase):
