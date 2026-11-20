@@ -109,7 +109,7 @@ by that profile's account.
 first (a detached one has none), and `scrub` adds it as `account_label` to
 every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
 `STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). `scrub` also sets `own_signin`, a copy of its argument or None:
-the latest sign-in run of the profiles the guest added (`own_signin`: `state`, `at`, `attempt`, never
+the run of the profiles the guest added that his page shows, the newest running one else the newest (`own_signin`: `state`, `at`, `attempt`, never
 a profile name). `profile_labels(numbers, mine)` and `retired_labels(retired, numbers, mine)` apply
 the `yours` rule to a sprint's label as `pool_view` does to a row's, so every profile of a
 colleague's account, counted or duplicate, reads `yours` for him. No profile name, address,
@@ -712,13 +712,14 @@ def retired_labels(retired: Mapping[str, tuple[int | None, str, str]], numbers: 
 
 def own_signin(signin_runs: Mapping[str, Mapping], owners: Mapping[str, str],
                login: str) -> dict | None:
-    """The latest sign-in run (highest `attempt`) among the profiles `login` added, as a copy of
-    its `state`, `at` and `attempt`; None when there is none. It never carries a profile name."""
+    """The run a colleague's page shows among the profiles `login` added: the highest `attempt` of the
+    running ones, else of all, as a copy of its `state`, `at` and `attempt`; None when there is none.
+    It never carries a profile name."""
     runs = [signin_runs[profile] for profile, owner in owners.items()
             if owner == login and profile in signin_runs]
     if not runs:
         return None
-    latest = max(runs, key=lambda run: run["attempt"])
+    latest = max(runs, key=lambda run: (run["state"] == "running", run["attempt"]))
     return {key: latest[key] for key in ("state", "at", "attempt")}
 
 

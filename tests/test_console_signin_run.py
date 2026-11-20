@@ -316,8 +316,8 @@ class GuestRecordTest(unittest.TestCase):
         self.assertEqual(guest_answer_members(None), {"link": None, "route": None})
         self.assertEqual(guest_answer_members(signin_run.Link(MANUAL_LINK, "manual", None, None)),
                          {"link": MANUAL_LINK, "route": "manual"})
-        self.assertEqual(guest_answer_members(signin_run.Link(LINK, "unknown", None, None)),
-                         {"link": LINK, "route": "unknown"})
+        self.assertEqual(guest_answer_members(signin_run.Link(MANUAL_LINK, "unknown", None, None)),
+                         {"link": MANUAL_LINK, "route": "unknown"})
         loopback = signin_run.Link(LOOPBACK_LINK, "loopback", 54545,
                                    "ssh -N -L 54545:localhost:54545 console-host")
         self.assertEqual(guest_answer_members(loopback), {"link": None, "route": "loopback"})
@@ -330,12 +330,21 @@ class GuestRecordTest(unittest.TestCase):
                     f"{authorize}?{redirect}#access_token=SENTINEL-TOKEN",
                     f"https://user:SENTINEL-TOKEN@claude.example/oauth/authorize?{redirect}",
                     f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%3Faccess_token%3DSENTINEL",
-                    f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%23SENTINEL"):
+                    f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%23SENTINEL",
+                    f"https://platform.claude.example/oauth/code/callback?code=SENTINEL-AUTH&state=s"
+                    f"&{redirect}",
+                    f"https://claude.example/oauth/code/callback?code=true&{redirect}",
+                    f"{authorize}?code=SENTINEL-AUTH&{redirect}",
+                    f"{authorize}?code=true&code=SENTINEL-AUTH&{redirect}",
+                    f"{authorize}?{redirect}&state=s",
+                    f"{authorize}x?code=true&{redirect}"):
             with self.subTest(url=url):
                 link = signin_run.Link(url, "manual", None, None)
                 self.assertEqual(signin_run.link_route(url), ("manual", None))
                 self.assertFalse(signin_run.guest_link(url))
                 self.assertEqual(guest_answer_members(link), {"link": None, "route": None})
+        self.assertFalse(signin_run.guest_link(
+            f"http://claude.example/oauth/authorize?code=true&{redirect}"))
         full = (f"{authorize}?code=true&client_id=c&response_type=code&{redirect}&scope=a%20b"
                 "&code_challenge=x&code_challenge_method=S256&state=s")
         self.assertTrue(signin_run.guest_link(full))

@@ -1063,6 +1063,9 @@ class OwnAccountTest(unittest.TestCase):
         self.assertIsNot(own, runs["colleague-3"])
         self.assertIsNone(guest.own_signin(runs, owners, self.B))
         self.assertNotIn(b"colleague", json.dumps(own).encode())
+        ended_later = {**runs, "colleague-1": {"state": "failed", "at": "t2", "attempt": 10}}
+        self.assertEqual(guest.own_signin(ended_later, owners, self.A),
+                         {"state": "running", "at": None, "attempt": 9})
         shown = derive_view(**guest.scoped(guest_inputs(), frozenset({"owner/p01"})))
         self.assertEqual(guest.scrub(shown, own_signin=own)["own_signin"], own)
         self.assertIsNone(guest.scrub(shown)["own_signin"])

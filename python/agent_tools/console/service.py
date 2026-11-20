@@ -180,12 +180,14 @@ appended. The add reads `{"consent": <bool>}` (`MAX_ACCOUNT_BYTES`, 400 `bad acc
 before anything else), the code `{"attempt", "code"}` and the cancel `{"attempt"}` (`MAX_SIGNIN_BYTES`, 400 `bad code` or
 `bad cancel`; the attempt is the one the add answered and `own_signin` shows). Under `_adding` and one `_ingest` block the add
 checks the access and the epoch, then takes his own live sign-in (the newest, the one his page shows), else his own profile not
-signed in, else the name of an add of his that did not finish (an `account.added` row of his whose profile is not listed), else
-a new `colleague-<n>` whose `account.added` row, with `by` his login, is appended in that block before the adder runs, so an add
-that stops after the launcher made the directory leaves it his and a retry reuses the name; the adder is skipped when the name
-is already listed, and one block stores the listing; then the trust grant, the status read and `start_signin(profile, by=...)`,
+signed in, else a new `colleague-<n>`: the console chooses it after a listing that was read (an unreadable listing
+creates and records nothing, `AddFailed` `unavailable`), runs the adder, and reads the listing again. The name is his only then:
+its `account.added` row, with `by` his login, is appended in the block that stores that second listing, with no access check
+between. A launcher that fails leaves its name reserved and unowned, so a profile that appears under it later (the owner's, made
+with the CLI) is never his, and his retry takes a new name; a launcher that returned but whose listing could not be read keeps
+the name for his retry, which skips the adder; then the trust grant, the status read and `start_signin(profile, by=...)`,
 which refuses a profile that is not his (`guest.NO_OWN_SIGNIN_TEXT`) or being removed (`guest.ACCOUNT_BUSY_TEXT`), and, once the
-link wait ends, refuses again when his access or epoch is gone or another attempt replaced the run. The code and the
+link wait ends, refuses again when his access or epoch is gone or the live run of that attempt has ended or been replaced. The code and the
 cancel act on his own live sign-in of that attempt only, else `NO_OWN_SIGNIN_TEXT`. A refusal is 409 with `guest.account_text`, a fixed text that names
 no profile; the add answers `200` `{"attempt", "link", "route"}` (`signin_run.guest_answer_members`, no `port` or `forward`, the
 link null for a loopback-only run), the other two `204`; `AddFailed` is 502 `the account could not be created: <kind>`, a failed
@@ -4025,6 +4027,10 @@ class ConsoleService:
         self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        # Under `_adding` only (#1343): names a colleague's add chose (`_guest_tried`, never chosen again) and
+        # the ones whose launcher returned, awaiting their ownership row (`_guest_made`, name -> login).
+        self._guest_tried: set[str] = set()
+        self._guest_made: dict[str, str] = {}
         self._account_owners: dict[str, str] = {}
         self._trust_failures: dict[tuple[str, str], dict] = {}
         self._pin_launches: pin.PinLaunches = pin.pin_launches([])
@@ -5205,7 +5211,7 @@ class ConsoleService:
         if by is not None:
             with self._ingest:
                 self._guest_account_refusal(by)
-                if self._signin_live.get(profile, attempt) != attempt:
+                if self._signin_live.get(profile) != attempt:
                     raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
         return attempt, link
 
@@ -5262,11 +5268,14 @@ class ConsoleService:
                           ) -> tuple[int, signin_run.Link | None]:
         """A colleague's add: sign in again a profile of his, else create one he owns; the attempt and link.
 
-        `consent` False is refused before anything else. The choice of profile and the checks are
-        made under one `_ingest` block, which also appends the ownership row of a name it makes up, so
-        the row exists before the launcher creates the directory and a retry of an add that stopped
-        between the two reuses the name; the listing is stored in another block with no access check
-        between (#1343, ADR-console-087).
+        `consent` False is refused before anything else. Under `_adding` the choice of profile and the
+        checks are made under one `_ingest` block. A new profile is his only once this console saw the
+        launcher return for a name it chose after a listing that did not hold it and then read the name
+        listed: its `account.added` row, with his login, is appended in the block that stores that second
+        listing, with no access check between. A listing that cannot be read creates and records nothing;
+        a launcher that fails leaves its name reserved and unowned, whatever a later listing shows, and
+        a launcher that returned but whose listing could not be read keeps the name for his retry
+        (#1343, ADR-console-087).
         """
         if not consent:
             raise sprints.Refused(guest.CONSENT_TEXT)
@@ -5284,24 +5293,31 @@ class ConsoleService:
                     target = next((p for p in own if getattr(
                         self._signins.get(p), "state", None) != "signed_in"), None)
                 if target is None:
-                    listed = self._read_profiles()
-                    unfinished = sorted(p for p, owner in self._account_owners.items()
-                                        if owner == by.login and p not in self._profiles)
-                    if unfinished:
-                        name = unfinished[0]
-                    else:
-                        name = account_add.guest_name(set(listed) | set(self._account_owners)
-                                                      | set(self._accounts_added))
-                        self._fold(self.log.append([account_add.added(name, by=by.login)]))
+                    listed = self._scan_profiles()
+                    if listed is None:
+                        raise account_add.AddFailed("unavailable")
+                    name = next((n for n, login in sorted(self._guest_made.items())
+                                 if login == by.login), None)
+                    if name is None:
+                        name = account_add.guest_name(
+                            set(listed) | set(self._account_owners) | set(self._accounts_added)
+                            | self._guest_tried | set(self._guest_made))
+                        self._guest_tried.add(name)
             if target is None:
-                if name not in listed:
+                if name not in self._guest_made:
                     self._account_adder(name)
-                    listed = self._read_profiles()
-                    if name not in listed:
-                        raise account_add.AddFailed("not_listed")
+                    self._guest_made[name] = by.login
+                listed = self._scan_profiles()
+                if listed is None:
+                    raise account_add.AddFailed("not_listed")
+                if name not in listed:
+                    del self._guest_made[name]
+                    raise account_add.AddFailed("not_listed")
                 with self._ingest:
                     self._profiles = listed
                     self._profiles_read = True
+                    self._fold(self.log.append([account_add.added(name, by=by.login)]))
+                    del self._guest_made[name]
                     self._publish()
                 target = name
                 created = True

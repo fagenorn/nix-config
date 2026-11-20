@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -31,6 +32,18 @@ VALID = {ADD: {"consent": True}, CODE_ROUTE: {"attempt": 1, "code": CODE}, CANCE
 PLANTED = "sk-ant-oat01-PLANTED-zq77"
 
 
+class Unreadable:
+    """The profile listing of a case, which fails while the case's `list_error` is set."""
+
+    def __init__(self, case):
+        self.case = case
+
+    def __iter__(self):
+        if self.case.list_error is not None:
+            raise self.case.list_error
+        return iter(Listing(self.case.profiles))
+
+
 class GuestAccountCase(GuestWriteCase):
     def setUp(self):
         super().setUp()
@@ -53,6 +66,8 @@ class GuestAccountCase(GuestWriteCase):
         self.after_add = None
         self.remove_fails = False
         self.grant_error = None
+        self.list_error = None
+        self.granted = []
         self.link_wait = 5
         self.end_gate = threading.Event()
         self.end_gate.set()
@@ -77,6 +92,7 @@ class GuestAccountCase(GuestWriteCase):
         shutil.rmtree(self.profiles / name)
 
     def granter(self, path, key):
+        self.granted.append(Path(path).parent.name)
         if self.grant_error is not None:
             raise self.grant_error
         return folder_trust.grant(path, key)
@@ -96,7 +112,7 @@ class GuestAccountCase(GuestWriteCase):
                                       link_wait=self.link_wait, manual_grace=0.2,
                                       host="console-host")
         self.svc = self.start(
-            profile_dirs=Listing(self.profiles), signin_reader=self.read, signin_runs=factory,
+            profile_dirs=Unreadable(self), signin_reader=self.read, signin_runs=factory,
             account_adder=self.adder, signer_out=lambda one: None, account_remover=self.remover,
             trust_granter=self.granter,
             clock=lambda: self.now[0],
@@ -416,23 +432,94 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertNotIn(b"https", body)
         self.assertNotIn(b"link", body)
 
-    def test_an_add_that_stops_after_the_directory_exists_leaves_it_his_and_the_retry_reuses_it(self):
+    def test_an_add_whose_profile_listing_cannot_be_read_records_and_creates_nothing(self):
         self.begin()
+        (self.profiles / "colleague-1").mkdir()
+        self.list_error = OSError("cannot list")
+        status, body = self.add()
+        self.assertEqual(status, 502)
+        self.assertEqual(body, b"the account could not be created: unavailable\n")
+        self.nothing_started()
+        self.list_error = None
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.added, ["colleague-2"])
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+
+    def test_an_add_that_fails_before_the_directory_exists_never_makes_a_later_owner_profile_his(self):
+        self.begin()
+        self.add_error = account_add.AddFailed("failed")
+        self.assertEqual(self.add()[0], 502)
+        self.assertEqual(self.added, ["colleague-1"])
+        self.assertEqual(self.rows("account.added"), [])
+        self.add_error = None
+        (self.profiles / "colleague-1").mkdir()
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+
+    def test_an_add_whose_launcher_returned_but_whose_listing_failed_is_recovered_by_the_retry(self):
+        self.begin()
+
+        def unreadable(name):
+            self.list_error = OSError("cannot list")
+        self.after_add = unreadable
+        self.assertEqual(self.add()[0], 502)
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.rows("account.added"), [])
+        self.assertEqual(self.added, ["colleague-1"])
+        self.list_error = None
+        self.after_add = None
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.added, ["colleague-1"])
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
+
+    def test_a_launcher_that_fails_after_the_directory_exists_leaves_it_unowned_and_the_retry_grants_a_new_one(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, stdin=subprocess.DEVNULL)
+        svc = self.begin()
+        support.write_registry(self.registry, [{"project_id": "repo", "root": str(repo)}])
 
         def killed(name):
             raise OSError("the process ended")
         self.after_add = killed
         self.assertEqual(self.add()[0], 500)
         self.assertEqual(self.names(), {"work", "colleague-1"})
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.rows("account.added"), [])
+        svc.poll_sessions()
         self.after_add = None
-        status, _ = self.add()
-        self.assertEqual(status, 200)
-        self.assertEqual(self.names(), {"work", "colleague-1"})
-        self.assertEqual(self.added, ["colleague-1"])
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
-        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
-        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.added, ["colleague-1", "colleague-2"])
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+        self.assertIn("colleague-2", self.granted)
+        self.assertNotIn("colleague-1", self.granted)
+
+    def test_a_link_fetched_after_the_run_ended_is_refused(self):
+        svc = self.begin()
+        runs = svc._signin_runs
+        awaited = runs.wait_link
+
+        def wait_then_end(profile):
+            link = awaited(profile)
+            with svc._ingest:
+                del svc._signin_live[profile]  # what the run's end callback does
+            return link
+        runs.wait_link = wait_then_end
+        status, body = self.add()
+        self.assertEqual((status, body), (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n"))
+        self.assertNotIn(b"https", body)
 
     def own_signin_attempt(self):
         return self.guest_view()["own_signin"]["attempt"]
@@ -548,6 +635,25 @@ class GuestAccountRefusalTest(GuestAccountCase):
                 self.assertEqual((got[0], got[2]), (403, b"token refused\n"))
         self.nothing_started()
 
+    def test_the_owners_port_refuses_each_guest_account_write_before_reading_its_body(self):
+        svc = self.begin()
+        for route in ROUTES:
+            with self.subTest(route=route), socket.create_connection(svc.address, timeout=5) as sock:
+                sock.sendall((
+                    f"POST {route} HTTP/1.1\r\nHost: 127.0.0.1:{svc.address[1]}\r\n"
+                    f"Origin: http://127.0.0.1:{svc.address[1]}\r\n"
+                    f"X-Console-Token: {self.owner_token()}\r\n"
+                    "Content-Type: application/json\r\nContent-Length: 64\r\n\r\n").encode())
+                answer = b""
+                while b"not found\n" not in answer:
+                    got = sock.recv(4096)
+                    if not got:
+                        break
+                    answer += got
+                self.assertTrue(answer.startswith((b"HTTP/1.0 404", b"HTTP/1.1 404")), answer)
+                self.assertTrue(answer.endswith(b"not found\n"), answer)
+        self.nothing_started()
+
     def test_no_guest_account_refusal_or_stderr_line_names_a_login_or_a_profile(self):
         self.begin()
         with stderr_text() as err:
@@ -561,7 +667,7 @@ class GuestAccountRefusalTest(GuestAccountCase):
             self.assertEqual(failed[0], 502)
             self.add_error = None
             self.registry.write_text("not json")
-            self.read_error["colleague-1"] = signin.StatusFailed("boom")
+            self.read_error["colleague-2"] = signin.StatusFailed("boom")
             self.assertEqual(self.add()[0], 200)
             self.sent_code()
             until(self, lambda: self.own_state() == "failed")

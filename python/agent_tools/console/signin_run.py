@@ -116,9 +116,11 @@ takes exactly `attempt` and returns it. `guest_answer_members(link)` is exactly 
 both None for no link, the url and route for `manual` and `unknown`, and `{"link": None, "route":
 "loopback"}` for a loopback link, whose return address is the owner's host's loopback that a colleague's
 browser cannot reach (ADR-console-080 D3). A link a colleague receives must also pass `guest_link(url)`:
-no user information or fragment, and a query of the OAuth authorization request's members only
+an `https` URL whose path is `GUEST_LINK_PATH` (`/oauth/authorize`), with no user information or fragment,
+and a query of the OAuth authorization request's members only
 (`GUEST_LINK_MEMBERS`: `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`,
-`code_challenge_method`, `state`), its `redirect_uri` without query, fragment or user information. A
+`code_challenge_method`, `state`) in which `code` is exactly `true` (the manual flag: a callback URL
+carrying an authorization code has another value), its `redirect_uri` without query, fragment or user information. A
 printed URL that fails it, such as a diagnostic one carrying an access token, is handed out as no link:
 `{"link": None, "route": None}`.
 
@@ -276,6 +278,7 @@ def guest_answer_members(link: Link | None) -> dict[str, object]:
     return {"link": link.url, "route": link.route}
 
 
+GUEST_LINK_PATH = "/oauth/authorize"
 GUEST_LINK_MEMBERS = frozenset({"code", "client_id", "response_type", "redirect_uri", "scope",
                                 "code_challenge", "code_challenge_method", "state"})
 
@@ -284,10 +287,12 @@ def guest_link(url: str) -> bool:
     """True when `url` is only the OAuth authorization request a colleague may be handed."""
     try:
         link = urlsplit(url)
+        if link.scheme != "https" or link.path != GUEST_LINK_PATH:
+            return False
         if link.fragment or "@" in link.netloc:
             return False
         query = parse_qs(link.query, keep_blank_values=True)
-        if set(query) - GUEST_LINK_MEMBERS:
+        if set(query) - GUEST_LINK_MEMBERS or query.get("code") != ["true"]:
             return False
         for value in query.get("redirect_uri", []):
             target = urlsplit(value)
