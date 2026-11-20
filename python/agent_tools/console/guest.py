@@ -87,10 +87,14 @@ capacity view's own; `state` is None while no row in use has a reading, else `ou
 `fine`. A number belongs to an account, not a profile (`account_numbers`): the accounts that hold a
 number in the previous numbering keep it, those with an address first, then by their smallest
 profile name, and every other account takes the smallest positive integer none holds, so an alias,
-a pin or a removal never moves a label; the numbering lives in `NUMBERS_FILE`, beside the event
+a pin or a removal never moves a label. When several profiles of one account hold numbers (a profile
+numbered before it signed in, then signed in to an address another already holds), the number of a
+profile in `established` (those that had an address at the previous numbering) is kept over a
+smaller one, so the established account and its running sprints keep their label; the numbering lives in `NUMBERS_FILE`, beside the event
 log (`read_numbers`, `write_numbers`; an unreadable file numbers afresh). `sprint_labels` gives the
 label of the account each running sprint's manager is on, and `scrub` adds it as `account_label` to
-every sprint node (None for a sprint it does not know). No profile name, address, organisation or
+every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
+`STOP_FAILED_TEXT`, which carries no reason: a stop failure's reason can name a profile. No profile name, address, organisation or
 proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
 per account or per project would show work on projects the colleague is not listed for.
 `picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
@@ -178,7 +182,7 @@ import re
 import stat
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -571,6 +575,7 @@ ACCOUNT_MEMBERS = ("label", "state", "week_left", "five_hour_left", "week_reset"
                    "five_hour_reset", "next_reset", "out_until", "in_use")
 POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
 NUMBERS_FILE = "account-numbers.json"
+STOP_FAILED_TEXT = "could not stop the manager; trying again"
 
 
 def _accounts(capacity: Mapping) -> list[tuple[bool, list[str]]]:
@@ -583,13 +588,15 @@ def _accounts(capacity: Mapping) -> list[tuple[bool, list[str]]]:
     return accounts
 
 
-def account_numbers(capacity: Mapping, previous: Mapping[str, int]) -> dict[str, int]:
+def account_numbers(capacity: Mapping, previous: Mapping[str, int],
+                    established: Collection[str] = ()) -> dict[str, int]:
     accounts = sorted(_accounts(capacity), key=lambda account: (not account[0], account[1][0]))
     taken: set[int] = set()
     kept: dict[int, int] = {}
     for index, (_, profiles) in enumerate(accounts):
-        held = sorted(previous[name] for name in profiles
+        held = sorted((name not in established, previous[name]) for name in profiles
                       if name in previous and previous[name] not in taken)
+        held = [number for _, number in held]
         if held:
             kept[index] = held[0]
             taken.add(held[0])
@@ -669,6 +676,8 @@ def scrub(view: Mapping, pool: Mapping | None = None,
             result = {key: labelled(member) for key, member in node.items()}
             if node.get("type") == "sprint":
                 result["account_label"] = accounts.get(node.get("sprint_id"))
+                if result.get("stop_text") is not None:
+                    result["stop_text"] = STOP_FAILED_TEXT
             return result
         if isinstance(node, list):
             return [labelled(member) for member in node]

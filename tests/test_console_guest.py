@@ -773,6 +773,45 @@ class PoolTest(unittest.TestCase):
                                   {"home": 1, "work": 3, "zalias": 1}),
             {"home": 2, "work": 3, "zalias": 1})
 
+    def test_an_account_that_signs_in_as_an_established_one_keeps_the_established_number(self):
+        readings = {
+            "newcomer": reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.1, T + 86400)}), "newcomer", 1, "t1"),
+            "work": reading_of(report(reset=T + 3600, windows={
+                "7d": window("allowed", 0.5, T + 86400)}), "work", 2, "t2")}
+
+        def cv(signins):
+            return capacity_module.capacity_view(
+                ["newcomer", "work"], CapacityState(readings, {}), T, signins)
+
+        def mine(address):
+            return SignIn("signed_in", None, "t", True, address)
+
+        before = {"work": mine(WORK_AT)}
+        numbers = guest.account_numbers(cv(before), {"work": 2})
+        self.assertEqual(numbers, {"newcomer": 1, "work": 2})
+        after = {**before, "newcomer": mine(WORK_AT)}
+        merged = guest.account_numbers(cv(after), numbers, {"work"})
+        self.assertEqual(merged, {"newcomer": 2, "work": 2})
+        running = {"s": dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                            manager=Manager(STARTED, at(5), "work", "m"))}
+        self.assertEqual(guest.sprint_labels(running, guest.profile_labels(merged)),
+                         {"s": "Account 2"})
+
+    def test_a_stop_failure_reason_never_reaches_a_guest(self):
+        inputs = running_inputs()
+        reason = "zalias-zq4 is being removed"
+        inputs["sprints"] = {**inputs["sprints"], "s-p01": dataclasses.replace(
+            inputs["sprints"]["s-p01"], stop_at=at(6), stop_failed_at=at(7), stop_reason=reason)}
+        derived = derive_view(**guest.scoped(inputs, frozenset({"owner/p01"})))
+        self.assertEqual({node["stop_text"] for node in sprint_nodes(derived)},
+                         {sprints.STOP_FAILED_TEXT.format(reason=reason)})
+        encoded = encode_view(guest.scrub(derived))
+        self.assertNotIn(b"zalias-zq4", encoded)
+        self.assertNotIn(b"being removed", encoded)
+        self.assertEqual({node["stop_text"] for node in sprint_nodes(json.loads(encoded))},
+                         {guest.STOP_FAILED_TEXT})
+
     def test_every_profile_of_one_account_reads_its_accounts_label(self):
         self.assertEqual(guest.profile_labels(owner_numbers()),
                          {"home-zq1": "Account 1", "spare-zq3": "Account 2",

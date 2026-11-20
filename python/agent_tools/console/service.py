@@ -3814,6 +3814,9 @@ class ConsoleService:
         self._capacity = capacity.CapacityState({}, {})
         self._numbers_path = Path(store).with_name(guest.NUMBERS_FILE)
         self._account_numbers = guest.read_numbers(self._numbers_path)
+        self._numbers_saved: dict[str, int] = dict(self._account_numbers)
+        self._numbers_established: frozenset[str] = frozenset()
+        self._profiles_read = False
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
         self._pinned: str | None = None
@@ -4236,16 +4239,26 @@ class ConsoleService:
         A guest view is derived from the clock (a sprint's age text), so recomputing it for a
         guest-port reading would change a guest's bytes: the cached guest views are kept. The account
         numbers are kept in `account-numbers.json` beside the event log, written when they change,
-        and a failed write keeps them in memory (ADR-console-085). A view that lists no profile (the first
-        publish, before the profiles are read) leaves them as they are, so a restart does not forget them.
+        and a failed write keeps them in memory and is retried on every publish while they differ from
+        the last numbers written (ADR-console-085). A view that lists no profile before the profiles are
+        first read leaves them as they are, so a restart does not forget them; once they are read, an
+        empty list is a confirmed empty pool and ends the numbering.
         """
         inputs = self._view_inputs()
-        numbers = (guest.account_numbers(inputs["capacity"], self._account_numbers)
-                   if inputs["capacity"]["profiles"] else self._account_numbers)
-        if numbers != self._account_numbers:
-            with contextlib.suppress(OSError):
-                guest.write_numbers(self._numbers_path, numbers)
+        if inputs["capacity"]["profiles"] or self._profiles_read:
+            numbers = guest.account_numbers(
+                inputs["capacity"], self._account_numbers, self._numbers_established)
+            self._numbers_established = frozenset(
+                entry["profile"] for entry in inputs["capacity"]["profiles"]
+                if entry["account"] is not None)
             self._account_numbers = numbers
+        if self._account_numbers != self._numbers_saved:
+            try:
+                guest.write_numbers(self._numbers_path, self._account_numbers)
+            except OSError:
+                pass
+            else:
+                self._numbers_saved = dict(self._account_numbers)
         latest = self._registration
         apply_items = inputs["apply_items"]
         access = self._access
@@ -4906,6 +4919,7 @@ class ConsoleService:
                 raise account_add.AddFailed("not_listed")
             with self._ingest:
                 self._profiles = listed
+                self._profiles_read = True
                 self._fold(self.log.append([account_add.added(name)]))
                 self._publish()
         self._grant_registered_projects(name)
@@ -5741,6 +5755,7 @@ class ConsoleService:
                     raise account_remove.RemoveFailed("still_listed")
                 with self._ingest:
                     self._profiles = listed
+                    self._profiles_read = True
                     rows = []
                     if profile in self._excluded:
                         rows.append(exclusion.entry(profile, False))
@@ -7546,6 +7561,7 @@ class ConsoleService:
             appended = self.log.append(changes)
             self._absent = absent
             self._profiles = self._read_profiles()
+            self._profiles_read = True
             if appended:
                 self._fold(appended)
             self._publish()

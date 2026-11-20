@@ -627,6 +627,39 @@ class ScopedReadTest(GuestCase):
         self.assertTrue(path.is_dir())
 
 
+    def test_numbers_that_could_not_be_written_are_written_once_storage_recovers(self):
+        self.seed()
+        path = self.store.with_name(guest.NUMBERS_FILE)
+        path.mkdir(parents=True)
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        svc = self.start(profile_dirs=[a])
+        svc.poll_sessions()
+        self.assertTrue(path.is_dir())
+        path.rmdir()
+        svc.poll_sessions()
+        self.assertEqual(guest.read_numbers(path), {"a-zq1": 1})
+
+    def test_removing_the_last_profile_ends_its_numbering(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "a-zq1", "session_name": "m-p01"})])
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        dirs = [a]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        dirs.clear()
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), ([], {"s-p01": None}))
+        self.assertEqual(guest.read_numbers(self.store.with_name(guest.NUMBERS_FILE)), {})
+
+
 class DoorTest(GuestCase):
     def test_the_guest_door_is_a_socket_in_a_private_folder(self):
         self.seed()
