@@ -174,7 +174,7 @@ The client's per-profile record, `projects[<git root>].hasTrustDialogAccepted` i
 _Avoid_: workspace trust, permission
 
 **Approved adoption**:
-A ready adoption plan the owner approved on the page by choosing `Apply it` on its question card: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
+A ready adoption plan the owner approved on the page by choosing `Apply it` on its question card: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox card while the pull request is ready to merge, has a failed check, holds commits the console did not push, or was closed while another registration is shown; the owner merges it with Merge on that card, pinned to the recorded head (ADR-console-030, ADR-console-086).
 _Avoid_: auto-adoption, auto-merge
 
 **Merged adoption**:
