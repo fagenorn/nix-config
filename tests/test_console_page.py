@@ -1130,7 +1130,7 @@ class CapacityPageTest(unittest.TestCase):
         result = render_page({**view([]), "capacity": capacity([
             profile("a", "ok", week_left=65, excluded=True),
             profile("b", "out", out_until="2026-11-20T09:30:00+00:00"),
-        ], all_out=True)})
+        ], all_out=True)}, NOW_MS)
         items = [n["text"] for n in nodes(result["promoted"]) if n["tag"] == "li"]
         self.assertEqual(items, ["a excluded", "b out until Fri 09:30"])
 
