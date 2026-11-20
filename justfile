@@ -135,6 +135,7 @@ agent-workflow-tests *args:
     tests/test_host_readings.py \
     tests/test_darwin_user_agent_reload.py \
     tests/test_darwin_path_order.py \
+    tests/test_pinned_file.py \
     tests/test_github_runners.py \
     tests/test_host_sudo.py \
     tests/test_runner_home.py \
