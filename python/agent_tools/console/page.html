@@ -6225,8 +6225,9 @@ const GUEST_CONSENT = "Your sign-in is kept on the owner's host under the owner'
 const GUEST_LOOPBACK = "This sign-in can only finish on the owner's machine, so it cannot finish from here. Cancel it and tell the owner.";
 const GUEST_NO_LINK = "No sign-in link came yet. Press Sign in again to fetch it, or Cancel.";
 // The guest's own-account form: whether it is open, the consent tick, a request in flight, the answer held ({attempt, link, route}),
-// the code typed, the last refusal, and the attempt whose ending the form still explains.
-const guestAccount = { open: false, ticked: false, posting: false, held: null, draft: "", failure: null, watched: null };
+// the code typed, the last refusal, the attempt whose ending the form still explains, and the held attempt a frame has
+// shown running (`confirmed`: once shown, its disappearing from the frames ends it).
+const guestAccount = { open: false, ticked: false, posting: false, held: null, draft: "", failure: null, watched: null, confirmed: null };
 const GUEST_FOCUS = new Set(["pool-add", "guest-tick", "guest-signin", "signin-code", "guest-code", "guest-cancel"]);
 // The answer of the add: attempt, the link only when https and not loopback, the route only when known; null when it is not that shape.
 function guestAnswer(text) {
@@ -6261,14 +6262,19 @@ async function guestAccountPost(failure, send) {
 async function guestSignIn() {
   const g = guestAccount;
   if (!g.ticked || g.posting) return;
+  // With an attempt held (no link yet) the press only asks for that attempt's link; the console creates nothing then.
+  const body = g.held === null ? { consent: true } : { consent: true, attempt: g.held.attempt };
   const text = await guestAccountPost("Could not start the sign-in: ", () => fetch("/api/guest-account", {
-    method: "POST", headers: stallHeaders(), body: JSON.stringify({ consent: true }),
+    method: "POST", headers: stallHeaders(), body: JSON.stringify(body),
   }));
   if (text !== null) {
     const held = guestAnswer(text);
     if (held === null) g.failure = "Could not start the sign-in: the console's answer was not understood";
     else {
-      if (g.held === null || g.held.attempt !== held.attempt) g.draft = "";
+      if (g.held === null || g.held.attempt !== held.attempt) {
+        g.draft = "";
+        g.confirmed = null;
+      }
       g.held = held;
       g.watched = null;
     }
@@ -6317,6 +6323,16 @@ function renderOwnAccount(view) {
     g.held = null;
     g.draft = "";
     g.ticked = false;
+  }
+  if (g.held !== null) {
+    if (run !== null && run.attempt === g.held.attempt && run.state === "running") g.confirmed = g.held.attempt;
+    else if (g.confirmed === g.held.attempt && (run === null || run.attempt < g.held.attempt)) {
+      // A frame showed this attempt running and the newest now shows an older one or none: it is over, so its link and id go.
+      g.held = null;
+      g.draft = "";
+      g.ticked = false;
+      g.confirmed = null;
+    }
   }
   const active = document.activeElement;
   const role = active !== null && typeof active.className === "string" ? active.className.split(" ")[0] : "";

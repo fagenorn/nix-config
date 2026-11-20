@@ -28,10 +28,12 @@ Failures. A failed run raises `AddFailed(kind)`, `str(error) == kind`, `kind` on
 `not_listed` is raised by the console service when the profile does not appear in the listing after
 a successful add.
 
-Row. `added(profile, by="owner")` is `("account.added", None, {"by": by, "profile": profile})`, one per
-account the owner or a listed colleague adds from the page (#1343); `by` is `owner` or the colleague's
+Row. `added(profile, by="owner", identity=None)` is `("account.added", None, {"by": by, "profile": profile})`,
+one per account the owner or a listed colleague adds from the page (#1343); `by` is `owner` or the colleague's
 login (`event_log.normal_login(by) == by`), and it raises `ValueError` when `refusal(profile)` is not
-None or `by` is neither. A row built with the default `by` is what it was before #1343.
+None or `by` is neither. A row built with the default `by` is what it was before #1343. A colleague's row also
+carries `"identity"` (a non-empty string, else `ValueError`; none for an owner's row) when the service gives
+one: `identity(directory)` of the profile directory the add created.
 `ADDED` is `event_log.ACCOUNT_ADDED`. The kind is not in `KEPT_KINDS`. `added_state(events, state=None)`
 is `state` (default empty) united with the `payload["profile"]` of every `ADDED` event whose payload is
 a dict with a string `profile` that `refusal` accepts, as a frozenset: the view's `accounts_added`
@@ -48,11 +50,22 @@ is not his), and any other outcome changes nothing; any other row is ignored. Fo
 onto an earlier fold gives the fold of all of them. `GONE_OUTCOMES` is `event_log.ACCOUNT_GONE_OUTCOMES`,
 the same two outcomes as `folder_trust.GONE_OUTCOMES` (folder_trust imports this module).
 
+Identity. `identity(directory)` is `<inode>:<birth>` of the directory as `os.stat` reads it, `<birth>` being
+its creation time in nanoseconds where the platform gives one (empty where it does not), and None when the
+directory cannot be read. A profile name can be given to another directory (the owner removes a profile with
+the CLI and makes one of that name), so ownership is the name together with this identity. The device number
+is left out: it is not stable across a restart on every platform. `identities_state(events, state=None)` is the
+profile -> identity map folded like `owners_state` (an `account.added` row whose `by` is a login and whose
+`identity` is a non-empty string sets it, any other valid `account.added` row and a completed removal drop
+it), onto a copy of `state`. A name owned with no identity (a row without one) is owned by name alone.
+
 Guest add. `GUEST_PREFIX` is `colleague-` and `guest_name(taken)` is `colleague-<n>` for the smallest
 `n >= 1` not among the `taken` names, a name `refusal` accepts: the console names a colleague's
 profile, never the colleague. `parse_guest_add_request(body)` reads strict UTF-8 JSON (a repeated
 key, `NaN` or nesting too deep is `ValueError`) whose value is an object of exactly the member
-`consent`, a `bool` (not `1`, not `"true"`), and returns it; anything else is `ValueError`.
+`consent`, a `bool` (not `1`, not `"true"`), and optionally `attempt`, a positive `int` (not a `bool`), and
+returns `(consent, attempt)`, `attempt` None when absent; anything else is `ValueError`. An `attempt` is the
+sign-in the page shows with no link yet: the add then only joins that one (#1343).
 
 Platform. `adder_for(platform)` is `Adder()` where `manager.supported(platform)`, else None.
 """
@@ -64,6 +77,7 @@ import os
 import re
 import subprocess
 from collections.abc import Collection, Iterable, Mapping, Sequence
+from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import event_log, manager
@@ -103,13 +117,27 @@ def parse_add_request(body: bytes) -> str:
     return value["name"]
 
 
-def added(profile: str, by: str = "owner") -> tuple[str, None, dict]:
+def added(profile: str, by: str = "owner", identity: str | None = None) -> tuple[str, None, dict]:
     reason = refusal(profile)
     if reason is not None:
         raise ValueError(reason)
     if by != "owner" and event_log.normal_login(by) != by:
         raise ValueError("by is neither owner nor a login")
-    return (ADDED, None, {"by": by, "profile": profile})
+    payload = {"by": by, "profile": profile}
+    if identity is not None:
+        if not isinstance(identity, str) or not identity:
+            raise ValueError("identity is not a non-empty string")
+        payload["identity"] = identity
+    return (ADDED, None, payload)
+
+
+def identity(directory: Path) -> str | None:
+    try:
+        found = directory.stat()
+    except OSError:
+        return None
+    born = getattr(found, "st_birthtime_ns", None)
+    return f"{found.st_ino}:{'' if born is None else born}"
 
 
 def added_state(events: Iterable[event_log.Event],
@@ -148,6 +176,31 @@ def owners_state(events: Iterable[event_log.Event],
     return owners
 
 
+def identities_state(events: Iterable[event_log.Event],
+                     state: Mapping[str, str] | None = None) -> dict[str, str]:
+    identities = dict(state or {})
+    for event in events:
+        payload = event.payload
+        if event.kind not in (ADDED, REMOVAL) or not isinstance(payload, dict):
+            continue
+        profile = payload.get("profile")
+        if not isinstance(profile, str) or refusal(profile) is not None:
+            continue
+        if event.kind == REMOVAL:
+            if payload.get("outcome") in GONE_OUTCOMES:
+                identities.pop(profile, None)
+            continue
+        by = payload.get("by")
+        if not isinstance(by, str) or not (by == "owner" or event_log.normal_login(by) == by):
+            continue
+        found = payload.get("identity")
+        if by != "owner" and isinstance(found, str) and found:
+            identities[profile] = found
+        else:
+            identities.pop(profile, None)
+    return identities
+
+
 def guest_name(taken: Collection[str]) -> str:
     number = 1
     while f"{GUEST_PREFIX}{number}" in taken:
@@ -155,7 +208,7 @@ def guest_name(taken: Collection[str]) -> str:
     return f"{GUEST_PREFIX}{number}"
 
 
-def parse_guest_add_request(body: bytes) -> bool:
+def parse_guest_add_request(body: bytes) -> tuple[bool, int | None]:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
@@ -163,9 +216,13 @@ def parse_guest_add_request(body: bytes) -> bool:
         raise ValueError("the body is nested too deeply") from error
     except UnicodeDecodeError as error:
         raise ValueError("not a JSON object") from error
-    if not isinstance(value, dict) or set(value) != {"consent"} or type(value["consent"]) is not bool:
-        raise ValueError("the body must be an object of exactly a consent bool")
-    return value["consent"]
+    if not isinstance(value, dict) or not {"consent"} <= set(value) <= {"consent", "attempt"}:
+        raise ValueError("the body must be an object of a consent bool and at most an attempt")
+    attempt = value.get("attempt")
+    if type(value["consent"]) is not bool or ("attempt" in value and (
+            type(attempt) is not int or attempt < 1)):
+        raise ValueError("the body must be an object of a consent bool and at most an attempt")
+    return value["consent"], attempt
 
 
 class AddFailed(Exception):

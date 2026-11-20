@@ -181,8 +181,9 @@ production holds) are never steerable. The service answers a write refused on th
 Three more guest writes (#1343, ADR-console-087), `POST /api/guest-account`, `/api/guest-signin-code` and
 `/api/guest-signin-cancel`, let a listed colleague add his own account and sign it in. The first four checks of
 `write_refusal` are `account_refusal(policy, actor)`, which they use alone (sharing off, no name read, another
-name, login not listed). The add takes `{"consent": true}` and nothing else: without the tick it is refused
-with `CONSENT_TEXT` before anything is created. The service picks the profile: the colleague's own live
+name, login not listed). The add takes `{"consent": true}` and at most the `attempt` the page shows with no link yet: without the tick it is
+refused with `CONSENT_TEXT` before anything is created, and with an attempt it creates and starts nothing, only handing
+out that live sign-in's link (any other attempt is `NO_OWN_SIGNIN_TEXT`). The service picks the profile: the colleague's own live
 sign-in (the newest, the one his page shows), else one of his own profiles that is not signed in, else a new
 `colleague-<n>` it names itself; no body names a profile, the code and the cancel carry the attempt the add
 answered and act on that attempt only, and no sign-in of a profile that is not his own is ever started, passed a code or

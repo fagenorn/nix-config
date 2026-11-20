@@ -1218,7 +1218,8 @@ class OwnAccountPageTest(unittest.TestCase):
         self.assertEqual(len(own_of(nolink, "guest-cancel")), 1)
         again = harness([*OPEN_OWN, TICK, attempt_reply(7, None, None), {"click": "guest-signin"},
                          attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"}, SNAP], GUEST)[0]
-        self.assertEqual(own_writes(again), [("/api/guest-account", {"consent": True})] * 2)
+        self.assertEqual(own_writes(again), [("/api/guest-account", {"consent": True}),
+                                             ("/api/guest-account", {"consent": True, "attempt": 7})])
         self.assertEqual(own_of(again, "signin-link")[0]["href"], MANUAL)
 
     def test_a_refused_sign_in_shows_its_reason(self) -> None:
@@ -1245,6 +1246,39 @@ class OwnAccountPageTest(unittest.TestCase):
         self.assertEqual(own_of(snap, "signin-code"), [])
         self.assertIn(RUNNING_WORDS, full(snap["own_account"]))
         self.assertEqual(len(own_of(snap, "guest-signin")), 1)
+
+    def test_the_attempt_that_ended_while_an_older_one_still_runs_drops_its_link_and_id(self) -> None:
+        # The newer attempt (9) was shown running, then the view falls back to the older running one (7): the page
+        # must not keep 9's link or submit 9 for Send code or Cancel.
+        gone = harness([
+            *OPEN_OWN, TICK, attempt_reply(9, MANUAL, "manual"), {"click": "guest-signin"},
+            {"frame": own_run("running", 9)}, {"type": {"class": "signin-code", "text": "abc"}},
+            {"frame": own_run("running", 7)}, SNAP], GUEST)[0]
+        self.assertEqual(own_of(gone, "signin-link"), [])
+        self.assertEqual(own_of(gone, "signin-code"), [])
+        self.assertEqual(own_of(gone, "guest-cancel"), [])
+        self.assertIn(RUNNING_WORDS, full(gone["own_account"]))
+        self.assertEqual(own_writes(gone), [("/api/guest-account", {"consent": True})])
+        # A frame that has not caught up with the attempt just answered does not drop it.
+        early = harness([
+            *OPEN_OWN, TICK, attempt_reply(9, MANUAL, "manual"), {"click": "guest-signin"},
+            {"frame": own_run("cancelled", 7)}, SNAP], GUEST)[0]
+        self.assertEqual(own_of(early, "signin-link")[0]["href"], MANUAL)
+        self.assertEqual(len(own_of(early, "guest-cancel")), 1)
+        # The same holds once the held attempt was shown and the frames show none of the colleague's runs.
+        vanished = harness([
+            *OPEN_OWN, TICK, attempt_reply(9, MANUAL, "manual"), {"click": "guest-signin"},
+            {"frame": own_run("running", 9)}, {"frame": OWN_FRAME}, SNAP], GUEST)[0]
+        self.assertEqual(own_of(vanished, "signin-link"), [])
+        self.assertEqual(own_of(vanished, "guest-cancel"), [])
+
+    def test_a_link_retry_sends_the_attempt_the_page_shows(self) -> None:
+        (snap,) = harness([
+            *OPEN_OWN, TICK, attempt_reply(7, None, None), {"click": "guest-signin"},
+            attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"}, SNAP], GUEST)
+        self.assertEqual(own_writes(snap), [("/api/guest-account", {"consent": True}),
+                                            ("/api/guest-account", {"consent": True, "attempt": 7})])
+        self.assertEqual(own_of(snap, "signin-link")[0]["href"], MANUAL)
 
     def test_the_run_ending_drops_the_link(self) -> None:
         (snap,) = harness([

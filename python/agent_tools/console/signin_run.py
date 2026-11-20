@@ -116,13 +116,19 @@ takes exactly `attempt` and returns it. `guest_answer_members(link)` is exactly 
 both None for no link, the url and route for `manual` and `unknown`, and `{"link": None, "route":
 "loopback"}` for a loopback link, whose return address is the owner's host's loopback that a colleague's
 browser cannot reach (ADR-console-080 D3). A link a colleague receives must also pass `guest_link(url)`:
-an `https` URL whose path is `GUEST_LINK_PATH` (`/oauth/authorize`), with no user information or fragment,
-and a query of the OAuth authorization request's members only
+an `https` URL on one of the client's own authorization endpoints (`GUEST_AUTHORIZE`, a host and path pair:
+`claude.com` `/cai/oauth/authorize`, `claude.ai` `/oauth/authorize`, `platform.claude.com` `/oauth/authorize`),
+the host written bare (no user information or port), with no fragment,
+and a query of the OAuth authorization request's members only, each once
 (`GUEST_LINK_MEMBERS`: `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`,
 `code_challenge_method`, `state`) in which `code` is exactly `true` (the manual flag: a callback URL
-carrying an authorization code has another value), its `redirect_uri` without query, fragment or user information. A
+carrying an authorization code has another value) and `redirect_uri` is present and is exactly the manual
+return address (`GUEST_CALLBACK`: `https://platform.claude.com/oauth/code/callback`, bare, with no
+query or fragment), so no address or path of a printed URL carries a value to the colleague. A
 printed URL that fails it, such as a diagnostic one carrying an access token, is handed out as no link:
-`{"link": None, "route": None}`.
+`{"link": None, "route": None}`. The run's manual link is the first manual-route candidate that passes
+`guest_link`; the first one that does not is kept apart and served only when none passes by the end of the
+wait, so a diagnostic URL printed first never takes the real link's place.
 
 Secrecy. No return value, exception message or stderr line carries a link or a code, and neither is
 stored or logged: the link lives in memory for the run, the code goes to the client's input and
@@ -278,7 +284,11 @@ def guest_answer_members(link: Link | None) -> dict[str, object]:
     return {"link": link.url, "route": link.route}
 
 
-GUEST_LINK_PATH = "/oauth/authorize"
+# The client's own endpoints (client 2.1.322, from its binary): the claude.ai and console authorization
+# addresses and the manual return address its console shows the code on.
+GUEST_AUTHORIZE = frozenset({("claude.com", "/cai/oauth/authorize"), ("claude.ai", "/oauth/authorize"),
+                             ("platform.claude.com", "/oauth/authorize")})
+GUEST_CALLBACK = ("platform.claude.com", "/oauth/code/callback")
 GUEST_LINK_MEMBERS = frozenset({"code", "client_id", "response_type", "redirect_uri", "scope",
                                 "code_challenge", "code_challenge_method", "state"})
 
@@ -287,17 +297,19 @@ def guest_link(url: str) -> bool:
     """True when `url` is only the OAuth authorization request a colleague may be handed."""
     try:
         link = urlsplit(url)
-        if link.scheme != "https" or link.path != GUEST_LINK_PATH:
+        if link.scheme != "https" or (link.hostname, link.path) not in GUEST_AUTHORIZE:
             return False
-        if link.fragment or "@" in link.netloc:
+        if link.netloc != link.hostname or link.fragment:
             return False
         query = parse_qs(link.query, keep_blank_values=True)
-        if set(query) - GUEST_LINK_MEMBERS or query.get("code") != ["true"]:
+        if (set(query) - GUEST_LINK_MEMBERS or query.get("code") != ["true"]
+                or any(len(values) != 1 for values in query.values())):
             return False
-        for value in query.get("redirect_uri", []):
-            target = urlsplit(value)
-            if target.query or target.fragment or "@" in target.netloc:
-                return False
+        target = urlsplit(query.get("redirect_uri", [""])[0])
+        if (target.scheme, target.netloc, target.path) != ("https", GUEST_CALLBACK[0], GUEST_CALLBACK[1]):
+            return False
+        if target.query or target.fragment:
+            return False
     except ValueError:
         return False
     return True
@@ -515,6 +527,7 @@ class _Run:
         self.fifo_link: str | None = None
         self.fifo_at: float | None = None
         self.manual: str | None = None
+        self.manual_other: str | None = None
         self.chosen: Link | None = None
         self.done = False
         self.cond = threading.Condition()
@@ -616,6 +629,8 @@ class SignIns:
     def _pick(self, run: _Run) -> Link | None:
         if run.manual is not None:
             return Link(run.manual, "manual", None, None)
+        if run.manual_other is not None:
+            return Link(run.manual_other, "manual", None, None)
         if run.fifo_link is None:
             return None
         route = link_route(run.fifo_link)
@@ -750,8 +765,7 @@ class SignIns:
         with run.cond:
             run.fifo_link = text
             run.fifo_at = time.monotonic()
-            if run.manual is None and link_route(text) == ("manual", None):
-                run.manual = text
+            self._offer_manual(run, text)
             run.cond.notify_all()
 
     def _output_lines(self, run: _Run, lines: list[bytes]) -> None:
@@ -760,13 +774,26 @@ class SignIns:
                 return
             try:
                 for token in output_links(line):
-                    if link_route(token) == ("manual", None):
-                        with run.cond:
-                            run.manual = token
-                            run.cond.notify_all()
+                    with run.cond:
+                        self._offer_manual(run, token)
+                        run.cond.notify_all()
+                    if run.manual is not None:
                         break
             except Exception:
                 continue
+
+    @staticmethod
+    def _offer_manual(run: _Run, text: str) -> None:
+        """Under `run.cond`: keep a manual-route candidate. The run's manual link is the first one a
+        colleague may be handed (`guest_link`); the first other one waits in `manual_other`, so a
+        printed diagnostic address never takes the place of the real link (#1343)."""
+        if link_route(text) != ("manual", None):
+            return
+        if guest_link(text):
+            if run.manual is None:
+                run.manual = text
+        elif run.manual_other is None:
+            run.manual_other = text
 
 
 _TOKEN_BYTES = bytes(range(0x21, 0x7F))

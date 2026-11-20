@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -200,6 +201,22 @@ class GuestAccountCase(GuestWriteCase):
     def acted(self):
         return self.rows("signin.acted")
 
+    def added_rows(self):
+        """The `account.added` payloads, each colleague's identity checked present and then left out."""
+        rows = self.rows("account.added")
+        for row in rows:
+            if row["by"] != "owner":
+                self.assertTrue(row.get("identity"), row)
+        return [{key: value for key, value in row.items() if key != "identity"} for row in rows]
+
+    def replace_dir(self, name):
+        """The owner removes a profile with the CLI and makes another of the name. The old directory is held
+        while the new one is made, so the two can never share an inode."""
+        aside = self.root / f"{name}-aside"
+        (self.profiles / name).rename(aside)
+        (self.profiles / name).mkdir(mode=0o700)
+        shutil.rmtree(aside)
+
 
 class GuestAccountTest(GuestAccountCase):
     def test_a_listed_colleague_adds_a_profile_he_owns_and_signs_it_in_after_the_tick(self):
@@ -209,7 +226,7 @@ class GuestAccountTest(GuestAccountCase):
         self.assertEqual(json.loads(body), {"attempt": self.start_seqs()[0], "link": MANUAL_LINK,
                                             "route": "manual"})
         self.assertEqual(self.names(), {"work", "colleague-1"})
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-1"}])
         self.assertEqual(self.acted(), [{"by": COLLEAGUE, "profile": "colleague-1",
                                          "action": "start", "outcome": "started"}])
         self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
@@ -294,7 +311,7 @@ class GuestAccountTest(GuestAccountCase):
 class GuestAccountRefusalTest(GuestAccountCase):
     def nothing_started(self):
         self.assertEqual(self.added, [])
-        self.assertEqual(self.rows("account.added"), [])
+        self.assertEqual(self.added_rows(), [])
         self.assertEqual(self.acted(), [])
         self.assertEqual(self.clients(), [])
 
@@ -444,7 +461,7 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertEqual(self.add()[0], 200)
         self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
         self.assertEqual(self.added, ["colleague-2"])
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-2"}])
         self.assertIsNone(self.owner_of("colleague-1"))
         self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
         self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
@@ -454,12 +471,12 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.add_error = account_add.AddFailed("failed")
         self.assertEqual(self.add()[0], 502)
         self.assertEqual(self.added, ["colleague-1"])
-        self.assertEqual(self.rows("account.added"), [])
+        self.assertEqual(self.added_rows(), [])
         self.add_error = None
         (self.profiles / "colleague-1").mkdir()
         self.assertEqual(self.add()[0], 200)
         self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-2"}])
         self.assertIsNone(self.owner_of("colleague-1"))
         self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
 
@@ -471,16 +488,91 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.after_add = unreadable
         self.assertEqual(self.add()[0], 502)
         self.assertEqual(self.names(), {"work", "colleague-1"})
-        self.assertEqual(self.rows("account.added"), [])
+        self.assertEqual(self.added_rows(), [])
         self.assertEqual(self.added, ["colleague-1"])
         self.list_error = None
         self.after_add = None
         self.assertEqual(self.add()[0], 200)
         self.assertEqual(self.names(), {"work", "colleague-1"})
         self.assertEqual(self.added, ["colleague-1"])
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-1"}])
         self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
         self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
+
+    def test_a_profile_the_owner_replaced_before_the_retry_is_not_taken_by_the_retry(self):
+        self.begin()
+
+        def unreadable(name):
+            self.list_error = OSError("cannot list")
+        self.after_add = unreadable
+        self.assertEqual(self.add()[0], 502)
+        self.list_error = None
+        self.after_add = None
+        self.replace_dir("colleague-1")
+        status, _ = self.add()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual(self.added, ["colleague-1", "colleague-2"])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+
+    def test_a_profile_replaced_between_the_launcher_and_the_listing_is_not_his(self):
+        self.begin()
+        self.after_add = lambda name: None
+        real = self.svc._scan_accounts
+        scans = []
+
+        def replaced_before_the_second_listing():
+            scans.append(1)
+            if len(scans) == 2:  # the listing after the launcher returned
+                self.replace_dir("colleague-1")
+            return real()
+        self.svc._scan_accounts = replaced_before_the_second_listing
+        status, body = self.add()
+        self.assertEqual((status, body), (502, b"the account could not be created: not_listed\n"))
+        self.assertEqual(self.added_rows(), [])
+        self.assertEqual(self.clients(), [])
+        self.svc._scan_accounts = real
+        self.svc.poll_sessions()
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+
+    def test_a_profile_the_owner_replaced_after_his_add_is_no_longer_his_to_sign_in(self):
+        svc = self.removed_and_made_again()
+        self.replace_dir("colleague-1")
+        theirs = guest.GuestActor(COLLEAGUE, TAILNET, svc._guest_epoch)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.start_signin("colleague-1", by=theirs)
+        self.assertEqual(str(raised.exception), guest.NO_OWN_SIGNIN_TEXT)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
+        svc.poll_sessions()
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual([row for row in self.guest_view()["pool"]["accounts"]
+                          if row["label"] == "yours"], [])
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1", "colleague-2"])
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+        self.assertEqual(self.owner_of("colleague-1"), None)
+        svc.close()
+        self.begin()
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+
+    def test_a_live_sign_in_code_or_cancel_is_refused_once_the_owner_replaced_the_profile(self):
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        attempt = self.shown_attempt()
+        self.replace_dir("colleague-1")
+        fixed = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
+        self.assertEqual(self.post(CODE_ROUTE, {"attempt": attempt, "code": CODE}), fixed)
+        self.assertEqual(self.post(CANCEL, {"attempt": attempt}), fixed)
+        self.assertEqual(self.code_records(), [])
+        self.assertEqual(svc._signin_runs.running(), {"colleague-1"})
 
     def test_a_launcher_that_fails_after_the_directory_exists_leaves_it_unowned_and_the_retry_grants_a_new_one(self):
         repo = self.root / "repo"
@@ -494,13 +586,13 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.after_add = killed
         self.assertEqual(self.add()[0], 500)
         self.assertEqual(self.names(), {"work", "colleague-1"})
-        self.assertEqual(self.rows("account.added"), [])
+        self.assertEqual(self.added_rows(), [])
         svc.poll_sessions()
         self.after_add = None
         self.assertEqual(self.add()[0], 200)
         self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
         self.assertEqual(self.added, ["colleague-1", "colleague-2"])
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-2"}])
         self.assertIsNone(self.owner_of("colleague-1"))
         self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
         self.assertIn("colleague-2", self.granted)
@@ -520,6 +612,58 @@ class GuestAccountRefusalTest(GuestAccountCase):
         status, body = self.add()
         self.assertEqual((status, body), (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n"))
         self.assertNotIn(b"https", body)
+
+    def test_a_link_fetched_while_the_ended_clients_final_read_runs_is_refused(self):
+        svc = self.begin()
+        runs = svc._signin_runs
+        awaited = runs.wait_link
+
+        def wait_then_end(profile):
+            link = awaited(profile)
+            runs.send_code(profile, CODE)  # the fake client exits on a code
+            end = time.monotonic() + 10
+            while profile in runs.running() and time.monotonic() < end:
+                time.sleep(0.02)
+            return link
+        runs.wait_link = wait_then_end
+        self.end_gate.clear()  # the end callback, which clears the live attempt, waits behind its final read
+        try:
+            status, body = self.add()
+            with svc._ingest:
+                held = dict(svc._signin_live)
+        finally:
+            self.end_gate.set()
+        self.assertEqual((status, body), (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n"))
+        self.assertIn("colleague-1", held)
+        self.assertNotIn(b"https", body)
+
+    def test_a_link_retry_names_the_shown_attempt_and_creates_and_starts_nothing(self):
+        self.environ["FAKE_MODE"] = "nolink"
+        del self.environ["FAKE_MANUAL"]
+        self.link_wait = 0.5
+        self.begin()
+        first = json.loads(self.add()[1])
+        self.assertEqual((first["link"], first["route"]), (None, None))
+        status, body = self.post(ADD, {"consent": True, "attempt": first["attempt"]})
+        self.assertEqual((status, json.loads(body)["attempt"]), (200, first["attempt"]))
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.added, ["colleague-1"])
+        self.assertEqual(len(self.clients()), 1)
+        self.assertEqual([row["action"] for row in self.acted()], ["start"])
+
+    def test_a_link_retry_for_an_attempt_that_is_over_creates_no_other_account(self):
+        self.begin()
+        first = json.loads(self.add()[1])["attempt"]
+        self.signed_in("colleague-1")
+        fixed = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
+        self.assertEqual(self.post(ADD, {"consent": True, "attempt": first}), fixed)
+        self.assertEqual(self.post(ADD, {"consent": True, "attempt": first + 1000}), fixed)
+        self.assertEqual(self.post(ADD, {"consent": True, "attempt": first}, SECOND), fixed)
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.added, ["colleague-1"])
+        self.assertEqual(len(self.clients()), 1)
+        self.assertEqual(self.post(ADD, {"consent": False, "attempt": first})[1],
+                         guest.CONSENT_TEXT.encode() + b"\n")
 
     def own_signin_attempt(self):
         return self.guest_view()["own_signin"]["attempt"]
@@ -598,7 +742,7 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertEqual(status, 409)
         self.assertIn(body.decode().strip(), (guest.REVOKED_TEXT, guest.NOT_SHARED_TEXT))
         self.assertEqual(self.names(), {"work", "colleague-1"})
-        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-1"}])
         self.assertEqual(self.acted(), [])
         self.assertEqual(self.clients(), [])
         self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)

@@ -30,11 +30,11 @@ from .process_liveness import process_alive
 
 LINK = "https://claude.example/oauth/authorize?state=SENTINEL-LINK-7f3a"
 CODE = "SENTINEL-CODE-91c2#x"
-LOOPBACK_LINK = ("https://claude.example/oauth/authorize?code=true"
+LOOPBACK_LINK = ("https://claude.com/cai/oauth/authorize?code=true"
                  "&redirect_uri=http%3A%2F%2Flocalhost%3A54321%2Fcallback"
                  "&state=SENTINEL-LINK-loop")
-MANUAL_LINK = ("https://claude.example/oauth/authorize?code=true"
-               "&redirect_uri=https%3A%2F%2Fplatform.claude.example%2Foauth%2Fcode%2Fcallback"
+MANUAL_LINK = ("https://claude.com/cai/oauth/authorize?code=true"
+               "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
                "&state=SENTINEL-LINK-manual")
 NOISE_LINK = ("https://claude.example/oauth/authorize"
               "?redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback&state=SENTINEL-OUT")
@@ -323,33 +323,58 @@ class GuestRecordTest(unittest.TestCase):
         self.assertEqual(guest_answer_members(loopback), {"link": None, "route": "loopback"})
 
     def test_a_printed_url_that_is_not_the_sign_in_request_is_handed_to_no_guest(self):
-        authorize = "https://claude.example/oauth/authorize"
-        redirect = "redirect_uri=https%3A%2F%2Fplatform.claude.example%2Foauth%2Fcode%2Fcallback"
+        authorize = "https://claude.com/cai/oauth/authorize"
+        callback = "https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        redirect = f"redirect_uri={callback}"
         for url in (f"{authorize}?{redirect}&access_token=SENTINEL-TOKEN",
                     f"https://diag.example/report?{redirect}&token=SENTINEL-TOKEN",
                     f"{authorize}?{redirect}#access_token=SENTINEL-TOKEN",
-                    f"https://user:SENTINEL-TOKEN@claude.example/oauth/authorize?{redirect}",
-                    f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%3Faccess_token%3DSENTINEL",
-                    f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%23SENTINEL",
-                    f"https://platform.claude.example/oauth/code/callback?code=SENTINEL-AUTH&state=s"
+                    f"https://user:SENTINEL-TOKEN@claude.com/cai/oauth/authorize?code=true&{redirect}",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fp.example%2Fcb%3Faccess_token%3DSENTINEL",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fp.example%2Fcb%23SENTINEL",
+                    f"https://platform.claude.com/oauth/code/callback?code=SENTINEL-AUTH&state=s"
                     f"&{redirect}",
-                    f"https://claude.example/oauth/code/callback?code=true&{redirect}",
+                    f"https://claude.com/oauth/code/callback?code=true&{redirect}",
                     f"{authorize}?code=SENTINEL-AUTH&{redirect}",
                     f"{authorize}?code=true&code=SENTINEL-AUTH&{redirect}",
                     f"{authorize}?{redirect}&state=s",
-                    f"{authorize}x?code=true&{redirect}"):
+                    f"{authorize}x?code=true&{redirect}",
+                    # the authorization host or path is the client's own, as a pair
+                    f"https://evil.example/oauth/authorize?code=true&{redirect}",
+                    f"https://evil.example/cai/oauth/authorize?code=true&{redirect}",
+                    f"https://claude.com/oauth/authorize?code=true&{redirect}",
+                    f"https://platform.claude.com/cai/oauth/authorize?code=true&{redirect}",
+                    f"https://claude.com:8443/cai/oauth/authorize?code=true&{redirect}",
+                    f"https://claude.com/cai/oauth/authorize;SENTINEL-TOKEN?code=true&{redirect}",
+                    f"https://claude.com/cai/oauth/authorize;x=SENTINEL?code=true&{redirect}",
+                    # the return address is the client's manual one, nothing after its path
+                    f"{authorize}?code=true&redirect_uri={callback}%2FSENTINEL-TOKEN",
+                    f"{authorize}?code=true&redirect_uri={callback}%3BSENTINEL-TOKEN",
+                    f"{authorize}?code=true&redirect_uri={callback}%2F",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fevil.example%2Foauth%2Fcode%2Fcallback",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%3A8443"
+                    "%2Foauth%2Fcode%2Fcallback",
+                    f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Fcb",
+                    f"{authorize}?code=true&state=s",
+                    f"{authorize}?code=true&{redirect}&{redirect}",
+                    f"{authorize}?code=true&{redirect}&state=a&state=SENTINEL-TOKEN"):
             with self.subTest(url=url):
                 link = signin_run.Link(url, "manual", None, None)
-                self.assertEqual(signin_run.link_route(url), ("manual", None))
                 self.assertFalse(signin_run.guest_link(url))
                 self.assertEqual(guest_answer_members(link), {"link": None, "route": None})
+        for url in (f"{authorize}?code=true&{redirect}&access_token=SENTINEL-TOKEN",
+                    f"{authorize}?code=true&redirect_uri={callback}%2FSENTINEL-TOKEN"):
+            self.assertEqual(signin_run.link_route(url), ("manual", None))
         self.assertFalse(signin_run.guest_link(
-            f"http://claude.example/oauth/authorize?code=true&{redirect}"))
-        full = (f"{authorize}?code=true&client_id=c&response_type=code&{redirect}&scope=a%20b"
-                "&code_challenge=x&code_challenge_method=S256&state=s")
-        self.assertTrue(signin_run.guest_link(full))
-        self.assertEqual(guest_answer_members(signin_run.Link(full, "manual", None, None)),
-                         {"link": full, "route": "manual"})
+            f"http://claude.com/cai/oauth/authorize?code=true&{redirect}"))
+        for endpoint in ("https://claude.com/cai/oauth/authorize", "https://claude.ai/oauth/authorize",
+                         "https://platform.claude.com/oauth/authorize"):
+            full = (f"{endpoint}?code=true&client_id=c&response_type=code&{redirect}&scope=a%20b"
+                    "&code_challenge=x&code_challenge_method=S256&state=s")
+            with self.subTest(endpoint=endpoint):
+                self.assertTrue(signin_run.guest_link(full))
+                self.assertEqual(guest_answer_members(signin_run.Link(full, "manual", None, None)),
+                                 {"link": full, "route": "manual"})
 
 
 class EntryTest(unittest.TestCase):
@@ -641,6 +666,27 @@ class RunTest(unittest.TestCase):
         runs = self.make()
         runs.start("work")
         self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_diagnostic_url_printed_first_does_not_take_the_manual_slot_from_the_real_link(self):
+        diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"
+                      "&access_token=SENTINEL-TOKEN")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=diagnostic, FAKE_MANUAL=MANUAL_LINK)
+        runs = self.make()
+        runs.start("work")
+        first = runs.wait_link("work")
+        self.assertEqual(route_of(first), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(guest_answer_members(first), {"link": MANUAL_LINK, "route": "manual"})
+        self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_manual_link_no_colleague_may_have_still_serves_the_owner_when_it_is_the_only_one(self):
+        diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"
+                      "&access_token=SENTINEL-TOKEN")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=diagnostic)
+        runs = self.make()
+        runs.start("work")
+        link = runs.wait_link("work")
+        self.assertEqual(route_of(link), (diagnostic, "manual", None, None))
+        self.assertEqual(guest_answer_members(link), {"link": None, "route": None})
 
     def test_a_line_cut_by_the_output_limit_never_hands_out_a_shortened_link(self):
         cut = len(MANUAL_LINK) - 5

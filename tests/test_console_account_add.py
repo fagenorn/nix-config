@@ -18,7 +18,7 @@ from pathlib import Path
 from agent_tools.console import account_add, account_remove, event_log, folder_trust
 from agent_tools.console.event_log import Event
 from agent_tools.console.account_add import AddFailed, Adder, adder_for, added, added_state
-from agent_tools.console.account_add import already_exists, guest_name, owners_state
+from agent_tools.console.account_add import already_exists, guest_name, identities_state, identity, owners_state
 from agent_tools.console.account_add import parse_add_request, parse_guest_add_request, refusal
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_guest import LONG_AGO, NOW, LogCase
@@ -220,14 +220,60 @@ class OwnerRecordTest(unittest.TestCase):
         self.assertEqual(guest_name({"colleague-1", "colleague-3", "work"}), "colleague-2")
         self.assertIsNone(refusal(guest_name({"colleague-1"})))
 
-    def test_a_guest_add_body_is_exactly_a_consent_bool(self):
-        self.assertIs(parse_guest_add_request(b'{"consent": true}'), True)
-        self.assertIs(parse_guest_add_request(b'{"consent": false}'), False)
+    def test_a_guest_add_body_is_a_consent_bool_and_at_most_the_shown_attempt(self):
+        self.assertEqual(parse_guest_add_request(b'{"consent": true}'), (True, None))
+        self.assertEqual(parse_guest_add_request(b'{"consent": false}'), (False, None))
+        self.assertEqual(parse_guest_add_request(b'{"consent": true, "attempt": 7}'), (True, 7))
         for body in (b'{}', b'{"consent": 1}', b'{"consent": "true"}',
                      b'{"consent": true, "profile": "work"}', b'{"consent": true, "consent": true}',
+                     b'{"attempt": 7}', b'{"consent": true, "attempt": 0}',
+                     b'{"consent": true, "attempt": -1}', b'{"consent": true, "attempt": true}',
+                     b'{"consent": true, "attempt": "7"}', b'{"consent": true, "attempt": 7.0}',
+                     b'{"consent": true, "attempt": null}',
+                     b'{"consent": true, "attempt": 7, "profile": "work"}',
+                     b'{"consent": true, "attempt": 7, "attempt": 7}',
                      b'[]', b'\xff', b'{"consent": NaN}', b'[' * 100000):
             with self.subTest(body=body[:30]), self.assertRaises(ValueError):
                 parse_guest_add_request(body)
+
+    def test_a_colleagues_row_carries_the_identity_of_the_directory_it_added(self):
+        self.assertEqual(added("colleague-1", by=A, identity="9:1")[2],
+                         {"by": A, "profile": "colleague-1", "identity": "9:1"})
+        for bad in ("", 5):
+            with self.subTest(identity=bad), self.assertRaises(ValueError):
+                added("colleague-1", by=A, identity=bad)
+
+    def test_the_identity_of_a_directory_is_not_the_one_of_a_directory_made_in_its_place(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "colleague-1").mkdir()
+            first = identity(root / "colleague-1")
+            self.assertEqual(identity(root / "colleague-1"), first)
+            (root / "colleague-1").rename(root / "aside")
+            (root / "colleague-1").mkdir()  # made while the old inode is still held
+            self.assertNotEqual(identity(root / "colleague-1"), first)
+            self.assertIsNone(identity(root / "missing"))
+
+    def test_the_identities_fold_follows_the_owners_fold(self):
+        rows = events_of([
+            ("account.added", None, {"by": A, "profile": "colleague-1", "identity": "1:a"}),
+            ("account.added", None, {"by": A, "profile": "colleague-2", "identity": "2:a"}),
+            ("account.added", None, {"by": B, "profile": "colleague-3"}),
+            ("account.added", None, {"by": "owner", "profile": "colleague-2", "identity": "x"}),
+            ("account.added", None, {"by": A, "profile": "colleague-4", "identity": ""}),
+            ("account.added", None, {"by": "x", "profile": "colleague-5", "identity": "5:a"}),
+            ("account.added", None, {"by": A, "profile": "Bad Name", "identity": "6:a"}),
+            ("account.added", None, {"by": A, "profile": "colleague-7", "identity": "7:a"}),
+            ("account.removal", None, {"profile": "colleague-7", "outcome": "removed"}),
+            ("account.added", None, {"by": A, "profile": "colleague-8", "identity": "8:a"}),
+            ("account.removal", None, {"profile": "colleague-8", "outcome": "remove_failed"}),
+        ])
+        earlier = {"colleague-9": "9:a"}
+        self.assertEqual(identities_state(rows), {"colleague-1": "1:a", "colleague-8": "8:a"})
+        self.assertEqual(identities_state(rows[4:], identities_state(rows[:4])),
+                         {"colleague-1": "1:a", "colleague-8": "8:a"})
+        self.assertEqual(identities_state(rows[5:6], earlier), {"colleague-9": "9:a"})
+        self.assertEqual(earlier, {"colleague-9": "9:a"})
 
 
 class OwnerRetentionTest(LogCase):
@@ -246,6 +292,14 @@ class OwnerRetentionTest(LogCase):
                          [{"by": A, "profile": "colleague-1"}, {"by": B, "profile": "colleague-4"}])
         self.assertEqual(owners_state(log.events()), before)
         self.assertEqual(before, {"colleague-1": A, "colleague-4": B})
+
+    def test_retention_keeps_the_identity_with_the_colleagues_row(self):
+        log = self.open()
+        self.now = LONG_AGO
+        log.append([added("colleague-1", by=A, identity="1:a")])
+        self.now = NOW
+        log.retain()
+        self.assertEqual(identities_state(log.events()), {"colleague-1": "1:a"})
 
     def test_a_later_add_row_the_fold_ignores_does_not_end_a_colleagues_kept_row(self):
         log = self.open()
