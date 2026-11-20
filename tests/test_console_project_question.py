@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    account_remove, deliveries, event_log, project_question, project_question_hook as hook, service, sessions,
+    account_remove, deliveries, event_log, project_question, project_question_hook as hook, question_records, service, sessions,
     signin, spend, sprints, view)
 from agent_tools.project_contract import resolve_project
 from agent_tools.system import siblings
@@ -1072,13 +1072,34 @@ class RecordsLaunchTest(LaunchCase):
             "its held checks",
             "Read it with Read, or Grep it",
             "why a delivery or production run failed",
-            "name it under Read when you use it",
+            "name it under Read with the parts you read",
         ):
             with self.subTest(part):
                 self.assertIn(part, text)
+        self.assertNotIn(project_question.SECTIONS_TEXT.split("{")[0], text)
         self.assertEqual(
             text, project_question.prompt(self.ask.question, self.routes, records=path))
         self.assertLess(text.index(path), text.index(project_question.QUESTION_MARK))
+
+    def test_the_prompt_gives_each_records_section_its_offset_and_limit(self):
+        doc = {"project_id": "owner/p01", "written_at": "2026-11-17T08:00:30+00:00",
+               "spend": None, "sprints": [], "deliveries": [], "activations": [],
+               "held_checks": []}
+        expected = set(doc) - {"project_id", "written_at"}
+        text = question_records.encode(doc)
+        self.ask = dataclasses.replace(self.ask, records=text)
+        prompt_text = project_question.launch_command(self.ask, "linux")[-1]
+        index = question_records.section_lines(text)
+        self.assertEqual(set(index), expected)
+        path = str(project_question.records_path(self.ask))
+        for name in sorted(expected):
+            offset, limit = index[name]
+            with self.subTest(name):
+                self.assertIn(f"{name} offset {offset} limit {limit}", prompt_text)
+        self.assertIn(path + " (spend)", prompt_text)
+        self.assertEqual(prompt_text, project_question.prompt(
+            self.ask.question, self.routes, records=path,
+            sections=question_records.section_lines(text)))
 
     def test_the_records_file_is_private_and_removed_and_only_the_hook_words_change(self):
         self.start(self.fake(act=self.capture))
@@ -2607,7 +2628,8 @@ class QuestionThreadServiceTest(QuestionCase):
             self.assertEqual(follow_argv[follow_argv.index(flag) + 1], value)
         self.assertEqual(follow_argv[-1], project_question.prompt(
             "and which host is deployed?", ROUTES, follow_ask.thread, repo="owner/p01",
-            records=str(project_question.records_path(follow_ask))))
+            records=str(project_question.records_path(follow_ask)),
+            sections=question_records.section_lines(follow_ask.records)))
         self.assertIn("Earlier question: what does the build check?\n"
                       "Earlier answer: Answer: it builds.\n", follow_argv[-1])
         self.assertEqual(_thread_ids(svc), [[first, follow]])

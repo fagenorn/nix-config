@@ -312,5 +312,49 @@ class ProjectRecordsTest(unittest.TestCase):
         self.assertIn('\n "project_id": "owner/p01"', text)
 
 
+    def assert_sections_read_alone(self, r, text, index):
+        lines = text.split("\n")
+        for name in sorted(index):
+            with self.subTest(name):
+                offset, limit = index[name]
+                part = "\n".join(lines[offset - 1:offset - 1 + limit])
+                head = ' "' + name + '": '
+                self.assertTrue(part.startswith(head))
+                self.assertEqual(json.loads(part.removeprefix(head).removesuffix(",")), r[name])
+
+    def test_each_section_reads_alone_by_its_offset_and_limit(self):
+        r = records()
+        expected = set(r) - {"project_id", "written_at"}
+        text = question_records.encode(r)
+        index = question_records.section_lines(text)
+        self.assertEqual(
+            expected, {"spend", "sprints", "deliveries", "activations", "held_checks"})
+        self.assertEqual(set(index), expected)
+        self.assert_sections_read_alone(r, text, index)
+        self.assertLess(index["spend"][1], len(text.split("\n")))
+
+    def test_a_line_separator_inside_a_reason_moves_no_sections_offset(self):
+        events = list(EVENTS)
+        events[4] = activation(
+            5, event_log.ACTIVATION_FINISHED,
+            {**EVENTS[4].payload, "reason": "exit 1 see log\u0085then end"})
+        r = records(events=events)
+        text = question_records.encode(r)
+        lines = text.split("\n")
+        index = question_records.section_lines(text)
+        self.assertIn("\u0085", text)
+        self.assertGreater(len(text.splitlines()), len(lines) - 1)
+        self.assertIn("\u0085", r["activations"][0]["reason"])
+        self.assert_sections_read_alone(r, text, index)
+        self.assertEqual(
+            json.loads("\n".join(lines[index["spend"][0] - 1:][:index["spend"][1]])
+                       .removeprefix(' "spend": ').removesuffix(",")), r["spend"])
+
+    def test_text_with_no_section_gives_no_offsets(self):
+        self.assertEqual(question_records.section_lines('{\n "project_id": "owner/p01"\n}\n'), {})
+        self.assertEqual(question_records.section_lines(""), {})
+        self.assertEqual(question_records.section_lines("not json"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

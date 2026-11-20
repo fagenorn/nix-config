@@ -46,7 +46,12 @@ records for the project (None: none). The session's file is `records_path(ask)`:
 directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
 settings file with exactly `ask.records`, and removed with the settings file on every path once the
 run ends. `prompt` puts `RECORDS_TEXT` with that path after the reads paragraph and before the
-thread text, only with records. No permission rule is added: Read is already admitted. A write that
+thread text, only with records. With records it also gives each part of `question_records.SECTIONS`
+that the document holds as `<name> offset <n> limit <m>` (`SECTIONS_TEXT`, from `section_lines`), so
+the session reads one part alone, and it asks the session to cite the file with the parts it read in
+parentheses right after the file name, as `<path> (spend)`; a cost question is answered with figures
+from the spend part, and spend is null only when the console could not read its spend (ADR-console-090).
+No permission rule is added: Read is already admitted. A write that
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
@@ -149,7 +154,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import manager
+from agent_tools.console import manager, question_records
 from agent_tools.console.event_log import (
     PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED, Event)
 from agent_tools.console.project_question_hook import (
@@ -194,6 +199,9 @@ NO_PRODUCTION_LINE = (
     "runs from its root."
 )
 RECORDS_UNWRITABLE = "cannot write the question's records: {detail}"
+SECTIONS_TEXT = (
+    "To read one part alone, give Read this file with that part's offset and limit: {parts}. "
+    "Read a part longer than one read in steps from its offset. ")
 RECORDS_TEXT = (
     "The console's own records for this project are in the file {path}: its spend over the last "
     "30 days by day, delivery run, issue, phase and sprint, in tokens and estimated dollars; its "
@@ -201,9 +209,11 @@ RECORDS_TEXT = (
     "how each ended and why; and its held checks. Read it with Read, or Grep it for an issue "
     "number, a run id or a commit, whenever the question is about cost, time, effort, what was "
     "delivered or is live, sprints, checks, or why a delivery or production run failed, and name "
-    "it under Read when you use it. The console wrote it for this project when this question "
-    "started; its spend is null until the console's first spend read. The console's other files "
-    "are not readable from this session.\n\n")
+    "it under Read with the parts you read, in parentheses right after the file name, for "
+    "example {path} (spend). Answer a cost question with figures from the spend part, in tokens "
+    "or dollars. {sections}The console wrote it for this project when this question started; "
+    "its spend is null only when the console could not read its spend. The console's other "
+    "files are not readable from this session.\n\n")
 RECORDS_FAILED = "the console's records could not be gathered: {detail}"
 CONTRACT_UNREADABLE = "the project's contract could not be resolved, so no session was started: {detail}"
 UNAVAILABLE_TEXT = "questions are not available on this host yet"
@@ -466,14 +476,18 @@ def reads_paragraph(repo: str | None) -> str:
 
 
 def prompt(question: str, routes: Sequence[Route], thread: Sequence[Turn] = (), *,
-           repo: str | None = None, records: str | None = None) -> str:
+           repo: str | None = None, records: str | None = None,
+           sections: Mapping[str, tuple[int, int]] | None = None) -> str:
     if routes:
         paragraph = ("Commands you may run, each exactly as written and alone: "
                      + ", ".join(shlex.join(route.argv) for route in routes) + ".\n\n")
     else:
         paragraph = ("This project declares no read-only command, so production cannot be read: "
                      "answer from the code, the docs and the reads below.\n\n")
-    held = RECORDS_TEXT.format(path=records) if records is not None else ""
+    parts = "; ".join(f"{name} offset {sections[name][0]} limit {sections[name][1]}"
+                      for name in question_records.SECTIONS if name in (sections or {}))
+    held = (RECORDS_TEXT.format(path=records, sections=SECTIONS_TEXT.format(parts=parts) if parts else "")
+            if records is not None else "")
     return (LEAD + paragraph + reads_paragraph(repo) + held + thread_text(thread) + QUESTION_MARK
             + question)
 
@@ -512,7 +526,9 @@ def launch_command(ask: Ask, platform: str) -> list[str] | None:
             "--permission-mode", PERMISSION_MODE, "--setting-sources", "", "--strict-mcp-config", "--tools", tools(ask.routes),
             "--output-format", "json", "--settings", str(ask.settings),
             prompt(ask.question, ask.routes, ask.thread, repo=ask.repo,
-                   records=str(records_path(ask)) if ask.records is not None else None)]
+                   records=str(records_path(ask)) if ask.records is not None else None,
+                   sections=(question_records.section_lines(ask.records)
+                             if ask.records is not None else None))]
 
 
 def answer_text(result: str, routes: Sequence[Route]) -> str:
