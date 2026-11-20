@@ -10987,6 +10987,20 @@ class LookHoldTest(unittest.TestCase):
         # the hold is given the landing commit the replay resolved, so it resolves nothing itself
         self.assertNotIn("oid equals headRefOid", prompt(calls, "hold"))
 
+    def test_a_head_that_landed_as_itself_is_never_named_as_its_own_landing_commit(self):
+        """#1356 C1: a fast-forward landing has the head as its own landing commit, whose first parent lies inside the PR, so no base before the landing exists to judge a kept approval against: the read returns merge null and the replay stops."""
+        result, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED)
+        head = prompt(calls, "look-head")
+        self.assertNotIn("merge commit is <headRefOid>", head)
+        self.assertIn("so it landed as itself (a fast-forward): no commit before the head names the tip of dev before the landing, so return merge null and stop here", head)
+        self.assertIn("is the head itself and it landed as itself: return merge null and stop here", head)
+        self.assertNotIn("merge commit is <headRefOid>", prompt(calls, "hold"))
+        stopped, calls = self.replay(self.awaiting(self.REWORDED), self.REWORDED,
+                                     replies={"look-head": {"head": SHA, "state": "MERGED", "merge": None}})
+        self.assertEqual(stopped["stage"], "look-approve")
+        self.assertNotIn("look-read", labels(calls))
+        self.assertNotIn("hold", labels(calls))
+
     def test_a_fence_that_spells_the_answered_check_in_lower_case_still_stops_the_landing(self):
         """#1356 C2: the runner compares check ids upper-cased, so ac2 is the criterion AC2 for the stale read and the returned block."""
         ordinary = dict(HUMAN, id="AC3")
