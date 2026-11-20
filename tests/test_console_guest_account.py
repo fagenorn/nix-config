@@ -274,7 +274,8 @@ class GuestAccountTest(GuestAccountCase):
         self.signed_in("colleague-1")
         self.assertEqual(self.add()[0], 200)
         self.cancelled()
-        attempt, _ = svc.start_signin("colleague-1")
+        attempt, _ = svc.start_signin(
+            "colleague-1", by=guest.GuestActor(COLLEAGUE, TAILNET, svc._guest_epoch))
         status, body = self.add()
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["attempt"], attempt)
@@ -376,6 +377,27 @@ class GuestAccountRefusalTest(GuestAccountCase):
                         svc, route, VALID[route], logins=logins))
                     self.assertEqual(got[0], 403)
         self.nothing_started()
+
+    def test_the_owner_is_refused_a_sign_in_of_a_profile_a_colleague_added(self):
+        """#1361, ADR-console-087 D3: the owner's start for his account starts no run and writes no row."""
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.cancelled()
+        before = (self.acted(), len(self.clients()))
+        headers = {"Origin": f"http://127.0.0.1:{svc.address[1]}",
+                   "X-Console-Token": self.owner_token(), **JSON}
+        status, _, answer = support.post_page(
+            svc.address, service.SIGNIN_PATH, headers, json.dumps({"profile": "colleague-1"}).encode())
+        self.assertEqual(status, 409)
+        self.assertEqual(answer, guest.colleague_signin_text("colleague-1", COLLEAGUE).encode() + b"\n")
+        self.assertIn(COLLEAGUE.encode(), answer)
+        with self.assertRaises(sprints.Refused) as raised:
+            svc.start_signin("colleague-1")
+        self.assertEqual(str(raised.exception), guest.colleague_signin_text("colleague-1", COLLEAGUE))
+        self.assertEqual((self.acted(), len(self.clients())), before)
+        self.assertEqual(self.own_state(), "cancelled")
+        attempt, _ = svc.start_signin("work")
+        self.assertGreater(attempt, 0)
 
     def test_a_sign_in_of_a_profile_not_his_is_refused(self):
         svc = self.begin()

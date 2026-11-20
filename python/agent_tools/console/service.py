@@ -5197,6 +5197,7 @@ class ConsoleService:
 
         With `by` (a colleague, #1343) the profile must be one he added and its client is started
         only for him; his refusals carry no profile name.
+        Without `by` (the owner) a profile a colleague added is refused: signing it in is his (#1361).
         """
         runs = self._signin_refuse_unless_listed(profile)
         who = "owner" if by is None else by.login
@@ -5210,6 +5211,10 @@ class ConsoleService:
                     raise sprints.Refused(guest.ACCOUNT_BUSY_TEXT)
             elif profile in self._removing:
                 raise sprints.Refused(account_remove.removing(profile))
+            else:
+                colleague = self._owners_now().get(profile)
+                if colleague is not None:
+                    raise sprints.Refused(guest.colleague_signin_text(profile, colleague))
             try:
                 started = runs.start(profile)
             except signin_run.StartFailed:

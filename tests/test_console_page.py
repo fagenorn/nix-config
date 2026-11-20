@@ -8969,6 +8969,18 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(default["cls"], "cap-signed-out")
         self.assertEqual(full(default), "default signed out")
 
+    def test_a_signed_out_colleague_profile_waits_for_him_and_the_owners_own_says_signed_out(self) -> None:
+        """#1361, ADR-console-087 D3: the strip says whose sign-in a signed-out account waits for."""
+        snap = capacity_snap(capacity([
+            profile("work", "unknown", signin=si("signed_out", None, ask=True), owner=None),
+            profile("colleague-1", "unknown", signin=si("signed_out", None, ask=True),
+                    owner="ana@corp.invalid")]))
+        by_name = {next(c["text"] for c in nodes(n) if c["tag"] == "b"): n for n in accounts(snap)}
+        self.assertEqual([full(n) for n in nodes(by_name["work"]) if has_class(n, "cap-signin")],
+                         ["signed out"])
+        self.assertEqual([full(n) for n in nodes(by_name["colleague-1"]) if has_class(n, "cap-signin")],
+                         ["waits for ana@corp.invalid to sign in"])
+
     def test_only_signed_out_profiles_show_without_a_state_word(self) -> None:
         snap = capacity_snap(capacity([
             profile("default", "unknown", signin=si("signed_out", None))]))

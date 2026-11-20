@@ -2962,7 +2962,10 @@ function renderCapacity(view) {
       if (owner !== null) acct.appendChild(owner);
       if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
       if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
-      if (signedOut(p)) acct.appendChild(el("span", "cap-signin", "signed out"));
+      if (signedOut(p)) {
+        const waits = typeof p.owner === "string" && p.owner !== "";
+        acct.appendChild(el("span", "cap-signin", waits ? "waits for " + p.owner + " to sign in" : "signed out"));
+      }
       else if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
       nodes.push(acct);
       continue;

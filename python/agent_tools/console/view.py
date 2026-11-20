@@ -224,7 +224,9 @@ one entry of `inbox.open`, after the stalls and the failed starts and before the
 stalls, progress, sign-in, questions, then the existing ones.
 
 A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
-`entry.get("signin")` so a capacity without that member shows none) is one entry of `inbox.open`,
+`entry.get("signin")` so a capacity without that member shows none) and that no colleague added (#1361,
+ADR-console-087 D3: its entry's `owner` is none, a read of `entry.get("owner")`; signing a colleague's
+account in is his, so it raises no card) is one entry of `inbox.open`,
 after the progress entries and before the questions, ordered by profile, and counts in
 `inbox_items` and the headline. Its entry is
 
@@ -2244,7 +2246,8 @@ def derive_view(
                            if s.no_progress_at is not None),
                           key=lambda s: (s.no_progress_at, s.sprint_id))
     signins = sorted((e for e in capacity["profiles"]
-                      if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")),
+                      if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")
+                      and not e.get("owner")),
                      key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
     retries = [dict(item) for item in retry_items]
