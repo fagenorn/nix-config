@@ -91,7 +91,22 @@ class NoticeRouteTest(Case):
         self.assertEqual(self.assert_unchanged(svc, lambda: self.listed(svc, b)), [{
             "at": at, "id": seq, "kind": "claim", "sprint_id": a, "text": "the page fold",
             "title": sprints.sprint_title(svc._sprints[a]), "until": CLAIM["until"],
-            "what": CLAIM["what"], "issue": 7, "live_fault": False}])
+            "what": CLAIM["what"], "issue": 7, "live_fault": False, "started": seq}])
+
+    def test_two_claims_on_one_file_both_stay_open_and_the_reading_names_who_lands_first(self):
+        svc = self.open()
+        a = self.approved(svc, "owner/p01")
+        b = self.approved(svc, "owner/p01")
+        ida = self.posted(svc, a, {**CLAIM, "what": "src/a.py"})
+        idb = self.posted(svc, b, {**CLAIM, "what": "src/./a.py", "issue": 8})
+        status, _, body = self.post(svc, NOTICES, {"sprint_id": b, "secret": self.secret(b)})
+        self.assertEqual(status, 200, body)
+        body = json.loads(body)
+        self.assertEqual(body["overlaps"], [{
+            "claims": [ida, idb], "sprints": [a, b], "files": ["src/a.py"], "first": ida,
+            "rule": "earlier-started", "asks": None}])
+        self.assertEqual([n["id"] for n in body["notices"]], [ida, idb])
+        self.assertEqual(self.rows("questions.asked"), [])
 
     def test_a_folder_wide_claim_is_refused_and_a_file_claim_is_listed(self):
         checkout = self.store.parent / "checkout"

@@ -639,14 +639,14 @@ class SprintCommandTest(Case):
                          "--closing-file", "-", "--port", self.port(svc),
                          stdin=json.dumps(CLOSING))
         self.assertEqual((got.returncode, got.stderr), (0, ""))
-        self.assertEqual(json.loads(self.notices(svc, b).stdout), {"notices": []})
+        self.assertEqual(json.loads(self.notices(svc, b).stdout), {"notices": [], "overlaps": []})
 
     def test_a_sprint_of_another_project_never_sees_the_notice(self):
         svc = self.open()
         a = self.goal(svc)
         c = svc.state_goal("owner/p00", "make the importer resumable")
         self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
-        self.assertEqual(json.loads(self.notices(svc, c).stdout), {"notices": []})
+        self.assertEqual(json.loads(self.notices(svc, c).stdout), {"notices": [], "overlaps": []})
 
     def test_withdraw_notice_removes_its_own_and_refuses_anothers_or_an_ended_one(self):
         svc = self.open()

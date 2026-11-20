@@ -528,9 +528,20 @@ a sprint that takes no notice as `postable_notice` does, then returns the open n
 or raises `NOTICE_ENDED` (withdrawn or ended), `NOTICE_FOREIGN` (a notice of a sprint in `others`)
 or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices neither withdrawn nor ended, in id order
 (the row's `seq`); `notice_entry` and `project_notices(states, project_id)` are the wire entries
-`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"`, `"until"`, `"issue"` and
-`"live_fault"` for a claim and
-`"to"` for a hand-off, of the project's open notices in id order. `notice_block(entries, sprint_id,
+`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"`, `"until"`, `"issue"`,
+`"live_fault"` and `"started"` for a claim (the lowest notice id of the sprint's claims, withdrawn and
+ended ones included, naming the same issue, so a withdrawn and reposted claim keeps its slice's start;
+the claim's own id when it names no issue) and
+`"to"` for a hand-off, of the project's open notices in id order.
+`claim_overlaps(entries)` is the console's reading of those entries (#1337, D5-D8): one dict per pair
+of claims of two different sprints whose paths overlap, `{"claims": [a, b], "sprints": [...],
+"files": [...], "first", "rule", "asks"}`, `a` being the claim with the lower `started`. Paths are
+compared segment by segment (`claim_paths`, `*` never crosses a `/`, a shorter path reads as a folder);
+the rule is `OVERLAP_EARLIER` (the earlier-started slice is `first`), `OVERLAP_FAULT` (the one live-fault
+fix is `first`, even when the feature started earlier) or `OVERLAP_UNSETTLED` (both fix a live fault:
+`first` None, `asks` the later-started sprint). The console refuses nothing because of an overlap.
+`notice_block` ends with one `- overlap with "<title>" on <files>: ...` line per reading naming the
+reader's sprint, saying who lands first (or, unsettled, who asks the owner). `notice_block(entries, sprint_id,
 now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
 per entry of another sprint (the sprint's own notices are left out), in the order given, and is
 `""` when no other sprint's notice is open. The four line forms are
@@ -663,6 +674,7 @@ verification` and `, <dropped> dropped` for each non-zero count. The new texts a
 The module reads no clock and no environment; only the secret helpers touch the filesystem.
 """
 
+import fnmatch
 import json
 import os
 import posixpath
@@ -1978,6 +1990,9 @@ def notice_entry(state: SprintState, notice: Notice) -> dict:
     if notice.kind == "claim":
         entry["what"], entry["until"] = notice.what, notice.until
         entry["issue"], entry["live_fault"] = notice.issue, notice.live_fault
+        entry["started"] = (notice.notice_id if notice.issue is None else min(
+            other.notice_id for other in state.notices
+            if other.kind == "claim" and other.issue == notice.issue))
     if notice.kind == "hand-off":
         entry["to"] = notice.to
     entry["at"] = notice.at
@@ -1998,12 +2013,130 @@ def project_notices(states: Iterable[SprintState], project_id: str,
                   key=lambda entry: entry["id"])
 
 
+OVERLAP_EARLIER = "earlier-started"
+OVERLAP_FAULT = "live-fault"
+OVERLAP_UNSETTLED = "unsettled"
+_WILDCARDS = "*?["
+
+
+def _segment_tokens(segment: str) -> list[str]:
+    """`*`, `?`, a bracket class as `fnmatch` reads it, or one literal character, each a token."""
+    tokens, i = [], 0
+    while i < len(segment):
+        if segment[i] == "[":
+            j = i + 1
+            if j < len(segment) and segment[j] == "!":
+                j += 1
+            if j < len(segment) and segment[j] == "]":
+                j += 1
+            while j < len(segment) and segment[j] != "]":
+                j += 1
+            if j < len(segment):
+                tokens.append(segment[i:j + 1])
+                i = j + 1
+                continue
+        tokens.append(segment[i])
+        i += 1
+    return tokens
+
+
+def _is_class(token: str) -> bool:
+    return len(token) > 1
+
+
+def _stand_together(x: str, y: str) -> bool:
+    """True when two single-character tokens may stand for one character (class and class: yes)."""
+    if x == "?" or y == "?" or (_is_class(x) and _is_class(y)):
+        return True
+    if _is_class(x):
+        return fnmatch.fnmatchcase(y, x)
+    if _is_class(y):
+        return fnmatch.fnmatchcase(x, y)
+    return x == y
+
+
+def _segments_meet(first: str, second: str) -> bool:
+    """True when some name without a `/` matches both segments read as `fnmatch` patterns."""
+    xs, ys = _segment_tokens(first), _segment_tokens(second)
+    reached = {(0, 0)}
+    todo = [(0, 0)]
+    while todo:
+        i, j = todo.pop()
+        steps = []
+        if i < len(xs) and xs[i] == "*":
+            steps.append((i + 1, j))
+            if j < len(ys) and ys[j] != "*":
+                steps.append((i, j + 1))
+        if j < len(ys) and ys[j] == "*":
+            steps.append((i, j + 1))
+            if i < len(xs) and xs[i] != "*":
+                steps.append((i + 1, j))
+        if i < len(xs) and j < len(ys) and "*" not in (xs[i], ys[j]) \
+                and _stand_together(xs[i], ys[j]):
+            steps.append((i + 1, j + 1))
+        for step in steps:
+            if step not in reached:
+                reached.add(step)
+                todo.append(step)
+    return (len(xs), len(ys)) in reached
+
+
+def _overlapping_files(first: str, second: str) -> list[str]:
+    """The files two claim paths both name, `[]` when they share none (a shorter path is a folder)."""
+    xs, ys = first.split("/"), second.split("/")
+    depth = min(len(xs), len(ys))
+    if not all(_segments_meet(xs[k], ys[k]) for k in range(depth)):
+        return []
+    if len(xs) < len(ys):
+        return [second]
+    if len(ys) < len(xs):
+        return [first]
+    first_glob = any(c in first for c in _WILDCARDS)
+    second_glob = any(c in second for c in _WILDCARDS)
+    if first_glob and second_glob:
+        return [first, second]
+    return [second] if first_glob else [first]
+
+
+def _claim_start(entry: Mapping) -> int:
+    return entry.get("started", entry["id"])
+
+
+def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
+    """One reading per pair of overlapping open claims of two sprints, in `(start, start)` order."""
+    claims = [entry for entry in entries
+              if entry.get("kind") == "claim" and entry.get("owner") is not True]
+    readings = []
+    for index, one in enumerate(claims):
+        for two in claims[index + 1:]:
+            if one["sprint_id"] == two["sprint_id"]:
+                continue
+            a, b = sorted((one, two), key=_claim_start)
+            files = sorted({file for p in claim_paths(a["what"]) for q in claim_paths(b["what"])
+                            for file in _overlapping_files(p, q)})
+            if not files:
+                continue
+            fault_a, fault_b = a.get("live_fault") is True, b.get("live_fault") is True
+            if fault_a and fault_b:
+                first, rule, asks = None, OVERLAP_UNSETTLED, b["sprint_id"]
+            elif fault_a != fault_b:
+                first, rule, asks = (a if fault_a else b)["id"], OVERLAP_FAULT, None
+            else:
+                first, rule, asks = a["id"], OVERLAP_EARLIER, None
+            readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]),
+                             {"claims": [a["id"], b["id"]],
+                              "sprints": [a["sprint_id"], b["sprint_id"]], "files": files,
+                              "first": first, "rule": rule, "asks": asks}))
+    return [reading for _, reading in sorted(readings, key=lambda keyed: keyed[0])]
+
+
 def _one_line(value: object) -> str:
     return " ".join(str(value).split())
 
 
 def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str:
     """The open notices of the other sprints as a head and one `- ` line each, or `""`."""
+    entries = list(entries)
     lines = []
     for entry in entries:
         if entry.get("owner") is True:
@@ -2022,6 +2155,23 @@ def notice_block(entries: Iterable[Mapping], sprint_id: str, now_ms: int) -> str
             lines.append(f'- {form} from "{title}", {age}: {text}')
         else:
             lines.append(f'- heads-up from "{title}", {age}: {text}')
+    if lines:
+        titles = {entry["sprint_id"]: entry["title"] for entry in entries
+                  if entry.get("kind") == "claim" and entry.get("owner") is not True}
+        for reading in claim_overlaps(entries):
+            if sprint_id not in reading["sprints"]:
+                continue
+            other = next(s for s in reading["sprints"] if s != sprint_id)
+            who, files = _one_line(titles[other]), _one_line(", ".join(reading["files"]))
+            head = f'- overlap with "{who}" on {files}: '
+            if reading["rule"] == OVERLAP_UNSETTLED:
+                lines.append(head + ("both fix a live fault; ask the owner which lands first"
+                                     if reading["asks"] == sprint_id else
+                                     "both fix a live fault; they ask the owner which lands first"))
+            elif reading["claims"].index(reading["first"]) == reading["sprints"].index(sprint_id):
+                lines.append(head + "your slice lands first; theirs rebases")
+            else:
+                lines.append(head + "their slice lands first; rebase yours after it lands")
     return "\n".join([NOTICE_BLOCK_HEAD, *lines]) if lines else ""
 
 
