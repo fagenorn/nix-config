@@ -235,6 +235,17 @@ class ProjectRecordsTest(unittest.TestCase):
         self.assertEqual([a["commit"] for a in r["activations"]], ["e" * 40])
         self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [0, 60])
 
+    def test_a_move_off_the_root_with_its_registration_pruned_still_keeps_the_predecessors_spend_out(self):
+        # The old retention pruned the predecessor's registration at the root but kept its later one
+        # under another root; that row names only the new root, so the successor's own retained
+        # registration at the root is the cutoff.
+        events = EVENTS + [
+            Event(100, f"{DAY1}T10:00:00+00:00", "project.registered", "owner/old",
+                  {"root": "/srv/elsewhere"}),
+            Event(101, f"{DAY1}T12:00:00+00:00", "project.registered", P, {"root": P_ROOT})]
+        r = records(events=events)
+        self.assertEqual([d["tokens"] for d in r["spend"]["days"]], [0, 60])
+
     def test_a_predecessors_activation_stays_out_after_retention_removed_every_old_row(self):
         # The host's newest activation rows are kept whatever their age; the registrations that say
         # who owned the path when they were written must be kept with them, the new project's own

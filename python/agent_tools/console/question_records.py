@@ -98,15 +98,24 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
     The rows are folded in `seq` order into each project's registered root: a registration of another
     project under a different root, or its unregistration, while it held `root` ends its ownership; an
     unregistration names the root it ended in its payload, else the root the fold holds for the project.
+    A registration names only the new root, so when retention pruned the registration that put the
+    other project at `root`, its move away is told only by being the newest registration of another
+    project under a different root before `project_id`'s own earliest registration at `root`.
     """
     roots: dict[str, str] = {}
     left = None
+    moved = before_own = None
+    own_seen = False
     for event in rows:
         other = event.project
         if event.kind == REGISTERED and isinstance(other, str):
             now = event.payload.get("root") if isinstance(event.payload, dict) else None
             if other != project_id and roots.get(other) == root and now != root:
                 left = event
+            if other != project_id and isinstance(now, str) and now != root:
+                moved = event
+            elif other == project_id and now == root and not own_seen:
+                own_seen, before_own = True, moved
             if isinstance(now, str):
                 roots[other] = now
         elif event.kind == PROJECT_UNREGISTERED and isinstance(other, str):
@@ -114,7 +123,7 @@ def _earlier_owner_left(rows: Iterable[Event], project_id: str, root: str) -> Ev
             if other != project_id and (named if isinstance(named, str) and named else roots.get(other)) == root:
                 left = event
             roots.pop(other, None)
-    return left
+    return left or before_own
 
 
 def _owned_since(rows: Iterable[Event], project_id: str, root: str) -> int:
