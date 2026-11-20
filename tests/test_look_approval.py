@@ -422,6 +422,46 @@ class StatusCarryTest(unittest.TestCase):
         self.assertNotIn(PULL_ARGV, self.world.argvs("gh"))
 
 
+class StatusMergedTest(unittest.TestCase):
+    BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
+    COMMIT_ARGV = ["api", f"repos/{SLUG}/commits/{MC}"]
+    PULL = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"}, "merge_commit_sha": MC}
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def seed(self, pull=None):
+        self.world.comment_store(SLUG, ISSUE, [comment(5, lm.approval_body(7, 12, A, "approved", "m1"))])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+        self.world.respond_json("gh", PULL_ARGV, self.PULL if pull is None else pull)
+        self.world.respond_json("gh", self.COMMIT_ARGV, {"sha": MC, "parents": [{"sha": BT}, {"sha": HEAD}]})
+        self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+        for path in (f"contents/.github/look-files.json?ref={B}", f"compare/{B}...{A}", f"compare/{B}...{HEAD}"):
+            self.world.not_found("gh", ["api", f"repos/{SLUG}/{path}"])
+        serve(self.world, SLUG, reads(BT))
+
+    def test_status_of_a_merged_head_settles_a_kept_approval_at_the_merge_commits_first_parent(self):
+        self.seed()
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "approved", "approved", 5, A))
+        self.assertNotIn(self.BRANCH_ARGV, self.world.argvs("gh"))
+
+    def test_status_of_a_merged_head_with_an_unreadable_merge_commit_is_an_error(self):
+        with self.subTest("no merge commit sha"):
+            self.seed({k: v for k, v in self.PULL.items() if k != "merge_commit_sha"})
+            code, out = run(*STATUS)
+            self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+            self.assertNotIn("kept_from", out)
+        with self.subTest("merge commit not found"):
+            self.world = ForgeWorld(self)
+            self.seed()
+            self.world.not_found("gh", self.COMMIT_ARGV)
+            code, out = run(*STATUS)
+            self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+            self.assertNotIn("kept_from", out)
+
+
 class TickCarryTest(unittest.TestCase):
     TICK = ["tick", *POST]
     PULL = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"}, "merge_commit_sha": MC}

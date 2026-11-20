@@ -29,8 +29,12 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    is a forge error (`payload_invalid`, exit 1), never an unmarked issue.
    When the issue is marked and no trusted live look marker names the head, but
    `look_marker.carry_candidate` names an earlier approval, `status` reads `repos/<repo>/pulls/<pr>`
-   (its `base.ref`) and `repos/<repo>/branches/<ref>` (`commit.sha`, the pinned base B) and asks
-   `look_marker.settle`, reading through `gh api` with a 404 as an absent read. When it holds the
+   once and asks `look_marker.settle` for the pinned base B, reading through `gh api` with a 404 as
+   an absent read. For a pull request merged at `head` (`look_marker.merged_head`), B is the merge
+   commit's first parent, read as `tick` reads it (`look_marker.merged_under_look`:
+   `repos/<repo>/commits/<merge_commit_sha>`), never the base branch after the merge. Any other pull
+   request keeps the base branch tip: its `base.ref` and `repos/<repo>/branches/<ref>`
+   (`commit.sha`). When it holds the
    verdict is `approved` with the candidate's `answer` and `comment_id`, and `kept_from` is the
    candidate's head; otherwise it is `needed` with `answer` and `comment_id` null. `kept_from` is
    null when the verdict does not rest on a kept approval. A failed read, an unreadable field (no
@@ -40,7 +44,11 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `unmarked`, `covers` (the criteria text) and `acs` (the `AC<n>` id of each acceptance criterion whose
    body line is a look marker that `tick` ticks (`look_marker.marker_lines`), `n` its 1-based place among the checkbox lines of the first
    `Acceptance criteria` section, the id a plan and a verify block give it; a plan that rewords the
-   criterion is still named by its place), exit 0, with the same `payload_invalid` rule as
+   criterion is still named by its place). Two limits are stated, not handled: an issue whose
+   checkboxes are reordered by hand while its delivery waits (an `AC<n>` id is a place, so it then
+   names another checkbox), and fence layouts no generator writes (a fence opened on a list bullet
+   and closed on an indented line), where the console's criteria parser and the marker reader may
+   disagree. Exit 0, with the same `payload_invalid` rule as
    `status`: an issue object with no `body` key is a forge error. The delivery programs (issue
    1139) use it to decide whether a delivery stops at awaiting look. Output keys: `repo`, `issue`,
    `verdict`, `covers`, `acs`.
@@ -214,9 +222,8 @@ def _reader(repo: str) -> Callable[[str], Any]:
     return lambda path: forge_api.gh_json(["api", f"repos/{repo}/{path}"], allow=(404,))
 
 
-def _base_tip(args: argparse.Namespace) -> str:
-    """The tip of the pull request's base branch: the pinned base B of `status`."""
-    pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
+def _base_tip(args: argparse.Namespace, pull: Any) -> str:
+    """The tip of the given pull request's base branch: the pinned base B of `status` for a pull not merged at the head."""
     base = pull.get("base") if isinstance(pull, dict) else None
     ref = base.get("ref") if isinstance(base, dict) else None
     if not isinstance(ref, str) or not ref:
@@ -240,9 +247,12 @@ def status(args: argparse.Namespace) -> int:
     verdict = "unmarked" if not look.marked else "approved" if answer == "approved" else "needed"
     candidate = lm.carry_candidate(comments, args.issue, args.pr, args.head) if look.marked and marker is None else None
     if candidate is not None:
-        base = _base_tip(args)
+        pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
         try:
-            holds = lm.settle(candidate, args.head, base, _reader(args.repo))
+            if lm.merged_head(pull) == args.head:
+                holds = lm.merged_under_look(comments, args.issue, args.pr, pull, _reader(args.repo))
+            else:
+                holds = lm.settle(candidate, args.head, _base_tip(args, pull), _reader(args.repo))
         except lm.Unreadable as error:
             raise forge_api.ForgeError("payload_invalid", str(error)) from None
         if holds:
