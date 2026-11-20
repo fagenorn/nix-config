@@ -1,6 +1,6 @@
 # ADR-console-049 — Spend is read from transcripts into memory and never logged
 
-- **Status:** accepted; amended by ADR-console-059
+- **Status:** accepted; amended by ADR-console-059, ADR-console-090
 - **Decided in:** #1134
 
 ## Context
