@@ -1850,11 +1850,13 @@ def outside_claim_part(part: str) -> bool:
 
 
 def wide_claim_part(part: str, is_folder: Callable[[str], bool]) -> bool:
-    """True when the part names a whole folder tree: a trailing slash, the root, a `**` or a
-    trailing `*` segment, or a directory `is_folder` knows."""
+    """True when the part names a whole folder tree: a trailing slash, the root, a `**`, a last
+    segment of `*` and `?` that holds a `*` (it matches every name), or a path, wildcards read as
+    patterns, that `is_folder` finds to be a directory."""
     path = claim_path(part)
-    return (part.endswith("/") or path == "." or "**" in path or path.split("/")[-1] == "*"
-            or is_folder(path))
+    last = path.split("/")[-1]
+    return (part.endswith("/") or path == "." or "**" in path
+            or ("*" in last and not last.strip("*?")) or is_folder(path))
 
 
 def _no_folder(path: str) -> bool:
@@ -2044,10 +2046,21 @@ def _is_class(token: str) -> bool:
     return len(token) > 1
 
 
+def _classes_meet(x: str, y: str) -> bool:
+    """True when some character is in both bracket classes: an endpoint, a neighbour of one, or a
+    character neither names (two negated classes) is tried."""
+    named = {c for c in x + y if c not in "[]!-"}
+    tried = {chr(n) for c in named for n in (ord(c) - 1, ord(c), ord(c) + 1) if 0 <= n <= 0x10FFFF}
+    outside = next(chr(n) for n in range(0x10FFFF, 0, -1) if chr(n) not in named | tried)
+    return any(fnmatch.fnmatchcase(c, x) and fnmatch.fnmatchcase(c, y) for c in tried | {outside})
+
+
 def _stand_together(x: str, y: str) -> bool:
     """True when two single-character tokens may stand for one character (class and class: yes)."""
-    if x == "?" or y == "?" or (_is_class(x) and _is_class(y)):
+    if x == "?" or y == "?":
         return True
+    if _is_class(x) and _is_class(y):
+        return _classes_meet(x, y)
     if _is_class(x):
         return fnmatch.fnmatchcase(y, x)
     if _is_class(y):
@@ -2083,7 +2096,8 @@ def _segments_meet(first: str, second: str) -> bool:
 
 def _overlapping_files(first: str, second: str) -> list[str]:
     """The files two claim paths both name, `[]` when they share none (a shorter path is a folder)."""
-    xs, ys = first.split("/"), second.split("/")
+    xs = [] if first == "." else first.split("/")
+    ys = [] if second == "." else second.split("/")
     depth = min(len(xs), len(ys))
     if not all(_segments_meet(xs[k], ys[k]) for k in range(depth)):
         return []
@@ -2107,6 +2121,7 @@ def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
     claims = [entry for entry in entries
               if entry.get("kind") == "claim" and entry.get("owner") is not True]
     readings = []
+    seen: dict[tuple, dict] = {}
     for index, one in enumerate(claims):
         for two in claims[index + 1:]:
             if one["sprint_id"] == two["sprint_id"]:
@@ -2116,6 +2131,10 @@ def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
                             for file in _overlapping_files(p, q)})
             if not files:
                 continue
+            key = tuple((c["sprint_id"], c.get("issue", c["id"])) for c in (a, b))
+            if key in seen:
+                seen[key]["files"] = sorted({*seen[key]["files"], *files})
+                continue
             fault_a, fault_b = a.get("live_fault") is True, b.get("live_fault") is True
             if fault_a and fault_b:
                 first, rule, asks = None, OVERLAP_UNSETTLED, b["sprint_id"]
@@ -2123,10 +2142,10 @@ def claim_overlaps(entries: Iterable[Mapping]) -> list[dict]:
                 first, rule, asks = (a if fault_a else b)["id"], OVERLAP_FAULT, None
             else:
                 first, rule, asks = a["id"], OVERLAP_EARLIER, None
-            readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]),
-                             {"claims": [a["id"], b["id"]],
-                              "sprints": [a["sprint_id"], b["sprint_id"]], "files": files,
-                              "first": first, "rule": rule, "asks": asks}))
+            reading = {"claims": [a["id"], b["id"]], "sprints": [a["sprint_id"], b["sprint_id"]],
+                       "files": files, "first": first, "rule": rule, "asks": asks}
+            seen[key] = reading
+            readings.append(((_claim_start(a), _claim_start(b), a["id"], b["id"]), reading))
     return [reading for _, reading in sorted(readings, key=lambda keyed: keyed[0])]
 
 

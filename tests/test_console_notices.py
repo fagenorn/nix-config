@@ -126,6 +126,21 @@ class NoticeRouteTest(Case):
         self.assertEqual([(e["what"], e["issue"], e["live_fault"]) for e in listed],
                          [("src/main.py", 7, False)])
 
+    def test_a_wildcard_claim_matching_a_folder_is_refused(self):
+        checkout = self.store.parent / "checkout"
+        (checkout / "src" / "pkg" / "console").mkdir(parents=True)
+        (checkout / "src" / "pkg" / "console" / "view.py").write_text("")
+        support.write_registry(self.registry, [{"project_id": "owner/p01", "root": str(checkout)}])
+        svc = self.start()
+        a = self.approved(svc, "owner/p01")
+        for what in ("src/pkg/con*", "src/pkg/consol?", "src/*/console", "src/?*"):
+            with self.subTest(what):
+                status, _, body = self.notice(svc, a, {**CLAIM, "what": what})
+                self.assertEqual(
+                    (status, body),
+                    (409, b"a claim's what names files or a narrow path, never a whole folder tree\n"))
+        self.posted(svc, a, {**CLAIM, "what": "src/pkg/console/vi*.py"})
+
     def test_a_sprint_of_another_project_never_sees_the_notice(self):
         svc = self.open()
         a = svc.state_goal("owner/p01", GOAL_TEXT)

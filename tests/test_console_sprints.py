@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 
 import json
+import re
 import stat
 import tempfile
 import unittest
@@ -2549,7 +2550,7 @@ class ClaimRuleTest(unittest.TestCase):
         for what in ("python/agent_tools/console/", "python/**", "tests/*", ".", "./",
                      "python/agent_tools/console", "./python/agent_tools/./console",
                      "tests/test_x.py, python/agent_tools/console", "src/main.py, ./",
-                     "src/main.py, ."):
+                     "src/main.py, .", "src/?*", "src/*?", "src/**", "src/?*?"):
             with self.subTest(what):
                 reason = notice_refusal(sprints.postable_notice, a, {**CLAIM, "what": what}, [],
                                         is_folder)
@@ -2557,6 +2558,32 @@ class ClaimRuleTest(unittest.TestCase):
                 for part in what.replace(",", " ").split():
                     if len(part) > 1:
                         self.assertNotIn(part, reason)
+
+    def test_a_wildcard_claim_matching_a_folder_is_refused_when_the_lookup_finds_one(self):
+        a = open_sprint(SA)
+        seen = []
+
+        def is_folder(path):
+            seen.append(path)
+            return "*" in path or "?" in path
+
+        for what in ("python/agent_tools/con*", "python/agent_tools/consol?", "docs/*/console"):
+            with self.subTest(what):
+                self.assertEqual(notice_refusal(sprints.postable_notice, a,
+                                                {**CLAIM, "what": what}, [], is_folder),
+                                 self.NO_FOLDER)
+                self.assertEqual(seen[-1], what)
+        self.assertEqual(sprints.wide_claim_part("src/??", lambda path: False), False)
+
+    def test_the_manager_contracts_claim_example_is_postable(self):
+        contract = (Path(__file__).resolve().parents[1]
+                    / "python/agent_tools/console/manager-contract.md").read_text()
+        examples = [json.loads(line) for line in re.findall(r"`(\{\"kind\": \"claim\"[^`]*\})`",
+                                                             contract)]
+        self.assertTrue(examples)
+        for example in examples:
+            with self.subTest(example):
+                sprints.postable_notice(open_sprint(SA), example, [])
 
     def test_a_claim_outside_the_project_is_refused_before_any_folder_lookup(self):
         a = open_sprint(SA)
@@ -2891,6 +2918,14 @@ class ClaimOverlapTest(unittest.TestCase):
             ("tests/t?st.py", "tests/tst.py", None),
             ("a*b", "ab", ["ab"]),
             ("a[", "a[", ["a["]),
+            ("tests/test_[ab].py", "tests/test_[cd].py", None),
+            ("tests/test_[a-c].py", "tests/test_[b-d].py", ["tests/test_[a-c].py", "tests/test_[b-d].py"]),
+            ("tests/test_[!a].py", "tests/test_[a].py", None),
+            ("tests/test_[!a].py", "tests/test_[!b].py", ["tests/test_[!a].py", "tests/test_[!b].py"]),
+            ("tests/test_[!a-c].py", "tests/test_[a-d].py", ["tests/test_[!a-c].py", "tests/test_[a-d].py"]),
+            ("tests/test_[!a-c].py", "tests/test_[a-c].py", None),
+            ("./", "src/main.py", ["src/main.py"]),
+            (".", "src/main.py", ["src/main.py"]),
         ]
         for one, two, files in cases:
             for entries in ([claim_entry(3, SA, one), claim_entry(5, SB, two)],
@@ -2912,6 +2947,16 @@ class ClaimOverlapTest(unittest.TestCase):
                         [claim_entry(5, SB, "a.py"), legacy]):
             self.assertEqual(sprints.claim_overlaps(entries),
                              [self.reading([2, 5], 2, "earlier-started", ["a.py"])])
+
+    def test_a_claim_posted_twice_for_one_slice_gives_one_reading(self):
+        for fault in (True, False):
+            entries = [claim_entry(3, SA, "a.py", live_fault=fault),
+                       {**claim_entry(4, SA, "a.py", live_fault=fault), "issue": 3, "started": 3},
+                       claim_entry(5, SB, "a.py", live_fault=fault)]
+            with self.subTest(fault=fault):
+                readings = sprints.claim_overlaps(entries)
+                self.assertEqual(len(readings), 1)
+                self.assertEqual(readings[0]["claims"], [3, 5])
 
     def test_a_reposted_claim_keeps_its_slices_start(self):
         slices = ((7, 3, {"claims": [6, 4], "sprints": [SA, SB], "first": 6}),

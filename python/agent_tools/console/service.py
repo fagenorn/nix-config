@@ -1600,6 +1600,7 @@ import contextlib
 import dataclasses
 import errno
 import fcntl
+import glob
 import hmac
 import http.server
 import json
@@ -7192,7 +7193,9 @@ class ConsoleService:
             root = project.root if project is not None else None
 
             def is_folder(path: str) -> bool:
-                return root is not None and os.path.isdir(os.path.join(root, path))
+                return root is not None and any(
+                    os.path.isdir(match) for match in glob.glob(
+                        os.path.join(glob.escape(root), path)))
 
             checked = sprints.postable_notice(sprint, notice, others, is_folder)
             appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {

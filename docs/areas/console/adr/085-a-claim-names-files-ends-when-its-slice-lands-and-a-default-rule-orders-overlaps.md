@@ -33,6 +33,6 @@ A claim notice (ADR-console-044) named "the paths or the area" a sprint worked i
 ## Consequences
 
 - Amends ADR-console-044 D2 and D6 (a claim's members and when it ends) and ADR-console-046 D6 (which overlaps go to the owner).
-- Rollback: reverting the change restores the free-text `what`, the end on withdrawal and the card for every overlap; rows already logged with `issue` and `live_fault` fold as before, the members being ignored.
+- Rollback: reverting the change restores the free-text `what`, the end on withdrawal and the card for every overlap. The base revision rejects a claim row carrying `issue` or `live_fault` as an unknown member and skips the whole row on replay, so each claim posted under this change is missing from the older console's board until the change is back.
 - The manager contract changed outside the instruction corpus (ADR-console-015, ADR-console-044 D10), so no Instruction Budget raise is needed.
 - A manager that posts a claim without `issue` is refused until it names one.
