@@ -41,7 +41,7 @@ cannot be read), then the reads paragraph (the git reads with their examples, an
 reads pinned to `--repo <repo>` with their examples or the sentence that gh cannot be used), then the
 thread text, then `QUESTION_MARK` and the question (ADR-console-065).
 
-Records (ADR-console-082). An `Ask` may carry `records`, the encoded document of the console's own
+Records (ADR-console-089). An `Ask` may carry `records`, the encoded document of the console's own
 records for the project (None: none). The session's file is `records_path(ask)`: `SETTINGS_DIR`'s
 directory (0700), the question's id plus `RECORDS_SUFFIX`, mode 0600, written atomically after the
 settings file with exactly `ask.records`, and removed with the settings file on every path once the
@@ -50,7 +50,7 @@ thread text, only with records. No permission rule is added: Read is already adm
 fails is a failed outcome (`RECORDS_UNWRITABLE`) and no session starts.
 `checked_question` strips and refuses an empty question or one over `MAX_QUESTION_CHARS`;
 `parse_request` reads the page's strict JSON body of exactly `project_id` and `question`
-(`parse_keyed_request` also reads an optional `request_key`, ADR-console-082 D9).
+(`parse_keyed_request` also reads an optional `request_key`, ADR-console-089 D9).
 
 Settings and fail closed (D7). `settings_document(routes)` is the one `--settings` file. Several
 layers each refuse on their own: `--setting-sources ""` loads no user, project or local settings,
@@ -61,7 +61,7 @@ which wins over any allow; `--tools` removes every other built-in tool, and Bash
 (the git reads need it even with no route). On top of those, a PreToolUse command hook
 (`project_question_hook`, run through `siblings.sibling_argv`, given the allowed argv and the
 repository, and with records also `private_dir(ask)`, the console's state directory, and
-`records_path(ask)`, which confine its reads to that one file: ADR-console-082) admits only reads, the bare declared commands and the plain git and gh reads;
+`records_path(ask)`, which confine its reads to that one file: ADR-console-089) admits only reads, the bare declared commands and the plain git and gh reads;
 `"onFailure": "block"` makes the pinned client treat a hook that errors, fails
 to start or times out as a block, because without it such a hook is non-blocking and the call would
 fall to the permission rules. The file lives in `SETTINGS_DIR` under the console's state (a 0700
@@ -129,7 +129,7 @@ lowercase hex digits; any other is a `ValueError`), and returns
 `(project_id, question, thread_id or None, request_key or None)`; `parse_request` returns its
 first three. The key names one request: an asked row carries `request_key` only when one was
 given, the fold keeps it only when it is a string fullmatching `REQUEST_KEY`, and the service asks
-a key once per project (ADR-console-082 D9).
+a key once per project (ADR-console-089 D9).
 """
 
 from __future__ import annotations
@@ -726,7 +726,7 @@ def asked_questions(events: Iterable[Event],
 
 def question_keys(events: Iterable[Event],
                   known: Mapping[tuple[str, str], str] | None = None) -> dict[tuple[str, str], str]:
-    """`(project, request key)` to the id of the question asked under it, from the receipt rows (ADR-console-082 D9).
+    """`(project, request key)` to the id of the question asked under it, from the receipt rows (ADR-console-089 D9).
 
     A receipt is kept whatever its age, so this outlives the asked row `asked_questions` folds; the first receipt of a key wins.
     """

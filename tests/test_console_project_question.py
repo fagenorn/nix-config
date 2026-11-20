@@ -2114,7 +2114,7 @@ def question_threads():
 
 
 class QuestionRecordsServiceTest(QuestionCase):
-    """The job gathers the asked project's own records once per accepted question (ADR-console-082)."""
+    """The job gathers the asked project's own records once per accepted question (ADR-console-089)."""
 
     def seed(self):
         self.store.parent.mkdir(parents=True, exist_ok=True)
@@ -2528,7 +2528,7 @@ class QuestionThreadServiceTest(QuestionCase):
 
 
 class QuestionRequestKeyTest(QuestionCase):
-    """A request may carry a key the console asks once per project (ADR-console-082 D9)."""
+    """A request may carry a key the console asks once per project (ADR-console-089 D9)."""
 
     KEY = "0123456789abcdef" * 2
 

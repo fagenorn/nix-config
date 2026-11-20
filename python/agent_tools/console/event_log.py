@@ -64,7 +64,7 @@ view's questions (#1177); the schema version is unchanged.
 
 One kind is kept whole (#1271): `PROJECT_QUESTION_KEYED` (`project_question.keyed`, payload `request_key`
 and `question_id`, the project in its project column) is the receipt of a question asked under a request
-key, appended in the same transaction as its asked row (ADR-console-082 D9). It is not in `KEPT_KINDS`, but the
+key, appended in the same transaction as its asked row (ADR-console-089 D9). It is not in `KEPT_KINDS`, but the
 retention pass never removes it, whatever its age, so a key the console has asked still finds its question
 after the asked row is gone and a retry of that key starts no second session. The question's own rows go
 at 90 days as before; the receipt is two short strings.
@@ -73,7 +73,7 @@ Two kinds are kept in part for the ownership of a path (#1271): `PROJECT_REGISTE
 payload `root`) and `PROJECT_UNREGISTERED` (`project.unregistered`) are not in `KEPT_KINDS`, but the retention pass
 never removes a registered row, and removes an unregistered row only when no earlier registered row of its
 project remains. The activation rows above are kept past the window and name a root, not a project, so the
-registrations that say who held the root when one was written must outlive it too (ADR-console-082 D3);
+registrations that say who held the root when one was written must outlive it too (ADR-console-089 D3);
 one pair of short rows per registration is all that is kept.
 
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one

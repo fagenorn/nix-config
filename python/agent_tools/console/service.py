@@ -1564,7 +1564,7 @@ tracker, movement, retention, digest and spend threads and the folder-trust star
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
 `question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062) and an optional
-`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-082 D9)
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
 `project_question.parse_keyed_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
@@ -1586,7 +1586,7 @@ model, flags, settings and cap are a first question's (ADR-console-062). Its job
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
 project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
-records (`question_records.project_records`, ADR-console-082) after the reach and before the
+records (`question_records.project_records`, ADR-console-089) after the reach and before the
 session; a gathering that raises is a `failed` answer with one stderr line `console:
 project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
@@ -4633,7 +4633,7 @@ class ConsoleService:
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
         turns go to the job. A `request_key` already on a folded question of the project returns
-        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-082 D9); the
+        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
         check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
         `project_question.Refused` and append and count nothing.
         """
@@ -4745,7 +4745,7 @@ class ConsoleService:
             self._record_project_answer(question_id, project_id, outcome)
 
     def _question_records(self, project_id: str, root: str) -> str:
-        """The encoded document of the console's own records of one project (ADR-console-082).
+        """The encoded document of the console's own records of one project (ADR-console-089).
 
         The events and the folded state are read in one section under the ingest lock, so a delivery
         that finishes while the records are gathered shows either before or after, never half of each.
