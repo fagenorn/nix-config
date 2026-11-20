@@ -54,7 +54,8 @@ Identity. `identity(directory)` is `<inode>:<birth>:<marker>` of the directory a
 None when the directory or its marker cannot be read. `<birth>` is the creation time in nanoseconds where the
 platform gives one (`st_birthtime_ns`, else `st_birthtime`; empty where it does not, as on Linux). `<marker>` is the
 random token `mark(directory)` wrote into the directory as the file `MARKER`: 32 lowercase hex digits, read through
-`os.open` with `O_NOFOLLOW`, any other content is no marker. A profile name can be given to another directory (the
+`os.open` with `O_NOFOLLOW` and `O_NONBLOCK` from a descriptor checked to be a regular file (a FIFO or a device at the path is
+no marker and is never waited on, so the read cannot block a caller that holds a lock), any other content is no marker. A profile name can be given to another directory (the
 owner removes a profile with the CLI and makes one of that name), and a freed inode may be given to it at once (ext4
 does, and Linux gives no creation time), so the inode and the creation time alone do not tell the two apart: the
 marker is what does, because the replacement is a new directory the launcher made, which holds none. `mark(directory)`
@@ -85,6 +86,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -150,11 +152,13 @@ def _stat(directory: Path) -> os.stat_result:
 
 def _marker(directory: Path) -> str | None:
     try:
-        descriptor = os.open(directory / MARKER, os.O_RDONLY | os.O_NOFOLLOW)
+        descriptor = os.open(directory / MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
         with os.fdopen(descriptor, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
             text = handle.read(MARKER_BYTES + 1)
     except OSError:
         return None

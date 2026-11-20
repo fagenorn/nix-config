@@ -357,7 +357,15 @@ class GuestRecordTest(unittest.TestCase):
                     f"{authorize}?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Fcb",
                     f"{authorize}?code=true&state=s",
                     f"{authorize}?code=true&{redirect}&{redirect}",
-                    f"{authorize}?code=true&{redirect}&state=a&state=SENTINEL-TOKEN"):
+                    f"{authorize}?code=true&{redirect}&state=a&state=SENTINEL-TOKEN",
+                    # a member the client sends is still one of its own values, not any text
+                    f"{authorize}?code=true&{redirect}&client_id=SENTINEL-TOKEN",
+                    f"{authorize}?code=true&{redirect}&scope=SENTINEL-TOKEN",
+                    f"{authorize}?code=true&{redirect}&scope=user%3Aprofile%20sk-ant-oat01-SENTINEL",
+                    f"{authorize}?code=true&{redirect}&response_type=token",
+                    f"{authorize}?code=true&{redirect}&code_challenge_method=plain",
+                    f"{authorize}?code=true&{redirect}&code_challenge=SENTINEL.TOKEN",
+                    f"{authorize}?code=true&{redirect}&state=SENTINEL%20TOKEN"):
             with self.subTest(url=url):
                 link = signin_run.Link(url, "manual", None, None)
                 self.assertFalse(signin_run.guest_link(url))
@@ -369,8 +377,9 @@ class GuestRecordTest(unittest.TestCase):
             f"http://claude.com/cai/oauth/authorize?code=true&{redirect}"))
         for endpoint in ("https://claude.com/cai/oauth/authorize", "https://claude.ai/oauth/authorize",
                          "https://platform.claude.com/oauth/authorize"):
-            full = (f"{endpoint}?code=true&client_id=c&response_type=code&{redirect}&scope=a%20b"
-                    "&code_challenge=x&code_challenge_method=S256&state=s")
+            full = (f"{endpoint}?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code"
+                    f"&{redirect}&scope=org%3Acreate_api_key%20user%3Aprofile%20user%3Ainference"
+                    "&code_challenge=x_Y-9&code_challenge_method=S256&state=s")
             with self.subTest(endpoint=endpoint):
                 self.assertTrue(signin_run.guest_link(full))
                 self.assertEqual(guest_answer_members(signin_run.Link(full, "manual", None, None)),
@@ -677,6 +686,21 @@ class RunTest(unittest.TestCase):
         self.assertEqual(route_of(first), (MANUAL_LINK, "manual", None, None))
         self.assertEqual(guest_answer_members(first), {"link": MANUAL_LINK, "route": "manual"})
         self.assertEqual(route_of(runs.wait_link("work")), (MANUAL_LINK, "manual", None, None))
+
+    def test_a_usable_manual_link_that_arrives_after_a_diagnostic_choice_replaces_it_on_retry(self):
+        diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"
+                      "&access_token=SENTINEL-TOKEN")
+        self.arrange("code", FAKE_LINK=LOOPBACK_LINK, FAKE_BAD=diagnostic, FAKE_MANUAL=MANUAL_LINK,
+                     FAKE_MANUAL_DELAY="1.0")
+        runs = self.make(manual_grace=0.2)
+        runs.start("work")
+        first = runs.wait_link("work")
+        self.assertEqual(guest_answer_members(first), {"link": None, "route": None})
+        self.wait_record("manual_written")
+        until(self, lambda: getattr(runs._runs.get("work"), "manual", None) is not None)
+        second = runs.wait_link("work")
+        self.assertEqual(route_of(second), (MANUAL_LINK, "manual", None, None))
+        self.assertEqual(guest_answer_members(second), {"link": MANUAL_LINK, "route": "manual"})
 
     def test_a_manual_link_no_colleague_may_have_still_serves_the_owner_when_it_is_the_only_one(self):
         diagnostic = ("https://diag.example/report?redirect_uri=https%3A%2F%2Fp.example%2Fcb"

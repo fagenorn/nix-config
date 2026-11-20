@@ -190,10 +190,13 @@ choice, in his sign-in, code and cancel, and in both pages' labels (at the next 
 reserved and unowned, so a profile that appears under it later (the owner's, made with the CLI) is never his, and his retry takes
 a new name; a launcher that returned but whose listing could not be read keeps the name and the directory's identity for his
 retry, which skips the adder and takes the profile only if its directory is still that one, else drops it and takes a new
-name; then the trust grant, the status read and `start_signin(profile, by=...)`,
+name (with no other profile listed there is no directory to mark at once: a failed second listing then leaves the
+profile unowned and his retry makes another); a new profile's status is read before its row (it must read signed out, else the add is `AddFailed`
+`not_listed` and the profile stays unowned: a reused name can find the launcher's keychain entry), and an add whose marker
+could not be written is `not_listed` too; then the trust grant and `start_signin(profile, by=...)`,
 which refuses a profile that is not his (`guest.NO_OWN_SIGNIN_TEXT`) or being removed (`guest.ACCOUNT_BUSY_TEXT`), and, once the
 link wait ends, refuses again when his access or epoch is gone or the live run of that attempt has ended (the runner no longer holds it, even
-while the end callback's final status read has yet to clear it) or been replaced. The code and the
+while the end callback's final status read has yet to clear it) or been replaced, or the profile is no longer his. The code and the
 cancel act on his own live sign-in of that attempt only, else `NO_OWN_SIGNIN_TEXT`. A refusal is 409 with `guest.account_text`, a fixed text that names
 no profile; the add answers `200` `{"attempt", "link", "route"}` (`signin_run.guest_answer_members`, no `port` or `forward`, the
 link null for a loopback-only run), the other two `204`; `AddFailed` is 502 `the account could not be created: <kind>`, a failed
@@ -5228,14 +5231,15 @@ class ConsoleService:
 
     def _guest_link_still_his(self, by: "guest.GuestActor", runs: signin_run.SignIns, profile: str,
                               attempt: int) -> None:
-        """After a link wait: refuse when his access is gone or the run of `attempt` ended or was replaced.
+        """After a link wait: refuse when his access is gone, the run of `attempt` ended or was replaced, or the
+        profile is no longer his (the owner removed it and made another of the name while he waited).
 
         The end callback clears `_signin_live` only after the client's final status read, so the runner's
         own liveness is checked too: a client that has ended hands out no link (#1343).
         """
         with self._ingest:
             self._guest_account_refusal(by)
-            if self._signin_live.get(profile) != attempt or profile not in runs.running():
+            if self._own_live_signin(by, runs, attempt) != profile:
                 raise sprints.Refused(guest.NO_OWN_SIGNIN_TEXT)
 
     def signin_link(self, profile: str) -> tuple[int, signin_run.Link | None]:
@@ -5312,14 +5316,16 @@ class ConsoleService:
         link, any other attempt is refused with `guest.NO_OWN_SIGNIN_TEXT`. Else, under `_adding`, the
         choice of profile and the checks are made under one `_ingest` block. A new profile is his only once
         this console saw the launcher return for a name it chose after a listing that did not hold it and
-        then read the name listed on the very directory the launcher made: its `account.added` row, with
-        his login and that directory's identity (marked by the console as soon as the launcher returned, so a
-        directory made later under the name, whatever inode it gets, holds no marker), is appended in the block
+        then read the name listed on the very directory the launcher made, its sign-in status read signed out (a
+        credential left under a reused name, or a read that fails, makes nothing his): its `account.added` row, with
+        his login and that directory's identity (marked by the console as soon as the launcher returned, and an add whose exclusive marker could not be
+        written is refused, so a directory made later under the name, whatever inode it gets, holds no marker), is appended in the block
         that stores that second listing, with no access check between. A listing that cannot be read creates and records nothing; a launcher
         that fails leaves its name reserved and unowned, whatever a later listing shows; a launcher that
         returned but whose listing could not be read keeps the name and the directory's identity for his
         retry, which takes the profile only if its directory is still that one, else drops the name and
-        makes another (#1343, ADR-console-087).
+        makes another; with no other profile listed there is no directory to mark at once, so a listing that fails
+        after the launcher returned leaves the profile unowned and his retry makes another (#1343, ADR-console-087).
         """
         if not consent:
             raise sprints.Refused(guest.CONSENT_TEXT)
@@ -5367,6 +5373,10 @@ class ConsoleService:
                 if pending is None:
                     self._account_adder(name)
                     recorded = None if root is None else account_add.mark(root / name)
+                    if root is not None and recorded is None:
+                        # The exclusive marker was not written, so a marker found later is not the one this
+                        # add made: the name stays reserved and unowned.
+                        raise account_add.AddFailed("not_listed")
                     self._guest_made[name] = (by.login, recorded)
                 accounts = self._scan_accounts()
                 if accounts is None:
@@ -5380,6 +5390,12 @@ class ConsoleService:
                 if bound is None or (recorded is not None and bound != recorded):
                     del self._guest_made[name]
                     raise account_add.AddFailed("not_listed")
+                # A fresh credential slot only: a name the owner removed with the CLI can still find the
+                # launcher's keychain entry of the earlier profile, which must not become his.
+                status = self._read_signin_now(name, "add", named=False)
+                if status is None or status.state != "signed_out":
+                    del self._guest_made[name]
+                    raise account_add.AddFailed("not_listed")
                 with self._ingest:
                     self._profiles = frozenset(accounts)
                     self._profiles_read = True
@@ -5390,7 +5406,6 @@ class ConsoleService:
                 created = True
         if created:
             self._grant_registered_projects(target, named=False)
-            self._read_signin_now(target, "add", named=False)
         return self.start_signin(target, by=by)
 
     def _grant_registered_projects(self, name: str, *, named: bool = True) -> None:

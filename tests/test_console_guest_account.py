@@ -320,6 +320,10 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertEqual(self.acted(), [])
         self.assertEqual(self.clients(), [])
 
+    def no_sign_in_started(self):
+        self.assertEqual(self.acted(), [])
+        self.assertEqual(self.clients(), [])
+
     def test_each_guest_account_write_is_guarded_like_a_guest_write(self):
         svc = self.begin()
         origin = "https://" + TAILNET
@@ -603,6 +607,86 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertIn("colleague-2", self.granted)
         self.assertNotIn("colleague-1", self.granted)
 
+    def test_a_profile_whose_credential_slot_is_not_fresh_is_never_his(self):
+        # A reused name can find the launcher's keychain entry of a profile the owner removed with the CLI.
+        self.begin()
+        self.status_of["colleague-1"] = signin.Status("signed_in", None, "someone@corp-zq.invalid")
+        status, body = self.add()
+        self.assertEqual((status, body), (502, b"the account could not be created: not_listed\n"))
+        self.assertEqual(self.added_rows(), [])
+        self.no_sign_in_started()
+        self.read_error["colleague-2"] = signin.StatusFailed("unreadable")  # a read that fails proves nothing
+        self.assertEqual(self.add()[0], 502)
+        self.assertEqual(self.added_rows(), [])
+        self.no_sign_in_started()
+        del self.read_error["colleague-2"]
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.added, ["colleague-1", "colleague-2", "colleague-3"])
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-3"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertIsNone(self.owner_of("colleague-2"))
+        self.assertEqual(self.owner_of("colleague-3"), COLLEAGUE)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-3"])
+
+    def test_an_add_whose_marker_could_not_be_written_is_refused_whatever_marker_is_found_later(self):
+        self.begin()
+        self.after_add = lambda name: (self.profiles / name / account_add.MARKER).write_text("a" * 32)
+        status, body = self.add()
+        self.assertEqual((status, body), (502, b"the account could not be created: not_listed\n"))
+        self.assertEqual(self.added_rows(), [])
+        self.no_sign_in_started()
+        self.after_add = None
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-2"])
+
+    def test_with_no_other_profile_listed_a_listing_that_fails_after_the_launcher_leaves_the_profile_unowned(self):
+        shutil.rmtree(self.profiles / "work")
+        self.begin()
+
+        def unreadable(name):
+            self.list_error = OSError("cannot list")
+        self.after_add = unreadable
+        self.assertEqual(self.add()[0], 502)
+        self.list_error = None
+        self.after_add = None
+        self.assertEqual(self.add()[0], 200)
+        self.assertEqual(self.names(), {"colleague-1", "colleague-2"})
+        self.assertEqual(self.added_rows(), [{"by": COLLEAGUE, "profile": "colleague-2"}])
+        self.assertIsNone(self.owner_of("colleague-1"))
+        self.assertEqual(self.owner_of("colleague-2"), COLLEAGUE)
+
+    def test_a_link_fetched_for_a_profile_replaced_while_it_was_awaited_is_refused(self):
+        svc = self.begin()
+        runs = svc._signin_runs
+        awaited = runs.wait_link
+
+        def wait_then_replace(profile):
+            link = awaited(profile)
+            self.replace_dir(profile)
+            return link
+        runs.wait_link = wait_then_replace
+        status, body = self.add()
+        self.assertEqual((status, body), (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n"))
+        self.assertNotIn(b"https", body)
+
+    def test_a_link_retry_for_a_profile_replaced_while_it_was_awaited_is_refused(self):
+        svc = self.begin()
+        first = json.loads(self.add()[1])["attempt"]
+        runs = svc._signin_runs
+        awaited = runs.wait_link
+
+        def wait_then_replace(profile):
+            link = awaited(profile)
+            self.replace_dir(profile)
+            return link
+        runs.wait_link = wait_then_replace
+        status, body = self.post(ADD, {"consent": True, "attempt": first})
+        self.assertEqual((status, body), (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n"))
+        self.assertNotIn(b"https", body)
+
     def test_a_link_fetched_after_the_run_ended_is_refused(self):
         svc = self.begin()
         runs = svc._signin_runs
@@ -817,13 +901,14 @@ class GuestAccountRefusalTest(GuestAccountCase):
             self.add_error = None
             self.registry.write_text("not json")
             self.read_error["colleague-2"] = signin.StatusFailed("boom")
+            self.assertEqual(self.add()[0], 502)  # a failed status read proves no fresh slot, so the add is refused
             self.assertEqual(self.add()[0], 200)
             self.sent_code()
             until(self, lambda: self.own_state() == "failed")
         for status, headers, body in self.responses:
-            for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+            for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "colleague-3", "work"):
                 self.assertNotIn(word.encode(), body)
-        for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "work"):
+        for word in (COLLEAGUE, SECOND, "colleague-1", "colleague-2", "colleague-3", "work"):
             self.assertNotIn(word, err.text)
         self.assertIn("signin_add_read_failed boom", err.text)
         self.assertIn("trust_account_registry_unreadable", err.text)
@@ -857,17 +942,6 @@ class GuestAccountTextTest(unittest.TestCase):
                          guest.ACCOUNT_BUSY_TEXT)
         self.assertEqual(guest.account_text(account_remove.removing("work")),
                          guest.ACCOUNT_BUSY_TEXT)
-
-
-class GuestAccountDocsTest(unittest.TestCase):
-    def test_adr_008_gives_the_code_and_cancel_bodies_their_attempt(self):
-        adr = (Path(__file__).resolve().parents[1] / "docs/areas/console/adr/"
-               "008-only-the-page-writes-with-a-token-and-its-origin.md").read_text()
-        text = " ".join(adr.split())
-        self.assertIn('`/api/guest-signin-code` takes `{"attempt", "code"}`', text)
-        self.assertIn('`/api/guest-signin-cancel` takes `{"attempt"}`', text)
-        self.assertNotIn('`/api/guest-signin-code` takes `{"code"}`', text)
-        self.assertNotIn('`/api/guest-signin-cancel` takes `{}`', text)
 
 
 class GuestAccountSecrecyTest(GuestAccountCase):

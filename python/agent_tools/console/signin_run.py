@@ -128,7 +128,12 @@ query or fragment), so no address or path of a printed URL carries a value to th
 printed URL that fails it, such as a diagnostic one carrying an access token, is handed out as no link:
 `{"link": None, "route": None}`. The run's manual link is the first manual-route candidate that passes
 `guest_link`; the first one that does not is kept apart and served only when none passes by the end of the
-wait, so a diagnostic URL printed first never takes the real link's place.
+wait, so a diagnostic URL printed first never takes the real link's place; one served that way and kept as the run's
+link is replaced by the first link that passes `guest_link`, which arrives later, so a retry is handed it. Each
+member a link may carry is also of the client's own shape (`GUEST_VALUES`, `GUEST_FIXED`): `client_id` a UUID,
+`response_type` `code`, `code_challenge_method` `S256`, `scope` lowercase words joined by `:` and spaces,
+`code_challenge` and `state` URL-safe opaque strings of at most 128 characters; a link with any other value of a member it
+carries is handed out as no link.
 
 Secrecy. No return value, exception message or stderr line carries a link or a code, and neither is
 stored or logged: the link lives in memory for the run, the code goes to the client's input and
@@ -291,6 +296,15 @@ GUEST_AUTHORIZE = frozenset({("claude.com", "/cai/oauth/authorize"), ("claude.ai
 GUEST_CALLBACK = ("platform.claude.com", "/oauth/code/callback")
 GUEST_LINK_MEMBERS = frozenset({"code", "client_id", "response_type", "redirect_uri", "scope",
                                 "code_challenge", "code_challenge_method", "state"})
+# The shape of each value a member may carry (the client's own: a UUID client id, `code`, `S256`, scopes of
+# lowercase words joined by `:`, and URL-safe opaque challenge and state strings), so no member of a printed
+# address carries free text to the colleague.
+GUEST_CLIENT_ID = re.compile(r"[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}")
+GUEST_SCOPE = re.compile(r"[a-z_]+(:[a-z_]+)*( [a-z_]+(:[a-z_]+)*)*")
+GUEST_OPAQUE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+GUEST_VALUES = {"client_id": GUEST_CLIENT_ID, "scope": GUEST_SCOPE, "code_challenge": GUEST_OPAQUE,
+                "state": GUEST_OPAQUE}
+GUEST_FIXED = {"response_type": "code", "code_challenge_method": "S256"}
 
 
 def guest_link(url: str) -> bool:
@@ -304,6 +318,11 @@ def guest_link(url: str) -> bool:
         query = parse_qs(link.query, keep_blank_values=True)
         if (set(query) - GUEST_LINK_MEMBERS or query.get("code") != ["true"]
                 or any(len(values) != 1 for values in query.values())):
+            return False
+        if any(not pattern.fullmatch(query[name][0]) for name, pattern in GUEST_VALUES.items()
+               if name in query):
+            return False
+        if any(query[name] != [value] for name, value in GUEST_FIXED.items() if name in query):
             return False
         target = urlsplit(query.get("redirect_uri", [""])[0])
         if (target.scheme, target.netloc, target.path) != ("https", GUEST_CALLBACK[0], GUEST_CALLBACK[1]):
@@ -792,6 +811,9 @@ class SignIns:
         if guest_link(text):
             if run.manual is None:
                 run.manual = text
+                chosen = run.chosen
+                if chosen is not None and chosen.route == "manual" and not guest_link(chosen.url):
+                    run.chosen = Link(text, "manual", None, None)  # a retry gets the real link, not the cached diagnostic
         elif run.manual_other is None:
             run.manual_other = text
 

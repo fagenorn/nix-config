@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -284,6 +285,27 @@ class OwnerRecordTest(unittest.TestCase):
             (Path(raw) / "elsewhere").write_text("a" * 32)
             marker.symlink_to(Path(raw) / "elsewhere")
             self.assertIsNone(identity(directory))
+
+    def test_a_marker_that_is_a_fifo_is_no_marker_and_blocks_nothing(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "p"
+            directory.mkdir()
+            fifo = directory / account_add.MARKER
+            os.mkfifo(fifo)
+            found = []
+            worker = threading.Thread(target=lambda: found.append(identity(directory)), daemon=True)
+            worker.start()
+            worker.join(5)
+            stuck = worker.is_alive()
+            if stuck:  # let the blocked open return so the thread ends
+                try:
+                    os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                except OSError:
+                    pass
+                worker.join(5)
+            self.assertFalse(stuck, "reading a FIFO at the marker path blocked")
+            self.assertEqual(found, [None])
+            self.assertIsNone(mark(directory))  # a marker path already taken is never marked
 
     def test_the_identities_fold_follows_the_owners_fold(self):
         rows = events_of([

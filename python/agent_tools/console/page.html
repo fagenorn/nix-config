@@ -6262,8 +6262,12 @@ async function guestAccountPost(failure, send) {
 async function guestSignIn() {
   const g = guestAccount;
   if (!g.ticked || g.posting) return;
-  // With an attempt held (no link yet) the press only asks for that attempt's link; the console creates nothing then.
-  const body = g.held === null ? { consent: true } : { consent: true, attempt: g.held.attempt };
+  // With an attempt held (no link yet) or shown running (a page reloaded during a sign-in holds none) the press only
+  // joins that attempt; the console creates nothing then, and refuses an attempt that is over.
+  const shown = g.held === null && lastView !== null && lastView.own_signin !== null && typeof lastView.own_signin === "object"
+    && lastView.own_signin.state === "running" && Number.isInteger(lastView.own_signin.attempt) ? lastView.own_signin.attempt : null;
+  const attempt = g.held !== null ? g.held.attempt : shown;
+  const body = attempt === null ? { consent: true } : { consent: true, attempt };
   const text = await guestAccountPost("Could not start the sign-in: ", () => fetch("/api/guest-account", {
     method: "POST", headers: stallHeaders(), body: JSON.stringify(body),
   }));

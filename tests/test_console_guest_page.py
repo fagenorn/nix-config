@@ -1280,6 +1280,19 @@ class OwnAccountPageTest(unittest.TestCase):
                                             ("/api/guest-account", {"consent": True, "attempt": 7})])
         self.assertEqual(own_of(snap, "signin-link")[0]["href"], MANUAL)
 
+    def test_a_sign_in_pressed_after_a_reload_names_the_attempt_the_page_shows_running(self) -> None:
+        # The page was reloaded while a sign-in ran (nothing held): the press must join that attempt, so a run that
+        # ended in another tab is refused by the console instead of making another account.
+        (snap,) = harness([
+            START, {"frame": own_run("running", 7)}, {"click": "pool-add"}, TICK,
+            attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"}, SNAP], GUEST)
+        self.assertEqual(own_writes(snap), [("/api/guest-account", {"consent": True, "attempt": 7})])
+        self.assertEqual(own_of(snap, "signin-link")[0]["href"], MANUAL)
+        (ended,) = harness([
+            START, {"frame": own_run("signed_in", 7)}, {"click": "pool-add"}, TICK,
+            attempt_reply(8, MANUAL, "manual"), {"click": "guest-signin"}, SNAP], GUEST)
+        self.assertEqual(own_writes(ended), [("/api/guest-account", {"consent": True})])
+
     def test_the_run_ending_drops_the_link(self) -> None:
         (snap,) = harness([
             *OPEN_OWN, TICK, attempt_reply(7, MANUAL, "manual"), {"click": "guest-signin"},
