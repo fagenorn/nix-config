@@ -1060,12 +1060,32 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)
 
-    def test_the_contract_requires_owner_only_on_a_permission_escalation(self):
+    def test_the_contract_requires_owner_only_on_a_go_ahead_and_leaves_a_design_choice_to_the_starter(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
-        self.assertIn("`owner_only`: required `true` on a question that escalates a permission, "
-                      "overlaps another sprint's claim or asks for a release, paid or production "
-                      "decision, otherwise optional", text)
-        self.assertIn("a colleague who started the sprint cannot answer it", text)
+        (line,) = [part for part in text.split("- `") if part.startswith("owner_only`")]
+        for action in ("run a release", "run a production step", "spend money",
+                       "escalate a permission", "proceed over another sprint's claim"):
+            with self.subTest(action):
+                self.assertIn(action, line)
+        self.assertIn("required `true` on a question whose answer is itself the go-ahead for an "
+                      "action", line)
+        self.assertIn("A question that only chooses what to build is the starter's to answer, "
+                      "even when the thing built is for production", line)
+        self.assertIn("a colleague who started the sprint cannot answer it", line)
+        self.assertNotIn("asks for a release, paid or production decision", line)
+
+    def test_the_contract_splits_the_starters_design_choices_from_the_owners_go_aheads(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertIn("2. Bring every real choice in one round, a design choice for the sprint's "
+                      "starter to answer and a go-ahead (see `owner_only`) for the owner:", text)
+        self.assertNotIn("Bring every real choice, one only the owner can make", text)
+
+    def test_the_contract_tells_a_manager_to_attach_unpaired_pictures_to_a_design_choice(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertIn("On a design choice for the starter (which layout to build), attach unpaired "
+                      "pictures, with no `pair`: a question carrying both a `before` and an `after` "
+                      "picture is an owner's look and a colleague who started the sprint cannot "
+                      "answer it. Reserve `pair` for the owner's review before a merge.", text)
 
     def test_the_contract_does_not_say_the_owner_stated_every_goal(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
