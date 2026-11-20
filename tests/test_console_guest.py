@@ -958,11 +958,12 @@ class PoolTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / guest.NUMBERS_FILE
             self.assertEqual(guest.read_retired(path), {})
-            guest.write_numbers(path, {"a": 1}, {"s-1": (1, "h@corp.invalid")})
+            guest.write_numbers(path, {"a": 1}, {"s-1": (1, "h@corp.invalid", "b")})
             self.assertEqual(guest.read_numbers(path), {"a": 1})
-            self.assertEqual(guest.read_retired(path), {"s-1": (1, "h@corp.invalid")})
-            for retired in ('{"s": [0, "x"]}', '{"s": [1]}', '{"s": [1, 2]}', '{"s": 1}',
-                            '{"s": [true, "x"]}', '[]'):
+            self.assertEqual(guest.read_retired(path), {"s-1": (1, "h@corp.invalid", "b")})
+            for retired in ('{"s": [0, "x", "b"]}', '{"s": [1]}', '{"s": [1, "x"]}',
+                            '{"s": [1, 2, "b"]}', '{"s": [1, "x", 2]}', '{"s": 1}',
+                            '{"s": [true, "x", "b"]}', '[]'):
                 with self.subTest(retired=retired):
                     path.write_text('{"numbers": {"a": 1}, "retired": %s}' % retired)
                     self.assertEqual((guest.read_numbers(path), guest.read_retired(path)), ({}, {}))
@@ -987,9 +988,10 @@ class PoolTest(unittest.TestCase):
     def test_the_numbers_file_keeps_a_detached_sprint(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / guest.NUMBERS_FILE
-            guest.write_numbers(path, {"a": 1}, {"s-1": (None, "h@corp.invalid"), "s-2": (None, "")})
+            guest.write_numbers(
+                path, {"a": 1}, {"s-1": (None, "h@corp.invalid", "b"), "s-2": (None, "", "c")})
             self.assertEqual(guest.read_retired(path),
-                             {"s-1": (None, "h@corp.invalid"), "s-2": (None, "")})
+                             {"s-1": (None, "h@corp.invalid", "b"), "s-2": (None, "", "c")})
 
 
 class DoorTest(unittest.TestCase):

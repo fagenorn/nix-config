@@ -726,6 +726,48 @@ class ScopedReadTest(GuestCase):
         again.poll_sessions()
         self.assertEqual(self.labels(again), (["Account 1", "Account 2"], {"s-p01": None}))
 
+    def removed_manager_then_takeover(self, siblings):
+        """Sprint s-p01's manager is on b-zq2, which is removed; a takeover then starts it on a-zq1."""
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", "h-zq@corp-zq.invalid"),
+            signed_in_row("b-zq2", "w-zq@corp-zq.invalid"),
+            signed_in_row("c-zq3", "w-zq@corp-zq.invalid")])
+        a, b, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2", "c-zq3"))
+        for path in (a, b, c):
+            path.mkdir(parents=True)
+        dirs = [a, b, c] if siblings else [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        svc._fold(svc.log.append([
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "a-zq1", "session_name": "m2-p01",
+              "takeover": True})]))
+        svc.poll_sessions()
+        return svc, [a, c] if siblings else [a]
+
+    def test_a_removed_only_profiles_sprint_is_labelled_by_the_profile_a_takeover_moves_it_to(self):
+        svc, dirs = self.removed_manager_then_takeover(siblings=False)
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        svc.close()
+        again = self.start(profile_dirs=dirs)
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1"], {"s-p01": "Account 1"}))
+
+    def test_a_removed_profiles_sprint_with_a_sibling_is_labelled_by_the_profile_a_takeover_moves_it_to(self):
+        svc, dirs = self.removed_manager_then_takeover(siblings=True)
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": "Account 1"}))
+        svc.close()
+        again = self.start(profile_dirs=dirs)
+        again.poll_sessions()
+        self.assertEqual(self.labels(again),
+                         (["Account 1", "Account 2"], {"s-p01": "Account 1"}))
+
     def test_a_removal_whose_listing_fails_is_not_recorded_and_leaves_the_numbering(self):
         self.seed()
         a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))

@@ -98,10 +98,12 @@ holders, then to the one whose counted profile held it, then by the order above;
 another number they held or take a free one. The numbering lives in `NUMBERS_FILE`, beside the event
 log (`read_numbers`, `read_retired`, `write_numbers`; an unreadable file numbers afresh). The file
 holds the numbers and, for each running sprint whose profile was removed, the number and address
-its sprint keeps while another profile still holds that address (`retired`, by sprint id, so a
-restart keeps the label and a profile name given to another account later never moves it); once no
-profile holds the address, or none did, the entry stays with a None number, so the sprint is
-detached from the name for good and has no label.
+its sprint keeps while another profile still holds that address, with the removed profile's name
+(`retired`, by sprint id, so a restart keeps the label and a profile name given to another account
+later never moves it); once no profile holds the address, or none did, the entry stays with a None
+number, so the sprint is detached from the name for good and has no label. The entry ends when the
+sprint's manager runs on another profile than the one named in it, and the sprint is then labelled
+by that profile's account.
 `sprint_labels` gives the label of the account each running sprint's manager is on, a `retired` one
 first (a detached one has none), and `scrub` adds it as `account_label` to
 every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
@@ -678,7 +680,7 @@ def sprint_labels(sprints: Mapping[str, SprintState], labels: Mapping[str, str],
     return found
 
 
-def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int | None, str]]]:
+def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int | None, str, str]]]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"),
                               object_pairs_hook=reject_duplicate_keys,
@@ -693,23 +695,24 @@ def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int | N
     retired = document.get("retired") if isinstance(document, dict) else None
     if (not isinstance(numbers, dict) or not isinstance(retired, dict)
             or not all(isinstance(key, str) and number(value) for key, value in numbers.items())
-            or not all(isinstance(key, str) and isinstance(value, list) and len(value) == 2
+            or not all(isinstance(key, str) and isinstance(value, list) and len(value) == 3
                        and (value[0] is None or number(value[0])) and isinstance(value[1], str)
+                       and isinstance(value[2], str)
                        for key, value in retired.items())):
         return {}, {}
-    return dict(numbers), {key: (value[0], value[1]) for key, value in retired.items()}
+    return dict(numbers), {key: (value[0], value[1], value[2]) for key, value in retired.items()}
 
 
 def read_numbers(path: Path) -> dict[str, int]:
     return _read_numbering(path)[0]
 
 
-def read_retired(path: Path) -> dict[str, tuple[int | None, str]]:
+def read_retired(path: Path) -> dict[str, tuple[int | None, str, str]]:
     return _read_numbering(path)[1]
 
 
 def write_numbers(path: Path, numbers: Mapping[str, int],
-                  retired: Mapping[str, tuple[int | None, str]] = MappingProxyType({})) -> None:
+                  retired: Mapping[str, tuple[int | None, str, str]] = MappingProxyType({})) -> None:
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
