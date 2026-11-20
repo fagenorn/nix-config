@@ -62,6 +62,20 @@ any other row; the spend fold reads the asked row's `session_id` and `profile`
 (`spend.question_sessions`), and `project_question.asked_questions` folds both into the desk
 view's questions (#1177); the schema version is unchanged.
 
+One kind is kept whole (#1271): `PROJECT_QUESTION_KEYED` (`project_question.keyed`, payload `request_key`
+and `question_id`, the project in its project column) is the receipt of a question asked under a request
+key, appended in the same transaction as its asked row (ADR-console-089 D9). It is not in `KEPT_KINDS`, but the
+retention pass never removes it, whatever its age, so a key the console has asked still finds its question
+after the asked row is gone and a retry of that key starts no second session. The question's own rows go
+at 90 days as before; the receipt is two short strings.
+
+Two kinds are kept in part for the ownership of a path (#1271): `PROJECT_REGISTERED` (`project.registered`,
+payload `root`) and `PROJECT_UNREGISTERED` (`project.unregistered`) are not in `KEPT_KINDS`, but the retention pass
+never removes a registered row, and removes an unregistered row only when no earlier registered row of its
+project remains. The activation rows above are kept past the window and name a root, not a project, so the
+registrations that say who held the root when one was written must outlive it too (ADR-console-089 D3);
+one pair of short rows per registration is all that is kept.
+
 Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
 nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
@@ -204,6 +218,7 @@ NOTICE_POSTED = "notice.posted"
 NOTICE_WITHDRAWN = "notice.withdrawn"
 NOTICE_NUDGED = "notice.nudged"
 PROJECT_QUESTION_ASKED = "project_question.asked"
+PROJECT_QUESTION_KEYED = "project_question.keyed"
 PROJECT_QUESTION_ANSWERED = "project_question.answered"
 SPRINT_CLOSED = "sprint.closed"
 SPRINT_STOP_REQUESTED = "sprint.stop_requested"
@@ -227,6 +242,7 @@ REGISTRATION_CANCELLED = "registration.cancelled"
 INBOX_SEEN = "inbox.seen"
 INBOX_CHANGED = "inbox.changed"
 INBOX_GONE = "inbox.gone"
+PROJECT_REGISTERED = "project.registered"
 PROJECT_UNREGISTERED = "project.unregistered"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
@@ -440,7 +456,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force, and the newest activation started and finished rows, and the access list in force, and every question key receipt, and the registry rows that say who owned a root; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -512,14 +528,20 @@ class EventLog:
                     "AND NOT EXISTS (SELECT 1 FROM events AS gone WHERE gone.kind = ? "
                     "AND gone.seq > events.seq AND json_extract(gone.payload, '$.outcome') IN (?, ?) "
                     "AND json_extract(gone.payload, '$.profile') "
-                    "IS json_extract(events.payload, '$.profile')))",
+                    "IS json_extract(events.payload, '$.profile'))) "
+                    "AND kind NOT IN (?, ?) "
+                    "AND NOT (kind = ? AND EXISTS (SELECT 1 FROM events AS began "
+                    "WHERE began.kind = ? AND began.project IS events.project "
+                    "AND began.seq < events.seq))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
                      INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff, ACTIVATION_STARTED, ACTIVATION_FINISHED, SHARING_TAILNET,
                      SHARING_COLLEAGUE, SHARING_COLLEAGUE, SHARING_REMOVED,
-                     ACCOUNT_ADDED, ACCOUNT_ADDED, ACCOUNT_REMOVAL, *ACCOUNT_GONE_OUTCOMES)).rowcount
+                     ACCOUNT_ADDED, ACCOUNT_ADDED, ACCOUNT_REMOVAL, *ACCOUNT_GONE_OUTCOMES,
+                     PROJECT_QUESTION_KEYED, PROJECT_REGISTERED, PROJECT_UNREGISTERED,
+                     PROJECT_REGISTERED)).rowcount
 
             return self._transaction(remove)
 

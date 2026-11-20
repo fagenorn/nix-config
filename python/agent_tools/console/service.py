@@ -41,6 +41,7 @@ stream `Content-Length`):
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
+    POST /api/adoption-merge 204, a JSON body, the page merges an adoption's pull request at its recorded head (below)
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
@@ -233,7 +234,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm`, `POST /api/trust-check`,
+`POST /api/adoption-register`, `POST /api/adoption-merge`, `POST /api/plan-defer`,
+`POST /api/register-confirm`, `POST /api/trust-check`,
 `POST /api/owner-notice`, `POST /api/owner-notice-withdraw`, `POST /api/project-question`, `POST /api/activate`,
 `POST /api/share-tailnet`, `POST /api/share-colleague`, `POST /api/share-remove`, `POST /api/guest-account`, `POST /api/guest-signin-code` and `POST /api/guest-signin-cancel` (the last three are the guest's, `GUEST_ACCOUNT_WRITES`: on the owner's port they pass this guard and are then 404 `not found`, the body unread); ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
@@ -580,8 +582,9 @@ the open without pushing again. The console stops between steps and inside every
 and forge call when it closes, appending nothing for the stopped step, so the next approval resumes;
 the one exception is the `applied` row, which is appended even when the close has begun, because
 apply has already made its branch and a restarted console must not offer a fresh apply.
-The console never merges: it pushes the one branch and opens its pull request, and the forge's
-required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
+The console merges only on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088): it
+pushes the one branch and opens its pull request, Apply is refused while that pull request is open,
+ready or failing, and the forge's required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
 
 A `trust.granted` row that leaves a profile `failed` is folded (`folder_trust.failures`, at start,
@@ -620,6 +623,46 @@ refused registration, `approve.NOT_REFUSED`. Otherwise the answer is an empty `2
 is dispatched on a tracked thread (`APPROVAL_THREAD`) that `close` joins, and the run appends its
 outcome whatever it is (an identical refusal included, so the card is fresh). Any other exception
 is `console: adoption_register_failed <Type>` and 500 `registering failed`.
+
+`POST /api/adoption-merge` (#1338, ADR-console-088) is the owner's Merge on an adoption's card. It
+is an owner-only page write (`OWNER_ONLY`; in neither `GUEST_WRITES` nor `MANAGER_WRITES`), so
+`write_guard.refusal` runs first and a request without the page's `Origin` and exact token merges
+and appends nothing. It runs the same checks with `MAX_ADOPTION_MERGE_BYTES` (4096) and
+`approve.parse_merge_request` (`{"plan_id", "number", "commit"}`): 400 `bad adoption merge`. The
+service refuses, each as 409 with the words, one stderr line `console: adoption_merge_refused
+<words>`, no forge merge call and nothing appended, in this order: without a forge,
+`approve.MERGE_UNAVAILABLE`; once the stop is set, `register.STOPPING`; while the plan is in
+`_merging`, `approve.MERGING`; when the folded adoption is `opened` and its pull request number or
+commit differs from the body's (a card of a replaced pull request), `approve.STALE_CARD`; then
+`approve.merge_refusal` of the folded adoption (no pull request the console opened, merged, closed,
+not made by the console, unread head, moved head, failing, not ready); the refusal for a plan with
+no pull request (a re-applied step) is computed before any slug is read. Then, still outside the
+ingest lock, one `forge.pull_request_reading` is taken (the forge's merge call pins only the head, so
+a pull request retargeted since the page polled would land the same commit elsewhere): it is
+recorded as a poll's reading is, and `approve.merge_refusal` of the refolded adoption decides again
+(a reading rejected as stale is never used: a reading that differs from the folded state refuses
+`approve.STALE_CARD`, one that names another forge id than the opened step recorded refuses
+`approve.FOUND`; a failed read refuses `approve.merge_failure`, and a recorded `merged` also dispatches
+registration); the target can still move between that read and the
+merge call, which the forge cannot pin. Otherwise
+`forge.merge_pull_request(slug, number, commit, cancel=<stop>)` runs outside the ingest lock with
+the folded commit, never a head the forge showed; `_merging` holds the plan id from the check until
+the outcome is recorded and registration dispatched, and `close` waits for it to be empty before it
+closes the log. When the call returned, `_record_reading` appends the `merged` row at that commit,
+`register_merged` is dispatched on the approval worker unless the stop is set (a dispatch that raises is one
+line `console: adoption_register_dispatch_failed <Type>` and does not change the answer: the poll's
+`register_merged` registers the recorded merge), the answer is an empty
+`204` and one line `console: adoption_merge_ended <plan_id> merged` ends it. A call that failed
+(any exception but `approve.Cancelled`, which refuses `register.STOPPING`) is first one line
+`console: adoption_merge_error <json>` (the plan, the number, the exception and, for a `ForgeError`,
+its code, detail and transience), then one `forge.pull_request_reading`, recorded as read, never as
+requested, and only while no other reading was recorded since it began (a `merged` one always): `merged` at the folded commit and the adoption's base is success as above, `merged` into another branch is 409
+`approve.MERGED_ELSEWHERE_BASE`, a reading that names another forge id is `approve.merge_failure(error)`, `merged` at another head is 409
+`approve.MERGED_ELSEWHERE` (`merged` with no readable head is `approve.merge_failure(error)`) with
+`register_merged` still dispatched, any other reading refuses with `approve.merge_refusal` of the
+refolded adoption, else `approve.merge_failure(error)`; a failed re-read is one line `console:
+adoption_poll_failed ...` and refuses `approve.merge_failure(error)`. Any other exception is
+`console: adoption_merge_failed <Type>` and 500 `merging failed`.
 
 `POST /api/plan-defer` (#1073, ADR-console-030) is the `Not now` of the apply card. It runs the
 same checks with `MAX_PLAN_DEFER_BYTES` (4096) and `approve.parse_approve_request`: 400
@@ -1126,18 +1169,23 @@ is in `KEPT_KINDS`, but retention leaves the newest row of each kind whatever it
 
 Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
-(`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_state(slug, number,
-cancel=...)`, the pull request of each adoption whose step is `opened` and whose state is still
-`open` or `ready` (`approve.waiting`), in the repository its recorded link names
+(`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_reading(slug, number,
+cancel=...)` (the state, the head and the target branch), the pull request of each adoption whose step is `opened` and
+whose state is still `open`, `ready` or `failing` (`approve.waiting`), in the repository its recorded link names
 (`approve.pull_slug`, never the checkout's origin of the day), one after another and never inside the ingest lock; the
 stop flag cancels the call in flight and a read finished after the stop appends nothing. Only a
-state that differs from the folded one is appended, as one `adoption.pull_request` row, and the
-view is published, so a ready pull request is one inbox item (`approve.inbox_entries`, see
-`view.py`) until it is merged, closed or reads open again; a merged or closed one is read no
-more. A failed read is one stderr line `console: adoption_poll_failed <plan_id> <Type>:
-<message>` and the item stays as it was. An exception escaping a round is one stderr line
-`console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console never
-merges: the owner does, on the forge.
+state, head or target that differs from the folded one is appended (`_record_reading`), as one
+`adoption.pull_request` row, and the view is published, so a ready or failing pull request is one
+inbox item (`approve.inbox_entries`, see `view.py`) until it is merged, closed or reads open again;
+a merged or closed one is read no more. Each plan has a mark bumped by every row appended; the poll
+takes it under the lock before its read and its reading is recorded only while the mark is
+unchanged, and nothing is recorded over `merged`, so a reading made before a click merged cannot
+bring the card back. A failed read is one stderr line `console: adoption_poll_failed <plan_id> <Type>:
+<message>` and the item stays as it was; a pull request whose head was read but whose checks were
+not (`checks_error`) records that head and target with one such line, as `open` unless it was
+`failing`, so a moved head never keeps its Merge. An exception escaping a round is one stderr line
+`console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console merges only
+on the owner's Merge (`POST /api/adoption-merge`, ADR-console-088).
 
 The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
 `register_merged()` runs `Adopter.register(root, cancel=..., integration_branch=<the recorded pull
@@ -1586,14 +1634,15 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 
 `POST /api/project-question` (#1176, ADR-console-058) carries one JSON body of `project_id` and
-`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062)
+`question`, and optionally a non-empty string `thread_id` (#1178, ADR-console-062) and an optional
+`request_key` of 32 lowercase hex digits that the console asks once per project (ADR-console-089 D9)
 (`MAX_PROJECT_QUESTION_BYTES`, 16384, the checks of the goal route): a body
-`project_question.parse_request` does not accept is 400 `bad question`; `project_question.Refused` is
+`project_question.parse_keyed_request` does not accept is 400 `bad question`; `project_question.Refused` is
 one stderr line `console: project_question_refused <reason>` and 409 with the reason; any other
 exception is `console: project_question_failed <Type>: <message>` and 500 `question failed`;
 success is an empty `204`, sent once the question is accepted and its job handed to
 `project_question_dispatch` (default: a new daemon thread named `PROJECT_QUESTION_THREAD`), never
-once it is answered. `ask_project_question(project_id, text, thread_id=None)` admits a question under the ingest
+once it is answered. `ask_project_question(project_id, text, thread_id=None, request_key=None)` admits a question under the ingest
 lock, in this order: no `project_asker` is `Refused` "questions are not available on this host
 yet", a set stop flag is `Refused` "the console is stopping", an unregistered project, the
 question's own checks, with a `thread_id` only the follow-up checks of
@@ -1602,12 +1651,15 @@ whose last question is not answered, a thread too long to carry), and no account
 start a session under (`_session_choice`); a refusal appends nothing and counts nothing. An
 accepted question appends one `project_question.asked` row (`question_id`, `question`, `profile`,
 `session_id`, the last also passed as the session's `--session-id`, and for a follow-up the
-`thread_id` it was given) and counts itself open in that same section. A follow-up's session gets
+`thread_id` and `request_key` it was given) and, for a keyed question, one `project_question.keyed` receipt row (`request_key`, `question_id`) in the same append, which retention never removes, so the key finds its question after the asked row is gone; it counts itself open in that same section. A follow-up's session gets
 the turns `follow_up` returned at admission in its prompt and nothing else changes: its routes,
 model, flags, settings and cap are a first question's (ADR-console-062). Its job reads the project's reach (its read-only routes and its GitHub repository,
 `project_question.reach_of`; a contract that cannot be resolved is a
 `failed` answer naming why, never "no routes", and starts no session; one stderr line `console:
-project_question_contract_failed <question_id> <Type>: <message>`), then runs the asker under the
+project_question_contract_failed <question_id> <Type>: <message>`), then gathers the project's own
+records (`question_records.project_records`, ADR-console-089) after the reach and before the
+session, under the ingest lock and only while the project still holds the root the question was asked in; a gathering that raises (a root taken by another project included) is a `failed` answer with one stderr line `console:
+project_question_records_failed <question_id> <Type>: <message>` and starts no session; then runs the asker under the
 chosen profile's client-run count (`_client_run`), so an account removal waits for a running
 question and a question whose profile is being removed or already removed fails without starting a
 session (`claude-account` would otherwise recreate a removed profile directory). A job that finds
@@ -1649,12 +1701,12 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     project_question, account_add, account_remove, activation, checkout_remote, activation_run, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, guest, manager, movement, nudge, peer, permission, pin, plan_questions, probe, question_records, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
     MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, NOTICE_NUDGED, NOTICE_POSTED, NOTICE_WITHDRAWN,
-    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED,
+    LOOK_RECORDED, PROJECT_QUESTION_ANSWERED, PROJECT_QUESTION_ASKED, PROJECT_QUESTION_KEYED,
     QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
@@ -1743,6 +1795,7 @@ REGISTER_PATH = "/api/register-project"
 PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
+ADOPTION_MERGE_PATH = "/api/adoption-merge"
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
@@ -1761,7 +1814,8 @@ PAGE_WRITES: frozenset[str] = frozenset({
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
+    ADOPTION_REGISTER_PATH, ADOPTION_MERGE_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH,
+    TRUST_CHECK_PATH,
     REGISTER_CANCEL_PATH, OWNER_NOTICE_PATH, OWNER_NOTICE_WITHDRAW_PATH, PROJECT_QUESTION_PATH, ACTIVATE_PATH,
     LOOK_RETRY_PATH, SHARE_TAILNET_PATH, SHARE_COLLEAGUE_PATH, SHARE_REMOVE_PATH,
     GUEST_ACCOUNT_PATH, GUEST_SIGNIN_CODE_PATH, GUEST_SIGNIN_CANCEL_PATH})
@@ -1772,6 +1826,7 @@ MAX_REGISTER_BYTES = 4096
 MAX_PLAN_ANSWER_BYTES = 4096
 MAX_PLAN_APPROVE_BYTES = 4096
 MAX_ADOPTION_REGISTER_BYTES = 4096
+MAX_ADOPTION_MERGE_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
 MAX_REGISTER_CONFIRM_BYTES = 4096
 MAX_TRUST_CHECK_BYTES = 4096
@@ -2160,12 +2215,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if body is None:
             return False
         try:
-            project_id, question, thread_id = project_question.parse_request(body)
+            project_id, question, thread_id, request_key = project_question.parse_keyed_request(body)
         except ValueError:
             self._refuse(400, "bad question")
             return False
         try:
-            console.ask_project_question(project_id, question, thread_id)
+            console.ask_project_question(project_id, question, thread_id, request_key)
         except project_question.Refused as error:
             print(f"console: project_question_refused {error}", file=sys.stderr)
             self._refuse(409, str(error))
@@ -2393,6 +2448,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: adoption_register_failed {type(error).__name__}", file=sys.stderr)
             self._refuse(500, "registering failed")
+            return False
+        return True
+
+    def _adoption_merge_request(self, console: "ConsoleService") -> bool:
+        """Carry out the owner's merge of an adoption's pull request; True when the 204 is to be sent."""
+        body = self._json_body(MAX_ADOPTION_MERGE_BYTES)
+        if body is None:
+            return False
+        try:
+            plan_id, number, commit = approve.parse_merge_request(body)
+        except ValueError:
+            self._refuse(400, "bad adoption merge")
+            return False
+        try:
+            console.merge_adoption(plan_id, number, commit)
+        except sprints.Refused as error:
+            print(f"console: adoption_merge_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: adoption_merge_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "merging failed")
             return False
         return True
 
@@ -3221,6 +3298,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._adoption_register_request(console):
                 return
+        elif route == ADOPTION_MERGE_PATH:
+            self.close_connection = True
+            if not self._adoption_merge_request(console):
+                return
         elif route == PLAN_DEFER_PATH:
             self.close_connection = True
             if not self._plan_defer_request(console):
@@ -3870,6 +3951,8 @@ class ConsoleService:
         self._cancelled: dict[str, int] = {}
         self._approving = False
         self._enrolling: set[str] = set()
+        self._merging: set[str] = set()
+        self._pull_marks: dict[str, int] = {}
         self._approval_workers: list[threading.Thread] = []
         self._approval_dispatch = (
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
@@ -3894,6 +3977,7 @@ class ConsoleService:
         self._project_question_dispatch = (
             self._on_project_question_thread if project_question_dispatch is None
             else project_question_dispatch)
+        self._question_keys: dict[tuple[str, str], str] = {}
         self._project_questions_open = 0  # accepted questions whose answered row is not yet written
         self._project_question_workers: list[threading.Thread] = []
         self._probe_thread: threading.Thread | None = None
@@ -4097,6 +4181,7 @@ class ConsoleService:
             self._withdrawn = sprints.withdrawn_ids(events)
             self._owner_notices = sprints.owner_notices(events)
             self._project_questions = project_question.asked_questions(events)
+            self._question_keys = project_question.question_keys(events)
             self._activation_run = activation_run.fold(events)
             self._pending = sprints.pending_stops(events)
             self._access = guest.access_list(events)
@@ -4342,7 +4427,9 @@ class ConsoleService:
                 None if self._approving else self._registering, self._registration,
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
                 approve=action, cancel=cancel),
-            adoption_items=approve.inbox_entries(self._adoptions),
+            adoption_items=approve.inbox_entries(
+                self._adoptions,
+                shown_root=None if self._registration is None else self._registration["root"]),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
             trust_items=folder_trust.items(self._trust_failures),
@@ -4732,14 +4819,17 @@ class ConsoleService:
             self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str,
-                             thread_id: str | None = None) -> str:
+                             thread_id: str | None = None, request_key: str | None = None) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-058).
 
         Admission, the asked row and the open count are one section under the ingest lock; the
         session runs on a job handed to `project_question_dispatch` outside it. A `thread_id`
         makes it a follow-up (#1178, ADR-console-062): it is checked against the project's folded
         questions after the question's own checks and before the profile choice, and its thread's
-        turns go to the job. Refusals are `project_question.Refused` and append and count nothing.
+        turns go to the job. A `request_key` already on a folded question of the project returns
+        that question's id, or a receipt of one, and appends, counts and dispatches nothing (ADR-console-089 D9); the
+        check precedes the follow-up check, so a re-sent follow-up is not refused. Refusals are
+        `project_question.Refused` and append and count nothing.
         """
         with self._ingest:
             if self._project_asker is None:
@@ -4749,6 +4839,12 @@ class ConsoleService:
             if project_id not in self._states:
                 raise project_question.Refused(project_question.UNREGISTERED)
             text = project_question.checked_question(text)
+            if request_key is not None:
+                known = self._question_keys.get((project_id, request_key)) or next(
+                    (item.question_id for item in self._project_questions.get(project_id, ())
+                     if item.request_key == request_key), None)
+                if known is not None:
+                    return known
             thread = () if thread_id is None else project_question.follow_up(
                 self._project_questions.get(project_id, ()), thread_id, text)
             profile = self._session_choice(self._read_profiles())
@@ -4761,7 +4857,13 @@ class ConsoleService:
                        "session_id": session_id}
             if thread_id is not None:
                 payload["thread_id"] = thread_id
-            appended = self.log.append([(PROJECT_QUESTION_ASKED, project_id, payload)])
+            if request_key is not None:
+                payload["request_key"] = request_key
+            rows = [(PROJECT_QUESTION_ASKED, project_id, payload)]
+            if request_key is not None:
+                rows.append((PROJECT_QUESTION_KEYED, project_id,
+                             {"request_key": request_key, "question_id": question_id}))
+            appended = self.log.append(rows)
             self._apply(appended)
             self._project_questions_open += 1
         try:
@@ -4795,25 +4897,36 @@ class ConsoleService:
                             detail=f"{type(error).__name__}: {error}"))
                 else:
                     try:
-                        with self._client_run(profile):
-                            if profile not in self._read_profiles():
-                                outcome = project_question.Outcome(
-                                    project_question.FAILED,
-                                    reason=project_question.PROFILE_GONE.format(profile=profile))
-                            else:
-                                ask = project_question.new_ask(
-                                    question_id, project_id, root, text, profile, reach.routes,
-                                    Path(self._store).with_name(project_question.SETTINGS_DIR),
-                                    session_id=session_id, thread=thread, repo=reach.repo,
-                                    unset=reach.unset)
-                                try:
-                                    outcome = self._project_asker(ask, self._stop)
-                                except Exception as error:
+                        records = self._question_records(project_id, root)
+                    except Exception as error:
+                        print(f"console: project_question_records_failed {question_id} "
+                              f"{type(error).__name__}: {error}", file=sys.stderr)
+                        outcome = project_question.Outcome(
+                            project_question.FAILED,
+                            reason=project_question.RECORDS_FAILED.format(
+                                detail=f"{type(error).__name__}: {error}"))
+                    else:
+                        try:
+                            with self._client_run(profile):
+                                if profile not in self._read_profiles():
                                     outcome = project_question.Outcome(
                                         project_question.FAILED,
-                                        reason=f"{type(error).__name__}: {error}")
-                    except _ProfileRemoving as error:
-                        outcome = project_question.Outcome(project_question.FAILED, reason=str(error))
+                                        reason=project_question.PROFILE_GONE.format(profile=profile))
+                                else:
+                                    ask = project_question.new_ask(
+                                        question_id, project_id, root, text, profile, reach.routes,
+                                        Path(self._store).with_name(project_question.SETTINGS_DIR),
+                                        session_id=session_id, thread=thread, repo=reach.repo,
+                                        unset=reach.unset, records=records)
+                                    try:
+                                        outcome = self._project_asker(ask, self._stop)
+                                    except Exception as error:
+                                        outcome = project_question.Outcome(
+                                            project_question.FAILED,
+                                            reason=f"{type(error).__name__}: {error}")
+                        except _ProfileRemoving as error:
+                            outcome = project_question.Outcome(
+                                project_question.FAILED, reason=str(error))
         except Exception as error:
             # Never raised on: a dispatch that runs the job inline would answer the question twice.
             traceback.print_exc()
@@ -4824,6 +4937,30 @@ class ConsoleService:
                 outcome = project_question.Outcome(
                     project_question.FAILED, reason=project_question.STOPPED_TEXT)
             self._record_project_answer(question_id, project_id, outcome)
+
+    def _question_records(self, project_id: str, root: str) -> str:
+        """The encoded document of the console's own records of one project (ADR-console-089).
+
+        The events and the folded state are read in one section under the ingest lock, so a delivery
+        that finishes while the records are gathered shows either before or after, never half of each.
+        That section also rechecks that `project_id` still holds `root`: a checkout path taken by another
+        project since the question was admitted would put the next owner's activations after the cutoff,
+        so the gathering raises and the question is a failed answer.
+        """
+        with self._ingest:
+            held_state = self._states.get(project_id)
+            if held_state is None or held_state.root != root:
+                raise RuntimeError("the project no longer holds the checkout the question was asked in")
+            events = self.log.events()
+            spend_view, sprint_states, inbox = self._spend_view, self._sprints, self._inbox
+            live_runs = {
+                key for key in self._deliveries
+                if (held := self._sessions.get(key[0])) is not None and held.state != sessions.ENDED
+                and held.repo is not None and project_for(held.repo, self._states) == project_id}
+        return question_records.encode(question_records.project_records(
+            project_id, root=root, events=events, spend=spend_view, live_runs=live_runs,
+            sprint_states=sprint_states, inbox=inbox,
+            written_at=self._now().isoformat(timespec="seconds")))
 
     def _record_project_answer(self, question_id: str, project_id: str,
                                outcome: "project_question.Outcome") -> None:
@@ -5699,7 +5836,7 @@ class ConsoleService:
                 raise sprints.Refused(approve.NOT_READY)
             found = self._adoptions.get(plan_id)
             if found is not None and found["step"] == "opened":
-                if found["pull_state"] in ("open", "ready"):
+                if found["pull_state"] in ("open", "ready", "failing"):
                     raise sprints.Refused(approve.OPENED)
                 if found["pull_state"] == "merged":
                     raise sprints.Refused(approve.MERGED)
@@ -5940,7 +6077,15 @@ class ConsoleService:
 
     def _pull_request(self, slug: str, branch: str, base: str, name: str, shown: Mapping,
                       stop: threading.Event, where: dict) -> tuple[dict | None, Exception | None]:
-        """The branch's pull request, found or opened; (None, the failure) when neither worked."""
+        """The branch's pull request, found or opened; (None, the failure) when neither worked.
+
+        One found before the console tried to open any is not the console's, whatever its words say
+        (a person can open one with the same title and plan sentence); one found after its own open
+        failed is the console's only when it carries the console's title, its plan sentence and the
+        marker of this create attempt (a token made here, fresh for the attempt, and never stored: a
+        person's pull request opened at the same time cannot carry it, and a restart before the
+        console recorded the pull request leaves it not established, so Merge is not offered).
+        """
         try:
             found = self._forge.find_pull_request(slug, branch, base, cancel=stop)
         except approve.Cancelled:
@@ -5948,11 +6093,14 @@ class ConsoleService:
         except Exception as error:
             self._log_forge_error("find", error, where)
             return None, error
+        plan_id = shown["plan_id"]
         if found is not None:
-            return found, None
+            return self._recorded(found, False), None
+        attempt = uuid.uuid4().hex
         try:
-            return self._forge.open_pull_request(
-                slug, branch, base, approve.title(name), approve.body(shown), cancel=stop), None
+            return self._recorded(self._forge.open_pull_request(
+                slug, branch, base, approve.title(name), approve.body(shown, attempt),
+                cancel=stop), True), None
         except approve.Cancelled:
             raise
         except Exception as error:
@@ -5965,7 +6113,17 @@ class ConsoleService:
         except Exception as error:
             self._log_forge_error("find", error, where)
             found = None
-        return (found, None) if found is not None else (None, failure)
+        if found is None:
+            return None, failure
+        return self._recorded(found, approve.console_made(found, name, plan_id, attempt)), None
+
+    @staticmethod
+    def _recorded(pull: Mapping, created: bool) -> dict:
+        """The pull request as the opened step stores it: its link, whether the console made it and the forge's id."""
+        recorded = {"number": pull["number"], "url": pull["url"], "created": created}
+        if "id" in pull:
+            recorded["id"] = pull["id"]
+        return recorded
 
     def remove_account(self, profile: str, typed: str) -> None:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.
@@ -8181,6 +8339,7 @@ class ConsoleService:
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._owner_notices = sprints.owner_notices(appended, self._owner_notices)
         self._project_questions = project_question.asked_questions(appended, self._project_questions)
+        self._question_keys = project_question.question_keys(appended, self._question_keys)
         self._activation_run = activation_run.fold(appended, self._activation_run)
         self._pending = sprints.pending_stops(appended, self._pending)
         for event in appended:
@@ -8219,6 +8378,7 @@ class ConsoleService:
                 self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._project_questions = project_question.asked_questions(events)
+                self._question_keys = project_question.question_keys(events)
                 self._derive_digest(events)
                 self._publish()
             self._sweep_pictures(events)
@@ -8538,28 +8698,201 @@ class ConsoleService:
             if slug is None:
                 continue
             number = entry["pull_request"]["number"]
+            plan_id = entry["plan_id"]
+            with self._ingest:
+                mark = self._pull_marks.get(plan_id, 0)
             try:
-                state = self._forge.pull_request_state(slug, number, cancel=self._stop)
+                reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
             except approve.Cancelled:
                 return
             except Exception as error:
-                print(f"console: adoption_poll_failed {entry['plan_id']} "
+                print(f"console: adoption_poll_failed {plan_id} "
                       f"{type(error).__name__}: {error}", file=sys.stderr)
                 continue
             if self._stop.is_set():
                 return
-            with self._ingest:
-                found = self._adoptions.get(entry["plan_id"])
-                if (found is None or found["step"] != "opened"
-                        or found["pull_request"]["number"] != number
-                        or found["pull_state"] == state):
-                    continue
-                appended = self.log.append(
-                    [approve.pull_row(entry["plan_id"], number, found["pull_request"]["url"],
-                                      state)])
-                self._fold(appended)
-                self._publish()
+            self._record_reading(plan_id, number, reading, mark)
         self.register_merged()
+
+    def _record_reading(self, plan_id: str, number: int, reading: Mapping,
+                        mark: int | None = None) -> bool:
+        """Append the forge's reading of a pull request when it differs; True when it appended.
+
+        A reading is refused for a plan whose pull request is not that number, is already
+        merged, already reads the same, or (when `mark` is given) has recorded another reading
+        since the mark was taken: a poll that read before a click merged must not undo it, and a
+        read that finished after a newer one was recorded must not replace it (a `merged` reading
+        is final and is never refused for that). A reading whose checks could not be read keeps a
+        `failing` pull request failing, and still records the head and target it saw.
+        """
+        unread = reading.get("checks_error")
+        if unread is not None:
+            print(f"console: adoption_poll_failed {plan_id} "
+                  f"{type(unread).__name__}: {unread}", file=sys.stderr)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is None:
+                return False
+            if (found["step"] == "opened" and found["pull_request"].get("id") is not None
+                    and "id" in reading and reading["id"] != found["pull_request"]["id"]):
+                return False
+            state = reading["state"]
+            if unread is not None and found["pull_state"] == "failing":
+                state = "failing"
+            base = reading.get("base")
+            if (found["step"] != "opened"
+                    or found["pull_request"]["number"] != number
+                    or found["pull_state"] == "merged"
+                    or (found["pull_state"], found["pull_head"], found["pull_base"])
+                    == (state, reading["head"], base)
+                    or (mark is not None and state != "merged"
+                        and self._pull_marks.get(plan_id, 0) != mark)):
+                return False
+            appended = self.log.append(
+                [approve.pull_row(plan_id, number, found["pull_request"]["url"],
+                                  state, reading["head"], base)])
+            self._pull_marks[plan_id] = self._pull_marks.get(plan_id, 0) + 1
+            self._fold(appended)
+            self._publish()
+            return True
+
+    def merge_adoption(self, plan_id: str, number: int, commit: str) -> None:
+        """Merge the adoption's pull request at its recorded commit; refusals are `sprints.Refused`."""
+        if self._forge is None:
+            raise sprints.Refused(approve.MERGE_UNAVAILABLE)
+        with self._ingest:
+            if self._stop.is_set():
+                raise sprints.Refused(register.STOPPING)
+            if plan_id in self._merging:
+                raise sprints.Refused(approve.MERGING)
+            found = self._adoptions.get(plan_id)
+            if (found is not None and found["step"] == "opened"
+                    and (found["pull_request"]["number"] != number or found["commit"] != commit)):
+                raise sprints.Refused(approve.STALE_CARD)
+            refusal = approve.merge_refusal(found)
+            if refusal is not None:
+                raise sprints.Refused(refusal)
+            slug = approve.pull_slug(found["pull_request"])
+            if slug is None:
+                raise sprints.Refused(approve.NO_PULL)
+            self._merging.add(plan_id)
+        try:
+            self._merge_and_record(plan_id, number, commit, slug)
+        finally:
+            with self._ingest:
+                self._merging.discard(plan_id)
+                self._runs_done.notify_all()
+
+    def _read_before_merging(self, plan_id: str, number: int, commit: str, slug: str) -> None:
+        """Refuse unless the forge shows, now, a ready pull request at `commit` and the recorded base.
+
+        The forge's merge call pins only the head, so a pull request retargeted since the page
+        polled would land the same commit on the new branch; this read is the check that the
+        target is still the recorded one. What it read is recorded like a poll's reading.
+        """
+        with self._ingest:
+            mark = self._pull_marks.get(plan_id, 0)
+        try:
+            reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as error:
+            print(f"console: adoption_poll_failed {plan_id} {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            raise sprints.Refused(approve.merge_failure(error)) from None
+        self._record_reading(plan_id, number, reading, mark)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is None or found["step"] != "opened":
+                refusal = approve.NO_PULL
+            elif self._other_pull_request(found, reading):
+                refusal = approve.FOUND
+            else:
+                refusal = approve.merge_refusal(found)
+                if refusal is None and (found["pull_state"], found["pull_head"],
+                                        found["pull_base"]) != (
+                        reading["state"], reading["head"], reading["base"]):
+                    refusal = approve.STALE_CARD
+            merged = found is not None and found["pull_state"] == "merged"
+        if merged:
+            self._dispatch_registration()
+        if refusal is not None:
+            raise sprints.Refused(refusal)
+
+    @staticmethod
+    def _other_pull_request(found: Mapping, reading: Mapping) -> bool:
+        """Whether the forge's reading names another pull request than the one recorded (a reused name and number)."""
+        recorded = found["pull_request"].get("id")
+        return recorded is not None and reading["id"] != recorded
+
+    def _merge_and_record(self, plan_id: str, number: int, commit: str, slug: str) -> None:
+        self._read_before_merging(plan_id, number, commit, slug)
+        try:
+            self._forge.merge_pull_request(slug, number, commit, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as error:
+            self._confirm_merged(plan_id, number, commit, slug, error)
+        else:
+            self._record_reading(plan_id, number, {"state": "merged", "head": commit})
+        self._dispatch_registration()
+        print(f"console: adoption_merge_ended {plan_id} merged", file=sys.stderr)
+
+    def _confirm_merged(self, plan_id: str, number: int, commit: str, slug: str,
+                        error: Exception) -> None:
+        """After a failed merge call, return only when the forge shows it merged at `commit`.
+
+        Anything else raises `sprints.Refused` with what the forge showed; the head recorded is
+        the one read, never the one requested.
+        """
+        record = {"plan_id": plan_id, "number": number, "exception": type(error).__name__}
+        if isinstance(error, ForgeError):
+            record.update({"code": error.code, "detail": error.detail,
+                           "transient": error.transient})
+        else:
+            record["detail"] = str(error)
+        print(f"console: adoption_merge_error {json.dumps(record, sort_keys=True)}",
+              file=sys.stderr)
+        if not isinstance(error, ForgeError):
+            traceback.print_exception(error, file=sys.stderr)
+        with self._ingest:
+            mark = self._pull_marks.get(plan_id, 0)
+        try:
+            reading = self._forge.pull_request_reading(slug, number, cancel=self._stop)
+        except approve.Cancelled:
+            raise sprints.Refused(register.STOPPING) from None
+        except Exception as again:
+            print(f"console: adoption_poll_failed {plan_id} {type(again).__name__}: {again}",
+                  file=sys.stderr)
+            raise sprints.Refused(approve.merge_failure(error)) from None
+        self._record_reading(plan_id, number, reading, mark)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is not None and found["step"] == "opened" and self._other_pull_request(
+                    found, reading):
+                raise sprints.Refused(approve.merge_failure(error))
+            targeted = None if found is None else found["base"]
+        if reading["state"] == "merged":
+            if reading["head"] == commit and reading["base"] == targeted:
+                return
+            self._dispatch_registration()
+            if reading["head"] is None or reading["base"] is None:
+                raise sprints.Refused(approve.merge_failure(error))
+            raise sprints.Refused(approve.MERGED_ELSEWHERE if reading["head"] != commit
+                                  else approve.MERGED_ELSEWHERE_BASE)
+        with self._ingest:
+            refusal = approve.merge_refusal(self._adoptions.get(plan_id))
+        raise sprints.Refused(refusal if refusal is not None else approve.merge_failure(error))
+
+    def _dispatch_registration(self) -> None:
+        """Register what the forge merged, on the approval worker, unless the console is stopping."""
+        if self._stop.is_set():
+            return
+        try:
+            self._approval_dispatch(self.register_merged)
+        except Exception as error:
+            print(f"console: adoption_register_dispatch_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
 
     def register_merged(self) -> None:
         """One round of merged registrations; see the module docstring."""
@@ -8939,7 +9272,7 @@ class ConsoleService:
         for worker in workers:
             worker.join()
         with self._ingest:
-            while self._registering is not None or self._enrolling:
+            while self._registering is not None or self._enrolling or self._merging:
                 self._runs_done.wait(DRAIN_POLL_SECONDS)
             workers = list(self._approval_workers)
         for worker in workers:

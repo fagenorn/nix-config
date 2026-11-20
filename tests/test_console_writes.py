@@ -139,7 +139,7 @@ class WriteRouteTest(Case):
                           "/api/signin-link", "/api/account-add",
                           "/api/account-remove", "/api/register-project",
                           "/api/plan-answer", "/api/plan-approve",
-                          "/api/adoption-register", "/api/plan-defer",
+                          "/api/adoption-register", "/api/adoption-merge", "/api/plan-defer",
                           "/api/register-confirm", "/api/trust-check",
                           "/api/register-cancel", "/api/owner-notice",
                           "/api/owner-notice-withdraw", "/api/project-question",

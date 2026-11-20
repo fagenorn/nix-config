@@ -1398,16 +1398,71 @@ function isProgress(item) {
 function isAdoption(item) {
   return item.reason === "adoption";
 }
+const adoptionMerges = new Map();
+async function mergeAdoption(item) {
+  const key = item.key + "\n" + item.number + "\n" + item.commit;
+  const current = adoptionMerges.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", plan: item.key, number: item.number, commit: item.commit, name: item.project_id || item.name };
+  adoptionMerges.set(key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/adoption-merge", {
+      method: "POST", headers: ownerHeaders(),
+      body: JSON.stringify({ plan_id: item.plan_id, number: item.number, commit: item.commit }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "the console did not answer";
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (adoptionMerges.get(key) !== state) return;
+  if (reason === null) adoptionMerges.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
 function adoptionCard(item) {
   const card = el("article", "card adoption");
   card.appendChild(pathWords(el("p", "q"), item.headline));
   card.appendChild(phrase("p", "meta", pathWords(el("span", "proj"), item.project_id || item.name), " \u00b7 waiting ", timeEl("since", item.waiting_since, "")));
+  if (typeof item.why === "string") card.appendChild(el("span", "reason", item.why));
+  if (item.merge === true) {
+    const state = adoptionMerges.get(item.key + "\n" + item.number + "\n" + item.commit);
+    const sending = state !== undefined && state.phase === "sending";
+    const merge = actionButton("adoption-merge btn-primary", "Merge", () => mergeAdoption(item));
+    if (sending) merge.setAttribute("disabled", "");
+    markBusy(merge, sending);
+    const act = el("div", "act");
+    act.appendChild(merge);
+    if (state !== undefined && state.phase === "failed") {
+      act.appendChild(el("span", "fail", "Could not merge: " + state.reason));
+    }
+    card.appendChild(act);
+  }
   if (isHttps(item.url)) {
     const link = el("a", "pr-link", "Open the pull request");
     link.href = item.url;
     link.rel = "noreferrer";
     card.appendChild(link);
   }
+  return card;
+}
+function adoptionNotice(key, state) {
+  const card = el("article", "card adoption-failed");
+  card.appendChild(pathWords(el("p", "q"), "Could not merge the adoption of " + state.name));
+  card.appendChild(el("span", "reason", state.reason));
+  const act = el("div", "act");
+  act.appendChild(actionButton("adoption-failed-dismiss btn-quiet", "Dismiss", () => {
+    adoptionMerges.delete(key);
+    redraw();
+  }));
+  card.appendChild(act);
   return card;
 }
 function progressCard(item) {
@@ -4850,7 +4905,11 @@ function drawInbox(view, guest = null) {
     if (guest !== null) kept.dataset.steer = "1";
     section.appendChild(kept);
   }
-  for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
+  const adoptions = open.filter(isAdoption);
+  for (const item of adoptions) section.appendChild(adoptionCard(item));
+  for (const [key, state] of adoptionMerges) {
+    if (state.phase === "failed" && !adoptions.some((item) => item.key === state.plan && item.number === state.number && item.commit === state.commit)) section.appendChild(adoptionNotice(key, state));
+  }
   for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {
     const lead = leadItem(tracked[0]);

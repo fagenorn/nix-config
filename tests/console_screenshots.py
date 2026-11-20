@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty-six screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-nine screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -183,6 +183,15 @@ Contract:
   column, the question once); any other reading fails with the same line. The jargon count is not
   checked (the text is the session's, not the page's labels); every other check still applies. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
+- `adoption-merge`, `adoption-moved` and `adoption-failed` are the adoption card of a pull request the console opened
+  and read ready, seeded through a stand-in forge that reads it as it is: the first at the head
+  the console pushed, so the card offers Merge, the second at another head, so the card says why
+  it does not (#1338). The third is the first with Merge clicked, its stand-in forge refusing the
+  merge and then reading the pull request merged at another head: the card has left the inbox and
+  the page keeps the refusal as the "Could not merge the adoption" notice with its Dismiss button
+  (the notice of a refused click whose card the forge's state removed); its two widths are
+  served by two consoles, since the click cannot be repeated. On a page with no merge the opened step's `created` member is left out (a
+  base console refuses it) and both shots wait only for the card, which is the before picture.
 - The before pictures are the base commit's service, view and page together: this module imports
   nothing from `agent_tools` that the base commit lacks, so running it with `PYTHONPATH` at an
   archive of the base commit's `python/` (`git archive <base> python`) serves the base page over the
@@ -210,13 +219,14 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import approve, capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
 from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT, Question, SprintState
+from agent_tools.system.forge_api import ForgeError
 
 from .console_test_support import hook_body, write_registry
 
@@ -227,7 +237,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
-          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "sharing-panel",
+          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "adoption-merge", "adoption-moved", "adoption-failed", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -248,6 +258,13 @@ SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
 REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply",
                    "register-reconcile-draft")
+ADOPTION_STATES = ("adoption-merge", "adoption-moved", "adoption-failed")
+CLICKED_STATES = ("adoption-failed",)
+ADOPTION_BRANCH = "adopt-" + "5" * 12
+ADOPTION_COMMIT = "a" * 40
+ADOPTION_MOVED_HEAD = "d" * 40
+ADOPTION_PULL_ID = 1007
+ADOPTION_CARD = "#inbox .adoption"
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
@@ -449,6 +466,8 @@ class Fixture:
     deaf: bool = False
     activating: tuple[str, ...] = ()
     registering: bool = False
+    adopting: bool = False
+    refusing: bool = False
 
 
 @dataclass(frozen=True)
@@ -738,12 +757,42 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
         seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
 
 
+def offers_merge() -> bool:
+    """Whether this page's adoption card can offer Merge; a base commit's forge has no such method."""
+    return hasattr(approve.GitHubForge, "merge_pull_request")
+
+
+def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
+    """An adoption pull request of `root` the console opened, read ready at the head it pushed or at another.
+
+    Both rows are payload dicts, as a base commit's `approve` refuses the `head` argument and the
+    `created` member; a base console ignores the head and refuses the opened step's `created`
+    member, so the member is written only when this page offers Merge (the before picture shows
+    the card without it).
+    """
+    pull = {"number": 7, "url": f"https://github.com/owner/{REGISTER_NAME}/pull/7"}
+    if offers_merge():
+        pull["created"] = True
+        pull["id"] = ADOPTION_PULL_ID
+    seed.put(MINUTE, event_log.ADOPTION_STEP, None, {
+        "by": "owner", "plan_id": REGISTER_PLAN_ID, "root": root, "project_id": f"owner/{REGISTER_NAME}",
+        "step": "opened", "branch": ADOPTION_BRANCH, "commit": ADOPTION_COMMIT, "base": "main",
+        "pull_request": pull, "reason": None, "note": None, "kept": None, "evidence": None})
+    seed.put(MINUTE / 2, event_log.ADOPTION_PULL, None, {
+        "plan_id": REGISTER_PLAN_ID, "number": 7, "url": pull["url"], "state": "ready",
+        "head": ADOPTION_MOVED_HEAD if state == "adoption-moved" else ADOPTION_COMMIT,
+        "base": "main"})
+
+
 def _seed_state(seed: _Seed, state: str, web_root: str = "",
                 read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> tuple[str, ...]:
     """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
     web, api = PROJECTS[0], PROJECTS[1]
     if state in REGISTER_STATES:
         _seed_registration(seed, state, str(Path(web_root).parent / REGISTER_NAME))
+        return ()
+    if state in ADOPTION_STATES:
+        _seed_adoption(seed, state, web_root)
         return ()
     if state == "live-several":
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
@@ -1001,7 +1050,8 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         token=console / "token", secrets=console / "sprint-secrets", home=home,
         accounts=accounts, config=config, state=state_dir, projects=projects,
         holding=(12,) if state == "waiting-its-turn" else (), deaf=state == "manager-cannot-hear",
-        activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES)
+        activating=ACTIVATION_PATHS.get(state, ()), registering=state in REGISTER_STATES,
+        adopting=state in ADOPTION_STATES, refusing=state == "adoption-failed")
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -1057,6 +1107,44 @@ def _activation_reader(paths: tuple[str, ...]):
         other = {"other": paths} if reads_other() else {}
         return Activation(sorted(roots)[0], (), ACTIVATION_COMMIT, **other)
     return read
+
+
+class _AdoptionForge:
+    """A stand-in forge of the adoption states: it reads the seeded pull request as it is, so a poll
+    changes nothing. `adoption-merge` and `adoption-moved` are never clicked; with `refuses` its
+    merge call fails and the pull request then reads merged at another head, as when someone else
+    merged it with commits the console did not push."""
+
+    def __init__(self, head: str, refuses: bool = False):
+        self._head = head
+        self._refuses = refuses
+        self._refused = False
+
+    def pull_request_reading(self, slug, number, cancel=None) -> dict:
+        if self._refused:
+            return {"state": "merged", "head": ADOPTION_MOVED_HEAD, "base": "main", "checks_error": None,
+                    "id": ADOPTION_PULL_ID}
+        return {"state": "ready", "head": self._head, "base": "main", "checks_error": None,
+                "id": ADOPTION_PULL_ID}
+
+    def merge_pull_request(self, slug, number, head, cancel=None) -> None:
+        if not self._refuses:
+            raise AssertionError("this state's pull request is never merged")
+        self._refused = True
+        raise ForgeError("gh_failed", "the pull request was merged elsewhere")
+
+    def pull_request_state(self, slug, number, cancel=None) -> str:
+        return "ready"
+
+
+def _seeded_head(fixture: Fixture) -> str:
+    """The head the fixture's adoption pull request row records."""
+    log = EventLog(fixture.store)
+    try:
+        return [event.payload["head"] for event in log.events()
+                if event.kind == event_log.ADOPTION_PULL][-1]
+    finally:
+        log.close()
 
 
 class _Inert:
@@ -1144,6 +1232,8 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None, 
         forge["activation_reader"] = _activation_reader(fixture.activating)
     if fixture.registering:
         forge.update(adopter=_Inert(), forge=_Inert())
+    if fixture.adopting:
+        forge["forge"] = _AdoptionForge(_seeded_head(fixture), refuses=fixture.refusing)
     bound: list = []
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
@@ -1268,34 +1358,37 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
             raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
         try:
             for state in states:
-                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
-                        tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
-                    now_s = datetime.now(timezone.utc).timestamp()
-                    service = start_service(
-                        build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
-                        guest_dir=Path(door) if state in SHARING_STATES else None,
-                        tailnet_readable=state != "sharing-unreadable")
-                    serve = None
-                    try:
-                        host, port = service.address
-                        if state in SHARING_PANELS:
-                            guest_requests(state, guest_door(service))
-                        elif state in ("guest-page", "guest-steer"):
-                            serve = _Serve(guest_door(service))
-                            host, port = serve.address
-                        shot_paths = []
-                        for width in widths:
-                            path = "spend" if state == "spend-page" else ""
-                            taken.append(
-                                _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
-                                      question=read[0]))
-                            shot_paths.append(out / f"{state}-{width}.png")
-                        if sheets:
-                            sheet(browser, shot_paths, out / f"{state}-sheet.png")
-                    finally:
-                        if serve is not None:
-                            serve.close()
-                        service.close()
+                # A state that clicks changes its console for good, so each width gets its own.
+                groups = [(width,) for width in widths] if state in CLICKED_STATES else [tuple(widths)]
+                shot_paths = []
+                for group in groups:
+                    with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp, \
+                            tempfile.TemporaryDirectory(prefix="cg-", dir="/tmp") as door:
+                        now_s = datetime.now(timezone.utc).timestamp()
+                        service = start_service(
+                            build_fixture(Path(tmp).resolve(), state, now_s, read=read), now_s,
+                            guest_dir=Path(door) if state in SHARING_STATES else None,
+                            tailnet_readable=state != "sharing-unreadable")
+                        serve = None
+                        try:
+                            host, port = service.address
+                            if state in SHARING_PANELS:
+                                guest_requests(state, guest_door(service))
+                            elif state in ("guest-page", "guest-steer"):
+                                serve = _Serve(guest_door(service))
+                                host, port = serve.address
+                            for width in group:
+                                path = "spend" if state == "spend-page" else ""
+                                taken.append(
+                                    _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
+                                          question=read[0]))
+                                shot_paths.append(out / f"{state}-{width}.png")
+                        finally:
+                            if serve is not None:
+                                serve.close()
+                            service.close()
+                if sheets:
+                    sheet(browser, shot_paths, out / f"{state}-sheet.png")
         finally:
             browser.close()
     return taken
@@ -1461,6 +1554,14 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                 page.wait_for_selector(selector)
         if state == "owner-actors" and page.query_selector(".cap-owner") is not None:
             page.wait_for_selector(".cap-tightest .cap-owner")
+        if state in ADOPTION_STATES:
+            page.wait_for_selector(
+                ADOPTION_CARD + (" .reason" if state == "adoption-moved" else " button.adoption-merge")
+                if offers_merge() else ADOPTION_CARD)
+        if state == "adoption-failed" and offers_merge():
+            page.click(ADOPTION_CARD + " button.adoption-merge")
+            page.wait_for_selector("#inbox .adoption-failed button.adoption-failed-dismiss")
+            page.wait_for_selector(ADOPTION_CARD, state="detached")
         if state in ("finished-list", "desk-spend"):
             if state == "desk-spend":
                 page.click('details[data-key="line:owner/web"] > summary')
