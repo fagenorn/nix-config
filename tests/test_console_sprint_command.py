@@ -1166,7 +1166,7 @@ class ManagerContractTest(unittest.TestCase):
 
         wanted = {
             "Notices": ("Check each slice against the open claims of other sprints",
-                        "send the owner a question card with `sprint ask` naming the overlap",
+                        "Only an overlap the rule cannot settle goes to the owner",
                         "never the owner's permission or approval",
                         "Post a `claim`", "a `heads-up` before", "a `hand-off` when",
                         "Withdraw a notice", "as soon as it no longer holds",
@@ -1182,6 +1182,22 @@ class ManagerContractTest(unittest.TestCase):
                 with self.subTest(name, needle=needle):
                     self.assertIn(needle, section(name))
         self.assertEqual(text.count("## Notices"), 1)
+
+    def test_the_contract_states_the_four_claim_rules(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        section = text.partition("## Notices")[2].partition(" ## ")[0]
+        for needle in ("names files or a narrow path, never a whole folder tree",
+                       "ends when its slice lands",
+                       "check the work already in delivery", "never claim over it",
+                       "`in-progress`",
+                       "a fix of a live fault outranks a feature",
+                       "otherwise the earlier-started slice lands first",
+                       "the slice that lands second rebases", "no question card",
+                       "Only an overlap the rule cannot settle goes to the owner",
+                       "`issue`", "`live_fault`", "`overlaps`", "`asks`"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertNotIn("the later slice rebases", section)
 
     def test_contract_sends_no_request(self):
         out = StringIO()
