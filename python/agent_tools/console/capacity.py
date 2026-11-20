@@ -30,8 +30,11 @@ profile each id was last seen with (`accounts[account] = profile`, last wins); o
 malformed payloads are ignored. `CapacityState(readings, accounts)` leaves `kept` empty, and a
 profile then holds only its last reading.
 
-`profile_capacity` returns `{"profile", "state", "week_left", "five_hour_left", "next_reset",
-"out_until", "read_at"}`, every time an ISO 8601 UTC string. A window's effective reset is its own
+`profile_capacity` returns `{"profile", "state", "week_left", "five_hour_left", "week_reset",
+"five_hour_reset", "next_reset", "out_until", "read_at"}`, every time an ISO 8601 UTC string.
+`week_reset` and `five_hour_reset` are each window's effective reset (below) while it is still
+ahead, else null (also when the window is absent from the reading); the owner's page does not draw
+them, the guest pool does (#1341). A window's effective reset is its own
 `reset` when known, else the reading's `reset` (a refused window that lost its own reset would
 otherwise stay out forever, since no request is made while out). A window whose effective reset has
 passed reads 100 left and is not out, never its stale utilization; otherwise its left is
@@ -265,7 +268,8 @@ def _iso(seconds: int | None) -> str | None:
 def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
     if reading is None:
         return {"profile": profile, "state": "unknown", "week_left": None,
-                "five_hour_left": None, "next_reset": None, "out_until": None, "read_at": None}
+                "five_hour_left": None, "week_reset": None, "five_hour_reset": None,
+                "next_reset": None, "out_until": None, "read_at": None}
     left: dict[str, int | None] = {}
     resets: dict[str, int | None] = {}
     passed: dict[str, bool] = {}
@@ -295,6 +299,8 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
         state = "reset"
     else:
         state = "ok"
+    week_reset, five_hour_reset = (
+        _iso(r) if r is not None and r > now else None for r in (resets.get("7d"), resets.get("5h")))
     known_out = [r for r in out_resets if r is not None]
     if refused and stopped is not None:
         known_out.append(stopped)
@@ -304,6 +310,8 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
         "state": state,
         "week_left": left.get("7d"),
         "five_hour_left": left.get("5h"),
+        "week_reset": week_reset,
+        "five_hour_reset": five_hour_reset,
         "next_reset": _iso(min(ahead)) if ahead else None,
         "out_until": _iso(max(known_out)) if out and known_out else None,
         "read_at": reading.at,
