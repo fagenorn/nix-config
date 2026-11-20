@@ -184,17 +184,18 @@ is the console's cancellable `gh` runner: it runs `gh` in its own group with no 
 `GH_TOKEN`, so a set `cancel` (the console is closing) ends the call and its process and raises
 `Cancelled`, and its failures are the `ForgeError`s of `forge_api` (`gh_timeout`, `gh_missing`,
 `gh_failed`, `payload_invalid`). `GitHubForge(gh_json=gh_json)` offers `find_pull_request(slug,
-head, base, cancel=None)` (the open pull request of that head and base as `{number, url}`, else
-None), `open_pull_request(slug, head, base, title, body, cancel=None)`,
+head, base, cancel=None)` (the open pull request of that head and base as `{number, url, title,
+body}`, the title and body as the listing gives them and None when not text, else None),
+`open_pull_request(slug, head, base, title, body, cancel=None)`,
 `pull_request_reading(slug, number, cancel=None)` (`{state, head}`: `merged`, `closed`, `ready` for
 an open pull request whose `mergeable_state` is in `READY_MERGEABLE`, `failing` for a `blocked` one
 whose head has a check run of any page concluded in `FAILED_CONCLUSIONS` or a combined status in
 `FAILED_STATUSES`, else `open`; `head` is the forge's head when it is 40 hex, else None),
 `merge_pull_request(slug, number, head, cancel=None)` (a merge of that head only, with the merge
-method, refusing a head that is not 40 lowercase hex before any call) and `pull_request_state(slug,
-number, cancel=None)` (the state alone, until the poll reads `pull_request_reading`); the link of a pull request is built here from the slug and
-number, never read from the forge's answer. `forge_for(platform)` is `GitHubForge()` on Linux and macOS
-(what `manager.supported` admits), else None (ADR-console-081: the adoption it serves runs wherever a manager does).
+method, refusing a head that is not 40 lowercase hex before any call); the link of a pull request is
+built here from the slug and number, never read from the forge's answer. `forge_for(platform)` is
+`GitHubForge()` on Linux and macOS (what `manager.supported` admits), else None (ADR-console-081:
+the adoption it serves runs wherever a manager does).
 """
 
 from __future__ import annotations
@@ -1131,6 +1132,10 @@ def _pull_request(slug: str, number: object) -> dict | None:
     return {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
 
 
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 class GitHubForge:
     def __init__(self, gh_json: Callable[..., Any] = gh_json):
         self._gh_json = gh_json
@@ -1147,7 +1152,8 @@ class GitHubForge:
                     and found["head"].get("ref") == head and found["base"].get("ref") == base):
                 pull = _pull_request(slug, found.get("number"))
                 if pull is not None:
-                    return pull
+                    return {**pull, "title": _str_or_none(found.get("title")),
+                            "body": _str_or_none(found.get("body"))}
         return None
 
     def open_pull_request(self, slug: str, head: str, base: str, title: str, body: str,
@@ -1203,17 +1209,6 @@ class GitHubForge:
              "-f", "merge_method=merge"], cancel)
         if not isinstance(answer, dict) or answer.get("merged") is not True:
             raise ForgeError("payload_invalid", "the merge answer does not say it merged")
-
-    def pull_request_state(self, slug: str, number: int, cancel=None) -> str:
-        answer = self._gh_json(["api", f"repos/{slug}/pulls/{number}"], cancel)
-        if isinstance(answer, dict):
-            if answer.get("merged") is True:
-                return "merged"
-            if answer.get("state") == "closed":
-                return "closed"
-            if answer.get("state") == "open":
-                return "ready" if answer.get("mergeable_state") in READY_MERGEABLE else "open"
-        raise ForgeError("payload_invalid", "the pull request answer has no state")
 
 
 def forge_for(platform: str) -> GitHubForge | None:

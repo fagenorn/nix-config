@@ -1546,10 +1546,17 @@ class GitHubForgeTest(unittest.TestCase):
 
     def test_find_returns_the_open_pull_request_of_the_head_and_base(self):
         listing = [{"number": 3, "head": {"ref": "other"}, "base": {"ref": "main"}},
-                   {"number": 7, "head": {"ref": ADOPTION}, "base": {"ref": "main"}}]
+                   {"number": 7, "head": {"ref": ADOPTION}, "base": {"ref": "main"},
+                    "title": "A title", "body": "A body"}]
         forge = self.forge(listing)
         self.assertEqual(forge.find_pull_request("o/r", ADOPTION, "main"),
-                         {"number": 7, "url": "https://github.com/o/r/pull/7"})
+                         {"number": 7, "url": "https://github.com/o/r/pull/7",
+                          "title": "A title", "body": "A body"})
+        bare = [{"number": 7, "head": {"ref": ADOPTION}, "base": {"ref": "main"}, "title": 5,
+                 "body": None}]
+        self.assertEqual(self.forge(bare).find_pull_request("o/r", ADOPTION, "main"),
+                         {"number": 7, "url": "https://github.com/o/r/pull/7",
+                          "title": None, "body": None})
         self.assertEqual(self.calls[0][0],
                          ["api", "-X", "GET", "repos/o/r/pulls", "-f", f"head=o:{ADOPTION}",
                           "-f", "base=main", "-f", "state=open"])
@@ -1646,6 +1653,12 @@ class GitHubForgeTest(unittest.TestCase):
             forge.merge_pull_request("o/r", 7, "abc")
         self.assertEqual(self.calls, [])
 
+    def test_the_forge_offers_exactly_its_four_methods(self):
+        self.assertEqual(
+            {name for name in dir(approve.GitHubForge) if not name.startswith("_")},
+            {"find_pull_request", "open_pull_request", "pull_request_reading",
+             "merge_pull_request"})
+
     def test_forge_for_each_platform(self):
         self.assertIsInstance(approve.forge_for("linux"), approve.GitHubForge)
         self.assertIsInstance(approve.forge_for("darwin"), approve.GitHubForge)
@@ -1663,6 +1676,8 @@ class GitHubForgeTest(unittest.TestCase):
                 out = '{"number": 7}'
             elif "GET" in argv and "repos/o/r/pulls" in argv:
                 out = "[]"
+            elif "PUT" in argv:
+                out = '{"merged": true}'
             else:
                 out = '{"state": "open", "mergeable_state": "clean"}'
             return subprocess.CompletedProcess(argv, 0, out, "")
@@ -1671,9 +1686,10 @@ class GitHubForgeTest(unittest.TestCase):
             forge = approve.forge_for("darwin")
             forge.find_pull_request("o/r", branch, "main")
             forge.open_pull_request("o/r", branch, "main", "t", "b")
-            forge.pull_request_state("o/r", 7)
+            forge.pull_request_reading("o/r", 7)
+            forge.merge_pull_request("o/r", 7, "b" * 40)
             approve.push("/r", branch, "b" * 40)
-        self.assertEqual([argv[0] for argv, _ in records], ["gh", "gh", "gh", "git"])
+        self.assertEqual([argv[0] for argv, _ in records], ["gh", "gh", "gh", "gh", "git"])
         for argv, kwargs in records:
             with self.subTest(argv=argv):
                 self.assertFalse(any(word in element
