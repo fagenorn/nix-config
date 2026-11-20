@@ -25,7 +25,7 @@ from unittest import mock
 
 from agent_tools.console import console as console_module
 from agent_tools.console import capacity, deliveries, digest, movement, probe, service, sessions, signin, sprints
-from agent_tools.console import peer, signin_run, spend, view
+from agent_tools.console import event_log, peer, register, signin_run, spend, view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.write_guard import TokenError
 from agent_tools.console.view import derive_view, encode_view, project_states
@@ -204,6 +204,18 @@ class RestartTest(Case):
         appended = second.poll_sessions()
         self.assertEqual([e.kind for e in appended], ["session.gone"])
         self.assertEqual(listed(second), {})
+
+
+class UnregisteredRowTest(Case):
+    def test_an_unregistered_row_names_the_root_it_removed(self):
+        items = support.entries(2)
+        svc = self.start(items)
+        support.write_registry(self.registry, items[:1])
+        svc.refresh()
+        rows = [row for row in support.log_rows(self.store) if row[2] == "project.unregistered"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3], items[1]["project_id"])
+        self.assertEqual(json.loads(rows[0][4]), {"root": items[1]["root"]})
 
 
 class AppendOnlyTest(Case):
@@ -1533,6 +1545,63 @@ class DigestExpiryTest(Case):
             return json.loads(body)["digest"]["recent"] == []
 
         self.assertTrue(wait_until(emptied))
+
+
+class RegistrationFoldServiceTest(Case):
+    """The page's registration folds back when its project is unregistered (#1334)."""
+
+    def registration(self, svc):
+        _, _, body = support.request(svc.address, "GET", "/api/state")
+        return json.loads(body)["registration"]
+
+    def seed(self, rows, clock=None):
+        log = event_log.EventLog(self.store, **({} if clock is None else {"clock": clock}))
+        try:
+            log.append(rows)
+        finally:
+            log.close()
+
+    def rows(self):
+        y_srv = register.dismissed(register.failed("/srv/y", "failed"))
+        r_srv = {**register.failed("/srv/p00", "failed"), "project_id": "owner/p00",
+                 "result": "registered", "note": None}
+        return register.ended(y_srv), register.ended(r_srv)
+
+    def test_an_unregistered_project_gives_the_page_back_its_previous_registration(self):
+        self.seed(list(self.rows()))
+        svc = self.start(support.entries(1))
+        self.assertIsNone(self.registration(svc))
+        support.write_registry(self.registry, [])
+        svc.refresh()
+        shown = self.registration(svc)
+        self.assertEqual(shown["root"], "/srv/y")
+        self.assertEqual(shown["note"], register.LATER_NOTE)
+        svc.close()
+        svc = self.start()
+        again = self.registration(svc)
+        self.assertEqual(again["root"], shown["root"])
+        self.assertEqual(again["at"], shown["at"])
+
+    def test_a_retention_pass_rebuilds_the_chain(self):
+        def iso(t):
+            return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="microseconds")
+
+        y_row, r_row = self.rows()
+        self.seed([y_row], lambda: iso(T0))
+        self.seed([r_row], lambda: iso(T0 + 60 * 86400))
+        now = [T0 + 60 * 86400]
+        svc = self.start(support.entries(1), retention_seconds=86400, **clocks(now))
+        now[0] = T0 + 95 * 86400
+        removed = svc.retain()
+        support.write_registry(self.registry, [])
+        svc.refresh()
+        running = self.registration(svc)
+        svc.close()
+        second = support.service(self, self.store, self.registry, **clocks(now))
+        restarted = self.registration(second)
+        self.assertGreaterEqual(removed, 1)
+        self.assertIsNone(running)
+        self.assertIsNone(restarted)
 
 
 class RetentionServiceTest(Case):

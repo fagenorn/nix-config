@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the forty-four screens the sprint block, the finished list, the message life, the
+- `STATES` names the forty-six screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold, the desk's spend figures and the controls must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -92,7 +92,14 @@ Contract:
   COLLEAGUE: ...` shows, and one whose brief version 1 waits, so the page shows an open card the colleague
   can act on with its Approve and Ask for changes controls; and an owner sprint with an owner message;
   and one tracker card, a release confirm of `owner/web#12`, waiting on the owner, which the page
-  draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed. Each
+  draws as `.guest-wait` with no control. `owner-actors` is the owner's desk over the same seed.
+  `guest-page`, `guest-steer` and `owner-actors` also hold the pool's two accounts, `work-main` and
+  `work-spare`, each with a week and a 5h window, and every manager runs on `work-main`, so the guest
+  page shows `Account 1` and `Account 2` and the sprint's account. On a page with `#pool` the
+  guest shots wait for the pool, a session reset and the sprint's account (`.sprint-account`); on a
+  page without it they wait for none of them. With `--sheets` `capture` also writes
+  `<state>-sheet.png` after each state's widths, the shots side by side in one PNG that must stay
+  under the 2 MiB a picture may be, and `main` prints each sheet's path after the shots. Each
   width waits for what the owner judges to be visible, which fails the run when it is not:
   `guest-steer` the door check of `guest-page`, then `.started-by`, `Answered by`, `.guest-wait` and
   `#inbox button.approve`; `owner-actors` `.started-by` and `Answered by`. The rows are seeded
@@ -107,13 +114,20 @@ Contract:
   plan's own lines (`REGISTER_PLAN_LINES`), with the registration entry reduced to "needs you"
   and no draft beside it; `register-draft` is the same plan after the owner chose Not now (the
   `adoption.deferred` row is seeded), so no card asks and the registration's draft rows show with
-  the proposal as a main line beside its Change control. `REGISTER_READING` reads the card's first
+  the proposal as a main line beside its Change control. `register-reconcile-apply` and
+  `register-reconcile-draft` are the same two screens for a repository that already has a contract
+  and pending adoption work, a `reconcile` plan (#1333): the row seeds the reading the console takes
+  of a pre-commit hook whose runner is not on the plain PATH and of a `devenv.nix`, so the plan
+  proposes the same command, and the first is the Apply card, the second the plan after Not now.
+  `REGISTER_READING` reads the card's first
   line, the proposal's draft row and whether that row has a Change button, and `REGISTER_SHOWN`
-  holds what each state must read on a page that proposes it (`proposes_environment()`); on a
-  page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
-  picture, and any other reading fails.
+  holds what each state must read on a page that proposes it (`proposes(state)`, which is
+  `proposes_environment()` for the first two and `proposes_reconcile()` for the reconcile pair); on
+  a page that does not (the base commit's) the reading is `REGISTER_BASE`, which is the before
+  picture, and any other reading fails. The base commit's reconcile row has no draft, so its Apply
+  card opens on the plan's own first line and its draft shows nothing.
   `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 88 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 92 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -171,6 +185,7 @@ base commit's guest port or the branch's guest socket, so a base run still serve
 from __future__ import annotations
 
 import argparse
+import base64
 import http.client
 import inspect
 import json
@@ -204,7 +219,7 @@ STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-s
           "inbox-card", "question-words", "question-refused", "look-card", "look-moved",
           "look-failed", "accounts-panel", "ask-box", "questions-closed", "questions-open",
           "ask-goal", "question-read", "activation-tooling", "activation-host", "register-apply",
-          "register-draft", "sharing-panel",
+          "register-draft", "register-reconcile-apply", "register-reconcile-draft", "sharing-panel",
           "sharing-off", "sharing-unreadable", "sharing-reached", "guest-page", "guest-steer", "owner-actors")
 WIDTHS = (1440, 480)
 HEIGHT = 900
@@ -223,15 +238,20 @@ OTHER_DEVICE_ADDRESS = "100.64.0.20"
 SHARING_STATES = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached",
                   "guest-page", "guest-steer")
 SHARING_PANELS = ("sharing-panel", "sharing-off", "sharing-unreadable", "sharing-reached")
-REGISTER_STATES = ("register-apply", "register-draft")
+REGISTER_STATES = ("register-apply", "register-draft", "register-reconcile-apply",
+                   "register-reconcile-draft")
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
 REGISTER_PLAN_LINES = ["moves 2 agent files under .agents/", "writes the project contract"]
 PROPOSAL_LINE = "commits run in its development shell: devenv shell (found in its files)"
 REGISTER_SHOWN = {"register-apply": (PROPOSAL_LINE, None, False),
-                  "register-draft": (None, PROPOSAL_LINE, True)}
+                  "register-draft": (None, PROPOSAL_LINE, True),
+                  "register-reconcile-apply": (PROPOSAL_LINE, None, False),
+                  "register-reconcile-draft": (None, PROPOSAL_LINE, True)}
 REGISTER_BASE = {"register-apply": (REGISTER_PLAN_LINES[0], None, False),
-                 "register-draft": (None, None, False)}
+                 "register-draft": (None, None, False),
+                 "register-reconcile-apply": (REGISTER_PLAN_LINES[0], None, False),
+                 "register-reconcile-draft": (None, None, False)}
 # The first line of the Apply card's list, the proposal's draft row and whether that row carries a
 # visible Change button; None for what the page does not show.
 REGISTER_READING = """(() => {
@@ -647,14 +667,22 @@ class _Seed:
             **actor})
         return sid, goal
 
-    def account(self, name: str, week: float) -> None:
-        """A signed-in profile with one capacity reading whose week window is `week` used."""
+    def account(self, name: str, week: float, *, session: float | None = None,
+                week_in: int = 86400, session_in: int | None = None) -> None:
+        """A signed-in profile with one capacity reading whose week window is `week` used.
+
+        With `session` it also has a `5h` window that much used, reset `session_in` seconds on;
+        the week window and the reading itself reset `week_in` seconds on.
+        """
         self._at[0] = _iso(self.now_s)
+        windows = {"7d": {"status": "allowed", "utilization": week,
+                          "reset": int(self.now_s) + week_in}}
+        if session is not None:
+            windows["5h"] = {"status": "allowed", "utilization": session,
+                             "reset": int(self.now_s) + session_in}
         reading = capacity.parse_report({
-            "http_status": 200, "status": "allowed", "reset": int(self.now_s) + 86400, "binding": None,
-            "claim": None, "account": None, "session_id": None,
-            "windows": {"7d": {"status": "allowed", "utilization": week,
-                               "reset": int(self.now_s) + 86400}}})
+            "http_status": 200, "status": "allowed", "reset": int(self.now_s) + week_in, "binding": None,
+            "claim": None, "account": None, "session_id": None, "windows": windows})
         self.log.append(capacity.report_entries(reading, name))
         self.log.append([signin.entry(name, signin.Status("signed_in", None))])
 
@@ -676,6 +704,18 @@ def _seed_registration(seed: _Seed, state: str, root: str) -> None:
     environment file are what a checkout with a devenv and installed commit hooks reads. The base
     commit's draft ignores both and proposes nothing (the before picture).
     """
+    if state.startswith("register-reconcile"):
+        fields = (contract_draft.reconcile_fields(root, {
+            "hooks": ["pre-commit"], "stranded": ["pre-commit"], "environments": ["devenv.nix"]})
+            if proposes_reconcile() else None)
+        seed.put(MINUTE, event_log.REGISTRATION_ENDED, None, {
+            "by": "owner", "root": root, "project_id": f"owner/{REGISTER_NAME}", "result": "planned",
+            "outcome": "reconcile", "headline": f"What adopting {REGISTER_NAME} would change.",
+            "lines": list(REGISTER_PLAN_LINES), "note": None, "plan_id": REGISTER_PLAN_ID,
+            "state": "ready", "questions": [], "answered": [], "draft": fields, "remote": None})
+        if state == "register-reconcile-draft":
+            seed.put(MINUTE / 2, event_log.ADOPTION_DEFERRED, None, {"plan_id": REGISTER_PLAN_ID})
+        return
     reading = {**contract_draft.read(root),
                "remotes": [("origin", f"https://github.com/owner/{REGISTER_NAME}.git")],
                "default_branch": "main", "branches": ["main"],
@@ -733,6 +773,9 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         else:
             seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE)
             seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        if state in ("guest-page", "guest-steer", "owner-actors"):
+            seed.account("work-main", 0.4, session=0.25, week_in=3 * 86400, session_in=2 * 3600)
+            seed.account("work-spare", 0.9, session=0.6, week_in=5 * 86400, session_in=4 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state in ("tell-box-open", "goal-open", "goal-near", "goal-over"):
@@ -957,7 +1000,7 @@ def build_fixture(root: Path, state: str, now_s: float, *,
         sprint_ids = _seed_state(_Seed(log, at, now_s, console / "pictures"), state, str(projects[0]), read=read)
     finally:
         log.close()
-    if state == "accounts-panel":
+    if state in ("accounts-panel", "guest-page", "guest-steer", "owner-actors"):
         for name in ("work-main", "work-spare"):
             (accounts / "profiles" / name).mkdir(parents=True, exist_ok=True)
     if state == "manager-cannot-hear":
@@ -1012,6 +1055,16 @@ class _Inert:
 def proposes_environment() -> bool:
     """Whether this page's drafted contract can propose the command the adoption commit runs through."""
     return hasattr(contract_draft, "proposed_lines")
+
+
+def proposes_reconcile() -> bool:
+    """Whether this page's reconcile plan can propose that command for a hook its PATH cannot find."""
+    return hasattr(contract_draft, "reconcile_fields")
+
+
+def proposes(state: str) -> bool:
+    """Whether this page proposes the commit environment in the register state `state`."""
+    return proposes_reconcile() if state.startswith("register-reconcile") else proposes_environment()
 
 
 class _UnixHTTPConnection(http.client.HTTPConnection):
@@ -1189,7 +1242,7 @@ class _Serve:
 
 
 def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = WIDTHS, *,
-            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER)) -> list[Shot]:
+            read: tuple[str, str] = (READ_QUESTION, READ_ANSWER), sheets: bool = False) -> list[Shot]:
     try:
         from playwright.sync_api import Error, sync_playwright
     except ImportError as error:
@@ -1219,11 +1272,15 @@ def capture(out: Path, states: Sequence[str] = STATES, widths: Sequence[int] = W
                         elif state in ("guest-page", "guest-steer"):
                             serve = _Serve(guest_door(service))
                             host, port = serve.address
+                        shot_paths = []
                         for width in widths:
                             path = "spend" if state == "spend-page" else ""
                             taken.append(
                                 _shoot(browser, f"http://{host}:{port}/{path}", state, width, out,
                                       question=read[0]))
+                            shot_paths.append(out / f"{state}-{width}.png")
+                        if sheets:
+                            sheet(browser, shot_paths, out / f"{state}-sheet.png")
                     finally:
                         if serve is not None:
                             serve.close()
@@ -1378,6 +1435,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
             page.wait_for_selector("#top-who:not([hidden])")
             if page.query_selector("#capacity") is not None:
                 raise RuntimeError("the guest shot is not the guest page")
+        if state in ("guest-page", "guest-steer") and page.query_selector("#pool") is not None:
+            for selector in ("#pool:not([hidden])", "#pool .pool-session time", ".sprint-account"):
+                page.wait_for_selector(selector)
         if state == "guest-steer" and reads_actors():
             for selector in (".started-by", "text=Answered by", ".guest-wait", "#inbox button.approve"):
                 page.wait_for_selector(selector)
@@ -1483,6 +1543,31 @@ def _shoot(browser, url: str, state: str, width: int, out: Path, *,
                 card=card, activation=activation, register=register)
 
 
+def sheet(browser, paths: Sequence[Path], out: Path) -> Path:
+    """One PNG of the given pictures side by side, top-aligned, in the order given.
+
+    Refuses with a RuntimeError when the file is over `pictures.MAX_BYTES`, the size `sprint ask`
+    refuses a picture over.
+    """
+    out = Path(out)
+    images = "".join(
+        '<img src="data:image/png;base64,' + base64.b64encode(Path(path).read_bytes()).decode() + '">'
+        for path in paths)
+    page = browser.new_page(viewport={"width": 2400, "height": HEIGHT})
+    try:
+        page.set_content(
+            "<!doctype html><html><body style=\"margin:0;background:#fff\">"
+            "<div id=\"row\" style=\"display:inline-flex;align-items:flex-start;gap:16px;"
+            f"padding:16px;background:#fff\">{images}</div></body></html>")
+        page.locator("#row").screenshot(path=str(out))
+    finally:
+        page.close()
+    size = out.stat().st_size
+    if size > pictures.MAX_BYTES:
+        raise RuntimeError(f"{out} is {size} bytes, over the {pictures.MAX_BYTES} a picture may be")
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="console-screenshots",
@@ -1490,6 +1575,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="the directory the PNG files go to")
     parser.add_argument("--question", help="the owner's question, shot with --answer-file")
     parser.add_argument("--answer-file", help="the stored answer's text (UTF-8), shot with --question")
+    parser.add_argument("--sheets", action="store_true",
+                        help="also write <state>-sheet.png, the state's widths side by side")
     args = parser.parse_args(argv)
     if (args.question is None) != (args.answer_file is None):
         parser.error("--question and --answer-file go together")
@@ -1500,8 +1587,9 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="console-shots-env-") as tmp:
         os.environ.update(sandbox_environ(Path(tmp).resolve()))
         try:
-            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text))
-                     if real else capture(Path(args.out)))
+            taken = (capture(Path(args.out), states=("question-read",), read=(args.question, text),
+                             sheets=args.sheets)
+                     if real else capture(Path(args.out), sheets=args.sheets))
         except Unavailable as error:
             print(f"console-screenshots: {error}", file=sys.stderr)
             return 2
@@ -1513,6 +1601,9 @@ def main(argv: list[str] | None = None) -> int:
                     os.environ[name] = value
     for shot in taken:
         print(shot.path)
+    if args.sheets:
+        for state in dict.fromkeys(shot.state for shot in taken):
+            print(Path(args.out) / f"{state}-sheet.png")
     wide = [shot for shot in taken if shot.scroll_width > shot.width]
     for shot in wide:
         print(f"console-screenshots: {shot.path.name} scrolls sideways "
@@ -1555,7 +1646,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"console-screenshots: {shot.path.name} does not show the activation line with its "
               "Activate button")
     proposals = [shot for shot in taken if shot.state in REGISTER_SHOWN and shot.register != (
-        REGISTER_SHOWN[shot.state] if proposes_environment() else REGISTER_BASE[shot.state])]
+        REGISTER_SHOWN[shot.state] if proposes(shot.state) else REGISTER_BASE[shot.state])]
     for shot in proposals:
         print(f"console-screenshots: {shot.path.name} does not show the proposed commit "
               "environment on the Apply card or as a changeable draft line")

@@ -27,13 +27,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import console, guest, peer, serve_probe_check, service, write_guard
+from agent_tools.console import (
+    account_remove, capacity, console, guest, peer, pin, serve_probe_check, service, signin,
+    write_guard)
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
-    SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
+    GOAL_STATED, MANAGER_STARTED, SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
 
 from . import console_test_support as support
 from .console_test_support import PIXEL, WIDE
+from .test_console_signin import SIGNED_IN
 from .test_console_stream import next_frame
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -43,6 +46,23 @@ OTHER_HOST = "other.invented-tailnet.ts.net"
 COLLEAGUE = "colleague@example.invalid"
 STRANGER = "stranger@example.invalid"
 FORGED = "forged-probe@example.invalid"
+READ_AT = int(time.time())
+PROXY_ID = "proxy-acct-zq77"
+SPEND_TOKENS = 987654321
+
+
+def reading_rows(profile, week, session, week_in, session_in, account=None):
+    return capacity.report_entries(capacity.parse_report({
+        "http_status": 200, "status": "allowed", "reset": READ_AT + week_in, "binding": None,
+        "claim": None, "account": account, "session_id": None,
+        "windows": {"7d": {"status": "allowed", "utilization": week, "reset": READ_AT + week_in},
+                    "5h": {"status": "allowed", "utilization": session,
+                           "reset": READ_AT + session_in}}}), profile)
+
+
+def signed_in_row(profile, address):
+    document = {**json.loads(SIGNED_IN), "email": address, "orgName": "org-zq9"}
+    return signin.entry(profile, signin.parse_status(0, json.dumps(document).encode()))
 SELF_V4 = "100.64.0.10"
 SELF_V6 = "fd7a:115c:a1e0::a"
 OTHER_DEVICE_ADDRESS = "100.64.0.20"
@@ -513,6 +533,467 @@ class ScopedReadTest(GuestCase):
         self.assertEqual((status, body), (200, WIDE))
         status, _, body = self.guest(svc, "GET", "/api/picture/" + p0, headers=headers)
         self.assertEqual((status, body), (404, b"this picture is not known\n"))
+
+
+    def append(self, rows):
+        log = EventLog(self.store)
+        try:
+            log.append(rows)
+        finally:
+            log.close()
+
+    def labels(self, svc):
+        status, _, body = self.guest(svc, "GET", "/api/state")
+        self.assertEqual(status, 200)
+        seen = json.loads(body)
+        return ([row["label"] for row in seen["pool"]["accounts"]],
+                {node["sprint_id"]: node["account_label"]
+                 for entry in seen["entries"] for node in entry["sprints"]})
+
+    def test_a_guest_sees_the_pool_and_the_account_of_their_running_sprint(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p00", {"sprint_id": "s-p00", "goal": "other-goal-zq7"}),
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p00",
+             {"sprint_id": "s-p00", "profile": "work-zq5", "session_name": "m-p00"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "work-zq5", "session_name": "m-p01"}),
+            signed_in_row("work-zq5", "work-zq5@corp-zq.invalid"),
+            *reading_rows("work-zq5", 0.4, 0.25, 3 * 86400, 7200, account=PROXY_ID)])
+        profile = self.root / "accounts/profiles/work-zq5"
+        profile.mkdir(parents=True)
+        sessions = self.root / "sessions"
+        svc = self.start(profile_dirs=[profile], session_dirs=[sessions])
+        svc.poll_sessions()
+        transcript = sessions.parent / "projects" / "-srv-p01" / "spend-zq.jsonl"
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text(json.dumps({
+            "type": "assistant", "sessionId": "spend-zq", "cwd": "/srv/p01",
+            "timestamp": time.strftime("%Y-%m-%dT10:00:00.000Z", time.gmtime()),
+            "message": {"id": "msg_zq", "model": "claude-sonnet-4-6",
+                        "usage": {"input_tokens": SPEND_TOKENS}}}) + "\n")
+        svc.poll_spend()
+        status, _, body = self.guest(svc, "GET", "/api/state")
+        mine = json.loads(self.owner(svc, "GET", "/api/state")[2])
+        spent = mine["spend"]["days"][-1]["total"]
+        self.assertEqual(spent["input"], SPEND_TOKENS)
+        self.assertGreater(spent["dollars"], 0)
+        self.assertEqual(status, 200)
+        seen = json.loads(body)
+        self.assertEqual([row["label"] for row in seen["pool"]["accounts"]], ["Account 1"])
+        self.assertEqual(seen["pool"]["state"], "fine")
+        row = seen["pool"]["accounts"][0]
+        theirs = mine["capacity"]["profiles"][0]
+        for member in ("state", "week_left", "five_hour_left", "week_reset", "five_hour_reset",
+                       "next_reset", "out_until"):
+            with self.subTest(member=member):
+                self.assertEqual(row[member], theirs[member])
+        self.assertEqual((row["week_left"], row["five_hour_left"]), (60, 75))
+        self.assertIsNotNone(row["week_reset"])
+        self.assertIsNotNone(row["five_hour_reset"])
+        self.assertEqual(
+            [(node["sprint_id"], node["account_label"])
+             for entry in seen["entries"] for node in entry["sprints"]], [("s-p01", "Account 1")])
+        for marker in (b"s-p00", b"other-goal-zq7", b"work-zq5", b"corp-zq.invalid", b"org-zq9",
+                       b"m-p01", PROXY_ID.encode(), str(SPEND_TOKENS).encode(),
+                       str(spent["dollars"]).encode()):
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, body)
+        self.assertIsNone(seen["spend"])
+        self.assertNotIn("pool", mine)
+        self.assertFalse([node for entry in mine["entries"] for node in entry["sprints"]
+                          if "account_label" in node])
+
+    def test_a_label_survives_another_account_leaving_and_a_restart(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "c-zq3", "session_name": "m-p01"})])
+        folder = self.root / "accounts/profiles"
+        a, b, c = (folder / name for name in ("a-zq1", "b-zq2", "c-zq3"))
+        for path in (a, b, c):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+        dirs = [a, b, c]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc),
+                         (["Account 1", "Account 2", "Account 3"], {"s-p01": "Account 3"}))
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 3"], {"s-p01": "Account 3"}))
+        self.assertTrue(self.store.with_name(guest.NUMBERS_FILE).exists())
+        svc.close()
+        again = self.start(profile_dirs=[a, c])
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1", "Account 3"], {"s-p01": "Account 3"}))
+
+    def test_a_numbers_file_that_cannot_be_written_still_serves_the_pool(self):
+        self.seed()
+        path = self.store.with_name(guest.NUMBERS_FILE)
+        path.mkdir(parents=True)
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        svc = self.start(profile_dirs=[a])
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc)[0], ["Account 1"])
+        self.assertTrue(path.is_dir())
+
+
+    def test_numbers_that_could_not_be_written_are_written_once_storage_recovers(self):
+        self.seed()
+        path = self.store.with_name(guest.NUMBERS_FILE)
+        path.mkdir(parents=True)
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        svc = self.start(profile_dirs=[a])
+        svc.poll_sessions()
+        self.assertTrue(path.is_dir())
+        path.rmdir()
+        svc.poll_sessions()
+        self.assertEqual(guest.read_numbers(path), {"a-zq1": 1})
+
+    def test_a_running_sprint_keeps_its_label_when_its_profile_goes_and_its_account_stays(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        dirs.clear()
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), ([], {"s-p01": None}))
+
+    def test_a_removed_accounts_number_given_to_a_new_account_does_not_label_its_sprint(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", "h-zq@corp-zq.invalid"),
+            signed_in_row("b-zq2", "w-zq@corp-zq.invalid")])
+        a, b, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2", "c-zq3"))
+        for path in (a, b, c):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc),
+                         (["Account 1", "Account 2"], {"s-p01": "Account 2"}))
+        dirs[:] = [a, c]
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": None}))
+
+    def test_a_removed_only_profile_recreated_on_another_address_does_not_label_its_sprint(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", "h-zq@corp-zq.invalid"),
+            signed_in_row("b-zq2", "w-zq@corp-zq.invalid")])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": "Account 2"}))
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": None}))
+        svc._fold(svc.log.append([signed_in_row("b-zq2", "other-zq@corp-zq.invalid")]))
+        dirs.append(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": None}))
+        svc.close()
+        again = self.start(profile_dirs=[a, b])
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1", "Account 2"], {"s-p01": None}))
+
+    def removed_manager_then_takeover(self, siblings):
+        """Sprint s-p01's manager is on b-zq2, which is removed; a takeover then starts it on a-zq1."""
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", "h-zq@corp-zq.invalid"),
+            signed_in_row("b-zq2", "w-zq@corp-zq.invalid"),
+            signed_in_row("c-zq3", "w-zq@corp-zq.invalid")])
+        a, b, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2", "c-zq3"))
+        for path in (a, b, c):
+            path.mkdir(parents=True)
+        dirs = [a, b, c] if siblings else [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        svc._fold(svc.log.append([
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "a-zq1", "session_name": "m2-p01",
+              "takeover": True})]))
+        svc.poll_sessions()
+        return svc, [a, c] if siblings else [a]
+
+    def test_a_removed_only_profiles_sprint_is_labelled_by_the_profile_a_takeover_moves_it_to(self):
+        svc, dirs = self.removed_manager_then_takeover(siblings=False)
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        svc.close()
+        again = self.start(profile_dirs=dirs)
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1"], {"s-p01": "Account 1"}))
+
+    def test_a_removed_profiles_sprint_with_a_sibling_is_labelled_by_the_profile_a_takeover_moves_it_to(self):
+        svc, dirs = self.removed_manager_then_takeover(siblings=True)
+        self.assertEqual(self.labels(svc), (["Account 1", "Account 2"], {"s-p01": "Account 1"}))
+        svc.close()
+        again = self.start(profile_dirs=dirs)
+        again.poll_sessions()
+        self.assertEqual(self.labels(again),
+                         (["Account 1", "Account 2"], {"s-p01": "Account 1"}))
+
+    def test_a_removal_whose_listing_fails_is_not_recorded_and_leaves_the_numbering(self):
+        self.seed()
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+
+        class Listing:
+            failing = False
+
+            def __iter__(self):
+                if self.failing:
+                    raise PermissionError("profiles")
+                return iter([a, b])
+
+        listing = Listing()
+
+        def remover(name):
+            listing.failing = True
+
+        svc = self.start(profile_dirs=listing, signin_reader=lambda one: signin.Status(
+            "signed_in", None), signer_out=lambda one: None, account_remover=remover)
+        svc.poll_sessions()
+        numbers = self.store.with_name(guest.NUMBERS_FILE)
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "b-zq2": 2})
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(account_remove.RemoveFailed):
+                svc.remove_account("b-zq2", "b-zq2")
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "b-zq2": 2})
+        listing.failing = False
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc)[0], ["Account 1", "Account 2"])
+
+    def test_a_removed_profiles_label_ends_when_the_profile_holding_its_account_leaves_it(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        svc._fold(svc.log.append([signed_in_row("a-zq1", "elsewhere-zq@corp-zq.invalid")]))
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": None}))
+
+    def test_a_profiles_directory_that_cannot_be_read_does_not_end_the_numbering(self):
+        self.seed()
+        a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
+        for path in (a, c):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+
+        class Listing(list):
+            readable = True
+
+            def __iter__(self):
+                if not self.readable:
+                    raise PermissionError(errno.EACCES, "denied")
+                return super().__iter__()
+
+        dirs = Listing([a, c])
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        numbers = self.store.with_name(guest.NUMBERS_FILE)
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "c-zq3": 2})
+        dirs.readable = False
+        svc.poll_sessions()
+        self.assertEqual(guest.read_numbers(numbers), {"a-zq1": 1, "c-zq3": 2})
+        dirs.readable = True
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc)[0], ["Account 1", "Account 2"])
+
+    def unreadable_listing(self, *paths):
+        class Listing(list):
+            readable = True
+
+            def __iter__(self):
+                if not self.readable:
+                    raise PermissionError(errno.EACCES, "denied")
+                return super().__iter__()
+
+        return Listing(paths)
+
+    def test_a_profiles_directory_that_cannot_be_read_is_named_once_until_it_reads_again(self):
+        self.seed()
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        dirs = self.unreadable_listing(a)
+        svc = self.start(profile_dirs=dirs)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.poll_sessions()
+            dirs.readable = False
+            svc.poll_sessions()
+            svc.poll_sessions()
+            dirs.readable = True
+            svc.poll_sessions()
+            dirs.readable = False
+            svc.poll_sessions()
+        self.assertEqual(
+            err.getvalue().splitlines(),
+            ["console: profiles_unlistable PermissionError: [Errno 13] denied"] * 2)
+
+    def test_a_pin_is_refused_for_a_removed_profile_while_the_directory_cannot_be_read(self):
+        self.seed()
+        a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
+        for path in (a, c):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+        dirs = self.unreadable_listing(a, c)
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(c)
+        dirs.readable = False
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(pin.Refused):
+                svc.set_pin("c-zq3", True)
+
+    def test_numbers_that_cannot_be_written_are_named_once_until_they_are_written(self):
+        self.seed()
+        path = self.store.with_name(guest.NUMBERS_FILE)
+        path.mkdir(parents=True)
+        a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
+        for folder in (a, c):
+            folder.mkdir(parents=True)
+            support.sign_in(self.store, folder.name)
+        dirs = [a]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc = self.start(profile_dirs=dirs)
+            svc.poll_sessions()
+            svc.poll_sessions()
+            path.rmdir()
+            dirs.append(c)
+            svc.poll_sessions()
+            self.assertEqual(guest.read_numbers(path), {"a-zq1": 1, "c-zq3": 2})
+            path.unlink()
+            path.mkdir()
+            dirs.remove(c)
+            svc.poll_sessions()
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            self.assertRegex(line, r"^console: numbers_unwritten \w+Error: ")
+
+    def test_a_running_sprints_label_survives_its_profile_leaving_and_a_restart(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        svc.close()
+        again = self.start(profile_dirs=[a])
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1"], {"s-p01": "Account 1"}))
+
+    def test_a_profile_name_given_to_another_account_does_not_move_a_running_sprints_label(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        svc._fold(svc.log.append([signed_in_row("b-zq2", "other-zq@corp-zq.invalid")]))
+        dirs.append(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc),
+                         (["Account 1", "Account 2"], {"s-p01": "Account 1"}))
+
+    def test_a_profiles_directory_that_cannot_be_listed_is_not_an_empty_one(self):
+        accounts = self.root / "accounts"
+        with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+            self.assertEqual(service.default_profile_dirs(), [])
+            (accounts / "profiles/a-zq1").mkdir(parents=True)
+            self.assertEqual(service.default_profile_dirs(), [accounts / "profiles/a-zq1"])
+            with mock.patch("os.scandir", side_effect=PermissionError(errno.EACCES, "denied")):
+                with self.assertRaises(OSError):
+                    service.default_profile_dirs()
+
+    def test_removing_the_last_profile_ends_its_numbering(self):
+        self.seed()
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "a-zq1", "session_name": "m-p01"})])
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        dirs = [a]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        dirs.clear()
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), ([], {"s-p01": None}))
+        self.assertEqual(guest.read_numbers(self.store.with_name(guest.NUMBERS_FILE)), {})
 
 
 class DoorTest(GuestCase):

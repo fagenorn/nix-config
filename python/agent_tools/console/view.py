@@ -7,7 +7,8 @@ orders and folds the state into the wire view; `encode_view` renders it as one
 line of JSON.
 
 Events: `project.registered` (payload `{"root": ...}`) sets a project, keeping
-its open work; `project.unregistered` removes it; a project question's asked or answered event
+its open work; `project.unregistered` (payload `{"root": ...}`, the root the registry
+no longer holds, #1334) removes it; a project question's asked or answered event
 (#1178) changes nothing, so a question or follow-up neither reorders projects nor resets a
 project's untouched age; any other event that names a
 project updates only that project's last sequence and time; an event naming no
@@ -1141,7 +1142,7 @@ def registry_changes(
         for project_id, root in sorted(wanted.items())
         if project_id not in states or states[project_id].root != root
     ]
-    changes.extend((UNREGISTERED, project_id, {})
+    changes.extend((UNREGISTERED, project_id, {"root": states[project_id].root})
                    for project_id in sorted(states) if project_id not in wanted)
     return changes
 

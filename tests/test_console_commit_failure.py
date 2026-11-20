@@ -13,6 +13,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -280,6 +281,160 @@ class DraftedEnvironmentTest(CommitFailureCase):
         self.assertEqual(card["lines"], ["hook config missing"])
         self.assertFalse((self.parent / "devenv-calls").exists())
         self.assertFalse((self.parent / "hook-passed").exists())
+
+
+class ReconciledEnvironmentTest(CommitFailureCase):
+    """An adopted devenv checkout whose installed hook finds its runner only in the shell reconciles through it (#1333)."""
+
+    LINE = "commits run in its development shell: devenv shell (found in its files)"
+
+    def arrange(self, *, devenv: bool, on_plain_path: bool = False,
+                own_environment: bool = False) -> None:
+        contract = json.loads((ROOT / register_check.CONTRACT_SOURCE).read_text("utf-8"))
+        contract["bindings"]["vcs"]["commit"]["signed"] = False
+        contract["bindings"]["commands"]["nix-build"]["argv"] = ["true"]
+        envbin = self.parent / "envbin"
+        envbin.mkdir()
+        if own_environment:
+            contract["bindings"]["commands"]["dev-shell"] = {
+                "argv": ["sh", "-c", f"PATH='{envbin}':\"$PATH\" exec \"$@\"", "dev-shell"],
+                "cwd": ".", "env": []}
+            contract["bindings"]["vcs"]["commit"]["environment"] = "dev-shell"
+        source = self.parent / "contract.json"
+        source.write_text(json.dumps(contract), "utf-8")
+        self.repo = register_check.adopted_repository(self.parent / "approve", SLUG, source)
+        for name, text in ((".claude/odd.md", "# odd\n"), (".claude/specs/a.md", "# a\n")):
+            (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / name).write_text(text)
+        if devenv:
+            (self.repo / "devenv.nix").write_text("{ ... }: { }\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "legacy")
+        common = Path(git(self.repo, "rev-parse", "--path-format=absolute",
+                          "--git-common-dir").strip())
+        (common / "hooks").mkdir(exist_ok=True)
+        hook = common / "hooks" / "pre-commit"
+        hook.write_text(support.PREK_HOOK.format(
+            prek=str(self.parent / "gone-store" / "bin" / "prek")))
+        hook.chmod(0o755)
+        prek = envbin / "prek"
+        prek.write_text(f"#!/bin/sh\nprintf 'passed\\n' > '{self.parent / 'hook-passed'}'\nexit 0\n")
+        prek.chmod(0o755)
+        (self.parent / "bin").mkdir()
+        stub = self.parent / "bin" / "devenv"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f"echo \"$*\" >> '{self.parent / 'devenv-calls'}'\n"
+            "if [ \"$1\" != shell ] || [ \"$2\" != -- ]; then exit 64; fi\n"
+            "shift 2\n"
+            f"PATH=\"{envbin}:$PATH\" exec \"$@\"\n")
+        stub.chmod(0o755)
+        tools = self.parent / "tools"
+        tools.mkdir()
+        for name in ("sh", "env", "git", "dirname", "true"):
+            (tools / name).symlink_to(shutil.which(name))
+        needed = [entry["argv"][0] for entry in contract["bindings"]["commands"].values()]
+        for name in [contract["bindings"]["tracker"]["cli"], *needed]:
+            if not (tools / name).exists():
+                (tools / name).write_text("#!/bin/sh\nexit 0\n")
+                (tools / name).chmod(0o755)
+        saved = os.environ["PATH"]
+        added = [str(self.parent / "bin")] + ([str(envbin)] if on_plain_path else [])
+        os.environ["PATH"] = os.pathsep.join([*added, str(tools)])
+        self.addCleanup(os.environ.__setitem__, "PATH", saved)
+        self.start(register.Adopter(), pusher=approve.push, slug_of=lambda root: SLUG)
+        self.shown = self.become_ready()
+
+    def stored_plan(self, plan_id: str) -> dict:
+        path = self.home / ".agents/state/adopt/plans" / (plan_id.partition(":")[2] + ".json")
+        return json.loads(path.read_text("utf-8"))["plan"]
+
+    def proposal_lines(self, card) -> list[str]:
+        return [x for x in card["lines"] if x.startswith("commits run in its development shell")]
+
+    def test_an_adopted_devenv_checkout_whose_hook_runner_is_only_in_its_shell_reconciles_through_it(self):
+        self.arrange(devenv=True)
+        (card,) = self.apply_cards()
+        self.assertEqual(card["lines"][0], self.LINE)
+        plan = self.stored_plan(self.shown["plan_id"])
+        self.assertEqual(plan["commit_environment"], ["devenv", "shell", "--"])
+        self.assertEqual(plan["outcome"], "reconcile")
+        self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        self.assertEqual(self.steps(), ["applied", "opened"])
+        calls = (self.parent / "devenv-calls").read_text().splitlines()
+        self.assertTrue(calls[0].startswith("shell -- env GIT_TRACE2_EVENT="), calls[0])
+        self.assertEqual((self.parent / "hook-passed").read_text(), "passed\n")
+        branch = self.view()["registration"]["adoption"]["branch"]
+        shipped = json.loads(git(self.repo, "show", f"{branch}:.agents/project.json"))
+        self.assertEqual(shipped["bindings"]["vcs"]["commit"]["environment"], "commit-environment")
+        self.assertEqual(shipped["bindings"]["commands"]["commit-environment"]["argv"],
+                         ["devenv", "shell", "--"])
+        refs = git(self.repo.parent / "origin.git", "for-each-ref", "--format=%(refname)")
+        self.assertIn(f"refs/heads/{branch}", refs.splitlines())
+
+    def test_the_same_hook_without_devenv_fails_with_not_found_outside_the_environment(self):
+        self.arrange(devenv=False)
+        (card,) = self.apply_cards()
+        self.assertEqual(self.proposal_lines(card), [])
+        card = self.failed()
+        self.assertIn("pre-commit hook", card["headline"])
+        self.assertTrue(any(line.endswith("exec: prek: not found") for line in card["lines"]),
+                        card["lines"])
+        self.assertFalse((self.parent / "devenv-calls").exists())
+        self.assertFalse((self.parent / "hook-passed").exists())
+
+    def host_prek(self) -> Path:
+        """A `prek` on the PATH the test process starts with, as a developer's machine can have."""
+        host = self.parent / "host"
+        host.mkdir()
+        marker = self.parent / "host-prek-ran"
+        (host / "prek").write_text(f"#!/bin/sh\nprintf 'host\\n' > '{marker}'\nexit 0\n")
+        (host / "prek").chmod(0o755)
+        saved = os.environ["PATH"]
+        os.environ["PATH"] = os.pathsep.join([str(host), saved])
+        self.addCleanup(os.environ.__setitem__, "PATH", saved)
+        return marker
+
+    def test_a_prek_on_the_host_path_does_not_hide_the_proposal(self):
+        marker = self.host_prek()
+        self.arrange(devenv=True)
+        (card,) = self.apply_cards()
+        self.assertEqual(card["lines"][0], self.LINE)
+        self.assertFalse(marker.exists())
+
+    def test_a_prek_on_the_host_path_is_not_run_by_the_negative_control(self):
+        marker = self.host_prek()
+        self.arrange(devenv=False)
+        (card,) = self.apply_cards()
+        self.assertEqual(self.proposal_lines(card), [])
+        card = self.failed()
+        self.assertTrue(any(line.endswith("exec: prek: not found") for line in card["lines"]),
+                        card["lines"])
+        self.assertFalse(marker.exists())
+
+    def test_a_contract_that_names_its_own_commit_environment_keeps_it(self):
+        self.arrange(devenv=True, own_environment=True)
+        (card,) = self.apply_cards()
+        self.assertEqual(self.proposal_lines(card), [])
+        self.assertNotIn("commit_environment", self.stored_plan(self.shown["plan_id"]))
+        self.assertIsNone(self.view()["registration"]["draft"])
+        self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        self.assertEqual(self.steps(), ["applied", "opened"])
+        self.assertTrue((self.parent / "hook-passed").exists())
+        self.assertFalse((self.parent / "devenv-calls").exists())
+        branch = self.view()["registration"]["adoption"]["branch"]
+        shipped = json.loads(git(self.repo, "show", f"{branch}:.agents/project.json"))
+        self.assertEqual(shipped["bindings"]["vcs"]["commit"]["environment"], "dev-shell")
+
+    def test_a_hook_whose_runner_is_on_the_plain_path_plans_as_today(self):
+        self.arrange(devenv=True, on_plain_path=True)
+        (card,) = self.apply_cards()
+        self.assertEqual(self.proposal_lines(card), [])
+        self.assertNotIn("commit_environment", self.stored_plan(self.shown["plan_id"]))
+        self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        self.assertEqual(self.steps(), ["applied", "opened"])
+        self.assertTrue((self.parent / "hook-passed").exists())
+        self.assertFalse((self.parent / "devenv-calls").exists())
 
 
 class CancelUntilShownTest(CancelChecks, CommitFailureCase):

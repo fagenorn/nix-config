@@ -201,7 +201,11 @@ class CancelledRegistrationTest(unittest.TestCase):
         self.assertEqual(event_log.cancelled_registration(event(**exact)), ("/x/r", "P"))
         self.assertEqual(event_log.cancelled_registration(event(**{**exact, "plan_id": None})),
                          ("/x/r", None))
+        self.assertEqual(event_log.cancelled_registration(event(**exact, restore=True)),
+                         ("/x/r", "P"))
         for name, bad in (
+                ("restore false", event(**exact, restore=False)),
+                ("restore a number", event(**exact, restore=1)),
                 ("no plan id", event(by="owner", root="/x/r")),
                 ("extra member", event(**exact, more=1)),
                 ("another by", event(**{**exact, "by": "page"})),

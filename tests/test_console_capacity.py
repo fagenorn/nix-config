@@ -117,6 +117,25 @@ class ProfileCapacityTest(unittest.TestCase):
             windows={"5h": window("rejected", 1.0, T + 50), "7d": window("rejected", 1.0, T + 200)}))
         self.assertEqual(profile_capacity("work", both, T)["out_until"], iso(T + 200))
 
+    def test_an_out_window_with_no_known_reset_leaves_the_return_unknown(self):
+        both = reading_of(report(windows={
+            "7d": window("rejected", 1.0, None), "5h": window("rejected", 1.0, T + 100)}))
+        for now in (T, T + 100, T + 500):
+            with self.subTest(now=now):
+                result = profile_capacity("work", both, now)
+                self.assertEqual(result["state"], "out")
+                self.assertIsNone(result["out_until"])
+
+    def test_a_refusal_whose_own_reset_is_unknown_leaves_the_return_unknown(self):
+        refused = reading_of(report(
+            http_status=429, status="rejected", reset=None, binding="5h",
+            windows={"7d": window("rejected", 1.0, T + 100)}))
+        for now in (T, T + 50):
+            with self.subTest(now=now):
+                result = profile_capacity("work", refused, now)
+                self.assertEqual(result["state"], "out")
+                self.assertIsNone(result["out_until"])
+
     def test_a_window_without_its_own_reset_uses_the_top_level_reset(self):
         refused = reading_of(report(
             http_status=429, status="rejected", binding="7d", claim="seven_day", reset=T + 100,
@@ -151,7 +170,40 @@ class ProfileCapacityTest(unittest.TestCase):
     def test_no_reading_is_unknown(self):
         self.assertEqual(profile_capacity("idle", None, T), {
             "profile": "idle", "state": "unknown", "week_left": None, "five_hour_left": None,
+            "week_reset": None, "five_hour_reset": None,
             "next_reset": None, "out_until": None, "read_at": None})
+
+    def test_each_window_reports_its_own_reset_while_ahead(self):
+        r = open_reading()
+        table = [
+            (T, (iso(T + 3600), iso(T + 600))),
+            (T + 600, (iso(T + 3600), None)),
+            (T + 3600, (None, None)),
+        ]
+        for now, expected in table:
+            with self.subTest(now=now):
+                result = profile_capacity("work", r, now)
+                self.assertEqual((result["week_reset"], result["five_hour_reset"]), expected)
+
+    def test_a_window_without_its_own_reset_reports_the_readings_reset(self):
+        r = reading_of(report(reset=T + 900, windows={"7d": window("allowed", 0.3, None)}))
+        result = profile_capacity("work", r, T)
+        self.assertEqual(result["week_reset"], iso(T + 900))
+        self.assertIsNone(result["five_hour_reset"])
+
+    def test_a_shared_account_entry_carries_the_newest_readings_resets(self):
+        state = CapacityState({
+            "p1": reading_of(report(reset=T + 3600, windows={"7d": window("allowed", 0.4, T + 3600)}),
+                             "p1", 2, "t2"),
+            "p2": reading_of(report(reset=T + 50, windows={"7d": window("allowed", 0.1, T + 50)}),
+                             "p2", 1, "t1"),
+        }, {})
+        signins = {"p1": SignIn("signed_in", None, "t", True, "a@example.invalid"),
+                   "p2": SignIn("signed_in", None, "t", True, "a@example.invalid")}
+        view = capacity_view(["p1", "p2"], state, T, signins)
+        for entry in view["profiles"]:
+            with self.subTest(profile=entry["profile"]):
+                self.assertEqual(entry["week_reset"], iso(T + 3600))
 
 
 class ReportTest(unittest.TestCase):

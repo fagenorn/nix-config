@@ -639,14 +639,14 @@ class SprintCommandTest(Case):
                          "--closing-file", "-", "--port", self.port(svc),
                          stdin=json.dumps(CLOSING))
         self.assertEqual((got.returncode, got.stderr), (0, ""))
-        self.assertEqual(json.loads(self.notices(svc, b).stdout), {"notices": []})
+        self.assertEqual(json.loads(self.notices(svc, b).stdout), {"notices": [], "overlaps": []})
 
     def test_a_sprint_of_another_project_never_sees_the_notice(self):
         svc = self.open()
         a = self.goal(svc)
         c = svc.state_goal("owner/p00", "make the importer resumable")
         self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
-        self.assertEqual(json.loads(self.notices(svc, c).stdout), {"notices": []})
+        self.assertEqual(json.loads(self.notices(svc, c).stdout), {"notices": [], "overlaps": []})
 
     def test_withdraw_notice_removes_its_own_and_refuses_anothers_or_an_ended_one(self):
         svc = self.open()
@@ -1060,12 +1060,32 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)
 
-    def test_the_contract_requires_owner_only_on_a_permission_escalation(self):
+    def test_the_contract_requires_owner_only_on_a_go_ahead_and_leaves_a_design_choice_to_the_starter(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
-        self.assertIn("`owner_only`: required `true` on a question that escalates a permission, "
-                      "overlaps another sprint's claim or asks for a release, paid or production "
-                      "decision, otherwise optional", text)
-        self.assertIn("a colleague who started the sprint cannot answer it", text)
+        (line,) = [part for part in text.split("- `") if part.startswith("owner_only`")]
+        for action in ("run a release", "run a production step", "spend money",
+                       "escalate a permission", "proceed over another sprint's claim"):
+            with self.subTest(action):
+                self.assertIn(action, line)
+        self.assertIn("required `true` on a question whose answer is itself the go-ahead for an "
+                      "action", line)
+        self.assertIn("A question that only chooses what to build is the starter's to answer, "
+                      "even when the thing built is for production", line)
+        self.assertIn("a colleague who started the sprint cannot answer it", line)
+        self.assertNotIn("asks for a release, paid or production decision", line)
+
+    def test_the_contract_splits_the_starters_design_choices_from_the_owners_go_aheads(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertIn("2. Bring every real choice in one round, a design choice for the sprint's "
+                      "starter to answer and a go-ahead (see `owner_only`) for the owner:", text)
+        self.assertNotIn("Bring every real choice, one only the owner can make", text)
+
+    def test_the_contract_tells_a_manager_to_attach_unpaired_pictures_to_a_design_choice(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        self.assertIn("On a design choice for the starter (which layout to build), attach unpaired "
+                      "pictures, with no `pair`: a question carrying both a `before` and an `after` "
+                      "picture is an owner's look and a colleague who started the sprint cannot "
+                      "answer it. Reserve `pair` for the owner's review before a merge.", text)
 
     def test_the_contract_does_not_say_the_owner_stated_every_goal(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
@@ -1146,7 +1166,7 @@ class ManagerContractTest(unittest.TestCase):
 
         wanted = {
             "Notices": ("Check each slice against the open claims of other sprints",
-                        "send the owner a question card with `sprint ask` naming the overlap",
+                        "Only an overlap the rule cannot settle goes to the owner",
                         "never the owner's permission or approval",
                         "Post a `claim`", "a `heads-up` before", "a `hand-off` when",
                         "Withdraw a notice", "as soon as it no longer holds",
@@ -1162,6 +1182,22 @@ class ManagerContractTest(unittest.TestCase):
                 with self.subTest(name, needle=needle):
                     self.assertIn(needle, section(name))
         self.assertEqual(text.count("## Notices"), 1)
+
+    def test_the_contract_states_the_four_claim_rules(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        section = text.partition("## Notices")[2].partition(" ## ")[0]
+        for needle in ("names files or a narrow path, never a whole folder tree",
+                       "ends when its slice lands",
+                       "check the work already in delivery", "never claim over it",
+                       "`in-progress`",
+                       "a fix of a live fault outranks a feature",
+                       "otherwise the earlier-started slice lands first",
+                       "the slice that lands second rebases", "no question card",
+                       "Only an overlap the rule cannot settle goes to the owner",
+                       "`issue`", "`live_fault`", "`overlaps`", "`asks`"):
+            with self.subTest(needle):
+                self.assertIn(needle, section)
+        self.assertNotIn("the later slice rebases", section)
 
     def test_contract_sends_no_request(self):
         out = StringIO()

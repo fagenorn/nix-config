@@ -88,7 +88,9 @@ the page refuses that option until the owner writes what to change, the console 
 (`NEEDS_WORDS_SHAPE`) and the command sends it as given.
 
 `owner_only` is optional and, when given, must be `true`: it marks a question only the console's owner
-answers, never a colleague who started the sprint (`OWNER_ONLY_SHAPE`); the command sends it as given.
+answers, never a colleague who started the sprint (`OWNER_ONLY_SHAPE`); the command sends it as given. The
+manager contract requires it on a question whose answer is itself a go-ahead (a release, a production step,
+spend, a permission escalation, proceeding over another sprint's claim), never on a design choice.
 
 `replaces` is optional: it names one open question of this sprint by its round id and its index (from 0,
 in the order the round was sent), and the console takes that question back in the write that
@@ -132,7 +134,8 @@ object is exit 2 with no request sent; a 200 answer without an integer `notice` 
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as returned, one JSON line `{"notices":
-[...]}` of the open notices of the sprint's project, oldest first, and exit 0.
+[...], "overlaps": [...]}`: the open notices of the sprint's project, oldest first, and the console's
+reading of the claims that overlap, and exit 0.
 
 `sprint withdraw-notice` reads the secret the same way and sends `POST /api/withdraw-notice` with
 `{"sprint_id", "secret", "notice"}`, no `Origin`, for the notice `--notice` (an integer of at least
