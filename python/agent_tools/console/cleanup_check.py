@@ -40,7 +40,8 @@ Output and exits, one JSON line with sorted keys, and no file written. 0 met
 `{"names", "profiles", "status": "met"}` (the profiles read); 1 not met `{"left", "status":
 "not_met"}`; 75 not yet: `{"check", "check_exit", "status": "waiting"}`, `{"status":
 "no_profiles"}` (met is never reported without reading a listing) or `{"profile", "reason",
-"status": "no_listing"}` (`nudge.ListingUnreadable`); 2 a usage error. The seams of `main` are
+"status": "no_listing"}` (`nudge.ListingUnreadable`, or `profile` `profiles` when the profile
+directories cannot be listed); 2 a usage error. The seams of `main` are
 `run_check`, `lister` and `profiles`.
 """
 
@@ -112,7 +113,13 @@ def main(argv=None, *, run_check=default_run_check, lister=nudge.read_full_entri
             return NOT_YET
         cleared.append(found)
     names = sorted({n for found in cleared for n in found["names"] if isinstance(n, str)})
-    to_read = sorted({*profiles(), *(p for found in cleared for p in found["profiles"]
+    try:
+        configured = profiles()
+    except OSError as error:
+        manager_check._print({"profile": "profiles", "reason": f"{type(error).__name__}: {error}",
+                              "status": "no_listing"})
+        return NOT_YET
+    to_read = sorted({*configured, *(p for found in cleared for p in found["profiles"]
                                      if isinstance(p, str))})
     if not to_read:
         manager_check._print({"status": "no_profiles"})

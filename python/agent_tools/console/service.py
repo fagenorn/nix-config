@@ -1853,7 +1853,9 @@ def default_profile_dirs() -> list[Path]:
     """Every account's config directory: each directory of `profiles/`.
 
     The unprofiled `~/.claude` is not an account (#1016). A missing `profiles/` is no accounts; one
-    that cannot be listed raises `OSError`, which is not the same thing (`glob` would hide it).
+    that cannot be listed raises `OSError`, which is not the same thing (`glob` would hide it), so a
+    caller decides what an unlistable folder means for it: the service names it on stderr and keeps
+    its last reading, `register_check` names what it could not clean, and `cleanup_check` is not yet.
     """
     home = Path.home()
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
@@ -3824,9 +3826,9 @@ class ConsoleService:
         self._capacity = capacity.CapacityState({}, {})
         self._numbers_path = Path(store).with_name(guest.NUMBERS_FILE)
         self._account_numbers = guest.read_numbers(self._numbers_path)
-        self._numbers_saved: dict[str, int] = dict(self._account_numbers)
+        self._retired_numbers = guest.read_retired(self._numbers_path)
+        self._numbers_saved = (dict(self._account_numbers), dict(self._retired_numbers))
         self._numbers_established: dict[str, str] = {}
-        self._retired_numbers: dict[str, tuple[int, str]] = {}
         self._profiles_read = False
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
@@ -4254,10 +4256,14 @@ class ConsoleService:
         the last numbers written (ADR-console-086). A view that lists no profile before the profiles are
         first read leaves them as they are, so a restart does not forget them; once they are read, an
         empty list is a confirmed empty pool and ends the numbering, but a failed read of the profiles
-        directory is not a list (`_scan_profiles`) and leaves them as they are. A removed profile's
-        number is kept in memory, with the address it had, while a profile still on that address
-        holds the number, so a sprint still running on it keeps its account label and a number given
-        to another account never does.
+        directory is not a list (`_scan_profiles`) and leaves them as they are. The number of a
+        removed profile that a sprint still runs on is kept for that sprint, with the address the
+        profile had, while a profile still on that address holds the number, so the sprint keeps
+        its account label and a number given to another account never labels it. It is kept in
+        `account-numbers.json` too, so a restart keeps the label, and by sprint, so a profile name
+        given to another account later does not move it. A write that fails and a profiles directory
+        that cannot be listed are each named once on stderr until the next good one (`numbers_unwritten`,
+        `profiles_unlistable`).
         """
         inputs = self._view_inputs()
         if inputs["capacity"]["profiles"] or self._profiles_read:
@@ -4267,22 +4273,28 @@ class ConsoleService:
             self._numbers_established = {
                 entry["profile"]: entry["account"] for entry in inputs["capacity"]["profiles"]
                 if entry["account"] is not None}
+            managers = guest.running_managers(self._sprints)
             gone = {**self._retired_numbers,
-                    **{name: (number, before[name])
-                       for name, number in self._account_numbers.items()
-                       if name not in numbers and name in before}}
+                    **{sprint_id: (self._account_numbers[name], before[name])
+                       for sprint_id, name in managers.items()
+                       if name not in numbers and name in self._account_numbers
+                       and name in before}}
             self._retired_numbers = {
-                name: (number, address) for name, (number, address) in gone.items()
-                if any(numbers[other] == number and now == address
-                       for other, now in self._numbers_established.items())}
+                sprint_id: (number, address) for sprint_id, (number, address) in gone.items()
+                if sprint_id in managers
+                and any(numbers[other] == number and now == address
+                        for other, now in self._numbers_established.items())}
             self._account_numbers = numbers
-        if self._account_numbers != self._numbers_saved:
+        if (self._account_numbers, self._retired_numbers) != self._numbers_saved:
             try:
-                guest.write_numbers(self._numbers_path, self._account_numbers)
-            except OSError:
-                pass
+                guest.write_numbers(self._numbers_path, self._account_numbers,
+                                    self._retired_numbers)
+            except OSError as error:
+                self._warn_once(
+                    "numbers", f"console: numbers_unwritten {type(error).__name__}: {error}")
             else:
-                self._numbers_saved = dict(self._account_numbers)
+                self._numbers_saved = (dict(self._account_numbers), dict(self._retired_numbers))
+                self._unreadable.discard("numbers")
         latest = self._registration
         apply_items = inputs["apply_items"]
         access = self._access
@@ -4308,9 +4320,10 @@ class ConsoleService:
         seen_pictures: dict[str, frozenset[str]] = {}
         if self._guest_server is not None and access.shared and name is not None:
             pool = guest.pool_view(inputs["capacity"], self._account_numbers)
-            running = guest.sprint_labels(self._sprints, guest.profile_labels(
-                {**{name: number for name, (number, _) in self._retired_numbers.items()},
-                 **self._account_numbers}))
+            running = guest.sprint_labels(
+                self._sprints, guest.profile_labels(self._account_numbers),
+                guest.profile_labels(
+                    {sprint_id: number for sprint_id, (number, _) in self._retired_numbers.items()}))
             for login, projects in access.colleagues.items():
                 derived = guest.mark_steer(
                     guest.scrub(derive_view(**guest.scoped(inputs, projects)), pool, running),
@@ -7593,8 +7606,9 @@ class ConsoleService:
                 self._sessions, observations, self._absent, self._repo_of, project_of)
             appended = self.log.append(changes)
             self._absent = absent
-            self._profiles, scanned = self._scan_profiles()
-            self._profiles_read = self._profiles_read or scanned
+            scanned = self._scan_profiles()
+            if scanned is not None:
+                self._profiles, self._profiles_read = scanned, True
             if appended:
                 self._fold(appended)
             self._publish()
@@ -7703,28 +7717,37 @@ class ConsoleService:
         self._choice = profile
         self._unreadable.discard("choice")
 
+    def _listed_dirs(self) -> list[Path] | None:
+        """The profile directories, None (one stderr line until the next good listing) when they cannot be listed."""
+        try:
+            found = list(self._profile_dirs())
+        except OSError as error:
+            self._warn_once(
+                "profiles", f"console: profiles_unlistable {type(error).__name__}: {error}")
+            return None
+        self._unreadable.discard("profiles")
+        return found
+
     def _dirs(self) -> list[Path]:
         """The profile directories, none when they cannot be listed."""
-        try:
-            return list(self._profile_dirs())
-        except OSError:
-            return []
+        return self._listed_dirs() or []
 
-    def _scan_profiles(self) -> tuple[frozenset[str], bool]:
-        """The accounts among the profile directories as they are now, and whether they were read.
+    def _scan_profiles(self) -> frozenset[str] | None:
+        """The accounts among the profile directories as they are now; None when they cannot be listed.
 
-        A directory that cannot be listed is not an empty one: the last accounts read stand in and
-        the flag is false, so the numbering is not ended by a read that failed.
+        A directory that cannot be listed is not an empty one: the numbering is not ended by a read
+        that failed, and `_read_profiles` answers no account rather than a stale one.
         """
-        try:
-            names = [sessions.account_name(d) for d in self._profile_dirs() if d.is_dir()]
-        except OSError:
-            return self._profiles, False
-        return frozenset(name for name in names if name is not None), True
+        found = self._listed_dirs()
+        if found is None:
+            return None
+        names = (sessions.account_name(d) for d in found if d.is_dir())
+        return frozenset(name for name in names if name is not None)
 
     def _read_profiles(self) -> frozenset[str]:
-        """The accounts among the profile directories as they are now."""
-        return self._scan_profiles()[0]
+        """The accounts among the profile directories as they are now; none when they cannot be listed."""
+        scanned = self._scan_profiles()
+        return frozenset() if scanned is None else scanned
 
     def _warn_once(self, key: str, line: str) -> None:
         """Print `line` unless `key` is already unreadable; `_unreadable` is cleared by a good read."""

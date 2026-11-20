@@ -954,6 +954,30 @@ class PoolTest(unittest.TestCase):
             path.mkdir()
             self.assertEqual(guest.read_numbers(path), {})
 
+    def test_the_numbers_file_keeps_the_label_a_running_sprint_holds_and_a_bad_one_reads_empty(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / guest.NUMBERS_FILE
+            self.assertEqual(guest.read_retired(path), {})
+            guest.write_numbers(path, {"a": 1}, {"s-1": (1, "h@corp.invalid")})
+            self.assertEqual(guest.read_numbers(path), {"a": 1})
+            self.assertEqual(guest.read_retired(path), {"s-1": (1, "h@corp.invalid")})
+            for retired in ('{"s": [0, "x"]}', '{"s": [1]}', '{"s": [1, 2]}', '{"s": 1}',
+                            '{"s": [true, "x"]}', '[]'):
+                with self.subTest(retired=retired):
+                    path.write_text('{"numbers": {"a": 1}, "retired": %s}' % retired)
+                    self.assertEqual((guest.read_numbers(path), guest.read_retired(path)), ({}, {}))
+
+    def test_a_retired_label_outranks_the_label_of_a_profile_that_took_the_name_since(self):
+        sprint = dataclasses.replace(guest_inputs()["sprints"]["s-p00"],
+                                     manager=Manager(STARTED, at(5), "b", "m"))
+        other = dataclasses.replace(sprint, manager=Manager(STARTED, at(6), "b", "m2"))
+        labels = guest.profile_labels({"b": 2})
+        self.assertEqual(guest.sprint_labels({"old": sprint, "new": other}, labels,
+                                             {"old": "Account 1"}),
+                         {"old": "Account 1", "new": "Account 2"})
+        self.assertEqual(guest.sprint_labels({"old": sprint}, {}, {"old": "Account 1"}),
+                         {"old": "Account 1"})
+
 
 class DoorTest(unittest.TestCase):
     def test_the_door_refusal_table(self):

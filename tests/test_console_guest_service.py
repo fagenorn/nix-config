@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import (
-    capacity, console, guest, peer, serve_probe_check, service, signin, write_guard)
+    capacity, console, guest, peer, pin, serve_probe_check, service, signin, write_guard)
 from agent_tools.console.activation import Activation
 from agent_tools.console.event_log import (
     GOAL_STATED, MANAGER_STARTED, SHARING_COLLEAGUE, SHARING_TAILNET, EventLog)
@@ -745,6 +745,124 @@ class ScopedReadTest(GuestCase):
         dirs.readable = True
         svc.poll_sessions()
         self.assertEqual(self.labels(svc)[0], ["Account 1", "Account 2"])
+
+    def unreadable_listing(self, *paths):
+        class Listing(list):
+            readable = True
+
+            def __iter__(self):
+                if not self.readable:
+                    raise PermissionError(errno.EACCES, "denied")
+                return super().__iter__()
+
+        return Listing(paths)
+
+    def test_a_profiles_directory_that_cannot_be_read_is_named_once_until_it_reads_again(self):
+        self.seed()
+        a = self.root / "accounts/profiles/a-zq1"
+        a.mkdir(parents=True)
+        support.sign_in(self.store, "a-zq1")
+        dirs = self.unreadable_listing(a)
+        svc = self.start(profile_dirs=dirs)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.poll_sessions()
+            dirs.readable = False
+            svc.poll_sessions()
+            svc.poll_sessions()
+            dirs.readable = True
+            svc.poll_sessions()
+            dirs.readable = False
+            svc.poll_sessions()
+        self.assertEqual(
+            err.getvalue().splitlines(),
+            ["console: profiles_unlistable PermissionError: [Errno 13] denied"] * 2)
+
+    def test_a_pin_is_refused_for_a_removed_profile_while_the_directory_cannot_be_read(self):
+        self.seed()
+        a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
+        for path in (a, c):
+            path.mkdir(parents=True)
+            support.sign_in(self.store, path.name)
+        dirs = self.unreadable_listing(a, c)
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(c)
+        dirs.readable = False
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(pin.Refused):
+                svc.set_pin("c-zq3", True)
+
+    def test_numbers_that_cannot_be_written_are_named_once_until_they_are_written(self):
+        self.seed()
+        path = self.store.with_name(guest.NUMBERS_FILE)
+        path.mkdir(parents=True)
+        a, c = (self.root / "accounts/profiles" / name for name in ("a-zq1", "c-zq3"))
+        for folder in (a, c):
+            folder.mkdir(parents=True)
+            support.sign_in(self.store, folder.name)
+        dirs = [a]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc = self.start(profile_dirs=dirs)
+            svc.poll_sessions()
+            svc.poll_sessions()
+            path.rmdir()
+            dirs.append(c)
+            svc.poll_sessions()
+            self.assertEqual(guest.read_numbers(path), {"a-zq1": 1, "c-zq3": 2})
+            path.unlink()
+            path.mkdir()
+            dirs.remove(c)
+            svc.poll_sessions()
+        lines = err.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        for line in lines:
+            self.assertRegex(line, r"^console: numbers_unwritten \w+Error: ")
+
+    def test_a_running_sprints_label_survives_its_profile_leaving_and_a_restart(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc), (["Account 1"], {"s-p01": "Account 1"}))
+        svc.close()
+        again = self.start(profile_dirs=[a])
+        again.poll_sessions()
+        self.assertEqual(self.labels(again), (["Account 1"], {"s-p01": "Account 1"}))
+
+    def test_a_profile_name_given_to_another_account_does_not_move_a_running_sprints_label(self):
+        self.seed()
+        address = "shared-zq@corp-zq.invalid"
+        self.append([
+            (GOAL_STATED, "owner/p01", {"sprint_id": "s-p01", "goal": "own-goal-zq8"}),
+            (MANAGER_STARTED, "owner/p01",
+             {"sprint_id": "s-p01", "profile": "b-zq2", "session_name": "m-p01"}),
+            signed_in_row("a-zq1", address), signed_in_row("b-zq2", address)])
+        a, b = (self.root / "accounts/profiles" / name for name in ("a-zq1", "b-zq2"))
+        for path in (a, b):
+            path.mkdir(parents=True)
+        dirs = [a, b]
+        svc = self.start(profile_dirs=dirs)
+        svc.poll_sessions()
+        dirs.remove(b)
+        svc.poll_sessions()
+        svc._fold(svc.log.append([signed_in_row("b-zq2", "other-zq@corp-zq.invalid")]))
+        dirs.append(b)
+        svc.poll_sessions()
+        self.assertEqual(self.labels(svc),
+                         (["Account 1", "Account 2"], {"s-p01": "Account 1"}))
 
     def test_a_profiles_directory_that_cannot_be_listed_is_not_an_empty_one(self):
         accounts = self.root / "accounts"

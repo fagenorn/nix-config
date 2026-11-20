@@ -154,6 +154,19 @@ class CleanupCheckTest(unittest.TestCase):
             {"sessionId": "x", "name": "p sprint c"}, {"sessionId": "y"}]}
         self.assertEqual((1, {"left": ["p sprint c"], "status": "not_met"}), self.check())
 
+    def test_profile_directories_that_cannot_be_listed_are_not_yet(self):
+        self.all_fresh()
+        out = io.StringIO()
+        with mock.patch.object(cleanup_check.service, "default_profile_dirs",
+                               side_effect=PermissionError(13, "denied")), \
+                contextlib.redirect_stdout(out):
+            code = cleanup_check.main(["--project", PROJECT, "--checks-dir", str(self.dir)],
+                                      run_check=self.run_check, lister=self.lister)
+        self.assertEqual((code, json.loads(out.getvalue())),
+                         (75, {"profile": "profiles", "reason": "PermissionError: [Errno 13] denied",
+                               "status": "no_listing"}))
+        self.assertEqual(self.read, [])
+
     def test_an_unreadable_listing_is_not_yet(self):
         self.all_fresh()
         self.configured = ["default", "work"]

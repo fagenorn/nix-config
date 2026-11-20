@@ -2823,11 +2823,13 @@ function settledPool(pool) {
     if (sessionGone) { next.five_hour_left = 100; next.five_hour_reset = null; }
     const ahead = [next.week_reset, next.five_hour_reset].filter((stamp) => typeof stamp === "string").sort();
     next.next_reset = ahead.length ? ahead[0] : null;
+    // "reset, not yet used" needs every window to read full with no reset left: a window still part used keeps the account ok.
+    const unused = [next.week_left, next.five_hour_left].every((left) => left === null || left === 100);
     if (outGone) {
-      next.state = ahead.length ? "ok" : "reset";
+      next.state = ahead.length || !unused ? "ok" : "reset";
       next.out_until = null;
       if (row.in_use === true) freed = true;
-    } else if (row.state === "ok" && !ahead.length) {
+    } else if (row.state === "ok" && !ahead.length && unused) {
       next.state = "reset";
     }
     return next;
@@ -6106,7 +6108,10 @@ function renderPool(view) {
     word.appendChild(icon(mark));
     word.appendChild(el("span", "", pool.state));
     line.appendChild(word);
-    if (pool.state === "fine") line.appendChild(el("span", "", "The pool has room."));
+    if (pool.state === "fine") {
+      const room = pool.accounts.some((row) => row.in_use === true && (row.state === "ok" || row.state === "reset"));
+      line.appendChild(el("span", "", room ? "The pool has room." : "No account read so far has room."));
+    }
     else if (pool.state === "tight") line.appendChild(el("span", "", "The pool is tight: one account has room."));
     else if (typeof pool.resumes_at === "string") {
       line.appendChild(phrase("span", "", "Every account is out until ", timeEl("weekday", pool.resumes_at, ""), "."));

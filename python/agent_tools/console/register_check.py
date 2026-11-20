@@ -415,7 +415,13 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
             print(f"register_check: {type(error).__name__}", file=sys.stderr)
             leftovers.append("trust cards")
         key = os.path.realpath(root)
-        for _, path in folder_trust.targets(Path.home(), service.default_profile_dirs()):
+        try:
+            trusted = folder_trust.targets(Path.home(), service.default_profile_dirs())
+        except OSError as error:
+            print(f"register_check: {type(error).__name__}", file=sys.stderr)
+            leftovers.append("trust entries")
+            trusted = []
+        for _, path in trusted:
             try:
                 if folder_trust.remove_entry(path, key) == folder_trust.FAILED:
                     leftovers.append(str(path))

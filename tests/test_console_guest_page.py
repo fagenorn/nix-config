@@ -1047,6 +1047,37 @@ class GuestPoolTest(unittest.TestCase):
         self.assertEqual(full(span(one, "pool-week")), "100% of the week left")
         self.assertEqual(full(span(one, "pool-session")), "100% of the session left")
 
+    def test_a_session_reset_does_not_mark_an_account_unused_while_part_of_its_week_is_used(self) -> None:
+        clock = 2524608000000
+        ok = {"label": "Account 1", "state": "ok", "week_left": 40, "week_reset": None,
+              "five_hour_left": 60, "five_hour_reset": "2050-01-01T01:00:00+00:00",
+              "next_reset": "2050-01-01T01:00:00+00:00", "out_until": None, "in_use": True}
+        out = {"label": "Account 2", "state": "out", "week_left": 40, "week_reset": None,
+               "five_hour_left": 0, "five_hour_reset": "2050-01-01T01:00:00+00:00",
+               "next_reset": "2050-01-01T01:00:00+00:00", "out_until": "2050-01-01T01:00:00+00:00",
+               "in_use": True}
+        pool = {"state": "fine", "tight": False, "all_out": False, "resumes_at": None,
+                "no_reading": None, "accounts": [ok, out]}
+        _, late = harness([
+            {"start": {"focused": False, "clock": clock}}, {"frame": {**SCOPED, "pool": pool}}, SNAP,
+            {"clock": clock + 90 * 60000}, SNAP], GUEST)
+        for row in pool_rows(late):
+            with self.subTest(row=full(row)):
+                self.assertIsNone(span(row, "pool-status"))
+                self.assertEqual(full(span(row, "pool-week")), "40% of the week left")
+                self.assertEqual(full(span(row, "pool-session")), "100% of the session left")
+
+    def test_the_fine_line_claims_room_only_when_an_account_in_use_has_it(self) -> None:
+        unread = {**A3, "in_use": True}
+        base = {"state": "fine", "tight": False, "all_out": False, "resumes_at": None,
+                "no_reading": "1 with no reading yet"}
+        bare = pool_page({**base, "accounts": [A2, unread]})
+        roomy = pool_page({**base, "accounts": [A1, A2, unread]})
+        self.assertNotIn("The pool has room.", full(bare["pool"]))
+        self.assertIn("No account read so far has room.", full(bare["pool"]))
+        self.assertIn("The pool has room.", full(roomy["pool"]))
+        self.assertNotIn("No account read so far has room.", full(roomy["pool"]))
+
     def test_the_running_sprint_shows_its_account_on_the_guest_page_only(self) -> None:
         frame = with_sprints([{**SPRINT, "account_label": "Account 2"}])
         guest_page = page_of(GUEST, [START, {"frame": frame}])
