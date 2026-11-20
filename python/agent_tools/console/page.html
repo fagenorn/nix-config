@@ -1394,7 +1394,7 @@ async function mergeAdoption(item) {
   const key = item.key + "\n" + item.number + "\n" + item.commit;
   const current = adoptionMerges.get(key);
   if (current !== undefined && current.phase === "sending") return;
-  const state = { phase: "sending", reason: "", plan: item.key, name: item.project_id || item.name };
+  const state = { phase: "sending", reason: "", plan: item.key, number: item.number, commit: item.commit, name: item.project_id || item.name };
   adoptionMerges.set(key, state);
   redraw();
   let reason = null;
@@ -4889,7 +4889,7 @@ function drawInbox(view, guest = null) {
   const adoptions = open.filter(isAdoption);
   for (const item of adoptions) section.appendChild(adoptionCard(item));
   for (const [key, state] of adoptionMerges) {
-    if (state.phase === "failed" && !adoptions.some((item) => item.key === state.plan)) section.appendChild(adoptionNotice(key, state));
+    if (state.phase === "failed" && !adoptions.some((item) => item.key === state.plan && item.number === state.number && item.commit === state.commit)) section.appendChild(adoptionNotice(key, state));
   }
   for (const item of looks) section.appendChild(lookCard(item));
   if (briefs.length === 0 && tracked.length > 0) {

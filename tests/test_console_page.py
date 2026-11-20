@@ -9320,13 +9320,16 @@ class SigninPageTest(unittest.TestCase):
             {"frame": frame([MOVED_ITEM])}, {"snapshot": True}])
         self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")], [])
 
-    def test_a_replaced_pull_requests_card_shows_no_old_refusal(self) -> None:
+    def test_a_replaced_pull_requests_card_shows_no_old_refusal_and_a_notice_carries_it(self) -> None:
+        refusal = "this card is out of date; the page now shows the current one"
         (snap,) = render([
             START, {"frame": frame([ADOPTION_ITEM])},
-            {"respond": {"status": 409, "text": "no\n"}}, {"click": "adoption-merge"},
+            {"respond": {"status": 409, "text": refusal + "\n"}}, {"click": "adoption-merge"},
             {"frame": frame([{**ADOPTION_ITEM, "number": 8}])}, {"snapshot": True}])
         (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
         self.assertEqual(of_class(card, "span", "fail"), [])
+        (notice,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption-failed")]
+        self.assertIn(refusal, full(notice))
 
 
 LATER = [START, {"respond": {"status": 200, "text": ANSWER}},

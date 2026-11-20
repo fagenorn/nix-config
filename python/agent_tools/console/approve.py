@@ -15,8 +15,10 @@ None, dict(payload))` and raises `ValueError` unless the members are exactly `ST
 `kept`, `evidence`), `by` is `owner`, `plan_id` and `root` are non-empty strings, `step` is one of `STEPS`
 (`applied`, `apply_failed`, `push_failed`, `open_failed`, `opened`), `project_id`, `branch`,
 `commit`, `base`, `reason` and `note` are each a string or None, `pull_request` is None or exactly
-`{number, url}` or `{number, url, created}` (a positive int, not a bool, a string and a bool: whether
-the console made the pull request, absent in a row of an earlier release) and `kept` is None or exactly `{branch,
+`{number, url}`, `{number, url, created}` or `{number, url, created, id}` (a positive int, not a bool,
+a string, a bool: whether the console made the pull request, absent in a row of an earlier release, and
+the forge's own numeric id of that pull request, which a recycled repository name and number do not
+reuse; with no id Merge is not offered) and `kept` is None or exactly `{branch,
 worktree}` strings and `evidence` is None or exactly `{hook, why, lines}` (`hook` None or
 matching `HOOK`, `why` None or a string, `lines` a list of at most `EVIDENCE_LINES` strings of at
 most `LINE_CHARS` characters; a stored step without `evidence` reads as None, so rows of an earlier
@@ -273,6 +275,8 @@ NOT_READY_PULL = "the pull request is not ready to merge yet"
 MERGING = "the pull request of this plan is being merged"
 MERGED_ELSEWHERE = ("the pull request was merged on the forge with commits the console did not "
                     "push")
+MERGED_ELSEWHERE_BASE = ("the pull request was merged on the forge into a branch other than the "
+                         "one the console opened it against")
 MOVED_WHY = ("Its branch holds commits the console did not push. Review them on the forge and "
              "merge it there, or close it and choose Apply it again.")
 RETARGETED_WHY = ("Its target branch is no longer the one the console opened it against. Review it on "
@@ -409,9 +413,11 @@ def parse_merge_request(body: bytes) -> tuple[str, int, str]:
 
 def _valid_pull_request(value: object) -> bool:
     return (isinstance(value, dict) and set(value) in ({"number", "url"},
-                                                       {"number", "url", "created"})
+                                                       {"number", "url", "created"},
+                                                       {"number", "url", "created", "id"})
             and _positive(value["number"]) and isinstance(value["url"], str)
-            and isinstance(value.get("created", False), bool))
+            and isinstance(value.get("created", False), bool)
+            and (value.get("id") is None or _positive(value["id"])))
 
 
 def _valid_kept(value: object) -> bool:
@@ -653,7 +659,8 @@ def merge_refusal(adoption: Mapping | None) -> str | None:
         return MERGED
     if state == "closed":
         return CLOSED_PULL
-    if adoption["pull_request"].get("created") is not True:
+    if (adoption["pull_request"].get("created") is not True
+            or adoption["pull_request"].get("id") is None):
         return FOUND
     head = adoption["pull_head"]
     if head is None or adoption["pull_base"] is None:
@@ -1150,10 +1157,13 @@ def gh_json(argv: list[str], cancel: threading.Event | None = None, *,
         raise ForgeError("payload_invalid", "stdout is not JSON") from None
 
 
-def _pull_request(slug: str, number: object) -> dict | None:
+def _pull_request(slug: str, number: object, ident: object = None) -> dict | None:
     if not _positive(number):
         return None
-    return {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
+    pull = {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
+    if _positive(ident):
+        pull["id"] = ident
+    return pull
 
 
 def _str_or_none(value: object) -> str | None:
@@ -1174,7 +1184,7 @@ class GitHubForge:
             if (isinstance(found, dict) and isinstance(found.get("head"), dict)
                     and isinstance(found.get("base"), dict)
                     and found["head"].get("ref") == head and found["base"].get("ref") == base):
-                pull = _pull_request(slug, found.get("number"))
+                pull = _pull_request(slug, found.get("number"), found.get("id"))
                 if pull is not None:
                     return {**pull, "title": _str_or_none(found.get("title")),
                             "body": _str_or_none(found.get("body"))}
@@ -1185,7 +1195,8 @@ class GitHubForge:
         answer = self._gh_json(
             ["api", "-X", "POST", f"repos/{slug}/pulls", "-f", f"title={title}",
              "-f", f"head={head}", "-f", f"base={base}", "-f", f"body={body}"], cancel)
-        pull = _pull_request(slug, answer.get("number")) if isinstance(answer, dict) else None
+        pull = (_pull_request(slug, answer.get("number"), answer.get("id"))
+                if isinstance(answer, dict) else None)
         if pull is None:
             raise ForgeError("payload_invalid", "the pull request answer has no number")
         return pull
@@ -1199,7 +1210,9 @@ class GitHubForge:
         sha = sha if isinstance(sha, str) and COMMIT.fullmatch(sha) else None
         target = answer.get("base")
         target = target.get("ref") if isinstance(target, dict) else None
-        seen = {"head": sha, "base": target if _text(target) else None, "checks_error": None}
+        ident = answer.get("id")
+        seen = {"head": sha, "base": target if _text(target) else None, "checks_error": None,
+                "id": ident if _positive(ident) else None}
         if answer.get("merged") is True:
             return {"state": "merged", **seen}
         if answer.get("state") == "closed":
@@ -1209,7 +1222,8 @@ class GitHubForge:
         mergeable = answer.get("mergeable_state")
         if mergeable in READY_MERGEABLE:
             return {"state": "ready", **seen}
-        if mergeable in ("blocked", "behind", "dirty") and sha is not None:
+        if (mergeable in ("blocked", "behind", "dirty", "draft") or answer.get("draft") is True) \
+                and sha is not None:
             try:
                 if self._failed(slug, sha, cancel):
                     return {"state": "failing", **seen}

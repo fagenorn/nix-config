@@ -616,9 +616,11 @@ not made by the console, unread head, moved head, failing, not ready); the refus
 no pull request (a re-applied step) is computed before any slug is read. Then, still outside the
 ingest lock, one `forge.pull_request_reading` is taken (the forge's merge call pins only the head, so
 a pull request retargeted since the page polled would land the same commit elsewhere): it is
-recorded as a poll's reading is, and `approve.merge_refusal` of the folded adoption with that
-reading's state, head and target decides again (a failed read refuses `approve.merge_failure`, and a
-`merged` one also dispatches registration); the target can still move between that read and the
+recorded as a poll's reading is, and `approve.merge_refusal` of the refolded adoption decides again
+(a reading rejected as stale is never used: a reading that differs from the folded state refuses
+`approve.STALE_CARD`, one that names another forge id than the opened step recorded refuses
+`approve.FOUND`; a failed read refuses `approve.merge_failure`, and a recorded `merged` also dispatches
+registration); the target can still move between that read and the
 merge call, which the forge cannot pin. Otherwise
 `forge.merge_pull_request(slug, number, commit, cancel=<stop>)` runs outside the ingest lock with
 the folded commit, never a head the forge showed; `_merging` holds the plan id from the check until
@@ -631,7 +633,8 @@ line `console: adoption_register_dispatch_failed <Type>` and does not change the
 (any exception but `approve.Cancelled`, which refuses `register.STOPPING`) is first one line
 `console: adoption_merge_error <json>` (the plan, the number, the exception and, for a `ForgeError`,
 its code, detail and transience), then one `forge.pull_request_reading`, recorded as read, never as
-requested, and only while no other reading was recorded since it began (a `merged` one always): `merged` at the folded commit is success as above, `merged` at another head is 409
+requested, and only while no other reading was recorded since it began (a `merged` one always): `merged` at the folded commit and the adoption's base is success as above, `merged` into another branch is 409
+`approve.MERGED_ELSEWHERE_BASE`, a reading that names another forge id is `approve.merge_failure(error)`, `merged` at another head is 409
 `approve.MERGED_ELSEWHERE` (`merged` with no readable head is `approve.merge_failure(error)`) with
 `register_merged` still dispatched, any other reading refuses with `approve.merge_refusal` of the
 refolded adoption, else `approve.merge_failure(error)`; a failed re-read is one line `console:
@@ -5853,8 +5856,11 @@ class ConsoleService:
 
     @staticmethod
     def _recorded(pull: Mapping, created: bool) -> dict:
-        """The pull request as the opened step stores it: its link, and whether the console made it."""
-        return {"number": pull["number"], "url": pull["url"], "created": created}
+        """The pull request as the opened step stores it: its link, whether the console made it and the forge's id."""
+        recorded = {"number": pull["number"], "url": pull["url"], "created": created}
+        if "id" in pull:
+            recorded["id"] = pull["id"]
+        return recorded
 
     def remove_account(self, profile: str, typed: str) -> None:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.
@@ -8417,6 +8423,9 @@ class ConsoleService:
             found = self._adoptions.get(plan_id)
             if found is None:
                 return False
+            if (found["step"] == "opened" and found["pull_request"].get("id") is not None
+                    and "id" in reading and reading["id"] != found["pull_request"]["id"]):
+                return False
             state = reading["state"]
             if unread is not None and found["pull_state"] == "failing":
                 state = "failing"
@@ -8482,15 +8491,29 @@ class ConsoleService:
                   file=sys.stderr)
             raise sprints.Refused(approve.merge_failure(error)) from None
         self._record_reading(plan_id, number, reading, mark)
-        if reading["state"] == "merged":
-            self._dispatch_registration()
         with self._ingest:
             found = self._adoptions.get(plan_id)
-            refusal = (approve.NO_PULL if found is None else approve.merge_refusal(
-                {**found, "pull_state": reading["state"], "pull_head": reading["head"],
-                 "pull_base": reading["base"]}))
+            if found is None or found["step"] != "opened":
+                refusal = approve.NO_PULL
+            elif self._other_pull_request(found, reading):
+                refusal = approve.FOUND
+            else:
+                refusal = approve.merge_refusal(found)
+                if refusal is None and (found["pull_state"], found["pull_head"],
+                                        found["pull_base"]) != (
+                        reading["state"], reading["head"], reading["base"]):
+                    refusal = approve.STALE_CARD
+            merged = found is not None and found["pull_state"] == "merged"
+        if merged:
+            self._dispatch_registration()
         if refusal is not None:
             raise sprints.Refused(refusal)
+
+    @staticmethod
+    def _other_pull_request(found: Mapping, reading: Mapping) -> bool:
+        """Whether the forge's reading names another pull request than the one recorded (a reused name and number)."""
+        recorded = found["pull_request"].get("id")
+        return recorded is not None and reading["id"] != recorded
 
     def _merge_and_record(self, plan_id: str, number: int, commit: str, slug: str) -> None:
         self._read_before_merging(plan_id, number, commit, slug)
@@ -8533,12 +8556,20 @@ class ConsoleService:
                   file=sys.stderr)
             raise sprints.Refused(approve.merge_failure(error)) from None
         self._record_reading(plan_id, number, reading, mark)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if found is not None and found["step"] == "opened" and self._other_pull_request(
+                    found, reading):
+                raise sprints.Refused(approve.merge_failure(error))
+            targeted = None if found is None else found["base"]
         if reading["state"] == "merged":
-            if reading["head"] == commit:
+            if reading["head"] == commit and reading["base"] == targeted:
                 return
             self._dispatch_registration()
-            raise sprints.Refused(approve.MERGED_ELSEWHERE if reading["head"] is not None
-                                  else approve.merge_failure(error))
+            if reading["head"] is None or reading["base"] is None:
+                raise sprints.Refused(approve.merge_failure(error))
+            raise sprints.Refused(approve.MERGED_ELSEWHERE if reading["head"] != commit
+                                  else approve.MERGED_ELSEWHERE_BASE)
         with self._ingest:
             refusal = approve.merge_refusal(self._adoptions.get(plan_id))
         raise sprints.Refused(refusal if refusal is not None else approve.merge_failure(error))

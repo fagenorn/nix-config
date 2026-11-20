@@ -105,6 +105,11 @@ class StandInForge:
         self.reads = 0
         self.read_entered = threading.Event()
         self.before_merge = None
+        self.ids = {}
+
+    def ident(self, number):
+        """The forge's own id of a pull request: fixed by its number unless a test replaces it."""
+        return self.ids.get(number, 1000 + number)
 
     def find_pull_request(self, slug, head, base, cancel=None):
         self.calls.append(("find", slug, head, base))
@@ -117,7 +122,7 @@ class StandInForge:
             return None
         title, body = self.texts.get(number, (None, None))
         return {"number": number, "url": f"https://github.com/{slug}/pull/{number}",
-                "title": title, "body": body}
+                "title": title, "body": body, "id": self.ident(number)}
 
     def open_pull_request(self, slug, head, base, title, body, cancel=None):
         self.calls.append(("open", slug, head, base, title, body))
@@ -134,7 +139,8 @@ class StandInForge:
             (cancel or threading.Event()).wait(10)
             time.sleep(self.linger)
             raise approve.Cancelled()
-        return {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
+        return {"number": number, "url": f"https://github.com/{slug}/pull/{number}",
+                "id": self.ident(number)}
 
     def pull_request_state(self, slug, number, cancel=None):
         self.calls.append(("state", slug, number))
@@ -150,7 +156,7 @@ class StandInForge:
             raise found
         reading = {"state": found, "head": self.heads.get(number, COMMIT),
                    "base": self.bases.get(number, "develop"),
-                   "checks_error": self.unread.get(number)}
+                   "checks_error": self.unread.get(number), "id": self.ident(number)}
         self.reads += 1
         if self.read_pause is not None and self.reads > self.pause_after and not self.paused:
             self.paused = True
@@ -932,7 +938,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(shown["adoption"]["url"], URL)
         self.assertEqual(len(fake.applied), 1)
         self.assertEqual(self.svc._adoptions[PID_B]["pull_request"],
-                         {"number": 7, "url": URL, "created": False})
+                         {"number": 7, "url": URL, "created": False, "id": 1007})
 
     def test_a_pull_request_found_after_the_consoles_own_open_failed_is_the_consoles(self):
         self.forge.lost = [ForgeError("gh_timeout", "api")]
@@ -940,7 +946,7 @@ class PlanApproveRunTest(ApproveCase):
         self.run_approval("opened")
         self.assertEqual(len(self.opens()), 1)
         self.assertEqual(self.svc._adoptions[PID_B]["pull_request"],
-                         {"number": 7, "url": URL, "created": True})
+                         {"number": 7, "url": URL, "created": True, "id": 1007})
 
     def test_an_origin_that_is_not_on_github_opens_nothing(self):
         self.ready(apply_result=APPLIED)
@@ -1223,7 +1229,7 @@ class AdoptionMergeTest(ApproveCase):
         self.run_approval("opened")
         self.assertEqual(len(self.opens()), 1)
         self.assertEqual(self.svc._adoptions[PID_B]["pull_request"],
-                         {"number": 7, "url": URL, "created": False})
+                         {"number": 7, "url": URL, "created": False, "id": 1007})
         self.poll("ready")
         (item,) = self.items()
         self.assertEqual((item["merge"], item["why"]), (False, approve.FOUND_WHY))
@@ -1240,6 +1246,59 @@ class AdoptionMergeTest(ApproveCase):
                          ("ready", "release"))
         (item,) = self.items()
         self.assertEqual((item["merge"], item["why"]), (False, approve.RETARGETED_WHY))
+
+    def test_a_reading_rejected_as_stale_does_not_authorize_a_merge_into_the_old_branch(self):
+        self.opened()
+        self.poll("ready")
+        self.forge.read_pause = threading.Event()
+        self.forge.pause_after = self.forge.reads
+        answers = []
+        clicker = threading.Thread(target=lambda: answers.append(self.logged_merge()))
+        clicker.start()
+        self.assertTrue(self.forge.read_entered.wait(10))
+        self.assertTrue(self.svc._record_reading(
+            PID_B, 7, {"state": "ready", "head": COMMIT, "base": "release", "id": 1007}))
+        self.forge.read_pause.set()
+        clicker.join(30)
+        (((status, body), _),) = answers
+        self.assertEqual((status, body), (409, approve.RETARGETED.encode() + b"\n"))
+        self.assertEqual(self.merged_calls(), [])
+        self.assertEqual((self.last_pull()["state"], self.last_pull()["base"]),
+                         ("ready", "release"))
+
+    def test_a_replacement_repository_that_reuses_the_name_and_number_is_not_merged(self):
+        self.green()
+        self.poll("ready")
+        self.assertIs(self.items()[0]["merge"], True)
+        pulls = self.pulls()
+        self.forge.ids[7] = 5007
+        errors = self.refused_merge(approve.FOUND)
+        self.assertIn("console: adoption_merge_refused", errors)
+        self.poll("merged")
+        self.assertEqual(self.pulls(), pulls)
+        self.assertEqual(self.registrations(), [])
+
+    def test_a_pull_request_the_forge_gave_no_id_offers_no_merge(self):
+        self.opened()
+        with self.svc._ingest:
+            found = self.svc._adoptions[PID_B]
+            found["pull_request"] = {key: value for key, value in found["pull_request"].items()
+                                     if key != "id"}
+        self.poll("ready")
+        (item,) = self.items()
+        self.assertEqual((item["merge"], item["why"]), (False, approve.FOUND_WHY))
+        self.refused_merge(approve.FOUND)
+
+    def test_a_merge_recovered_into_another_branch_is_not_acknowledged(self):
+        self.green()
+        self.poll("ready")
+        self.forge.merge_raises = [ForgeError("gh_timeout", "api")]
+        self.forge.before_merge = lambda: (self.forge.states.update({7: "merged"}),
+                                           self.forge.bases.update({7: "release"}))
+        self.assertEqual(self.merge(), (409, approve.MERGED_ELSEWHERE_BASE.encode() + b"\n"))
+        self.assertEqual((self.last_pull()["state"], self.last_pull()["base"]),
+                         ("merged", "release"))
+        self.settled(1)
 
     def test_a_click_on_a_card_whose_step_was_applied_again_is_refused_in_words(self):
         self.opened()

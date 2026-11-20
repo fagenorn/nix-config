@@ -255,6 +255,7 @@ CLICKED_STATES = ("adoption-failed",)
 ADOPTION_BRANCH = "adopt-" + "5" * 12
 ADOPTION_COMMIT = "a" * 40
 ADOPTION_MOVED_HEAD = "d" * 40
+ADOPTION_PULL_ID = 1007
 ADOPTION_CARD = "#inbox .adoption"
 REGISTER_NAME = "sample-app"
 REGISTER_PLAN_ID = "sha256:" + "6" * 64
@@ -764,6 +765,7 @@ def _seed_adoption(seed: _Seed, state: str, root: str) -> None:
     pull = {"number": 7, "url": f"https://github.com/owner/{REGISTER_NAME}/pull/7"}
     if offers_merge():
         pull["created"] = True
+        pull["id"] = ADOPTION_PULL_ID
     seed.put(MINUTE, event_log.ADOPTION_STEP, None, {
         "by": "owner", "plan_id": REGISTER_PLAN_ID, "root": root, "project_id": f"owner/{REGISTER_NAME}",
         "step": "opened", "branch": ADOPTION_BRANCH, "commit": ADOPTION_COMMIT, "base": "main",
@@ -1109,8 +1111,10 @@ class _AdoptionForge:
 
     def pull_request_reading(self, slug, number, cancel=None) -> dict:
         if self._refused:
-            return {"state": "merged", "head": ADOPTION_MOVED_HEAD, "base": "main", "checks_error": None}
-        return {"state": "ready", "head": self._head, "base": "main", "checks_error": None}
+            return {"state": "merged", "head": ADOPTION_MOVED_HEAD, "base": "main", "checks_error": None,
+                    "id": ADOPTION_PULL_ID}
+        return {"state": "ready", "head": self._head, "base": "main", "checks_error": None,
+                "id": ADOPTION_PULL_ID}
 
     def merge_pull_request(self, slug, number, head, cancel=None) -> None:
         if not self._refuses:
