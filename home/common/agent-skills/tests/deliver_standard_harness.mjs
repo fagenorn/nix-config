@@ -51,6 +51,7 @@ const DEFAULTS = [
   [/^look-head$/, { head: SHA, state: 'OPEN', renew: { verdict: 'renewed' } }],
   [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
   [/^look-read$/, { verdict: 'approved', kept_from: null }],
+  [/^look-stale$/, { stale: [] }],
   [/^look-status$/, { verdict: 'needed', kept_from: null }],
   // #1246: the verification of an approved head; the fast-forward reached the head the prompt names.
   [/^look-verify$/, prompt => ({ head: (/merge --ff-only ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, clean: true, merge_only: true, ahead: false, results: [{ id: 'build', status: 'pass', summary: 'ok' }] })],
