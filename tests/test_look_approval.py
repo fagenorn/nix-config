@@ -212,15 +212,34 @@ class MarkedTest(unittest.TestCase):
         self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
         code, out = run(*self.MARKED)
         self.assertEqual((code, out), (0, {"command": "look-approval", "action": "marked", "repo": SLUG,
-                                           "issue": 7, "verdict": "marked", "covers": [WHAT]}))
+                                           "issue": 7, "verdict": "marked", "covers": [WHAT],
+                                           "acs": ["AC1"]}))
         self.assertEqual([call["argv"] for call in self.world.calls()], [ISSUE_ARGV])
+
+    def test_marked_names_the_criteria_of_the_marker_lines_by_their_place_in_the_issue(self):
+        """#1356: a plan may reword the look criterion, so the issue's own marker line is named by its AC id."""
+        body = ("## Problem\n\n- [ ] not a criterion\n\n## Acceptance criteria\n\n- [ ] [code] a test\n"
+                "- [ ] [human] before merge: " + WHAT + " \u2014 measured: the owner, on the console\n"
+                "- [ ] [human] the owner reads the notes \u2014 measured: the owner\n")
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+        code, out = run(*self.MARKED)
+        self.assertEqual((code, out["verdict"], out["acs"]), (0, "marked", ["AC2"]))
+
+    def test_marked_names_only_the_marker_lines_that_tick_ticks(self):
+        """#1356: a fence the console parser closes but the marker reader opens must not suppress a marker tick leaves open."""
+        marker = "- [ ] [human] before merge: " + WHAT + " \u2014 measured: the owner, on the console\n"
+        body = "## Acceptance criteria\n\n" + marker + "- ```\n  sample\n  ```\n" + marker
+        self.assertEqual(lm.tick_markers(body)[1], 1)
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
+        code, out = run(*self.MARKED)
+        self.assertEqual((code, out["verdict"], out["acs"]), (0, "marked", ["AC1"]))
 
     def test_an_unmarked_or_fenced_body_is_unmarked(self):
         for body in ("plain", None, "```\n" + BODY + "```\n"):
             with self.subTest(body=body):
                 self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": body})
                 code, out = run(*self.MARKED)
-                self.assertEqual((code, out["verdict"], out["covers"]), (0, "unmarked", []))
+                self.assertEqual((code, out["verdict"], out["covers"], out["acs"]), (0, "unmarked", [], []))
 
     def test_an_issue_with_no_body_key_is_a_forge_error(self):
         self.world.respond_json("gh", ISSUE_ARGV, {"number": 7})
@@ -403,6 +422,54 @@ class StatusCarryTest(unittest.TestCase):
         self.assertNotIn(PULL_ARGV, self.world.argvs("gh"))
 
 
+class StatusMergedTest(unittest.TestCase):
+    BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
+    COMMIT_ARGV = ["api", f"repos/{SLUG}/commits/{MC}"]
+    PULL = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"}, "merge_commit_sha": MC}
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def seed(self, pull=None):
+        self.world.comment_store(SLUG, ISSUE, [comment(5, lm.approval_body(7, 12, A, "approved", "m1"))])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+        self.world.respond_json("gh", PULL_ARGV, self.PULL if pull is None else pull)
+        self.world.respond_json("gh", self.COMMIT_ARGV, {"sha": MC, "parents": [{"sha": BT}, {"sha": HEAD}]})
+        self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+        for path in (f"contents/.github/look-files.json?ref={B}", f"compare/{B}...{A}", f"compare/{B}...{HEAD}"):
+            self.world.not_found("gh", ["api", f"repos/{SLUG}/{path}"])
+        serve(self.world, SLUG, reads(BT))
+
+    def test_status_of_a_merged_head_settles_a_kept_approval_at_the_merge_commits_first_parent(self):
+        self.seed()
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "approved", "approved", 5, A))
+        self.assertNotIn(self.BRANCH_ARGV, self.world.argvs("gh"))
+
+    def test_status_of_a_merged_head_with_an_unreadable_merge_commit_is_an_error(self):
+        with self.subTest("no merge commit sha"):
+            self.seed({k: v for k, v in self.PULL.items() if k != "merge_commit_sha"})
+            code, out = run(*STATUS)
+            self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+            self.assertNotIn("kept_from", out)
+        with self.subTest("merge commit not found"):
+            self.world = ForgeWorld(self)
+            self.seed()
+            self.world.not_found("gh", self.COMMIT_ARGV)
+            code, out = run(*STATUS)
+            self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "payload_invalid"))
+            self.assertNotIn("kept_from", out)
+
+    def test_an_indirect_merge_is_settled_at_the_landing_commit_the_caller_resolved(self):
+        """#1356 I3: a null merge_commit_sha alone is an error; the resolved landing commit stands in for it."""
+        indirect = {k: v for k, v in self.PULL.items() if k != "merge_commit_sha"}
+        self.seed(dict(indirect, merge_commit_sha=None))
+        code, out = run(*STATUS, "--merge-commit", MC)
+        self.assertEqual((code, out["verdict"], out["kept_from"]), (0, "approved", A))
+        self.assertIn(self.COMMIT_ARGV, self.world.argvs("gh"))
+
+
 class TickCarryTest(unittest.TestCase):
     TICK = ["tick", *POST]
     PULL = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"}, "merge_commit_sha": MC}
@@ -427,6 +494,16 @@ class TickCarryTest(unittest.TestCase):
     def test_tick_ticks_under_a_kept_approval(self):
         self.seed()
         code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
+        self.assertEqual(len(self.patches()), 1)
+
+    def test_tick_of_an_indirect_merge_ticks_at_the_landing_commit_the_caller_resolved(self):
+        """#1356 I3: the same resolved landing commit serves `tick`; without it the null merge_commit_sha is an error."""
+        self.seed(pull=dict(self.PULL, merge_commit_sha=None))
+        code, out = run(*self.TICK)
+        self.assertEqual((code, out["verdict"]), (1, "error"))
+        self.assertEqual(self.patches(), [])
+        code, out = run(*self.TICK, "--merge-commit", MC)
         self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
         self.assertEqual(len(self.patches()), 1)
 
@@ -516,6 +593,7 @@ class UsageTest(unittest.TestCase):
             "issue": ["status", "--repo", SLUG, "--issue", "x", "--pr", "12", "--head", HEAD],
             "repo": ["status", "--repo", "nope", "--issue", "7", "--pr", "12", "--head", HEAD],
             "verb": ["frobnicate", *POST],
+            "merge commit": ["tick", *POST, "--merge-commit", MC[:39]],
             "missing pr": ["status", "--repo", SLUG, "--issue", "7", "--head", HEAD],
         }
         for name, argv in cases.items():

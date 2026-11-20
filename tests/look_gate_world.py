@@ -255,7 +255,7 @@ class LookGateWorld:
     def look_of(self, issue: int) -> dict:
         proc = self.look_approval("marked", "--repo", SLUG, "--issue", str(issue))
         out = json.loads(proc.stdout.strip().splitlines()[-1])
-        return {"verdict": out["verdict"], "covers": out.get("covers", [])}
+        return {"verdict": out["verdict"], "covers": out.get("covers", []), "acs": out.get("acs", [])}
 
     # ---- the actor ----
 
