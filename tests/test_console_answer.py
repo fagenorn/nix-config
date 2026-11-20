@@ -624,7 +624,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
                                            "/api/account-remove",
                                            "/api/register-project",
                                            "/api/plan-answer", "/api/plan-approve",
-                                           "/api/adoption-register", "/api/plan-defer",
+                                           "/api/adoption-register", "/api/adoption-merge", "/api/plan-defer",
                                            "/api/register-confirm", "/api/register-cancel",
                                        "/api/trust-check", "/api/owner-notice",
                                        "/api/owner-notice-withdraw", "/api/project-question",
