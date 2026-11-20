@@ -183,7 +183,7 @@ attempt nothing is created or started: his own live sign-in of that attempt hand
 checks the access and the epoch, then takes his own live sign-in (the newest, the one his page shows), else his own profile not
 signed in, else a new `colleague-<n>`: the console chooses it after a listing that was read (an unreadable listing
 creates and records nothing, `AddFailed` `unavailable`), runs the adder, and reads the listing again. The name is his only then:
-its `account.added` row, with `by` his login and `identity` the `account_add.identity` of the directory the launcher made, is
+its `account.added` row, with `by` his login and `identity` that `account_add.mark` returned for the directory the launcher made (its inode, creation time where the platform gives one and a random marker file the console wrote there), is
 appended in the block that stores that second listing, with no access check between. A profile is his only while its directory is
 that one (`_owned_now`): the owner who removes it with the CLI and makes another of the name takes it from him, in the add's
 choice, in his sign-in, code and cancel, and in both pages' labels (at the next listing). A launcher that fails leaves its name
@@ -5313,8 +5313,9 @@ class ConsoleService:
         choice of profile and the checks are made under one `_ingest` block. A new profile is his only once
         this console saw the launcher return for a name it chose after a listing that did not hold it and
         then read the name listed on the very directory the launcher made: its `account.added` row, with
-        his login and that directory's identity, is appended in the block that stores that second listing,
-        with no access check between. A listing that cannot be read creates and records nothing; a launcher
+        his login and that directory's identity (marked by the console as soon as the launcher returned, so a
+        directory made later under the name, whatever inode it gets, holds no marker), is appended in the block
+        that stores that second listing, with no access check between. A listing that cannot be read creates and records nothing; a launcher
         that fails leaves its name reserved and unowned, whatever a later listing shows; a launcher that
         returned but whose listing could not be read keeps the name and the directory's identity for his
         retry, which takes the profile only if its directory is still that one, else drops the name and
@@ -5365,14 +5366,17 @@ class ConsoleService:
             if target is None:
                 if pending is None:
                     self._account_adder(name)
-                    recorded = None if root is None else account_add.identity(root / name)
+                    recorded = None if root is None else account_add.mark(root / name)
                     self._guest_made[name] = (by.login, recorded)
                 accounts = self._scan_accounts()
                 if accounts is None:
                     if recorded is None:
                         del self._guest_made[name]
                     raise account_add.AddFailed("not_listed")
-                bound = account_add.identity(accounts[name]) if name in accounts else None
+                if recorded is None and root is None and name in accounts:
+                    bound = account_add.mark(accounts[name])  # no other profile showed where to mark early
+                else:
+                    bound = account_add.identity(accounts[name]) if name in accounts else None
                 if bound is None or (recorded is not None and bound != recorded):
                     del self._guest_made[name]
                     raise account_add.AddFailed("not_listed")

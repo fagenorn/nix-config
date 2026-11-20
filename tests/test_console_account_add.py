@@ -14,11 +14,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import account_add, account_remove, event_log, folder_trust
 from agent_tools.console.event_log import Event
 from agent_tools.console.account_add import AddFailed, Adder, adder_for, added, added_state
-from agent_tools.console.account_add import already_exists, guest_name, identities_state, identity, owners_state
+from agent_tools.console.account_add import already_exists, guest_name, identities_state, identity, mark, owners_state
 from agent_tools.console.account_add import parse_add_request, parse_guest_add_request, refusal
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_guest import LONG_AGO, NOW, LogCase
@@ -243,16 +244,46 @@ class OwnerRecordTest(unittest.TestCase):
             with self.subTest(identity=bad), self.assertRaises(ValueError):
                 added("colleague-1", by=A, identity=bad)
 
-    def test_the_identity_of_a_directory_is_not_the_one_of_a_directory_made_in_its_place(self):
-        with tempfile.TemporaryDirectory() as raw:
+    def test_a_directory_made_in_place_of_a_freed_one_is_not_the_same_directory_even_with_its_inode(self):
+        same = os.stat_result((0o40700, 4242, 1, 2, 0, 0, 64, 0, 0, 0))
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(account_add, "_stat", lambda _: same):
             root = Path(raw)
             (root / "colleague-1").mkdir()
-            first = identity(root / "colleague-1")
+            self.assertIsNone(identity(root / "colleague-1"))  # no marker yet
+            first = mark(root / "colleague-1")
+            self.assertRegex(first, r"^4242:[0-9]*:[0-9a-f]{32}$")
             self.assertEqual(identity(root / "colleague-1"), first)
-            (root / "colleague-1").rename(root / "aside")
-            (root / "colleague-1").mkdir()  # made while the old inode is still held
-            self.assertNotEqual(identity(root / "colleague-1"), first)
+            self.assertIsNone(mark(root / "colleague-1"))  # never marked twice
+            shutil.rmtree(root / "colleague-1")
+            (root / "colleague-1").mkdir()  # the freed inode, as the filesystem hands it out again
+            self.assertIsNone(identity(root / "colleague-1"))
+            second = mark(root / "colleague-1")
+            self.assertNotEqual(second, first)
             self.assertIsNone(identity(root / "missing"))
+            self.assertIsNone(mark(root / "missing"))
+
+    def test_the_birth_time_is_the_platforms_when_it_gives_one(self):
+        class Born:
+            st_ino = 7
+            st_birthtime = 1.5
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(account_add, "_stat", lambda _: Born()):
+            (Path(raw) / "p").mkdir()
+            self.assertRegex(mark(Path(raw) / "p"), r"^7:1500000000:[0-9a-f]{32}$")
+
+    def test_a_marker_that_is_not_a_token_or_a_link_is_no_marker(self):
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "p"
+            directory.mkdir()
+            marker = directory / account_add.MARKER
+            for content in (b"", b"abc", b"G" * 32, b"a" * 33, b"\xff" * 32):
+                marker.write_bytes(content)
+                with self.subTest(content=content):
+                    self.assertIsNone(identity(directory))
+            marker.unlink()
+            (Path(raw) / "elsewhere").write_text("a" * 32)
+            marker.symlink_to(Path(raw) / "elsewhere")
+            self.assertIsNone(identity(directory))
 
     def test_the_identities_fold_follows_the_owners_fold(self):
         rows = events_of([

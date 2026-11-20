@@ -50,14 +50,23 @@ is not his), and any other outcome changes nothing; any other row is ignored. Fo
 onto an earlier fold gives the fold of all of them. `GONE_OUTCOMES` is `event_log.ACCOUNT_GONE_OUTCOMES`,
 the same two outcomes as `folder_trust.GONE_OUTCOMES` (folder_trust imports this module).
 
-Identity. `identity(directory)` is `<inode>:<birth>` of the directory as `os.stat` reads it, `<birth>` being
-its creation time in nanoseconds where the platform gives one (empty where it does not), and None when the
-directory cannot be read. A profile name can be given to another directory (the owner removes a profile with
-the CLI and makes one of that name), so ownership is the name together with this identity. The device number
-is left out: it is not stable across a restart on every platform. `identities_state(events, state=None)` is the
+Identity. `identity(directory)` is `<inode>:<birth>:<marker>` of the directory as `_stat` (`directory.stat()`) reads it, and
+None when the directory or its marker cannot be read. `<birth>` is the creation time in nanoseconds where the
+platform gives one (`st_birthtime_ns`, else `st_birthtime`; empty where it does not, as on Linux). `<marker>` is the
+random token `mark(directory)` wrote into the directory as the file `MARKER`: 32 lowercase hex digits, read through
+`os.open` with `O_NOFOLLOW`, any other content is no marker. A profile name can be given to another directory (the
+owner removes a profile with the CLI and makes one of that name), and a freed inode may be given to it at once (ext4
+does, and Linux gives no creation time), so the inode and the creation time alone do not tell the two apart: the
+marker is what does, because the replacement is a new directory the launcher made, which holds none. `mark(directory)`
+creates the marker with `O_CREAT | O_EXCL` and returns the identity, or None when a marker is already there, the file
+cannot be written or the identity cannot be read (a directory is never marked twice, so a marker found at once in a
+directory the launcher just made is not trusted). The device number is left out of the identity: it is not stable
+across a restart on every platform. `identities_state(events, state=None)` is the
 profile -> identity map folded like `owners_state` (an `account.added` row whose `by` is a login and whose
 `identity` is a non-empty string sets it, any other valid `account.added` row and a completed removal drop
-it), onto a copy of `state`. A name owned with no identity (a row without one) is owned by name alone.
+it), onto a copy of `state`. A name owned with no identity (a row without one) is owned by name alone. Stated limit: a
+copy of a marked directory with its marker (the owner copying a colleague's profile by hand) has the marker but not
+its inode, which is not enough to take it from him either.
 
 Guest add. `GUEST_PREFIX` is `colleague-` and `guest_name(taken)` is `colleague-<n>` for the smallest
 `n >= 1` not among the `taken` names, a name `refusal` accepts: the console names a colleague's
@@ -75,6 +84,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from pathlib import Path
@@ -86,6 +96,9 @@ ADDED = event_log.ACCOUNT_ADDED
 REMOVAL = event_log.ACCOUNT_REMOVAL
 GONE_OUTCOMES = event_log.ACCOUNT_GONE_OUTCOMES
 GUEST_PREFIX = "colleague-"
+MARKER = ".console-owner"
+MARKER_BYTES = 32
+MARKER_TOKEN = re.compile(r"[0-9a-f]{32}")
 ADD_TIMEOUT = 30
 SKIP_TRUST_ENV = "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST"
 NAME = re.compile(r"[a-z0-9_-]+")
@@ -131,13 +144,55 @@ def added(profile: str, by: str = "owner", identity: str | None = None) -> tuple
     return (ADDED, None, payload)
 
 
-def identity(directory: Path) -> str | None:
+def _stat(directory: Path) -> os.stat_result:
+    return directory.stat()
+
+
+def _marker(directory: Path) -> str | None:
     try:
-        found = directory.stat()
+        descriptor = os.open(directory / MARKER, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            text = handle.read(MARKER_BYTES + 1)
+    except OSError:
+        return None
+    try:
+        token = text.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    return token if MARKER_TOKEN.fullmatch(token) else None
+
+
+def identity(directory: Path) -> str | None:
+    try:
+        found = _stat(directory)
+    except OSError:
+        return None
+    token = _marker(directory)
+    if token is None:
+        return None
     born = getattr(found, "st_birthtime_ns", None)
-    return f"{found.st_ino}:{'' if born is None else born}"
+    if born is None:
+        seconds = getattr(found, "st_birthtime", None)
+        born = None if seconds is None else int(seconds * 1_000_000_000)
+    return f"{found.st_ino}:{'' if born is None else born}:{token}"
+
+
+def mark(directory: Path) -> str | None:
+    token = secrets.token_hex(MARKER_BYTES // 2)
+    try:
+        descriptor = os.open(directory / MARKER,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(token.encode("ascii"))
+    except OSError:
+        return None
+    return identity(directory)
 
 
 def added_state(events: Iterable[event_log.Event],

@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,6 +75,11 @@ class GuestAccountCase(GuestWriteCase):
         self.end_gate = threading.Event()
         self.end_gate.set()
         self.responses = []
+        # Every directory reads as one inode: a replacement that the filesystem gives the freed inode at once.
+        same = os.stat_result((0o40700, 4242, 1, 2, 0, 0, 64, 0, 0, 0))
+        patch = mock.patch.object(account_add, "_stat", lambda _: same)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def read(self, one):
         if one.profile in self.read_error:
@@ -210,12 +217,10 @@ class GuestAccountCase(GuestWriteCase):
         return [{key: value for key, value in row.items() if key != "identity"} for row in rows]
 
     def replace_dir(self, name):
-        """The owner removes a profile with the CLI and makes another of the name. The old directory is held
-        while the new one is made, so the two can never share an inode."""
-        aside = self.root / f"{name}-aside"
-        (self.profiles / name).rename(aside)
+        """The owner removes a profile with the CLI and makes another of the name, which every directory reads
+        as the same inode of (see `setUp`), as a filesystem that reuses a freed inode gives it."""
+        shutil.rmtree(self.profiles / name)
         (self.profiles / name).mkdir(mode=0o700)
-        shutil.rmtree(aside)
 
 
 class GuestAccountTest(GuestAccountCase):
