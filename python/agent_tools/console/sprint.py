@@ -134,7 +134,8 @@ object is exit 2 with no request sent; a 200 answer without an integer `notice` 
 
 `sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
 "secret"}`, no `Origin`. It prints the console's answer as returned, one JSON line `{"notices":
-[...]}` of the open notices of the sprint's project, oldest first, and exit 0.
+[...], "overlaps": [...]}`: the open notices of the sprint's project, oldest first, and the console's
+reading of the claims that overlap, and exit 0.
 
 `sprint withdraw-notice` reads the secret the same way and sends `POST /api/withdraw-notice` with
 `{"sprint_id", "secret", "notice"}`, no `Origin`, for the notice `--notice` (an integer of at least

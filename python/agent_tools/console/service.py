@@ -842,9 +842,12 @@ reason; any other exception is `console: <route>_failed <Type>: <message>` and 5
 The reason is always one of `sprints.py`'s fixed refusal texts, which never carry a key or value the
 manager sent, so every stderr line is one line and neither the secret nor the notice text is printed.
 Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for a post (the new row's
-`seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...]}` for the list.
+`seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...],"overlaps":
+[<sprints.claim_overlaps of those entries>...]}` for the list.
 `post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
-`SecretRefused`), then `sprints.postable_notice` against every other folded sprint; it appends exactly
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder
+test built from the sprint's project root (a stat per part of a claim's `what`, so a claim naming a
+directory is refused; a project not registered has no folder); it appends exactly
 one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
 folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
 `sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
@@ -1599,6 +1602,7 @@ import contextlib
 import dataclasses
 import errno
 import fcntl
+import glob
 import hmac
 import http.server
 import json
@@ -2705,7 +2709,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             print(f"console: notices_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "notices failed")
         self._send(200, "application/json", json.dumps(
-            {"notices": entries}, sort_keys=True, separators=(",", ":")).encode())
+            {"notices": entries, "overlaps": sprints.claim_overlaps(entries)},
+            sort_keys=True, separators=(",", ":")).encode())
 
     def _withdraw_notice_request(self):
         """The manager's route: one open notice of the sprint taken back, with its secret."""
@@ -7236,7 +7241,15 @@ class ConsoleService:
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
             others = [other for key, other in self._sprints.items() if key != sprint_id]
-            checked = sprints.postable_notice(sprint, notice, others)
+            project = self._states.get(sprint.project_id)
+            root = project.root if project is not None else None
+
+            def is_folder(path: str) -> bool:
+                return root is not None and any(
+                    os.path.isdir(match) for match in glob.glob(
+                        os.path.join(glob.escape(root), path)))
+
+            checked = sprints.postable_notice(sprint, notice, others, is_folder)
             appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
             self._apply(appended)
