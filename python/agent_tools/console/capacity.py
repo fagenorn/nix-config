@@ -103,12 +103,18 @@ never decides what the account has left. The counted entry is the minimum by (ex
 pinned, name); choosing it never changes the reading, it only decides which profile is launched and
 drawn. Every aggregate is evaluated over the entries that are not signed out, not excluded and not
 a duplicate, so one account's allowance is counted once.
+
+Each entry also carries `"owner"` (#1343, ADR-console-087 D4), always present, after
+`"duplicate_of"`: the login the optional `owners` mapping (profile to the colleague who added it)
+gives the profile, else None. The owner's page shows it beside the row; it changes no aggregate and
+no other member, and without `owners` every entry's `owner` is None.
 """
 
 import re
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import MappingProxyType
 
 from agent_tools.console import signin as signin_state
 from agent_tools.console.event_log import Event
@@ -374,7 +380,8 @@ def _of_left(reading: Reading, one: signin_state.SignIn, left: tuple[str, str | 
 def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
                   signins: Mapping[str, signin_state.SignIn] | None = None,
                   excluded: Collection[str] = frozenset(),
-                  pinned: str | None = None) -> dict:
+                  pinned: str | None = None,
+                  owners: Mapping[str, str] = MappingProxyType({})) -> dict:
     names = sorted(set(profiles))
     signins = signins or {}
     counted: dict[str, Reading | None] = {}
@@ -396,7 +403,8 @@ def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
                         "account": one.account if one is not None
                         and one.state in ("signed_in", "unknown") else None,
                         "same_account_as": [],
-                        "duplicate_of": None})
+                        "duplicate_of": None,
+                        "owner": owners.get(name)})
     groups: dict[str, list[dict]] = {}
     for entry in entries:
         if entry["account"] is not None:

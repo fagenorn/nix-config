@@ -79,7 +79,8 @@ account, pin and registration members, the digest, the activation line, the spen
 capacity profiles, and puts in their place the `pool` member (#1341, ADR-console-086). `pool_view`
 builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `all_out`,
 `resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
-neutral `label` (`Account <n>`), `state`, the percent left and reset of the week and the session,
+neutral `label` (`Account <n>`, or `yours` on the page of a colleague holding a profile of that
+account, ADR-console-087 D4), `state`, the percent left and reset of the week and the session,
 `next_reset`, `out_until` and `in_use` (not signed out and not excluded). One row stands for one
 account: a profile whose `duplicate_of` is set (signed in to an address another profile counts) has
 no row and shares its account's label. `tight`, `all_out`, `resumes_at` and `no_reading` are the
@@ -107,7 +108,12 @@ by that profile's account.
 `sprint_labels` gives the label of the account each running sprint's manager is on, a `retired` one
 first (a detached one has none), and `scrub` adds it as `account_label` to
 every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
-`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). No profile name, address, organisation or
+`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). `scrub` also sets `own_signin`, a copy of its argument or None:
+the latest sign-in run of the profiles the guest added (`own_signin`: `state`, `at`, `attempt`, never
+a profile name). `profile_labels(numbers, mine)` and `retired_labels(retired, numbers, mine)` apply
+the `yours` rule to a sprint's label as `pool_view` does to a row's, so every profile of a
+colleague's account, counted or duplicate, reads `yours` for him. No profile name, address,
+organisation or
 proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
 per account or per project would show work on projects the colleague is not listed for.
 `picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
@@ -636,14 +642,51 @@ def account_numbers(capacity: Mapping, previous: Mapping[str, int],
             for name in profiles}
 
 
-def profile_labels(numbers: Mapping[str, int]) -> dict[str, str]:
-    return {profile: f"Account {number}" for profile, number in numbers.items()}
+YOURS = "yours"
 
 
-def pool_view(capacity: Mapping, numbers: Mapping[str, int]) -> dict:
+def _label(number: int, own: Collection[int]) -> str:
+    return YOURS if number in own else f"Account {number}"
+
+
+def _own_numbers(numbers: Mapping[str, int], mine: Collection[str]) -> set[int]:
+    return {numbers[profile] for profile in mine if profile in numbers}
+
+
+def profile_labels(numbers: Mapping[str, int],
+                   mine: Collection[str] = frozenset()) -> dict[str, str]:
+    """Each profile's label: `yours` when its account's number is one a profile of `mine` holds."""
+    own = _own_numbers(numbers, mine)
+    return {profile: _label(number, own) for profile, number in numbers.items()}
+
+
+def retired_labels(retired: Mapping[str, tuple[int | None, str, str]], numbers: Mapping[str, int],
+                   mine: Collection[str] = frozenset()) -> dict[str, str | None]:
+    """The `retired` argument of `sprint_labels` for one page: None for a detached sprint, else the
+    label of its kept number, `yours` when a profile of `mine` holds that account."""
+    own = _own_numbers(numbers, mine)
+    return {sprint_id: None if number is None else _label(number, own)
+            for sprint_id, (number, _, _) in retired.items()}
+
+
+def own_signin(signin_runs: Mapping[str, Mapping], owners: Mapping[str, str],
+               login: str) -> dict | None:
+    """The latest sign-in run (highest `attempt`) among the profiles `login` added, as a copy of
+    its `state`, `at` and `attempt`; None when there is none. It never carries a profile name."""
+    runs = [signin_runs[profile] for profile, owner in owners.items()
+            if owner == login and profile in signin_runs]
+    if not runs:
+        return None
+    latest = max(runs, key=lambda run: run["attempt"])
+    return {key: latest[key] for key in ("state", "at", "attempt")}
+
+
+def pool_view(capacity: Mapping, numbers: Mapping[str, int],
+              mine: Collection[str] = frozenset()) -> dict:
+    own = _own_numbers(numbers, mine)
     entries = sorted((entry for entry in capacity["profiles"] if entry["duplicate_of"] is None),
                      key=lambda entry: (numbers[entry["profile"]], entry["profile"]))
-    rows = [{"label": f"Account {numbers[entry['profile']]}", "state": entry["state"],
+    rows = [{"label": _label(numbers[entry["profile"]], own), "state": entry["state"],
              "week_left": entry["week_left"], "five_hour_left": entry["five_hour_left"],
              "week_reset": entry["week_reset"], "five_hour_reset": entry["five_hour_reset"],
              "next_reset": entry["next_reset"], "out_until": entry["out_until"],
@@ -725,7 +768,8 @@ def write_numbers(path: Path, numbers: Mapping[str, int],
 
 
 def scrub(view: Mapping, pool: Mapping | None = None,
-          sprint_accounts: Mapping[str, str] | None = None) -> dict:
+          sprint_accounts: Mapping[str, str] | None = None,
+          own_signin: Mapping | None = None) -> dict:
     accounts = sprint_accounts or {}
 
     def labelled(node: object) -> object:
@@ -751,6 +795,7 @@ def scrub(view: Mapping, pool: Mapping | None = None,
                      "accounts_added": [], "pin": None, "pin_launches": [],
                      "registration": None, "digest": None, "activation": None, "spend": None,
                      "capacity": dict(EMPTY),
+                     "own_signin": None if own_signin is None else dict(own_signin),
                      "pool": {**shown, "accounts": [dict(row) for row in shown["accounts"]]}})
     return scrubbed
 
