@@ -16,7 +16,7 @@ from .test_console_page import (
     OPEN_A, OWNER_W, PICTURED, PROGRESS, Q0, Q1, R0, R2, REGISTER_TYPED, REPORTED, SIGNED_IN_STEPS,
     SIGNIN, SPRINT, ACTIVATION, START, STALL, T0, V, WORK_CAP, ANSWER, ASK_ANSWERED, cards,
     FAILED_LINE, asking, check_item, frame, media_block, nodes, panel, postable, project, real_capacity, render,
-    look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints)
+    look_answered, style_rules, thread, view, with_check, with_notices, with_run, with_sprints, css_declared)
 from .test_console_guest_page import (
     GUEST, MANUAL, OPEN_OWN, SHARED_FRAME, TICK, UNSHARED_OPEN, attempt_reply, harness)
 
@@ -582,6 +582,13 @@ class ControlStyleTest(unittest.TestCase):
                 heights = [d["min-height"] for s, d in block if s == "." + kind and "min-height" in d]
                 self.assertTrue(heights, kind)
                 self.assertGreaterEqual(css_px(heights[-1]), 32)
+
+    def test_the_consent_tick_is_at_least_32_px_in_both_directions(self) -> None:
+        # The screenshot check rejects every visible input under 32 px, and the tick is an input.
+        declared = css_declared(self.style, ".guest-tick")
+        for prop in ("width", "height"):
+            with self.subTest(prop=prop):
+                self.assertGreaterEqual(css_px(declared.get(prop, "0")), 32)
 
     def test_the_height_floor_gate_sees_a_later_spend_rule(self) -> None:
         shrunk = spend_style() + "\n.span { min-height: 20px; }\n"

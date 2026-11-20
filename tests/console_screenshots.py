@@ -210,7 +210,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from agent_tools.console import account_add, capacity, contract_draft, event_log, manager, pictures, sessions, signin
+from agent_tools.console import capacity, contract_draft, event_log, manager, pictures, sessions, signin
 from agent_tools.console.activation import Activation
 from agent_tools.console.answer import FORGE_DOWN
 from agent_tools.console.event_log import SHARING_COLLEAGUE, SHARING_TAILNET, EventLog
@@ -784,7 +784,7 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "",
         if state in ("guest-page", "guest-steer", "owner-actors"):
             seed.account("work-main", 0.4, session=0.25, week_in=3 * 86400, session_in=2 * 3600)
             seed.account("work-spare", 0.9, session=0.6, week_in=5 * 86400, session_in=4 * 3600)
-            seed.put(10 * MINUTE, *account_add.added("colleague-1", COLLEAGUE))
+            seed.put(10 * MINUTE, event_log.ACCOUNT_ADDED, None, {"by": COLLEAGUE, "profile": "colleague-1"})
             seed.account("colleague-1", 0.95, session=0.5, week_in=2 * 86400, session_in=3 * 3600)
     elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)

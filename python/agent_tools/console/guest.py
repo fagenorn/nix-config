@@ -183,8 +183,9 @@ Three more guest writes (#1343, ADR-console-087), `POST /api/guest-account`, `/a
 `write_refusal` are `account_refusal(policy, actor)`, which they use alone (sharing off, no name read, another
 name, login not listed). The add takes `{"consent": true}` and nothing else: without the tick it is refused
 with `CONSENT_TEXT` before anything is created. The service picks the profile: the colleague's own live
-sign-in, else one of his own profiles that is not signed in, else a new `colleague-<n>` it names itself; no
-body names a profile, and no sign-in of a profile that is not his own is ever started, passed a code or
+sign-in (the newest, the one his page shows), else one of his own profiles that is not signed in, else a new
+`colleague-<n>` it names itself; no body names a profile, the code and the cancel carry the attempt the add
+answered and act on that attempt only, and no sign-in of a profile that is not his own is ever started, passed a code or
 cancelled. A refusal is read by a guest only as one of the fixed texts `CONSENT_TEXT`, `NO_OWN_SIGNIN_TEXT`,
 `ACCOUNT_BUSY_TEXT`, `ACCOUNT_UNAVAILABLE_TEXT`, `NOT_SHARED_TEXT` or `REVOKED_TEXT` (`account_text` maps any
 other text, such as one that names a profile, to `ACCOUNT_BUSY_TEXT`). No answer names a profile, a login, a

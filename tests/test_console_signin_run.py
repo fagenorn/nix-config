@@ -293,18 +293,24 @@ class GuestRecordTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             acted("w", "start", "started", by="nobody")
 
-    def test_the_guest_code_and_cancel_bodies_name_no_profile(self):
-        self.assertEqual(parse_guest_code_request(json.dumps({"code": CODE}).encode()), CODE)
-        self.assertIsNone(parse_guest_cancel_request(b"{}"))
-        for body in ({"code": CODE, "profile": "work"}, {"code": ""}, {"code": "a b"},
-                     {"code": "x" * 513}, {}):
+    def test_the_guest_code_and_cancel_bodies_name_an_attempt_and_no_profile(self):
+        self.assertEqual(parse_guest_code_request(json.dumps({"attempt": 7, "code": CODE}).encode()),
+                         (7, CODE))
+        self.assertEqual(parse_guest_cancel_request(b'{"attempt": 7}'), 7)
+        for body in ({"attempt": 7, "code": CODE, "profile": "work"}, {"attempt": 7, "code": ""},
+                     {"attempt": 7, "code": "a b"}, {"attempt": 7, "code": "x" * 513},
+                     {"code": CODE}, {"attempt": 0, "code": CODE}, {"attempt": -1, "code": CODE},
+                     {"attempt": True, "code": CODE}, {"attempt": "7", "code": CODE},
+                     {"attempt": 7.0, "code": CODE}, {}):
             with self.subTest(code=body), self.assertRaises(ValueError):
                 parse_guest_code_request(json.dumps(body).encode())
-        for body in (b'{"profile": "work"}', b'[]', b'{"a":1,"a":1}', b'\xff'):
+        for body in (b'{}', b'{"profile": "work"}', b'{"attempt": 7, "profile": "work"}',
+                     b'{"attempt": true}', b'{"attempt": 0}', b'{"attempt": "7"}', b'[]',
+                     b'{"attempt":1,"attempt":1}', b'\xff'):
             with self.subTest(cancel=body), self.assertRaises(ValueError):
                 parse_guest_cancel_request(body)
         with self.assertRaises(ValueError):
-            parse_guest_code_request(b'{"code": "a", "code": "a"}')
+            parse_guest_code_request(b'{"attempt": 7, "code": "a", "code": "a"}')
 
     def test_the_guest_answer_hands_out_a_remote_link_only(self):
         self.assertEqual(guest_answer_members(None), {"link": None, "route": None})
@@ -315,6 +321,26 @@ class GuestRecordTest(unittest.TestCase):
         loopback = signin_run.Link(LOOPBACK_LINK, "loopback", 54545,
                                    "ssh -N -L 54545:localhost:54545 console-host")
         self.assertEqual(guest_answer_members(loopback), {"link": None, "route": "loopback"})
+
+    def test_a_printed_url_that_is_not_the_sign_in_request_is_handed_to_no_guest(self):
+        authorize = "https://claude.example/oauth/authorize"
+        redirect = "redirect_uri=https%3A%2F%2Fplatform.claude.example%2Foauth%2Fcode%2Fcallback"
+        for url in (f"{authorize}?{redirect}&access_token=SENTINEL-TOKEN",
+                    f"https://diag.example/report?{redirect}&token=SENTINEL-TOKEN",
+                    f"{authorize}?{redirect}#access_token=SENTINEL-TOKEN",
+                    f"https://user:SENTINEL-TOKEN@claude.example/oauth/authorize?{redirect}",
+                    f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%3Faccess_token%3DSENTINEL",
+                    f"{authorize}?redirect_uri=https%3A%2F%2Fp.example%2Fcb%23SENTINEL"):
+            with self.subTest(url=url):
+                link = signin_run.Link(url, "manual", None, None)
+                self.assertEqual(signin_run.link_route(url), ("manual", None))
+                self.assertFalse(signin_run.guest_link(url))
+                self.assertEqual(guest_answer_members(link), {"link": None, "route": None})
+        full = (f"{authorize}?code=true&client_id=c&response_type=code&{redirect}&scope=a%20b"
+                "&code_challenge=x&code_challenge_method=S256&state=s")
+        self.assertTrue(signin_run.guest_link(full))
+        self.assertEqual(guest_answer_members(signin_run.Link(full, "manual", None, None)),
+                         {"link": full, "route": "manual"})
 
 
 class EntryTest(unittest.TestCase):

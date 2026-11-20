@@ -111,8 +111,10 @@ with none, a failed plan), else None.
 
 `ACCOUNT_ADDED` (`account.added`, one per account the owner or a listed colleague adds from the page,
 #1027, #1343) is not in `KEPT_KINDS` but is kept in part: the retention pass leaves, whatever its age,
-the `account.added` row whose `by` is a JSON string other than `owner` (a colleague's login), whose
-seq is the largest of the `account.added` rows of the same `profile`, and after which no
+the `account.added` row whose `by` is a login (a JSON string other than `owner` with `normal_login(by) == by`), whose
+seq is the largest of the `account.added` rows of the same `profile` whose `by` the owner fold reads
+(`owner` or a login with `normal_login(by) == by`; a row with any other `by` is ignored by the fold and
+by this rule alike), and after which no
 `account.removal` row of that profile has an outcome in `ACCOUNT_GONE_OUTCOMES` (`removed`,
 `removed_signed_out_already`: the same two as `folder_trust.GONE_OUTCOMES`, which this module cannot
 import). A colleague's account must stay his after the window and end only with a completed removal,
@@ -348,6 +350,11 @@ def normal_login(text: object) -> str | None:
     return text.lower()
 
 
+def _valid_added_by(by: object) -> int:
+    """1 for the `by` of an `account.added` row the owner fold reads: `owner` or a normalised login."""
+    return int(isinstance(by, str) and (by == "owner" or normal_login(by) == by))
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -365,6 +372,7 @@ class EventLog:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, isolation_level=None,
                                            check_same_thread=False)
+        self._connection.create_function("valid_added_by", 1, _valid_added_by, deterministic=True)
         try:
             self._prepare()
         except BaseException:
@@ -495,9 +503,10 @@ class EventLog:
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind IN (?, ?) AND "
                     "json_extract(newer.payload, '$.login') IS json_extract(events.payload, '$.login'))) "
-                    "AND NOT (kind = ? AND json_type(payload, '$.by') = 'text' "
+                    "AND NOT (kind = ? AND valid_added_by(json_extract(payload, '$.by')) "
                     "AND json_extract(payload, '$.by') != 'owner' "
                     "AND seq = (SELECT MAX(newer.seq) FROM events AS newer WHERE newer.kind = ? "
+                    "AND valid_added_by(json_extract(newer.payload, '$.by')) "
                     "AND json_extract(newer.payload, '$.profile') "
                     "IS json_extract(events.payload, '$.profile')) "
                     "AND NOT EXISTS (SELECT 1 FROM events AS gone WHERE gone.kind = ? "

@@ -1,7 +1,7 @@
 # ADR-console-008 — Only the page writes, with a per-install token and the console's own origin
 
 - **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036, ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, ADR-console-076, ADR-console-078
-- **Decided in:** #837, #838, #861, #862, #886, #887, #889, #891, #1026, #1027, #1035, #1053, #1054, #1089, #1120, #1176, #1193, #1237, #1263, #1294, #1305, #1343
+- **Decided in:** #837, #838, #861, #862, #886, #887, #889, #891, #1026, #1027, #1035, #1053, #1054, #1089, #1120, #1176, #1193, #1237, #1263, #1294, #1305
 
 ## Context
 

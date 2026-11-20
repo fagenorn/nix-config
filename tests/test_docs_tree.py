@@ -541,7 +541,7 @@ class DocsTreeTest(unittest.TestCase):
                     "ADR-console-037, ADR-console-053, ADR-console-058, ADR-system-004, "
                     "ADR-console-076, ADR-console-078")
         decided = next(row for row in lines if row.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith("#1237, #1263, #1294, #1305, #1343"))
+        self.assertTrue(decided.endswith("#1237, #1263, #1294, #1305"))
         context = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
         console = next(row for row in context if row.startswith("The per-host loopback service"))
         self.assertIn("ADR-console-076", console)
@@ -816,7 +816,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
-                 "ADR-console-086, ADR-console-087"),
+                 "ADR-console-086"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025, ADR-console-075, "
                  "ADR-console-080")):
@@ -867,7 +867,7 @@ class DocsTreeTest(unittest.TestCase):
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
                                           "ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, "
-                                          "ADR-console-086, ADR-console-087")):
+                                          "ADR-console-086")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)

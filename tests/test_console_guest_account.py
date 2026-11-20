@@ -26,7 +26,7 @@ ADD = "/api/guest-account"
 CODE_ROUTE = "/api/guest-signin-code"
 CANCEL = "/api/guest-signin-cancel"
 ROUTES = (ADD, CODE_ROUTE, CANCEL)
-VALID = {ADD: {"consent": True}, CODE_ROUTE: {"code": CODE}, CANCEL: {}}
+VALID = {ADD: {"consent": True}, CODE_ROUTE: {"attempt": 1, "code": CODE}, CANCEL: {"attempt": 1}}
 PLANTED = "sk-ant-oat01-PLANTED-zq77"
 
 
@@ -159,8 +159,12 @@ class GuestAccountCase(GuestWriteCase):
         self.assertFalse(thread.is_alive(), "the call did not return")
         return box[0]
 
+    def shown_attempt(self, login=COLLEAGUE):
+        return self.guest_view(login)["own_signin"]["attempt"]
+
     def sent_code(self, login=COLLEAGUE):
-        status, _ = self.timed(lambda: self.post(CODE_ROUTE, {"code": CODE}, login))
+        attempt = self.shown_attempt(login)
+        status, _ = self.timed(lambda: self.post(CODE_ROUTE, {"attempt": attempt, "code": CODE}, login))
         self.assertEqual(status, 204)
         self.assertEqual(self.timed(lambda: self.owner(self.svc, "GET", "/api/state"))[0], 200)
 
@@ -170,7 +174,8 @@ class GuestAccountCase(GuestWriteCase):
         until(self, lambda: self.own_state(login) == "signed_in")
 
     def cancelled(self, login=COLLEAGUE):
-        status, _ = self.timed(lambda: self.post(CANCEL, {}, login))
+        attempt = self.shown_attempt(login)
+        status, _ = self.timed(lambda: self.post(CANCEL, {"attempt": attempt}, login))
         self.assertEqual(status, 204)
         self.assertEqual(self.timed(lambda: self.owner(self.svc, "GET", "/api/state"))[0], 200)
         until(self, lambda: self.own_state(login) == "cancelled")
@@ -340,8 +345,8 @@ class GuestAccountRefusalTest(GuestAccountCase):
             with self.subTest(route=route, body=body):
                 self.assertEqual(self.post(route, body, SECOND), owner_only)
         no_run = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
-        self.assertEqual(self.post(CODE_ROUTE, {"code": CODE}, SECOND), no_run)
-        self.assertEqual(self.post(CANCEL, {}, SECOND), no_run)
+        self.assertEqual(self.post(CODE_ROUTE, {"attempt": first, "code": CODE}, SECOND), no_run)
+        self.assertEqual(self.post(CANCEL, {"attempt": first}, SECOND), no_run)
         theirs = guest.GuestActor(SECOND, TAILNET, svc._guest_epoch)
         for profile in ("colleague-1", "work"):
             with self.subTest(profile=profile):
@@ -357,6 +362,76 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertEqual(self.names(), {"work", "colleague-1", "colleague-2"})
         self.assertEqual(self.owner_of("colleague-2"), SECOND)
         self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+
+    def test_a_stale_attempt_cannot_cancel_or_pass_a_code_to_a_newer_sign_in(self):
+        self.begin()
+        first = json.loads(self.add()[1])["attempt"]
+        self.cancelled()
+        second = json.loads(self.add()[1])["attempt"]
+        self.assertNotEqual(first, second)
+        fixed = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
+        self.assertEqual(self.post(CANCEL, {"attempt": first}), fixed)
+        self.assertEqual(self.post(CODE_ROUTE, {"attempt": first, "code": CODE}), fixed)
+        self.assertEqual(self.post(CANCEL, {"attempt": second + 1000}), fixed)
+        self.assertEqual(self.code_records(), [])
+        self.assertEqual(self.own_state(), "running")
+        self.assertEqual([row["action"] for row in self.acted()], ["start", "cancel", "start"])
+        self.assertEqual(self.post(CANCEL, {"attempt": second})[0], 204)
+        until(self, lambda: self.own_state() == "cancelled")
+
+    def test_code_and_cancel_act_on_the_attempt_his_page_shows_among_two_live_sign_ins(self):
+        svc = self.begin()
+        self.assertEqual(self.add()[0], 200)
+        self.signed_in("colleague-1")
+        self.assertEqual(self.add()[0], 200)
+        self.signed_in("colleague-2")
+        theirs = guest.GuestActor(COLLEAGUE, TAILNET, svc._guest_epoch)
+        older, _ = svc.start_signin("colleague-1", by=theirs)
+        newer, _ = svc.start_signin("colleague-2", by=theirs)
+        self.assertLess(older, newer)
+        self.assertEqual(self.shown_attempt(), newer)
+        self.assertEqual(svc._signin_runs.running(), {"colleague-1", "colleague-2"})
+        self.assertEqual(self.timed(lambda: self.post(CANCEL, {"attempt": newer}))[0], 204)
+        until(self, lambda: svc._signin_runs.running() == {"colleague-1"})
+        cancels = [row["profile"] for row in self.acted() if row["action"] == "cancel"]
+        self.assertEqual(cancels, ["colleague-2"])
+        self.assertEqual(self.timed(lambda: self.post(CANCEL, {"attempt": newer}))[0], 409)
+        self.assertEqual(self.timed(lambda: self.post(CANCEL, {"attempt": older}))[0], 204)
+        until(self, lambda: not svc._signin_runs.running())
+
+    def test_a_colleague_removed_while_the_link_is_awaited_gets_no_link(self):
+        svc = self.begin()
+        runs = svc._signin_runs
+        awaited = runs.wait_link
+
+        def wait_then_revoke(profile):
+            link = awaited(profile)
+            svc.remove_colleague(COLLEAGUE)
+            return link
+        runs.wait_link = wait_then_revoke
+        status, body = self.add()
+        self.assertEqual(status, 409)
+        self.assertIn(body.decode().strip(), (guest.REVOKED_TEXT, guest.NOT_SHARED_TEXT))
+        self.assertNotIn(b"https", body)
+        self.assertNotIn(b"link", body)
+
+    def test_an_add_that_stops_after_the_directory_exists_leaves_it_his_and_the_retry_reuses_it(self):
+        self.begin()
+
+        def killed(name):
+            raise OSError("the process ended")
+        self.after_add = killed
+        self.assertEqual(self.add()[0], 500)
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.after_add = None
+        status, _ = self.add()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.names(), {"work", "colleague-1"})
+        self.assertEqual(self.added, ["colleague-1"])
+        self.assertEqual(self.rows("account.added"), [{"by": COLLEAGUE, "profile": "colleague-1"}])
+        self.assertEqual(self.owner_of("colleague-1"), COLLEAGUE)
+        self.assertEqual([line["account"] for line in self.clients()], ["colleague-1"])
 
     def own_signin_attempt(self):
         return self.guest_view()["own_signin"]["attempt"]
@@ -445,12 +520,14 @@ class GuestAccountRefusalTest(GuestAccountCase):
         self.assertEqual(self.add()[0], 200)
         self.end_gate.clear()
         try:
-            self.assertEqual(self.post(CODE_ROUTE, {"code": CODE})[0], 204)
+            attempt = self.shown_attempt()
+            self.assertEqual(self.post(CODE_ROUTE, {"attempt": attempt, "code": CODE})[0], 204)
             until(self, lambda: "colleague-1" not in svc._signin_runs.running())
             fixed = (409, guest.NO_OWN_SIGNIN_TEXT.encode() + b"\n")
-            for route in (CODE_ROUTE, CANCEL):
+            for route, body in ((CODE_ROUTE, {"attempt": attempt, "code": CODE}),
+                                (CANCEL, {"attempt": attempt})):
                 with self.subTest(route=route):
-                    got = self.post(route, VALID[route])
+                    got = self.post(route, body)
                     self.assertEqual(got, fixed)
                     self.assertNotIn(b"colleague-1", got[1])
         finally:
@@ -476,8 +553,8 @@ class GuestAccountRefusalTest(GuestAccountCase):
             self.post(ADD, {"consent": False})
             self.post(ADD, {})
             self.post(ADD, {"consent": True}, STRANGER)
-            self.post(CODE_ROUTE, {"code": CODE}, SECOND)
-            self.post(CANCEL, {}, SECOND)
+            self.post(CODE_ROUTE, VALID[CODE_ROUTE], SECOND)
+            self.post(CANCEL, VALID[CANCEL], SECOND)
             self.add_error = account_add.AddFailed("failed")
             failed = self.add()
             self.assertEqual(failed[0], 502)
@@ -552,8 +629,17 @@ class GuestAccountSecrecyTest(GuestAccountCase):
         self.cancelled()
         self.post(ADD, {"consent": False})
         self.post(ADD, {})
-        self.post(CODE_ROUTE, {"code": CODE}, SECOND)
-        self.post(CANCEL, {}, SECOND)
+        self.post(CODE_ROUTE, VALID[CODE_ROUTE], SECOND)
+        self.post(CANCEL, VALID[CANCEL], SECOND)
+        # The first response is the guest page, which carries the guest write token by design (ADR-console-066, the
+        # guest page contract); AC3 covers the owner's token, a credential and the client's output in every response
+        # and the guest token in every response of the account API.
+        page, *api = self.responses
+        self.assertIn(self.guest_token().encode(), page[2])
+        for status, headers, body in api:
+            blob = (str(status) + json.dumps(headers)).encode() + body
+            with self.subTest(status=status, word="the guest token"):
+                self.assertNotIn(self.guest_token().encode(), blob)
         for status, headers, body in self.responses:
             blob = (str(status) + json.dumps(headers)).encode() + body
             for word in (PLANTED, "SENTINEL-OUT", "SENTINEL-ERR", self.owner_token(),

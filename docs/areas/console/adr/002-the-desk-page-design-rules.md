@@ -1,7 +1,7 @@
 # ADR-console-002 — The desk page's design rules
 
-- **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, ADR-console-086, ADR-console-087
-- **Decided in:** #833, #855, #887, #895, #911, #919, #920, #922, #944, #1026, #1027, #1039, #1036, #1046, #1066, #1086, #1119, #1133, #1135, #1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262, #1343
+- **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, ADR-console-035, ADR-console-038, ADR-console-052, ADR-console-056, ADR-console-064, ADR-console-086
+- **Decided in:** #833, #855, #887, #895, #911, #919, #920, #922, #944, #1026, #1027, #1039, #1036, #1046, #1066, #1086, #1119, #1133, #1135, #1136, #1137, #1177, #1178, #1179, #1182, #1226, #1214, #1262
 
 ## Context
 

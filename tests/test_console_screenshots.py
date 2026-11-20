@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import pictures, service
+from agent_tools.console import account_add, event_log, pictures, service
 
 from . import accounts_sandbox
 from . import console_screenshots as shots
@@ -194,6 +194,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
                             if e.kind == "signin.reading" and e.payload.get("profile") == "colleague-1"]
                 self.assertEqual([r["state"] for r in readings], ["signed_in"])
                 self.assertTrue((fixture.accounts / "profiles" / "colleague-1").is_dir())
+
+    def test_the_guest_seed_builds_against_the_base_revisions_add_row(self) -> None:
+        # The before picture runs this fixture against the base revision, whose `added` takes a profile only.
+        def base_added(profile):
+            return (event_log.ACCOUNT_ADDED, None, {"by": "owner", "profile": profile})
+
+        for state in ("guest-page", "guest-steer", "owner-actors"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(account_add, "added", base_added):
+                fixture = shots.build_fixture(Path(tmp).resolve(), state, time.time())
+                log = shots.EventLog(fixture.store)
+                try:
+                    added = [e.payload for e in log.events() if e.kind == "account.added"]
+                finally:
+                    log.close()
+                self.assertEqual(added, [{"by": shots.COLLEAGUE, "profile": "colleague-1"}])
 
     def test_the_guest_page_shot_opens_the_consent_only_on_a_page_that_has_it(self) -> None:
         door = "#console-door"

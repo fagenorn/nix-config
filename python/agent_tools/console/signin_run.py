@@ -108,13 +108,19 @@ later events onto an earlier fold gives the fold of all of them.
 Requests. `parse_profile_request(body)` takes a UTF-8 JSON object with exactly the member `profile`,
 a non-empty string, and returns it. `parse_code_request(body)` takes exactly `profile` (as above) and
 `code`, a string of 1 to `MAX_CODE_CHARS` (512) characters each in 0x21 to 0x7E, and returns
-`(profile, code)`. Both raise `ValueError` otherwise. A colleague's bodies name no profile (#1343):
-`parse_guest_code_request(body)` takes strict UTF-8 JSON (a repeated key or `NaN` is `ValueError`)
-of exactly `code`, under the same code rule, and returns it; `parse_guest_cancel_request(body)` takes
-exactly the empty object and returns None. `guest_answer_members(link)` is exactly `{"link", "route"}`:
+`(profile, code)`. Both raise `ValueError` otherwise. A colleague's bodies name no profile but the
+attempt of the sign-in the page displays (#1343): `parse_guest_code_request(body)` takes strict UTF-8
+JSON (a repeated key or `NaN` is `ValueError`) of exactly `attempt`, a positive `int` (never a `bool`),
+and `code`, under the same code rule, and returns `(attempt, code)`; `parse_guest_cancel_request(body)`
+takes exactly `attempt` and returns it. `guest_answer_members(link)` is exactly `{"link", "route"}`:
 both None for no link, the url and route for `manual` and `unknown`, and `{"link": None, "route":
 "loopback"}` for a loopback link, whose return address is the owner's host's loopback that a colleague's
-browser cannot reach (ADR-console-080 D3).
+browser cannot reach (ADR-console-080 D3). A link a colleague receives must also pass `guest_link(url)`:
+no user information or fragment, and a query of the OAuth authorization request's members only
+(`GUEST_LINK_MEMBERS`: `code`, `client_id`, `response_type`, `redirect_uri`, `scope`, `code_challenge`,
+`code_challenge_method`, `state`), its `redirect_uri` without query, fragment or user information. A
+printed URL that fails it, such as a diagnostic one carrying an access token, is handed out as no link:
+`{"link": None, "route": None}`.
 
 Secrecy. No return value, exception message or stderr line carries a link or a code, and neither is
 stored or logged: the link lives in memory for the run, the code goes to the client's input and
@@ -265,7 +271,31 @@ def guest_answer_members(link: Link | None) -> dict[str, object]:
         return {"link": None, "route": None}
     if link.route == "loopback":
         return {"link": None, "route": "loopback"}
+    if not guest_link(link.url):
+        return {"link": None, "route": None}
     return {"link": link.url, "route": link.route}
+
+
+GUEST_LINK_MEMBERS = frozenset({"code", "client_id", "response_type", "redirect_uri", "scope",
+                                "code_challenge", "code_challenge_method", "state"})
+
+
+def guest_link(url: str) -> bool:
+    """True when `url` is only the OAuth authorization request a colleague may be handed."""
+    try:
+        link = urlsplit(url)
+        if link.fragment or "@" in link.netloc:
+            return False
+        query = parse_qs(link.query, keep_blank_values=True)
+        if set(query) - GUEST_LINK_MEMBERS:
+            return False
+        for value in query.get("redirect_uri", []):
+            target = urlsplit(value)
+            if target.query or target.fragment or "@" in target.netloc:
+                return False
+    except ValueError:
+        return False
+    return True
 
 
 def _object(body: bytes, members: set[str]) -> dict:
@@ -309,12 +339,19 @@ def _guest_object(body: bytes, members: set[str]) -> dict:
     return value
 
 
-def parse_guest_code_request(body: bytes) -> str:
-    return _code(_guest_object(body, {"code"})["code"])
+def _guest_attempt(value: object) -> int:
+    if not _attempt(value):
+        raise ValueError("bad attempt")
+    return value  # type: ignore[return-value]
 
 
-def parse_guest_cancel_request(body: bytes) -> None:
-    _guest_object(body, set())
+def parse_guest_code_request(body: bytes) -> tuple[int, str]:
+    value = _guest_object(body, {"attempt", "code"})
+    return _guest_attempt(value["attempt"]), _code(value["code"])
+
+
+def parse_guest_cancel_request(body: bytes) -> int:
+    return _guest_attempt(_guest_object(body, {"attempt"})["attempt"])
 
 
 def acted(profile: str, action: str, outcome: str, by: str = "owner") -> tuple[str, None, dict]:

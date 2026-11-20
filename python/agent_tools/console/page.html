@@ -264,7 +264,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .guest-account { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
 .guest-account p { flex-basis: 100%; margin: 0; }
 .guest-consent { color: var(--text); }
-.guest-agree { display: inline-flex; align-items: center; gap: 6px; }
+.guest-agree { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; }
+.guest-tick { width: 32px; height: 32px; margin: 0; accent-color: var(--lav); }
 .pool-week, .pool-session { flex: 1 0 100%; padding-left: 16px; }
 .message-reply { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .manager-line .message-reply { flex: 1 1 auto; padding-left: 0; }
@@ -6218,19 +6219,21 @@ async function guestSignIn() {
 async function guestSendCode() {
   const g = guestAccount;
   const code = g.draft.trim();
-  if (g.posting || code === "") return;
+  if (g.posting || code === "" || g.held === null) return;
+  const attempt = g.held.attempt;
   await guestAccountPost("Could not send the code: ", () => fetch("/api/guest-signin-code", {
-    method: "POST", headers: stallHeaders(), body: JSON.stringify({ code }),
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({ attempt, code }),
   }));
   redraw();
 }
 async function guestCancel() {
   const g = guestAccount;
-  if (g.posting) return;
+  if (g.posting || g.held === null) return;
+  const attempt = g.held.attempt;
   const text = await guestAccountPost("Could not cancel: ", () => fetch("/api/guest-signin-cancel", {
-    method: "POST", headers: stallHeaders(), body: "{}",
+    method: "POST", headers: stallHeaders(), body: JSON.stringify({ attempt }),
   }));
-  if (text !== null && g.held !== null) {
+  if (text !== null && g.held !== null && g.held.attempt === attempt) {
     g.watched = g.held.attempt;
     g.held = null;
     g.draft = "";

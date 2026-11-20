@@ -1195,8 +1195,8 @@ class OwnAccountPageTest(unittest.TestCase):
         self.assertEqual(len(own_of(linked, "guest-cancel")), 1)
         self.assertEqual(own_writes(done), [
             ("/api/guest-account", {"consent": True}),
-            ("/api/guest-signin-code", {"code": "abc#def"}),
-            ("/api/guest-signin-cancel", {})])
+            ("/api/guest-signin-code", {"attempt": 7, "code": "abc#def"}),
+            ("/api/guest-signin-cancel", {"attempt": 7})])
         for post in done["posts"]:
             if post["url"] != "/api/looked":
                 self.assertEqual((post["method"], post["headers"]), ("POST", HEADERS))

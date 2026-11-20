@@ -247,6 +247,29 @@ class OwnerRetentionTest(LogCase):
         self.assertEqual(owners_state(log.events()), before)
         self.assertEqual(before, {"colleague-1": A, "colleague-4": B})
 
+    def test_a_later_add_row_the_fold_ignores_does_not_end_a_colleagues_kept_row(self):
+        log = self.open()
+        self.now = LONG_AGO
+        ignored = [("account.added", None, {"by": by, "profile": "colleague-1"})
+                   for by in ("Colleague@Example.invalid", "someone", "", 7, None)]
+        log.append([added("colleague-1", by=A), *ignored])
+        before = owners_state(log.events())
+        self.assertEqual(before, {"colleague-1": A})
+        self.now = NOW
+        log.retain()
+        self.assertEqual([event.payload for event in log.events() if event.kind == "account.added"],
+                         [{"by": A, "profile": "colleague-1"}])
+        self.assertEqual(owners_state(log.events()), before)
+
+    def test_an_old_row_with_an_unreadable_login_is_not_kept(self):
+        log = self.open()
+        self.now = LONG_AGO
+        log.append([("account.added", None, {"by": "Colleague@Example.invalid", "profile": "x"}),
+                    ("account.added", None, {"by": "someone", "profile": "y"})])
+        self.now = NOW
+        log.retain()
+        self.assertEqual([e for e in log.events() if e.kind == "account.added"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
