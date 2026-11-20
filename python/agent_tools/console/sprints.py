@@ -493,7 +493,7 @@ carry them, both kept (`event_log.NOTICE_POSTED`, `NOTICE_WITHDRAWN`; each with 
 project column):
 
     notice.posted     {"sprint_id", "goal": <str>, "notice": {"kind", "text", "what"?, "until"?,
-                       "to"?}}
+                       "issue"?, "live_fault"?, "to"?}}
     notice.withdrawn  {"sprint_id", "goal": <str>, "notice": <int>}
 
 A third row, `notice.nudged {"sprint_id", "notice", "route", "ok", "reason"?, "listing_failed"?,
@@ -501,26 +501,35 @@ A third row, `notice.nudged {"sprint_id", "notice", "route", "ok", "reason"?, "l
 cost a manager; the fold reads only its `permission`.
 
 `checked_notice(notice)` returns a new dict of exactly the kind's members (`NOTICE_MEMBERS`: a claim
-has kind, text, what and until; a heads-up kind and text; a hand-off kind, text and to), texts
+has kind, text, what, until, issue and live_fault; a heads-up kind and text; a hand-off kind, text and to), texts
 stripped, or raises `Refused` at the first failure, in this order: not an object
 (`NOTICE_NOT_OBJECT`); `kind` missing or not in `NOTICE_KINDS` (`NOTICE_KIND`); a key outside the
 kind's members (`NOTICE_EXTRA`, one fixed text per kind that never carries the key); then `text`,
 then a claim's `what`, then its `until`: not a string, empty after stripping, or holding a line
 break (`NOTICE_MEMBER`), or longer than `MAX_NOTICE_TEXT_CHARS` / `MAX_CLAIM_WHAT_CHARS` /
-`MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then a hand-off's `to`, which is
-`"owner"` or a sprint id (`NOTICE_MEMBER`). Every notice refusal is one line built only from fixed
+`MAX_CLAIM_UNTIL_CHARS` after stripping (`NOTICE_TOO_LONG`); then, for a claim, `issue`
+(optional; an int of at least 1, not a bool) and `live_fault` (optional; a bool), each refused as
+`NOTICE_MEMBER`; then a hand-off's `to`, which is `"owner"` or a sprint id (`NOTICE_MEMBER`).
+Every notice refusal is one line built only from fixed
 kinds, member names and limits, never from a key or value the manager sent, because the command
 prints it and the service answers it as it is. `takes_notices(state)` is `takes_questions(state)`
 and no stop requested. `postable_notice(state, notice, others)` refuses, in order: a sprint that
-takes no notice (`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a
-hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of the
+takes no notice (`ALREADY_STOPPING` while a stop waits, else `ENDED`); `checked_notice`; for a claim,
+no `issue` (`NOTICE_MEMBER`), then no part in its `what` (`claim_parts`: split on commas, stripped,
+empty parts and repeats dropped; `NOTICE_MEMBER`), then a part outside the project (absolute or with
+a `..` segment, `outside_claim_part`; `CLAIM_OUTSIDE`), and only then a part naming a whole folder
+tree (`wide_claim_part`: a trailing slash, the root, a `**`, a last segment `*`, or a directory
+`is_folder` reports; `CLAIM_FOLDER`), so no path leaving the project reaches `is_folder`; the
+checked claim keeps `what` as written and `claim_path` / `claim_paths` give the normalized
+comparison keys; for a hand-off to a sprint, its own id (`NOTICE_TO_SELF`) or an id that is no sprint of `others` of the
 same project that takes notices (`NOTICE_TO_REFUSED`); and a sixth open notice (`NOTICE_LIMIT`);
 it never looks at another sprint's claims. `withdrawable_notice(state, notice_id, others)` refuses
 a sprint that takes no notice as `postable_notice` does, then returns the open notice of `state`,
 or raises `NOTICE_ENDED` (withdrawn or ended), `NOTICE_FOREIGN` (a notice of a sprint in `others`)
 or `NOTICE_UNKNOWN`. `open_notices(state)` is the notices neither withdrawn nor ended, in id order
 (the row's `seq`); `notice_entry` and `project_notices(states, project_id)` are the wire entries
-`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"` and `"until"` for a claim and
+`{"id", "sprint_id", "title", "kind", "text", "at"}` plus `"what"`, `"until"`, `"issue"` and
+`"live_fault"` for a claim and
 `"to"` for a hand-off, of the project's open notices in id order. `notice_block(entries, sprint_id,
 now_ms)` renders those entries for the manager of `sprint_id` under `NOTICE_BLOCK_HEAD`, one line
 per entry of another sprint (the sprint's own notices are left out), in the order given, and is
@@ -571,7 +580,9 @@ The fold: a `notice.posted` row for a folded sprint that takes notices and whose
 A `notice.withdrawn` row whose `notice` is an int (not a bool) naming an open notice of a sprint that
 takes notices sets that notice's `withdrawn_at` to the row's `at`; anything else changes nothing.
 The fold enforces neither the limit nor the addressee: the service does, under its lock. After
-every row that names a folded sprint, the end sweep (`_ended_notices`) sets `ended_at` to the
+every row that names a folded sprint, the landing sweep (`_landed_claims`) sets `ended_at` to the row's
+`at` on each open claim whose `issue` the sprint's report lists as landed or held (a claim without an
+`issue`, a heads-up and a hand-off are never ended by it), and the end sweep (`_ended_notices`) sets `ended_at` to the
 row's `at` on each notice still open when the sprint takes no notice (a stop was requested, it
 closed, stopped or is done); `ended_at` is never cleared, so a notice stays ended when its sprint
 reopens (a newer brief or report clears a done report), and folding the rows in one call, one row
@@ -654,6 +665,7 @@ The module reads no clock and no environment; only the secret helpers touch the 
 
 import json
 import os
+import posixpath
 import re
 import secrets
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -870,14 +882,17 @@ MAX_CLAIM_UNTIL_CHARS = 140
 MAX_OPEN_NOTICES = 5
 NOTICE_OWNER = "owner"
 NOTICE_KINDS = ("claim", "heads-up", "hand-off")
-NOTICE_MEMBERS = {"claim": ("kind", "text", "what", "until"), "heads-up": ("kind", "text"),
+NOTICE_MEMBERS = {"claim": ("kind", "text", "what", "until", "issue", "live_fault"),
+                  "heads-up": ("kind", "text"),
                   "hand-off": ("kind", "text", "to")}
 NOTICE_NOT_OBJECT = "the notice is not a JSON object"
 NOTICE_KIND = "the notice's kind is not one of claim, heads-up, hand-off"
-NOTICE_EXTRA = {"claim": "a claim notice has only kind, text, what and until",
+NOTICE_EXTRA = {"claim": "a claim notice has only kind, text, what, until, issue and live_fault",
                 "heads-up": "a heads-up notice has only kind and text",
                 "hand-off": "a hand-off notice has only kind, text and to"}
 NOTICE_MEMBER = "the notice has no valid {member}"
+CLAIM_FOLDER = "a claim's what names files or a narrow path, never a whole folder tree"
+CLAIM_OUTSIDE = "a claim's what names paths inside the project, relative to its root"
 NOTICE_TOO_LONG = "the notice's {member} is over {limit} characters"
 NOTICE_TO_SELF = ("the hand-off's to names this sprint: address another open sprint of this "
                   "project or the owner")
@@ -1096,6 +1111,8 @@ class Notice:
     to: str | None = None
     withdrawn_at: str | None = None
     ended_at: str | None = None
+    issue: int | None = None
+    live_fault: bool = False
 
 
 @dataclass(frozen=True)
@@ -1796,6 +1813,42 @@ def _notice_line(value: object) -> bool:
             and "\r" not in value)
 
 
+def claim_parts(what: str) -> tuple[str, ...]:
+    """A claim's `what` split on commas: each part stripped, empty parts and repeats dropped."""
+    parts: dict[str, None] = {}
+    for part in what.split(","):
+        if part.strip():
+            parts.setdefault(part.strip())
+    return tuple(parts)
+
+
+def claim_path(part: str) -> str:
+    """The one normalized, project-relative key a claim part is compared by."""
+    return posixpath.normpath(part)
+
+
+def claim_paths(what: str) -> tuple[str, ...]:
+    """`claim_path` of each part of `what`, repeats dropped, in first-seen order."""
+    return tuple(dict.fromkeys(claim_path(part) for part in claim_parts(what)))
+
+
+def outside_claim_part(part: str) -> bool:
+    """True when the part is absolute or climbs out of the project with a `..` segment."""
+    return part.startswith("/") or ".." in part.split("/")
+
+
+def wide_claim_part(part: str, is_folder: Callable[[str], bool]) -> bool:
+    """True when the part names a whole folder tree: a trailing slash, the root, a `**` or a
+    trailing `*` segment, or a directory `is_folder` knows."""
+    path = claim_path(part)
+    return (part.endswith("/") or path == "." or "**" in path or path.split("/")[-1] == "*"
+            or is_folder(path))
+
+
+def _no_folder(path: str) -> bool:
+    return False
+
+
 def checked_notice(notice: object) -> dict:
     """The notice reduced to its kind's members, texts stripped, else `Refused` at the first failure."""
     if not isinstance(notice, dict):
@@ -1816,6 +1869,16 @@ def checked_notice(notice: object) -> dict:
         if len(value.strip()) > _NOTICE_LIMITS[member]:
             raise Refused(NOTICE_TOO_LONG.format(member=member, limit=_NOTICE_LIMITS[member]))
         checked[member] = value.strip()
+    if kind == "claim":
+        if "issue" in notice:
+            issue = notice["issue"]
+            if not isinstance(issue, int) or isinstance(issue, bool) or issue < 1:
+                raise Refused(NOTICE_MEMBER.format(member="issue"))
+            checked["issue"] = issue
+        if "live_fault" in notice:
+            if not isinstance(notice["live_fault"], bool):
+                raise Refused(NOTICE_MEMBER.format(member="live_fault"))
+            checked["live_fault"] = notice["live_fault"]
     if kind == "hand-off":
         to = notice.get("to")
         if not isinstance(to, str) or (to != NOTICE_OWNER and SPRINT_ID.fullmatch(to) is None):
@@ -1830,10 +1893,21 @@ def _refused_notices(state: SprintState) -> None:
                       else ENDED)
 
 
-def postable_notice(state: SprintState, notice: object, others: Iterable[SprintState]) -> dict:
+def postable_notice(state: SprintState, notice: object, others: Iterable[SprintState],
+                    is_folder: Callable[[str], bool] = _no_folder) -> dict:
     """The checked notice `state` may post now, else `Refused` with why not."""
     _refused_notices(state)
     checked = checked_notice(notice)
+    if checked["kind"] == "claim":
+        if "issue" not in checked:
+            raise Refused(NOTICE_MEMBER.format(member="issue"))
+        parts = claim_parts(checked["what"])
+        if not parts:
+            raise Refused(NOTICE_MEMBER.format(member="what"))
+        if any(outside_claim_part(part) for part in parts):
+            raise Refused(CLAIM_OUTSIDE)
+        if any(wide_claim_part(part, is_folder) for part in parts):
+            raise Refused(CLAIM_FOLDER)
     to = checked.get("to")
     if checked["kind"] == "hand-off" and to != NOTICE_OWNER:
         if to == state.sprint_id:
@@ -1903,6 +1977,7 @@ def notice_entry(state: SprintState, notice: Notice) -> dict:
              "kind": notice.kind, "text": notice.text}
     if notice.kind == "claim":
         entry["what"], entry["until"] = notice.what, notice.until
+        entry["issue"], entry["live_fault"] = notice.issue, notice.live_fault
     if notice.kind == "hand-off":
         entry["to"] = notice.to
     entry["at"] = notice.at
@@ -2034,7 +2109,8 @@ def _folded_notice(state: SprintState, event: Event) -> SprintState:
         except Refused:
             return state
         notice = Notice(event.seq, event.at, checked["kind"], checked["text"],
-                        checked.get("what"), checked.get("until"), checked.get("to"))
+                        checked.get("what"), checked.get("until"), checked.get("to"),
+                        issue=checked.get("issue"), live_fault=checked.get("live_fault", False))
         return replace(state, notices=(*state.notices, notice))
     notice_id = payload.get("notice")
     if not _id(notice_id):
@@ -2087,6 +2163,20 @@ def _ended_notices(state: SprintState, at: str) -> SprintState:
         replace(notice, ended_at=at)
         if notice.withdrawn_at is None and notice.ended_at is None else notice
         for notice in state.notices))
+
+
+def _landed_claims(state: SprintState, at: str) -> SprintState:
+    """Marks every open claim ended whose slice the sprint's report lists as landed or held."""
+    if state.report is None:
+        return state
+    done = {issue for issue, stage in state.report.issues if stage in (LANDED, HELD)}
+    if not any(notice.kind == "claim" and notice.issue in done and notice.withdrawn_at is None
+               and notice.ended_at is None for notice in state.notices):
+        return state
+    return replace(state, notices=tuple(
+        replace(notice, ended_at=at)
+        if notice.kind == "claim" and notice.issue in done and notice.withdrawn_at is None
+        and notice.ended_at is None else notice for notice in state.notices))
 
 
 def _folded_message(state: SprintState, event: Event) -> SprintState:
@@ -2512,6 +2602,7 @@ def sprint_states(events: Iterable[Event],
                                             pictures=folded[sprint_id].pictures | {picture})
         if sprint_id in folded:
             folded[sprint_id] = _ended_notices(folded[sprint_id], event.at)
+            folded[sprint_id] = _landed_claims(folded[sprint_id], event.at)
     return folded
 
 

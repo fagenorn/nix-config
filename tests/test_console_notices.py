@@ -23,7 +23,7 @@ OWNER_NOTICE = "/api/owner-notice"
 OWNER_WITHDRAW = "/api/owner-notice-withdraw"
 JSON = {"Content-Type": "application/json"}
 CLAIM = {"kind": "claim", "text": " the page fold ", "what": "python/agent_tools/console/page.html",
-         "until": "the board fold lands"}
+         "until": "the board fold lands", "issue": 7}
 HEADS_UP = {"kind": "heads-up", "text": "sprint ask gains a dry run"}
 HAND_OFF = {"kind": "hand-off", "text": "the importer needs a retry", "to": "owner"}
 OTHER_GOAL = "make the exporter resumable"
@@ -91,7 +91,25 @@ class NoticeRouteTest(Case):
         self.assertEqual(self.assert_unchanged(svc, lambda: self.listed(svc, b)), [{
             "at": at, "id": seq, "kind": "claim", "sprint_id": a, "text": "the page fold",
             "title": sprints.sprint_title(svc._sprints[a]), "until": CLAIM["until"],
-            "what": CLAIM["what"]}])
+            "what": CLAIM["what"], "issue": 7, "live_fault": False}])
+
+    def test_a_folder_wide_claim_is_refused_and_a_file_claim_is_listed(self):
+        checkout = self.store.parent / "checkout"
+        (checkout / "src").mkdir(parents=True)
+        (checkout / "src" / "main.py").write_text("")
+        support.write_registry(self.registry, [{"project_id": "owner/p01", "root": str(checkout)}])
+        svc = self.start()
+        a = self.approved(svc, "owner/p01")
+        before = len(support.log_rows(self.store))
+        status, _, body = self.notice(svc, a, {**CLAIM, "what": "src"})
+        self.assertEqual(
+            (status, body),
+            (409, b"a claim's what names files or a narrow path, never a whole folder tree\n"))
+        self.assertEqual(len(support.log_rows(self.store)), before)
+        self.posted(svc, a, {**CLAIM, "what": "src/main.py"})
+        listed = self.listed(svc, a)
+        self.assertEqual([(e["what"], e["issue"], e["live_fault"]) for e in listed],
+                         [("src/main.py", 7, False)])
 
     def test_a_sprint_of_another_project_never_sees_the_notice(self):
         svc = self.open()

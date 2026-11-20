@@ -2401,7 +2401,7 @@ SA = "a" * 16
 SB = "b" * 16
 SC = "c" * 16
 CLAIM = {"kind": "claim", "text": " the page fold ", "what": "python/agent_tools/console/page.html",
-         "until": "the board fold lands"}
+         "until": "the board fold lands", "issue": 7}
 HEADS_UP = {"kind": "heads-up", "text": "sprint ask gains a dry run"}
 HAND_OFF = {"kind": "hand-off", "text": "the importer needs a retry", "to": "owner"}
 
@@ -2470,7 +2470,7 @@ class NoticeCheckTest(unittest.TestCase):
         self.assertNotIn("\n", reason)
         self.assertNotIn("approve_refused", reason)
         self.assertEqual(notice_refusal(sprints.checked_notice, {**CLAIM, "to": "owner"}),
-                         "a claim notice has only kind, text, what and until")
+                         "a claim notice has only kind, text, what, until, issue and live_fault")
         self.assertEqual(notice_refusal(sprints.checked_notice, {**HAND_OFF, "until": "x"}),
                          "a hand-off notice has only kind, text and to")
         self.assertEqual(
@@ -2533,13 +2533,100 @@ class NoticeCheckTest(unittest.TestCase):
                          sprints.ALREADY_STOPPING)
 
 
+class ClaimRuleTest(unittest.TestCase):
+    NO_FOLDER = "a claim's what names files or a narrow path, never a whole folder tree"
+    OUTSIDE = "a claim's what names paths inside the project, relative to its root"
+
+    def test_a_claim_naming_a_whole_folder_tree_is_refused(self):
+        a = open_sprint(SA)
+        is_folder = lambda path: path == "python/agent_tools/console"  # noqa: E731
+        for what in ("python/agent_tools/console/", "python/**", "tests/*", ".", "./",
+                     "python/agent_tools/console", "./python/agent_tools/./console",
+                     "tests/test_x.py, python/agent_tools/console", "src/main.py, ./",
+                     "src/main.py, ."):
+            with self.subTest(what):
+                reason = notice_refusal(sprints.postable_notice, a, {**CLAIM, "what": what}, [],
+                                        is_folder)
+                self.assertEqual(reason, self.NO_FOLDER)
+                for part in what.replace(",", " ").split():
+                    if len(part) > 1:
+                        self.assertNotIn(part, reason)
+
+    def test_a_claim_outside_the_project_is_refused_before_any_folder_lookup(self):
+        a = open_sprint(SA)
+        seen = []
+        is_folder = lambda path: seen.append(path) or False  # noqa: E731
+        for what in ("/etc/passwd", "../other/x.py", "src/../../x.py", "src/main.py, ../x.py"):
+            with self.subTest(what):
+                self.assertEqual(notice_refusal(sprints.postable_notice, a,
+                                                {**CLAIM, "what": what}, [], is_folder),
+                                 self.OUTSIDE)
+        self.assertEqual(seen, [])
+
+    def test_a_file_level_claim_is_accepted(self):
+        a = open_sprint(SA)
+        is_folder = lambda path: path == "python/agent_tools/console"  # noqa: E731
+        what = "python/agent_tools/console/sprints.py, ./tests/test_console_notice*.py"
+        self.assertEqual(
+            sprints.postable_notice(a, {**CLAIM, "what": what, "live_fault": True}, [], is_folder),
+            {"kind": "claim", "text": "the page fold", "what": what, "until": CLAIM["until"],
+             "issue": 7, "live_fault": True})
+        self.assertEqual(sprints.claim_parts(" a.py ,, ./b.py, a.py "), ("a.py", "./b.py"))
+        self.assertEqual(sprints.claim_paths(" a.py ,, ./b.py, src/./c.py, ./a.py "),
+                         ("a.py", "b.py", "src/c.py"))
+        self.assertEqual(sprints.claim_paths("./"), (".",))
+
+    def test_a_claim_without_its_slices_issue_or_with_a_bad_one_is_refused(self):
+        a = open_sprint(SA)
+        no_issue = {k: v for k, v in CLAIM.items() if k != "issue"}
+        no_valid_issue = "the notice has no valid issue"
+        self.assertEqual(notice_refusal(sprints.postable_notice, a, no_issue, []),
+                         no_valid_issue)
+        for value in (0, True, "7", 1.5):
+            with self.subTest(value):
+                self.assertEqual(notice_refusal(sprints.checked_notice, {**CLAIM, "issue": value}),
+                                 no_valid_issue)
+        self.assertEqual(notice_refusal(sprints.checked_notice, {**CLAIM, "live_fault": "yes"}),
+                         "the notice has no valid live_fault")
+        self.assertEqual(sprints.checked_notice(no_issue), {**no_issue, "text": "the page fold"})
+        self.assertEqual(notice_refusal(sprints.postable_notice, a, {**CLAIM, "what": " , "}, []),
+                         "the notice has no valid what")
+
+    def rows(self, claim_four, extra=()):
+        return [stated(1, "o/a", SA, "g"), sent(2, SA, 1, PARTS), approved(3, SA, 1),
+                posted(4, SA, claim_four), posted(5, SA, {**CLAIM, "issue": 12}),
+                posted(6, SA, HEADS_UP), reported(7, SA, REPORT), *extra]
+
+    def test_a_claim_ends_when_its_slice_lands(self):
+        rows = self.rows({**CLAIM, "issue": 13})
+        state = sprints.sprint_states(rows)[SA]
+        self.assertEqual([n.notice_id for n in sprints.open_notices(state)], [5, 6])
+        ended = next(n for n in state.notices if n.notice_id == 4)
+        self.assertEqual((ended.ended_at, ended.withdrawn_at), (at(7), None))
+        held = {**REPORT, "issues": [{"issue": 12, "stage": "held"},
+                                     {"issue": 13, "stage": "landed"}]}
+        rows.append(reported(8, SA, held))
+        state = sprints.sprint_states(rows)[SA]
+        self.assertEqual([n.notice_id for n in sprints.open_notices(state)], [6])
+        stepwise = {}
+        for row in rows:
+            stepwise = sprints.sprint_states([row], stepwise)
+        self.assertEqual(sprints.sprint_states(rows), stepwise)
+
+    def test_a_logged_claim_without_an_issue_still_folds_and_never_ends_on_landing(self):
+        no_issue = {k: v for k, v in CLAIM.items() if k != "issue"}
+        state = sprints.sprint_states(self.rows(no_issue))[SA]
+        notice = next(n for n in sprints.open_notices(state) if n.notice_id == 4)
+        self.assertEqual((notice.issue, notice.live_fault), (None, False))
+
+
 class NoticeFoldTest(unittest.TestCase):
     def test_a_posted_notice_is_open_until_withdrawn(self):
         goals = [stated(1, "o/a", SA, "make the importer resumable"), stated(2, "o/a", SB, "other")]
         states = sprints.sprint_states([*goals, posted(3, SA, CLAIM)])
         self.assertEqual(sprints.open_notices(states[SA]),
                          (Notice(3, at(3), "claim", "the page fold", CLAIM["what"],
-                                 CLAIM["until"]),))
+                                 CLAIM["until"], issue=7),))
         states = sprints.sprint_states([taken(4, SA, 3)], states)
         self.assertEqual(sprints.open_notices(states[SA]), ())
         self.assertEqual(states[SA].notices[0].withdrawn_at, at(4))
@@ -2578,7 +2665,7 @@ class NoticeFoldTest(unittest.TestCase):
         self.assertEqual(sprints.project_notices(states.values(), "o/a"), [
             {"id": 4, "sprint_id": SA, "title": "make the importer resumable", "kind": "claim",
              "text": "the page fold", "what": CLAIM["what"], "until": CLAIM["until"],
-             "at": at(4)},
+             "issue": 7, "live_fault": False, "at": at(4)},
             {"id": 6, "sprint_id": SB, "title": "other", "kind": "hand-off",
              "text": HAND_OFF["text"], "to": SA, "at": at(6)}])
 

@@ -842,7 +842,9 @@ manager sent, so every stderr line is one line and neither the secret nor the no
 Success is 200 `application/json` (sorted keys, compact): `{"notice":<id>}` for a post (the new row's
 `seq`) and a withdrawal (the withdrawn id), `{"notices":[<sprints.notice_entry>...]}` for the list.
 `post_notice(sprint_id, secret, notice)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
-`SecretRefused`), then `sprints.postable_notice` against every other folded sprint; it appends exactly
+`SecretRefused`), then `sprints.postable_notice` against every other folded sprint, with a folder
+test built from the sprint's project root (a stat per part of a claim's `what`, so a claim naming a
+directory is refused; a project not registered has no folder); it appends exactly
 one `notice.posted` row (project the sprint's project) `{"sprint_id", "goal", "notice": <checked>}`,
 folds, publishes and returns the row's `seq`. `withdraw_notice` is `_manager_sprint` then
 `sprints.withdrawable_notice`; it appends exactly one `notice.withdrawn` row `{"sprint_id", "goal",
@@ -7184,7 +7186,13 @@ class ConsoleService:
         with self._ingest:
             sprint = self._manager_sprint(sprint_id, secret)
             others = [other for key, other in self._sprints.items() if key != sprint_id]
-            checked = sprints.postable_notice(sprint, notice, others)
+            project = self._states.get(sprint.project_id)
+            root = project.root if project is not None else None
+
+            def is_folder(path: str) -> bool:
+                return root is not None and os.path.isdir(os.path.join(root, path))
+
+            checked = sprints.postable_notice(sprint, notice, others, is_folder)
             appended = self.log.append([(NOTICE_POSTED, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "notice": checked})])
             self._apply(appended)
