@@ -93,15 +93,18 @@ failure or error next to `activation`, `run`, `build`, `deploy`, `production`, `
 to open`) is removed first (`_FAILED_RUN`), so `q.records.json (failed activation)` is a citation.
 
 `spend_figure(text)` is False for None, else whether the text holds a spend figure: a dollar amount
-(`$0.42`), a number followed by `tokens` (with an optional `k`, `m`, `b`, `thousand`, `million` or
-`billion`) or a number followed by `dollars` or `usd`. A number is digits with commas only between
-three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
+(`$0.42`, `$1,200`, `$3k`: a complete amount, with a fraction, a comma group or a magnitude, not followed
+by a digit, `,` or `.` and a digit, so `$1` and `$12,34` are not figures), a number followed by `tokens`
+(with an optional `k`, `m`, `b`, `thousand`, `million` or `billion`) or a number followed by `dollars` or
+`usd`, with the `**bold**` or `inline code` marks the answer rules permit around the number or the unit
+(`**4,200** tokens`). A number is digits with commas only between three-digit groups and an optional fraction, and one right after `#`, a word character, `.` or `,` is
 not a figure, so `issue #7, tokens` and `issue 7, tokens` hold none. `cites_part(read_text, name, part)`
 is True iff `cites(read_text, name)` holds and some occurrence of `name` in the Read text, at the start
 of a line or after whitespace, `/`, a backquote, a quote, `(`, `[` or `<`, is followed by an optional
 closing backquote, an optional line range (`:120-400`) and optional whitespace and then a parenthesized
-group one of whose tokens equals `part` (case-insensitively), so the part is bound to the citation of
-the question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
+group one of whose items equals `part` (case-insensitively; the group is a list of section names split
+at `,`, `;`, `/`, `&` and `and`, so `deliveries only, excluding spend` cites no spend part), so the part is bound to the citation of the
+question's own file: `<path> (deliveries), old-profile.md (spend)` does not cite the spend part.
 
 The seams of `main` are `state`, `post`, `now`, `sleep`, `new_key` and `revision`.
 """
@@ -146,10 +149,14 @@ _FAILED_RUN = re.compile(
 _LINE_SUFFIX = re.compile(r":[0-9][0-9,-]*$")
 SPEND_PART = "spend"
 _NUMBER = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_MAGNITUDE = r"(?:[kmb]|thousand|million|billion)"
+_MARK = r"[*`]{0,2}\s?[*`]{0,2}"
+_END = r"(?![\d]|[.,]\d)"
 _SPEND_FIGURE = re.compile(
-    r"\$\s?" + _NUMBER
-    + r"|(?<![#\w.,])" + _NUMBER + r"\s?(?:[kmb]|thousand|million|billion)?\s?tokens?\b"
-    + r"|(?<![#\w.,])" + _NUMBER + r"\s?(?:dollars|usd)\b", re.IGNORECASE)
+    r"\$\s?(?:(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+|\d{1,3}(?:,\d{3})+|\d+\s?" + _MAGNITUDE + r"\b)" + _END
+    + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:" + _MAGNITUDE + _MARK + r")?tokens?\b"
+    + r"|(?<![#\w.,])" + _NUMBER + _MARK + r"(?:dollars|usd)\b", re.IGNORECASE)
+_PART_SPLIT = re.compile(r"\s*(?:[,;/&]|\band\b)\s*", re.IGNORECASE)
 _EXIT = {"met": 0, "not_met": 1, "waiting": NOT_YET}
 
 
@@ -181,8 +188,8 @@ def cites_part(read_text: str | None, name: str, part: str) -> bool:
     body = read_text.removeprefix(view.ASK_READ_TEXT.format(text=""))
     pattern = re.compile(r"(?:^|(?<=[\s/`'\"(\[<]))" + re.escape(name)
                          + r"`?(?::[0-9][0-9,-]*)?`?\s*\(([^)]*)\)", re.MULTILINE)
-    return any(part.casefold() == token.casefold()
-               for found in pattern.finditer(body) for token in _TOKEN_SPLIT.split(found.group(1)))
+    return any(part.casefold() == item.strip(" *`'\"").casefold()
+               for found in pattern.finditer(body) for item in _PART_SPLIT.split(found.group(1)))
 
 
 def _names(clause: str, name: str) -> bool:

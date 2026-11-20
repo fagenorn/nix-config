@@ -316,6 +316,37 @@ class QuestionCheckTest(unittest.TestCase):
                 self.assertEqual((code, line["status"], line["verdicts"][1]),
                                  (1, "not_met", "ungrounded"))
 
+    def test_a_cost_answer_whose_only_dollar_figure_is_not_a_complete_amount_is_not_met(self):
+        own = READ.format("q2")
+        for answer in ("The script takes $1 as its argument.", "Planning cost $12,34 per issue."):
+            with self.subTest(answer=answer):
+                h = Harness(self)
+                h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + own + " (spend)", grounded("q3")])
+                code, line = h.run()
+                self.assertEqual((code, line["status"], line["verdicts"][1]),
+                                 (1, "not_met", "ungrounded"))
+
+    def test_a_cost_answer_citing_the_records_with_spend_excluded_is_not_met(self):
+        for read in (READ.format("q2") + " (deliveries only, excluding spend)",
+                     READ.format("q2") + " (not spend)"):
+            with self.subTest(read=read):
+                h = Harness(self)
+                h.seed([grounded("q1"), "Answer: Planning used 4,200 tokens.\nRead: " + read, grounded("q3")])
+                code, line = h.run()
+                self.assertEqual((code, line["status"], line["verdicts"][1]),
+                                 (1, "not_met", "ungrounded"))
+
+    def test_a_cost_answer_with_the_bold_the_prompt_permits_is_grounded(self):
+        for answer in ("Planning used **4,200** tokens per issue.", "Planning used **4,200 tokens** per issue.",
+                       "Planning cost **$0.42** per issue.", "Planning used **4.2M** tokens.",
+                       "Planning used `4,200` tokens.", "Planning cost **12** dollars."):
+            with self.subTest(answer=answer):
+                h = Harness(self)
+                h.seed([grounded("q1"), "Answer: " + answer + "\nRead: " + READ.format("q2") + " (spend)",
+                        grounded("q3")])
+                code, line = h.run()
+                self.assertEqual((code, line["verdicts"]), (0, ["grounded"] * 3))
+
     def test_a_cost_answer_with_a_spend_figure_from_its_spend_part_is_grounded(self):
         own = READ.format("q2")
         for answer in ("#7 cost 4,200 tokens.", "#7 cost 4.2M tokens.", "#7 cost $0.42.",
@@ -336,12 +367,13 @@ class QuestionCheckTest(unittest.TestCase):
         self.assertEqual((code, line["status"]), (0, "met"))
 
     def test_spend_figure_and_cites_part(self):
-        for text in ("4,200 tokens", "$38.10", "40k tokens", "12 USD", "4.2M tokens", "1.5 million tokens"):
+        for text in ("4,200 tokens", "$38.10", "40k tokens", "12 USD", "4.2M tokens", "1.5 million tokens", "$1,200", "$3k", "$1.5 million",
+                     "**4,200** tokens", "**$0.42**", "`4,200` tokens"):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), True)
         for text in (None, "Planning costs the most per issue.", "#1271 took 3 runs over 7 days",
                      "For issue #7, tokens were unavailable.", "For issue 7, tokens were unavailable.",
-                     "#7 tokens", "12,34 tokens"):
+                     "#7 tokens", "12,34 tokens", "$1 is a script argument", "costs $12,34", "the $1."):
             with self.subTest(text=text):
                 self.assertIs(question_check.spend_figure(text), False)
         own = READ.format("q2")
@@ -353,6 +385,7 @@ class QuestionCheckTest(unittest.TestCase):
                      "Read: " + own + " (deliveries), old-profile.md (spend)",
                      "Read: /s/xq2.records.json (spend)",
                      "Read: " + own + " (spend); could not open it",
+                     "Read: " + own + " (deliveries only, excluding spend)",
                      "Read: the spend part of " + own):
             with self.subTest(read=read):
                 self.assertIs(question_check.cites_part(read, "q2.records.json", "spend"), False)
