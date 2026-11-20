@@ -12,11 +12,16 @@ let
     p.regex
     p.jsonschema
   ]);
-  # This immutable model revision is the template installed on eleven-m5.
-  # Fetch only its small prompt template, never the 106 GB checkpoint.
-  qwenTemplate = pkgs.fetchurl {
-    url = "https://huggingface.co/Jundot/Qwen3.8-Flash-Next-oQ4e-mtp/resolve/2322c888c2c314d4eceddf0159dec5d821aa1e41/chat_template.jinja";
-    hash = "sha256-w8+eNKv0+eNsLXIWWqnBMtPipyW2wlhqqjqK+deoEEE=";
+  # A copy of the prompt template installed on eleven-m5
+  # (~/.omlx/models/Qwen3.8-Flash-Next-oQ4e-mtp/chat_template.jinja), kept here
+  # because the publisher rewrote the model's history and the revision this
+  # check once fetched from Hugging Face is gone. The hash makes evaluation fail
+  # if the copy ever differs from that file; the copy must keep matching the
+  # template installed on the host.
+  qwenTemplate = import ./pinned-file.nix {
+    path = ../tests/fixtures/omlx/qwen3.8-flash-next-chat_template.jinja;
+    name = "chat_template.jinja";
+    sha256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041";
   };
 in
 pkgs.runCommand "omlx-adapter-check"
