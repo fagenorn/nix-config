@@ -34,7 +34,7 @@ A registered project with no open work, no live session and no open sprint. It r
 _Avoid_: dormant project, idle project
 
 **Guest**:
-A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), reachable from another device only while the tailnet's access rules allow TCP 443 to this host (ADR-console-079), and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and leaves spend, accounts, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); on the guest page a guest may state a goal on a listed project and, on sprints they started, approve or ask for changes to the brief, answer questions other than a look before merge or one the manager marked `owner_only`, and message the manager; everything else there is read-only.
+A named colleague the owner lists for chosen projects, who reaches the console through Tailscale Serve on a guest door of its own (a Unix socket only Serve and the owner can open, ADR-console-077), shared at this host's own tailnet name, read from this host's Tailscale client (ADR-console-078), reachable from another device only while the tailnet's access rules allow TCP 443 to this host (ADR-console-079), and never on the owner's port; the guest page carries a guest token, shows only the listed projects, and sees the pool's room under neutral account labels (ADR-console-086) and leaves spend, account names and controls, activation, registration, the access list and every release or production confirmation to the owner (ADR-console-066); on the guest page a guest may state a goal on a listed project and, on sprints they started, approve or ask for changes to the brief, answer questions other than a look before merge or one the manager marked `owner_only`, and message the manager; everything else there is read-only.
 _Avoid_: user, viewer
 
 **Goal**:
@@ -136,6 +136,10 @@ _Avoid_: quota bar
 **Accounts panel**:
 The one place that holds every account control and detail: opened from the capacity strip or the `a` key and closed with Escape, one row per account with its allowance details, the account it is signed in to, sign-in end and run status, and Exclude, Pin, Sign in and Remove, then Add account (ADR-console-002, ADR-console-023, ADR-console-024, ADR-console-025, ADR-console-026).
 _Avoid_: settings page, account menu
+
+**Account label**:
+The neutral name `Account <n>` a guest sees for one account of the pool; every profile signed in to that account shares it, it stays with the account while the account stays in the pool, across a console restart, and carries nothing of a profile name, address or organisation (ADR-console-086).
+_Avoid_: account name, profile
 
 **Activation line**:
 The one line at the head of the Work column when origin's integration branch carries a merged change this host is built from and does not run, in console wording for a console change and in plain words otherwise. It names the commit and carries Activate, which has the console run this host's activation for that commit; it then reads the run's outcome in plain words. It is not an inbox item and is not counted in the statement (ADR-console-043, ADR-system-004, ADR-console-073).

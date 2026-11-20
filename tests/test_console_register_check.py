@@ -474,6 +474,13 @@ class RestoreTest(Case):
             Path.home(), register_check.service.default_profile_dirs())]
         self.assertEqual((code, out), (1, {"status": "not_restored", "leftovers": expected}))
 
+    def test_profile_directories_that_cannot_be_listed_are_named_and_the_rest_is_still_cleaned(self):
+        with unittest.mock.patch.object(register_check.service, "default_profile_dirs",
+                                        side_effect=PermissionError(13, "denied")):
+            code, out = self.registered_run()
+        self.assertEqual((code, out), (1, {"status": "not_restored", "leftovers": ["trust entries"]}))
+        self.assertFalse(self.plan.exists())
+
 
 class StubTest(Case):
     def test_a_console_that_does_not_answer_is_not_running(self):

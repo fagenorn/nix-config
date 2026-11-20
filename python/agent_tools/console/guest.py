@@ -73,9 +73,43 @@ kept project's root (so no unmanaged entry, no other repository); `deliveries` k
 kept session. `PASSED_INPUTS` pass as given and every `OWNER_ONLY_INPUTS` key is reset to its listed
 empty value whether or not it was given. The input set is closed: a key of none of the three sets
 is refused with `ValueError("unscoped view input <name>")`, so a view input added later must be
-classified before a guest can see it. `scrub(view)` then drops what the inputs cannot: the `sharing`
-member, the unmanaged list, the per-profile session counts, the sign-in, account, pin and
-registration members, the digest, the activation line, the spend view and the capacity profiles.
+classified before a guest can see it. `scrub(view, pool, sprint_accounts)` then drops what the inputs
+cannot: the `sharing` member, the unmanaged list, the per-profile session counts, the sign-in,
+account, pin and registration members, the digest, the activation line, the spend view and the
+capacity profiles, and puts in their place the `pool` member (#1341, ADR-console-086). `pool_view`
+builds it from the owner's capacity view: `POOL_MEMBERS` are `state`, `tight`, `all_out`,
+`resumes_at`, `no_reading` and `accounts`; each account row carries exactly `ACCOUNT_MEMBERS`: a
+neutral `label` (`Account <n>`), `state`, the percent left and reset of the week and the session,
+`next_reset`, `out_until` and `in_use` (not signed out and not excluded). One row stands for one
+account: a profile whose `duplicate_of` is set (signed in to an address another profile counts) has
+no row and shares its account's label. `tight`, `all_out`, `resumes_at` and `no_reading` are the
+capacity view's own; `state` is None while no row in use has a reading, else `out`, `tight` or
+`fine`. A number belongs to an account, not a profile (`account_numbers`): the accounts that hold a
+number in the previous numbering keep it, those with an address first, then by their smallest
+profile name, and every other account takes the smallest positive integer none holds, so an alias,
+a pin or a removal never moves a label. When several profiles of one account hold numbers (a profile
+numbered before it signed in, then signed in to an address another already holds), the number of a
+profile in `established` (those that had an address at the previous numbering) is kept over a
+smaller one, so the established account and its running sprints keep their label. When several
+accounts claim one number (an alias moved from one account to another, or a profile left a shared
+account for a new address), it goes to the account whose profiles holding it kept their address
+(`established` given as a Mapping of profile to the address it had), then to the one with more
+holders, then to the one whose counted profile held it, then by the order above; the others keep
+another number they held or take a free one. The numbering lives in `NUMBERS_FILE`, beside the event
+log (`read_numbers`, `read_retired`, `write_numbers`; an unreadable file numbers afresh). The file
+holds the numbers and, for each running sprint whose profile was removed, the number and address
+its sprint keeps while another profile still holds that address, with the removed profile's name
+(`retired`, by sprint id, so a restart keeps the label and a profile name given to another account
+later never moves it); once no profile holds the address, or none did, the entry stays with a None
+number, so the sprint is detached from the name for good and has no label. The entry ends when the
+sprint's manager runs on another profile than the one named in it, and the sprint is then labelled
+by that profile's account.
+`sprint_labels` gives the label of the account each running sprint's manager is on, a `retired` one
+first (a detached one has none), and `scrub` adds it as `account_label` to
+every sprint node (None for a sprint it does not know) and replaces a sprint's `stop_text` with
+`STOP_FAILED_TEXT`, and each `unstopped` item's `text` with `UNSTOPPED_TEXT`, which carry no reason: a stop failure's reason can name a profile. A stalled sprint's `manager_text` is likewise cut to `STALLED_TEXT` and the stall card's `last_reason` becomes `MANAGER_REASON_TEXT`, since a recorded stall can read `<profile> is being removed` (a failed start's text is already `manager.plain_reason`, never the reason). No profile name, address, organisation or
+proxy account id reaches a guest, and `spend` stays None: money is the owner's bill, and a spend
+per account or per project would show work on projects the colleague is not listed for.
 `picture_ids(view)` is the set of every picture id in the scoped view, found by walking every list
 stored under a key `pictures`: a picture read is answered to a guest only for an id this walk
 finds in that guest's scoped view.
@@ -160,15 +194,18 @@ import os
 import re
 import stat
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.event_log import (
     LOGIN_MAX, SHARING_COLLEAGUE, SHARING_REMOVED, SHARING_TAILNET, Event, normal_login)
-from agent_tools.console.sprints import NUDGE_ACTION_TEXT
+from agent_tools.console.sprints import (
+    NUDGE_ACTION_TEXT, STALLED_TEXT, STARTED, SprintState, ended_at)
 from agent_tools.console.view import project_for
 
 OWNER_ONLY_INPUTS: Mapping[str, object] = MappingProxyType({
@@ -548,12 +585,173 @@ def scoped(inputs: Mapping[str, object], projects: frozenset[str]) -> dict:
     return result
 
 
-def scrub(view: Mapping) -> dict:
-    scrubbed = {name: member for name, member in view.items() if name != "sharing"}
+ACCOUNT_MEMBERS = ("label", "state", "week_left", "five_hour_left", "week_reset",
+                   "five_hour_reset", "next_reset", "out_until", "in_use")
+POOL_MEMBERS = ("state", "tight", "all_out", "resumes_at", "no_reading", "accounts")
+NUMBERS_FILE = "account-numbers.json"
+STOP_FAILED_TEXT = "could not stop the manager; trying again"
+MANAGER_REASON_TEXT = "the owner has the details"
+UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped; trying again"
+
+
+def _accounts(capacity: Mapping) -> list[tuple[bool, list[str], str]]:
+    """Each account as (has an address, its profiles sorted, its counted profile), in no order."""
+    accounts = []
+    for entry in capacity["profiles"]:
+        if entry["duplicate_of"] is None:
+            accounts.append((entry["account"] is not None,
+                             sorted({entry["profile"], *entry["same_account_as"]}),
+                             entry["profile"]))
+    return accounts
+
+
+def account_numbers(capacity: Mapping, previous: Mapping[str, int],
+                    established: Collection[str] = ()) -> dict[str, int]:
+    accounts = sorted(_accounts(capacity), key=lambda account: (not account[0], account[1][0]))
+    address = {entry["profile"]: entry["account"] for entry in capacity["profiles"]}
+    before = established if isinstance(established, Mapping) else {}
+    claims = []
+    for index, (_, profiles, counted) in enumerate(accounts):
+        for number in {previous[name] for name in profiles if name in previous}:
+            holders = [name for name in profiles if previous.get(name) == number]
+            claims.append((
+                not any(name in established for name in holders),
+                -sum(address[name] is not None and before.get(name) == address[name]
+                     for name in holders),
+                -len(holders), previous.get(counted) != number, number, index))
+    numbered: dict[int, int] = {}
+    taken: set[int] = set()
+    for *_, number, index in sorted(claims):
+        if index not in numbered and number not in taken:
+            numbered[index] = number
+            taken.add(number)
+    for index, _ in sorted(enumerate(accounts), key=lambda item: item[1][1][0]):
+        if index not in numbered:
+            number = 1
+            while number in taken:
+                number += 1
+            numbered[index] = number
+            taken.add(number)
+    return {name: numbered[index] for index, (_, profiles, _) in enumerate(accounts)
+            for name in profiles}
+
+
+def profile_labels(numbers: Mapping[str, int]) -> dict[str, str]:
+    return {profile: f"Account {number}" for profile, number in numbers.items()}
+
+
+def pool_view(capacity: Mapping, numbers: Mapping[str, int]) -> dict:
+    entries = sorted((entry for entry in capacity["profiles"] if entry["duplicate_of"] is None),
+                     key=lambda entry: (numbers[entry["profile"]], entry["profile"]))
+    rows = [{"label": f"Account {numbers[entry['profile']]}", "state": entry["state"],
+             "week_left": entry["week_left"], "five_hour_left": entry["five_hour_left"],
+             "week_reset": entry["week_reset"], "five_hour_reset": entry["five_hour_reset"],
+             "next_reset": entry["next_reset"], "out_until": entry["out_until"],
+             "in_use": entry["signin"]["state"] != "signed_out" and not entry["excluded"]}
+            for entry in entries]
+    read = any(row["in_use"] and row["state"] != "unknown" for row in rows)
+    state = (None if not read else "out" if capacity["all_out"]
+             else "tight" if capacity["tight"] else "fine")
+    return {"state": state, "tight": capacity["tight"], "all_out": capacity["all_out"],
+            "resumes_at": capacity["resumes_at"], "no_reading": capacity["no_reading"],
+            "accounts": rows}
+
+
+EMPTY_POOL: dict = pool_view(EMPTY, {})
+
+
+def running_managers(sprints: Mapping[str, SprintState]) -> dict[str, str]:
+    """Each running sprint's id with the profile its manager is on."""
+    return {sprint_id: state.manager.profile for sprint_id, state in sprints.items()
+            if state.manager is not None and state.manager.state == STARTED
+            and ended_at(state) is None}
+
+
+def sprint_labels(sprints: Mapping[str, SprintState], labels: Mapping[str, str],
+                  retired: Mapping[str, str | None] = MappingProxyType({})) -> dict[str, str]:
+    """The account label of each running sprint: `retired[sprint_id]` when the sprint's profile left
+    while it ran (a profile name can be given to another account since; a None one is detached and
+    has no label, never its name's), else its profile's label."""
+    found = {}
+    for sprint_id, profile in running_managers(sprints).items():
+        label = retired[sprint_id] if sprint_id in retired else labels.get(profile)
+        if label is not None:
+            found[sprint_id] = label
+    return found
+
+
+def _read_numbering(path: Path) -> tuple[dict[str, int], dict[str, tuple[int | None, str, str]]]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"),
+                              object_pairs_hook=reject_duplicate_keys,
+                              parse_constant=reject_nonfinite_literal)
+    except (OSError, ValueError, RecursionError):
+        return {}, {}
+
+    def number(value: object) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+    numbers = document.get("numbers") if isinstance(document, dict) else None
+    retired = document.get("retired") if isinstance(document, dict) else None
+    if (not isinstance(numbers, dict) or not isinstance(retired, dict)
+            or not all(isinstance(key, str) and number(value) for key, value in numbers.items())
+            or not all(isinstance(key, str) and isinstance(value, list) and len(value) == 3
+                       and (value[0] is None or number(value[0])) and isinstance(value[1], str)
+                       and isinstance(value[2], str)
+                       for key, value in retired.items())):
+        return {}, {}
+    return dict(numbers), {key: (value[0], value[1], value[2]) for key, value in retired.items()}
+
+
+def read_numbers(path: Path) -> dict[str, int]:
+    return _read_numbering(path)[0]
+
+
+def read_retired(path: Path) -> dict[str, tuple[int | None, str, str]]:
+    return _read_numbering(path)[1]
+
+
+def write_numbers(path: Path, numbers: Mapping[str, int],
+                  retired: Mapping[str, tuple[int | None, str, str]] = MappingProxyType({})) -> None:
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps({"numbers": dict(numbers), "retired": dict(retired)},
+                                sort_keys=True))
+        os.replace(name, path)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+
+
+def scrub(view: Mapping, pool: Mapping | None = None,
+          sprint_accounts: Mapping[str, str] | None = None) -> dict:
+    accounts = sprint_accounts or {}
+
+    def labelled(node: object) -> object:
+        if isinstance(node, Mapping):
+            result = {key: labelled(member) for key, member in node.items()}
+            if node.get("type") == "sprint":
+                result["account_label"] = accounts.get(node.get("sprint_id"))
+                if result.get("stop_text") is not None:
+                    result["stop_text"] = STOP_FAILED_TEXT
+                if node.get("manager_state") == "stalled":
+                    result["manager_text"] = STALLED_TEXT
+            if node.get("type") == "inbox_item" and node.get("reason") == "manager":
+                result["last_reason"] = MANAGER_REASON_TEXT
+            return result
+        if isinstance(node, list):
+            return [labelled(member) for member in node]
+        return node
+
+    scrubbed = labelled({name: member for name, member in view.items() if name != "sharing"})
+    scrubbed["unstopped"] = [{**item, "text": UNSTOPPED_TEXT} for item in view.get("unstopped", ())]
+    shown = EMPTY_POOL if pool is None else pool
     scrubbed.update({"unmanaged": [], "profile_sessions": {}, "signin_runs": {},
                      "accounts_added": [], "pin": None, "pin_launches": [],
                      "registration": None, "digest": None, "activation": None, "spend": None,
-                     "capacity": dict(EMPTY)})
+                     "capacity": dict(EMPTY),
+                     "pool": {**shown, "accounts": [dict(row) for row in shown["accounts"]]}})
     return scrubbed
 
 
