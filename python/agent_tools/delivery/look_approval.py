@@ -7,8 +7,8 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
 
     look-approval post --repo <owner/name> --issue <n> --pr <n> --head <sha> --answer <approved|changes> --message <id>
     look-approval post ... --answer fix --message <id> --words-file <path|->
-    look-approval status --repo <owner/name> --issue <n> --pr <n> --head <sha>
-    look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha>
+    look-approval status --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
+    look-approval tick --repo <owner/name> --issue <n> --pr <n> --head <sha> [--merge-commit <sha>]
     look-approval marked --repo <owner/name> --issue <n>
     look-approval judge            (no options; reads stdin; no network)
 
@@ -40,6 +40,10 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    null when the verdict does not rest on a kept approval. A failed read, an unreadable field (no
    `base.ref`, a `commit.sha` that is not 40 lowercase hex) or a malformed successful answer
    (`look_marker.Unreadable`) is a forge error (`payload_invalid` for the last two), never `needed`.
+   `--merge-commit <sha>` (40 lowercase hex, a usage error otherwise) names the landing commit when
+   the caller resolved it, and replaces the pull request's `merge_commit_sha` in that read: a pull
+   request merged indirectly has a null `merge_commit_sha`, which alone is `payload_invalid`. It
+   changes nothing else.
 3. `marked` reads the issue body only (no comment, nothing posted) and prints `verdict` `marked` or
    `unmarked`, `covers` (the criteria text) and `acs` (the `AC<n>` id of each acceptance criterion whose
    body line is a look marker that `tick` ticks (`look_marker.marker_lines`), `n` its 1-based place among the checkbox lines of the first
@@ -85,6 +89,7 @@ Every call prints one JSON object on one stdout line with `command` (`look-appro
    `ticked` as an exact approval does, with `kept_from` the candidate's head; False is `needed`
    with no write. A failed read, or `look_marker.Unreadable` (`payload_invalid`), is a forge error
    (exit 1) with no write. `kept_from` is null when the verdict does not rest on a kept approval.
+   `--merge-commit <sha>` is read as `status` reads it.
 8. `judge` takes an optional key `carry: {"base": <40 lowercase hex>, "reads": {<path>: <JSON>}}`:
    any other shape (not an object, a missing or extra key, a base that is not 40 lowercase hex,
    `reads` not an object, a `reads` key for which `look_marker.read_path_ok(key, base)` is false)
@@ -142,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--issue", required=True, type=_number)
         sub.add_argument("--pr", required=True, type=_number)
         sub.add_argument("--head", required=True)
+        if name != "post":
+            sub.add_argument("--merge-commit", default=None)
         if name == "post":
             sub.add_argument("--answer", required=True)
             sub.add_argument("--message", required=True)
@@ -250,7 +257,7 @@ def status(args: argparse.Namespace) -> int:
         pull = forge_api.gh_json(["api", f"repos/{args.repo}/pulls/{args.pr}"])
         try:
             if lm.merged_head(pull) == args.head:
-                holds = lm.merged_under_look(comments, args.issue, args.pr, pull, _reader(args.repo))
+                holds = lm.merged_under_look(comments, args.issue, args.pr, pull, _reader(args.repo), args.merge_commit)
             else:
                 holds = lm.settle(candidate, args.head, _base_tip(args, pull), _reader(args.repo))
         except lm.Unreadable as error:
@@ -294,7 +301,7 @@ def tick(args: argparse.Namespace) -> int:
         if lm.merged_head(pull) != args.head:
             return finish("not_merged", 1)
         try:
-            holds = lm.merged_under_look(comments, args.issue, args.pr, pull, _reader(args.repo))
+            holds = lm.merged_under_look(comments, args.issue, args.pr, pull, _reader(args.repo), args.merge_commit)
         except lm.Unreadable as error:
             raise forge_api.ForgeError("payload_invalid", str(error)) from None
         if not holds:
@@ -385,8 +392,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "post":
             args.words = _words(args)
             lm.approval_body(args.issue, args.pr, args.head, args.answer, args.message, args.words)
-        elif args.action in ("status", "tick") and not (isinstance(args.head, str) and lm.HEAD_PATTERN.fullmatch(args.head)):
-            raise UsageError(f"head {args.head!r} is not 40 lowercase hex")
+        elif args.action in ("status", "tick"):
+            if not (isinstance(args.head, str) and lm.HEAD_PATTERN.fullmatch(args.head)):
+                raise UsageError(f"head {args.head!r} is not 40 lowercase hex")
+            if args.merge_commit is not None and not lm.HEAD_PATTERN.fullmatch(args.merge_commit):
+                raise UsageError(f"merge commit {args.merge_commit!r} is not 40 lowercase hex")
     except (UsageError, ValueError) as error:
         return usage_out(argv[0] if argv and argv[0] in VERBS else None, str(error))
     try:

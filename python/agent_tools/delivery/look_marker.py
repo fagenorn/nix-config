@@ -618,8 +618,12 @@ def settle(candidate: Candidate, head: str, base: str, read: Callable[[str], Any
 
 
 def merged_under_look(comments: Iterable[Mapping[str, Any]], issue: int, pr: int, pull: Any,
-                      read: Callable[[str], Any]) -> bool:
-    """Whether a merged pull request's head was merged under an approval, exact or kept."""
+                      read: Callable[[str], Any], merge_commit: str | None = None) -> bool:
+    """Whether a merged pull request's head was merged under an approval, exact or kept.
+
+    `merge_commit` names the landing commit when the caller resolved it (a pull request merged
+    indirectly has a null `merge_commit_sha`); without it the pull's own is read.
+    """
     comments = list(comments)
     head = merged_head(pull)
     if head is None:
@@ -630,7 +634,7 @@ def merged_under_look(comments: Iterable[Mapping[str, Any]], issue: int, pr: int
     found = carry_candidate(comments, issue, pr, head)
     if found is None:
         return False
-    sha = pull.get("merge_commit_sha")
+    sha = merge_commit if merge_commit is not None else pull.get("merge_commit_sha")
     if not _sha(sha):
         raise Unreadable("merge_commit_sha")
     commit = read(f"commits/{sha}")

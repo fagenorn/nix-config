@@ -48,10 +48,10 @@ const DEFAULTS = [
   [/^look-pr$/, { pr: 42, head: SHA, probe: { conflicted: false }, behind: false, renew: { verdict: 'renewed' } }],
   [/^look-push$/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, renew: { verdict: 'renewed' } })],
   // #1139: the owner's look answers: the pull request head read, the approval post, and the fix round of a changes answer (look-fix-review falls to the review default).
-  [/^look-head$/, { head: SHA, state: 'OPEN', renew: { verdict: 'renewed' } }],
+  [/^look-head$/, { head: SHA, state: 'OPEN', merge: 'c0ffee' + '0'.repeat(34), renew: { verdict: 'renewed' } }],
   [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
   [/^look-read$/, { verdict: 'approved', kept_from: null }],
-  [/^look-stale$/, { stale: [] }],
+  [/^look-stale$/, { complete: true, stale: [] }],
   [/^look-status$/, { verdict: 'needed', kept_from: null }],
   // #1246: the verification of an approved head; the fast-forward reached the head the prompt names.
   [/^look-verify$/, prompt => ({ head: (/merge --ff-only ([0-9a-f]{40})/.exec(prompt) || [])[1] || SHA, clean: true, merge_only: true, ahead: false, results: [{ id: 'build', status: 'pass', summary: 'ok' }] })],
