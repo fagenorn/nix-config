@@ -1164,7 +1164,8 @@ class ColleagueAccountTest(unittest.TestCase):
         unknown = (None, None)
         shown = cap(("work", "out", 0, 0, "signed_in"),
                     ("c1", "unknown", *unknown, "signed_in", False, False, ALICE))
-        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None), "c1")
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None), "work")
+        self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, ALICE), "c1")
         self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, None, frozenset({ALICE})),
                          "work")
         only = cap(("c1", "ok", 90, 90, "signed_in", False, False, ALICE))
@@ -1199,6 +1200,44 @@ class ColleagueAccountTest(unittest.TestCase):
         self.assertEqual(manager.session_profile(fold, {}), "work")
         self.assertEqual(manager.session_profile(fold, {}, ALICE), "colleague-1")
         self.assertEqual(manager.choose_profile(fold, {}, ALICE), "colleague-1")
+
+    def test_a_colleagues_account_without_a_room_reading_is_only_his_own_fallback(self):
+        unknown = (None, None)
+        shown = cap(("work", "out", 0, 0, "signed_in"),
+                    ("c1", "unknown", *unknown, "signed_in", False, False, ALICE))
+        for starter, expected in ((None, "work"), (BOB, "work"), (ALICE, "c1")):
+            self.assertEqual(manager.session_profile(shown, {"c1": T_LATE}, starter), expected)
+
+    def test_the_wait_is_over_the_accounts_the_sprint_may_use(self):
+        soon, later = "2026-11-13T01:00:00+00:00", "2026-11-13T02:00:00+00:00"
+        shown = cap(("work", "out", 0, 0, "signed_in"), ("c1", "ok", 50, 50, None, False, False, ALICE))
+        shown["profiles"][0]["out_until"] = later
+        self.assertEqual(manager.choose_profile(shown, {}), "c1")
+        self.assertEqual(manager.choose_profile(shown, {}, None, frozenset({ALICE})), manager.Wait(later))
+        self.assertEqual(manager.choose_profile(shown, {}, ALICE, frozenset({ALICE})), "c1")
+        other = cap(("work", "out", 0, 0, "signed_in"), ("home", "out", 0, 0, "signed_in"),
+                    ("c1", "ok", 50, 50, None, False, False, ALICE))
+        other["profiles"][0]["out_until"] = later
+        other["profiles"][1]["out_until"] = soon
+        self.assertEqual(manager.choose_profile(other, {}, BOB, frozenset({ALICE})), manager.Wait(soon))
+
+    def test_a_pin_with_room_is_not_a_wait_whatever_else_reads(self):
+        shown = cap(("work", "out", 0, 0, "signed_in"),
+                    ("c1", "ok", 50, 50, None, False, True, ALICE))
+        self.assertEqual(manager.choose_profile(shown, {}, None, frozenset({ALICE})), "c1")
+
+    def test_an_alias_of_a_colleagues_profile_is_his_account_whichever_profile_keeps_it(self):
+        shown = cap(("a-work", "ok", 90, 90), ("c1", "ok", 90, 90, None, False, False, ALICE),
+                    ("other", "ok", 10, 10))
+        shown["profiles"][0]["same_account_as"] = ["c1"]
+        shown["profiles"][1]["same_account_as"] = ["a-work"]
+        shown["profiles"][1]["duplicate_of"] = "a-work"
+        self.assertEqual(manager.session_profile(shown, {}, ALICE), "a-work")
+        self.assertEqual(manager.session_profile(shown, {}, BOB, frozenset({ALICE})), "other")
+        self.assertEqual(manager.session_profile(shown, {}, None, frozenset({ALICE})), "other")
+        self.assertEqual(manager.session_profile(shown, {}), "a-work")
+        self.assertTrue(manager.colleague_account(shown, "a-work"))
+        self.assertFalse(manager.colleague_account(shown, "other"))
 
 
 if __name__ == "__main__":

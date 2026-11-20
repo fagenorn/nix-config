@@ -6461,7 +6461,7 @@ class ConsoleService:
             sprint.started_by for sprint in self._sprints.values()
             if sprint.started_by is not None and sprint.manager is not None
             and sprint.manager.state == sprints.WAITING and sprint.stop_at is None
-            and sprint.stopped_at is None and sprint.closing is None)
+            and sprints.ended_at(sprint) is None)
 
     def _quota_wait(self, sprint: sprints.SprintState) -> manager.Wait | None:
         """Under the ingest lock: where the sprint's manager waits for quota, None when its account has room.
@@ -6627,25 +6627,26 @@ class ConsoleService:
 
     def _unexcluded_launch(self, launch: manager.Launch, token: object,
                            prepared_pin: str | None) -> manager.Launch | None:
-        """Under the ingest lock: `launch`, or its replacement when its profile was excluded, is being removed or gone, or the pin moved after it was prepared.
+        """Under the ingest lock: `launch`, or its replacement when its profile was excluded, is being removed or gone, or the pin moved after it was prepared, or it is a colleague's account (room and reservation are read again, #1344).
 
         `prepared_pin` is the pin in force when it was prepared. The choice is made again over the
         set and the pin now in force; with nothing to choose a wait row is appended (as
         `_prepared_launch` does) and None returned.
         """
+        sprint = self._sprints.get(launch.sprint_id)
+        view = capacity.capacity_view(
+            self._read_profiles() - self._removing, self._capacity, self._clock(), self._signins,
+            excluded=self._excluded, pinned=self._pinned, owners=self._owners_now())
         if (launch.profile not in self._excluded and self._pinned == prepared_pin
                 and launch.profile not in self._removing
-                and launch.profile in self._read_profiles()):
+                and launch.profile in self._read_profiles()
+                and not manager.colleague_account(view, launch.profile)):
             return launch
-        sprint = self._sprints.get(launch.sprint_id)
         if sprint is None:
             self._release(launch.sprint_id, token)
             return None
-        choice = manager.choose_profile(
-            capacity.capacity_view(self._read_profiles() - self._removing, self._capacity,
-                                   self._clock(), self._signins, excluded=self._excluded,
-                                   pinned=self._pinned, owners=self._owners_now()),
-            self._use.last, sprint.started_by, self._waiting_logins())
+        choice = manager.choose_profile(view, self._use.last, sprint.started_by,
+                                        self._waiting_logins())
         if isinstance(choice, manager.Wait):
             marks = {"takeover": True, "goal": sprint.goal} if launch.takeover else {}
             self._append_manager(MANAGER_WAITING, launch.project_id, {

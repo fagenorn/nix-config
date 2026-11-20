@@ -21,12 +21,14 @@ from unittest import mock
 
 from agent_tools.console import (account_add, capacity, console, exclusion, guest, manager, nudge, permission,
                                  pin, probe, service, sessions, signin, sprints)
-from agent_tools.console.event_log import GOAL_STATED, MANAGER_WAITING, EventLog
+from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_SENT, GOAL_STATED, MANAGER_WAITING,
+                                           SPRINT_REPORTED, EventLog)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import PARTS
 from .test_console_notices import CLAIM
+from .test_console_sprints import REPORT
 from .test_console_guest_service import COLLEAGUE, TAILNET, GuestCase
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -1464,7 +1466,7 @@ class ColleagueAccountLaunchTest(GuestCase):
 
     ACTOR = guest.GuestActor(COLLEAGUE, TAILNET)
 
-    def start_pool(self, work_used, colleague_used, waiting=False):
+    def start_pool(self, work_used, colleague_used, waiting=False, done=False, **kwargs):
         """The owner's `work` and the colleague's `colleague-1`, both signed in, with the given weekly use."""
         self.seed()
         base = self.store.parent.parent / "accounts" / "profiles"
@@ -1478,12 +1480,23 @@ class ColleagueAccountLaunchTest(GuestCase):
                  for name in ("work", "colleague-1")]
         rows.append(account_add.added("colleague-1", COLLEAGUE))
         if waiting:
-            rows += [(GOAL_STATED, "owner/p01", {"sprint_id": "w" * 16, "goal": "wait", "by": COLLEAGUE}),
-                     (MANAGER_WAITING, "owner/p01", {"sprint_id": "w" * 16, "until": None})]
+            rows += self.waiting_rows()
+        if done:
+            sid = "w" * 16
+            rows += [(BRIEF_SENT, "owner/p01", {"sprint_id": sid, "version": 1, "goal": "wait",
+                                                "brief": PARTS}),
+                     (BRIEF_APPROVED, "owner/p01", {"sprint_id": sid, "version": 1, "goal": "wait"})]
+            rows.append((SPRINT_REPORTED, "owner/p01", {
+                "sprint_id": "w" * 16, "goal": "wait", "report": {**REPORT, "phase": "done"}}))
         self.append(rows)
         self.launches = support.Launches()
         return self.start(profile_dirs=dirs, clock=lambda: NOW, launcher=self.launches,
-                          session_poll_seconds=3600)
+                          session_poll_seconds=3600, **kwargs)
+
+    @staticmethod
+    def waiting_rows():
+        return [(GOAL_STATED, "owner/p01", {"sprint_id": "w" * 16, "goal": "wait", "by": COLLEAGUE}),
+                (MANAGER_WAITING, "owner/p01", {"sprint_id": "w" * 16, "until": None})]
 
     def profile_of_next(self, svc, by=None):
         before = len(self.launches.calls)
@@ -1504,6 +1517,35 @@ class ColleagueAccountLaunchTest(GuestCase):
         svc = self.start_pool(0.7, 0.1, waiting=True)
         self.assertEqual(self.profile_of_next(svc), "work")
         self.assertEqual(self.profile_of_next(svc, self.ACTOR), "colleague-1")
+
+    def test_a_sprint_that_ended_through_a_done_report_no_longer_keeps_his_account(self):
+        svc = self.start_pool(0.7, 0.1, waiting=True, done=True)
+        self.assertEqual(self.profile_of_next(svc), "colleague-1")
+
+    def launch_after(self, act):
+        """An owner's sprint prepared on the colleague's account, then `act(svc)` under the lock before it launches."""
+        queue = support.Queued()
+        svc = self.start_pool(0.9, 0.1, dispatch=queue)
+        svc.state_goal("owner/p01", "make the importer resumable")
+        def under_lock():
+            with svc._ingest:
+                act(svc)
+        ProfileChoiceServiceTest.prepare_then(self, svc, queue, under_lock)
+        return [call.profile for call in self.launches.calls]
+
+    def test_a_launch_prepared_on_his_account_is_chosen_again_when_it_runs_out_meanwhile(self):
+        def run_out(svc):
+            svc._apply(svc.log.append([(capacity.READING, None, {
+                "profile": "colleague-1", **ManagerServiceTest.exhausted(FAR)})]))
+        self.assertEqual(self.launch_after(run_out), ["work"])
+
+    def test_a_launch_prepared_on_his_account_is_chosen_again_when_a_sprint_of_his_waits_meanwhile(self):
+        def reserve(svc):
+            svc._apply(svc.log.append(self.waiting_rows()))
+        self.assertEqual(self.launch_after(reserve), ["work"])
+
+    def test_a_launch_prepared_on_his_account_stays_while_it_has_room(self):
+        self.assertEqual(self.launch_after(lambda svc: None), ["colleague-1"])
 
 
 if __name__ == "__main__":
