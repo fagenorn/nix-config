@@ -616,11 +616,11 @@ class HookTest(Case):
         self.assertFalse(state["thread"].is_alive())
         return state["blocked"]
 
-    def stale_busy_session(self):
+    def stale_busy_session(self, **kwargs):
         support.write_session(
             self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00", status="busy",
             updated_at=int(time.time() * 1000) - 10000)
-        svc = self.start(self.ITEMS, session_poll_seconds=3600)
+        svc = self.start(self.ITEMS, session_poll_seconds=3600, **kwargs)
         self.assertEqual(listed(svc), {SID: "working"})
         return svc
 
@@ -685,6 +685,106 @@ class HookTest(Case):
         svc.poll_sessions()
         gone = [row for row in support.log_rows(self.store) if row[2] == "session.gone"]
         self.assertEqual(len(gone), 1)
+
+    def projects(self):
+        return self.root / "projects" / "-srv-p00"
+
+    def record(self, kind, ms):
+        stamp = datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="milliseconds")
+        return json.dumps({"type": kind, "timestamp": stamp}) + "\n"
+
+    def waiting_on_a_permission(self, **kwargs):
+        """A stale busy session that a permission hook has just put in `waiting_permission`."""
+        svc = self.stale_busy_session(**kwargs)
+        status, _, _ = support.post_hook(svc.address, support.hook_body("permission prompt"))
+        self.assertEqual(status, 204)
+        wait_rows(self.store, "session.hook", 1)
+        self.assertEqual(listed(svc), {SID: "waiting_permission"})
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "waiting_permission"})
+        return svc, svc._sessions[SID].hook_ms
+
+    def turn_rows(self):
+        payloads = [json.loads(row[4]) for row in support.log_rows(self.store)
+                    if row[2] == "session.seen"]
+        return [payload for payload in payloads if "turn_ms" in payload]
+
+    def test_a_permission_wait_the_session_moved_past_clears_at_the_next_poll(self):
+        svc, hook = self.waiting_on_a_permission()
+        self.projects().mkdir(parents=True)
+        (self.projects() / f"{SID}.jsonl").write_text(
+            self.record("assistant", hook - 1000) + self.record("user", hook + 1000))
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "working"})
+        self.assertEqual(self.turn_rows(), [
+            {"session_id": SID, "cwd": "/srv/p00", "repo": "/srv/p00", "state": "working",
+             "turn_ms": hook + 1000}])
+
+    def test_a_workflow_agents_wait_clears_from_the_agents_transcript(self):
+        svc, hook = self.waiting_on_a_permission()
+        agents = self.projects() / SID / "subagents"
+        agents.mkdir(parents=True)
+        (self.projects() / f"{SID}.jsonl").write_text(self.record("assistant", hook - 1000))
+        (agents / "agent-x.jsonl").write_text(self.record("user", hook + 1000))
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "working"})
+
+    def test_a_wait_with_nothing_after_it_in_the_transcripts_stays(self):
+        svc, hook = self.waiting_on_a_permission()
+        agents = self.projects() / SID / "subagents"
+        agents.mkdir(parents=True)
+        (self.projects() / f"{SID}.jsonl").write_text(self.record("assistant", hook - 1000))
+        (agents / "agent-x.jsonl").write_text(self.record("user", hook - 500))
+        before = len(support.log_rows(self.store))
+        for _ in range(2):
+            svc.poll_sessions()
+            self.assertEqual(listed(svc), {SID: "waiting_permission"})
+        self.assertEqual(len(support.log_rows(self.store)), before)
+
+    def test_an_unchanged_waiting_registry_does_not_undo_the_clear(self):
+        svc, hook = self.waiting_on_a_permission(clock=lambda: time.time() - 5)
+        self.projects().mkdir(parents=True)
+        (self.projects() / f"{SID}.jsonl").write_text(self.record("user", hook + 2000))
+
+        def registry(updated):
+            support.write_session(
+                self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00", status="waiting",
+                waiting_for="permission prompt", updated_at=updated)
+
+        registry(hook + 1000)
+        for _ in range(2):
+            svc.poll_sessions()
+            self.assertEqual(listed(svc), {SID: "working"})
+        self.assertEqual(len(self.turn_rows()), 1)
+        registry(hook + 3000)
+        svc.poll_sessions()
+        self.assertEqual(listed(svc), {SID: "waiting_permission"})
+
+    def test_the_transcript_read_holds_no_lock_and_a_newer_row_wins(self):
+        svc, hook = self.waiting_on_a_permission()
+        self.projects().mkdir(parents=True)
+        (self.projects() / f"{SID}.jsonl").write_text(self.record("user", hook + 1000))
+        real = movement.transcript_turn_ms
+        outcome = {}
+
+        def read(*args, **kwargs):
+            def other():
+                outcome["acquired"] = svc._ingest.acquire(timeout=1)
+                if outcome["acquired"]:
+                    svc._ingest.release()
+                support.post_hook(svc.address, support.hook_body("finished turn"))
+                wait_rows(self.store, "session.hook", 2)
+
+            thread = threading.Thread(target=other)
+            thread.start()
+            thread.join(5)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(service.movement, "transcript_turn_ms", read):
+            svc.poll_sessions()
+        self.assertTrue(outcome["acquired"])
+        self.assertEqual(listed(svc), {SID: "idle"})
+        self.assertEqual(self.turn_rows(), [])
 
 
 CREDENTIAL_NAMES = {".credentials.json", ".claude.json"}

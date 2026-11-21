@@ -9547,7 +9547,12 @@ class ConsoleService:
         self._publish()
 
     def poll_sessions(self) -> list[Event]:
-        """Append what the session registry shows that the folded sessions do not, and publish."""
+        """Append what the session registry shows that the folded sessions do not, and publish.
+
+        A session that waits is then read once more outside the ingest lock: when its transcripts
+        (its own and its agents') hold a turn newer than the wait, a row puts it back to working,
+        unless a row was folded for it since (`last_seq`), which the transcript read never beats (#1424).
+        """
         with self._ingest:
             observations = {
                 session_id: seen
@@ -9568,7 +9573,18 @@ class ConsoleService:
                 self._fold(appended)
             self._publish()
             self._note_choice(self._session_choice(self._profiles))
+            waits = sessions.waiting_snapshot(self._sessions)
+            dirs = self._projects_dirs()
+        turns = {sid: (seq, turn) for sid, seq in waits.items()
+                 if (turn := movement.transcript_turn_ms(dirs, sid)) is not None}
+        if not turns:
             return appended
+        with self._ingest:
+            moved = self.log.append(sessions.moved_on(self._sessions, turns, project_of))
+            if moved:
+                self._fold(moved)
+                self._publish()
+        return appended + moved
 
     def _session_choice(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
                         pinned: object = _FOLDED) -> str | None:

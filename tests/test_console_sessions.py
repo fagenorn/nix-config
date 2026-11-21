@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -27,6 +28,7 @@ from agent_tools.console.sessions import (
     hook_entry,
     liveness_unreadable,
     main_checkout,
+    moved_on,
     own_pid_domain,
     poll_changes,
     process_matches,
@@ -35,6 +37,7 @@ from agent_tools.console.sessions import (
     read_session_registry,
     registry_state,
     session_states,
+    waiting_snapshot,
 )
 
 from . import console_test_support as support
@@ -586,3 +589,55 @@ class ProfileTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MovedOnTest(unittest.TestCase):
+    def waiting(self, state="waiting_permission", **fields):
+        return SessionState("s1", "/srv/p00", "/srv/p00", state, "n", 1, "t1", 2000, None, 2000,
+                            **fields)
+
+    def test_a_waiting_session_whose_turn_is_newer_than_its_wait_reads_working(self):
+        for state in ("waiting_permission", "waiting_answer"):
+            with self.subTest(state):
+                st = self.waiting(state)
+                self.assertEqual(
+                    moved_on({"s1": st}, {"s1": (1, 2500)}, project_of),
+                    [(SEEN, project_of("/srv/p00"),
+                      {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00",
+                       "state": "working", "turn_ms": 2500})])
+                self.assertEqual(moved_on({"s1": st}, {"s1": (1, 2000)}, project_of), [])
+                self.assertEqual(moved_on({"s1": st}, {}, project_of), [])
+                self.assertEqual(moved_on({"s1": st}, {"s1": (0, 2500)}, project_of), [])
+
+    def test_the_correction_names_no_session_and_no_profile(self):
+        st = replace(self.waiting(), profile="work")
+        ((kind, project, payload),) = moved_on({"s1": st}, {"s1": (1, 2500)}, project_of)
+        self.assertNotIn("name", payload)
+        self.assertNotIn("profile", payload)
+        folded = session_states([Event(2, iso(3000), kind, project, payload)], {"s1": st})["s1"]
+        self.assertEqual((folded.name, folded.profile, folded.hook_ms, folded.cleared_ms,
+                          folded.state), ("n", "work", 2000, 2500, "working"))
+
+    def test_only_waiting_sessions_are_snapshotted(self):
+        def made(sid, state, state_ms, seq):
+            return SessionState(sid, "/srv/p00", "/srv/p00", state, "n", seq, "t1", 1, None,
+                                state_ms)
+
+        states = {s.session_id: s for s in (
+            made("a", "working", 1, 1), made("b", "idle", 1, 2), made("c", "limit", 1, 3),
+            made("d", "ended", 1, 4), made("e", "waiting_answer", None, 5),
+            made("f", "waiting_answer", 1, 6), made("g", "waiting_permission", 1, 7))}
+        self.assertEqual(waiting_snapshot(states), {"f": 6, "g": 7})
+
+    def test_a_registry_reading_older_than_the_clear_is_skipped(self):
+        st = replace(sstate("s1", "working", 2000), cleared_ms=3000)
+        self.assertEqual(
+            poll_changes({"s1": st}, {"s1": Observation("s1", "/srv/p00", 10, "waiting",
+                                                        "permission prompt", "n", 2500)},
+                         frozenset(), repo_of, project_of),
+            ([], frozenset()))
+        changes, _ = poll_changes(
+            {"s1": st}, {"s1": Observation("s1", "/srv/p00", 10, "waiting",
+                                           "permission prompt", "n", 3500)},
+            frozenset(), repo_of, project_of)
+        self.assertEqual(changes, [seen("s1", "waiting_permission")])
