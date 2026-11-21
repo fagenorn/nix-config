@@ -6,6 +6,7 @@ import dataclasses
 import inspect
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -19,6 +20,7 @@ from unittest import mock
 
 from agent_tools.console import (
     capacity, exclusion, manager, permission, pin, revive_check, sessions)
+from agent_tools.console import sprint as sprint_command
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 from . import console_test_support as support
@@ -311,7 +313,7 @@ class RunTest(Case):
                                  {"defaultMode": mode, "deny": list(DENY)})
                 self.assertEqual(list(self.dir.iterdir()), [self.settings])
 
-    def test_the_settings_turn_the_isolation_guard_off_and_refuse_every_permission_prompt(self):
+    def test_the_settings_turn_the_isolation_guard_off_and_hold_a_bash_prompt_for_the_owner(self):
         self.run_fake()
         settings = json.loads(self.settings.read_text())
         self.assertEqual(set(settings), {"env", "worktree", "hooks", "permissions"})
@@ -320,13 +322,32 @@ class RunTest(Case):
         [group] = settings["hooks"]["PermissionRequest"]
         self.assertNotIn("matcher", group)
         [hook] = group["hooks"]
+        refusal = json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "deny", "message": REFUSAL}}})
+        self.assertEqual(set(hook), {"type", "command", "timeout"})
         self.assertEqual(hook["type"], "command")
-        done = subprocess.run(["sh", "-c", hook["command"]], capture_output=True, text=True,
-                              check=True)
+        self.assertEqual(hook["timeout"], manager.PROMPT_TIMEOUT)
+        self.assertTrue(hook["command"].startswith("sprint permit --prompt || printf '%s\\n' "),
+                        hook["command"])
+        self.assertTrue(hook["command"].endswith(shlex.quote(refusal)), hook["command"])
+        self.assertEqual(manager.PROMPT_COMMAND, "sprint permit --prompt")
+        self.assertGreater(manager.PROMPT_TIMEOUT, manager.PROMPT_HOLD_SECONDS
+                           + manager.PROMPT_POLL_SECONDS + 2 * sprint_command.TIMEOUT_SECONDS)
+        self.assertNotIn("allow", settings["permissions"])
+        self.assertNotIn("ask", settings["permissions"])
+        self.assertNotIn("updatedPermissions", json.dumps(settings))
+
+    def test_a_crashed_prompt_hook_still_refuses(self):
+        self.run_fake()
+        [hook] = json.loads(self.settings.read_text())["hooks"]["PermissionRequest"][0]["hooks"]
+        bare = self.tmp / "no-sprint-bin"
+        bare.mkdir()
+        done = subprocess.run(["/bin/sh", "-c", hook["command"]], capture_output=True, text=True,
+                              env={"PATH": str(bare)})
         self.assertEqual(json.loads(done.stdout), {"hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
             "decision": {"behavior": "deny", "message": REFUSAL}}})
-        self.assertEqual(done.stderr, "")
 
     def test_the_refusal_names_the_fixed_reason_and_the_two_ways_on(self):
         self.assertIn("nobody watches this session", REFUSAL.lower())

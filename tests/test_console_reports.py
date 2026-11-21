@@ -8,10 +8,10 @@ import io
 import json
 import unittest
 
-from agent_tools.console import service, sprints
+from agent_tools.console import service, sprints, view
 from agent_tools.console.deliveries import QUIET_AFTER_MS, IssueStage
 from agent_tools.console.sprints import (
-    BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DECISION_TEXT, NOW_DRAFTING_TEXT,
+    BALL_TEXT, CHANGES, NOW_BRIEF_TEXT, NOW_DECISION_TEXT, NOW_DRAFTING_TEXT,
     NOW_NO_PROGRESS_TEXT, NOW_PAUSED_TEXT, NOW_PERMISSION_TEXT, NOW_QUOTA_TEXT, NOW_REFUSED_TEXT,
     NOW_STALLED_TEXT, NOW_STARTING_TEXT, NOW_STOPPING_TEXT, NOW_WAIT_TEXT, Question, refused_reason)
 
@@ -464,16 +464,17 @@ class SprintBallViewTest(unittest.TestCase):
                 self.assertEqual((shown["ball"], shown["ball_text"]), ("owner", "waiting on you"))
         self.assertEqual(self.shown(briefed(sprint(A)), T0_MS + MIN)["now_text"], NOW_BRIEF_TEXT)
 
-    def test_a_manager_waiting_in_its_terminal_is_waiting_on_you(self):
+    def test_only_an_open_permission_card_gives_the_owner_the_ball(self):
         s = reported(with_manager(started(A)), T0_MS)
-        answer = self.shown(s, T0_MS + MIN, manager_session("waiting_answer"))
-        self.assertEqual((answer["ball"], answer["ball_text"], answer["now_text"]),
-                         ("owner", "waiting on you", NOW_ANSWER_TEXT))
-        permission = self.shown(s, PAST, manager_session("waiting_permission"),
-                                session("s2", "working", name=NAME))
-        self.assertEqual((permission["ball"], permission["now_text"]),
-                         ("owner", NOW_PERMISSION_TEXT))
-        self.assertEqual(self.shown(s, PAST, manager_session("waiting_answer"))["ball"], "owner")
+        ball = view.sprint_ball(s, PAST, 0, ["working"], prompted=True)
+        now = view.sprint_now(s, None, ["working"], 0, [], ball, prompted=True)
+        self.assertEqual((ball, now), ("owner", NOW_PERMISSION_TEXT))
+        for waiting in ("waiting_answer", "waiting_permission"):
+            with self.subTest(waiting):
+                shown = self.shown(s, PAST, manager_session(waiting))
+                self.assertNotEqual(shown["ball"], "owner")
+                self.assertNotEqual(shown["now_text"], NOW_PERMISSION_TEXT)
+                self.assertNotEqual(view.sprint_ball(s, PAST, 0, [waiting]), "owner")
 
     def test_a_stated_wait_reads_waiting_until_its_time_and_a_pause_reads_its_reason(self):
         s = reported(with_manager(started(A)), T0_MS)
