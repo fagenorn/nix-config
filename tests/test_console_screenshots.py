@@ -938,6 +938,11 @@ MOVED += (
     moved(_SPEND_FIT, ".trend-day", "flex-basis", NARROW, "spend-fit-flex-basis",
           via="every flex-basis the page declares is read as drawn at 480"),
 )
+_TICK = f"{CONTROLS}::ControlStyleTest::test_the_consent_tick_is_at_least_32_px_in_both_directions"
+MOVED += (
+    moved(_TICK, ".guest-tick", "width", BOTH, "guest-tick-width"),
+    moved(_TICK, ".guest-tick", "height", BOTH, "guest-tick-height"),
+)
 STRIPPED: frozenset[str] = frozenset({
     f"{PAGE}::PageTest::test_runs_are_never_peach_or_red_and_never_stalled",
     f"{PAGE}::CapacityPageTest::test_every_account_out_reads_out_in_red_and_when_work_resumes",

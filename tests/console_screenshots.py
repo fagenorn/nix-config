@@ -1450,6 +1450,10 @@ STYLE_CHECKS += (
          widths=(480,), every=True),
     _row("spend-fit-row-name-wrap", _SPEND, ".row-name", "overflow-wrap", "equals", "anywhere",
          "normal", widths=(480,), every=True),
+    # The consent tick is at least 32 px in both directions; SHORT_CONTROLS reads only heights
+    # (#1313).
+    _row("guest-tick-width", _GUEST_PAGES, ".guest-tick", "width", "min", "32", "20px"),
+    _row("guest-tick-height", _GUEST_PAGES, ".guest-tick", "height", "min", "32", "20px"),
 )
 STYLE_PLACE = r"""((rows) => {
   let placed = 0;
