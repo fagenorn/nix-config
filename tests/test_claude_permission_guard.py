@@ -2689,6 +2689,51 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertIn("lifecycle guard: unsafe merge:", result.stderr)
                 self.assertIn("declared integration branch", result.stderr)
 
+    def test_release_merge_arm_judges_each_check_by_its_latest_run(self):
+        """Issue 1374: a superseded red run does not block the release arm, but a red or
+        pending latest run, a tie and an unstamped run still do."""
+        repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
+        merge = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
+        early, late = "2026-11-20T09:00:00Z", "2026-11-20T09:30:00Z"
+
+        def run(name, conclusion, started=None, status="COMPLETED"):
+            entry = {"__typename": "CheckRun", "name": name, "status": status,
+                     "conclusion": conclusion}
+            if started is not None:
+                entry["startedAt"] = started
+            return entry
+
+        green = [{"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS"}]
+        for rollup in (
+            [run("build", "FAILURE", early), run("build", "SUCCESS", late)] + green,
+            [run("build", "SUCCESS", late), run("build", "CANCELLED", early)] + green,
+            [run("build", None, early, "IN_PROGRESS"), run("build", "SUCCESS", late)] + green,
+            [{"__typename": "StatusContext", "context": "deploy", "state": "FAILURE",
+              "startedAt": early}, run("build", "SUCCESS", late),
+             {"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS",
+              "startedAt": late}],
+        ):
+            with self.subTest(admitted=rollup):
+                result = self.run_guard(
+                    merge, cwd=repo, env=self.release_env(statusCheckRollup=rollup))
+                self.assertEqual(0, result.returncode, result.stderr)
+        for rollup in (
+            [run("build", "SUCCESS", early), run("build", "FAILURE", late)] + green,
+            [run("build", "FAILURE", late), run("build", "SUCCESS", early)] + green,
+            [run("build", "SUCCESS", early), run("build", None, late, "IN_PROGRESS")] + green,
+            [run("build", "FAILURE", late), run("build", "SUCCESS", late)] + green,
+            [run("build", "FAILURE"), run("build", "SUCCESS", late)] + green,
+            [run("build", "FAILURE", "yesterday"), run("build", "SUCCESS", late)] + green,
+            [run("build", "FAILURE", early), run("build", "SUCCESS", "yesterday")] + green,
+            [run("build", "FAILURE", early), run("build", "SUCCESS", late),
+             run("lint", "FAILURE", early)] + green,
+        ):
+            with self.subTest(refused=rollup):
+                result = self.run_guard(
+                    merge, cwd=repo, env=self.release_env(statusCheckRollup=rollup))
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("check rollup is not entirely green", result.stderr)
+
     def test_release_merge_arm_blocks_unless_every_check_is_green(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
         merge = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
@@ -3064,13 +3109,19 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     LOOKUP_FAILED = "lifecycle guard: protection lookup failed: stderr="
 
     @staticmethod
-    def check_run(name, status="COMPLETED", conclusion="SUCCESS"):
-        return {"__typename": "CheckRun", "name": name, "status": status,
-                "conclusion": conclusion}
+    def check_run(name, status="COMPLETED", conclusion="SUCCESS", started=None):
+        entry = {"__typename": "CheckRun", "name": name, "status": status,
+                 "conclusion": conclusion}
+        if started is not None:
+            entry["startedAt"] = started
+        return entry
 
     @staticmethod
-    def status_context(context, state="SUCCESS"):
-        return {"__typename": "StatusContext", "context": context, "state": state}
+    def status_context(context, state="SUCCESS", started=None):
+        entry = {"__typename": "StatusContext", "context": context, "state": state}
+        if started is not None:
+            entry["startedAt"] = started
+        return entry
 
     def floor_merge(self, rollup, slug=None, base="main", pin=True, rows=None, env=None,
                     guard_args=()):
@@ -3153,6 +3204,73 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         for name, rollup, pin, line in cases:
             with self.subTest(case=name):
                 self.assertEqual(line, self.refusal_line(self.floor_merge(rollup, pin=pin)))
+
+    EARLY = "2026-11-20T09:00:00Z"
+    LATE = "2026-11-20T09:30:00Z"
+
+    def test_the_floor_judges_each_declared_check_by_its_latest_run(self):
+        """Issue 1374: a failed run a later run of the same check superseded does not
+        refuse, whichever order the rollup lists them in, and a status context is judged
+        the same way."""
+        lint = self.status_context(self.LINT)
+        for name, rollup in (
+            ("failed then green", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY),
+                self.check_run(self.BUILD, started=self.LATE), lint]),
+            ("green listed first", [
+                self.check_run(self.BUILD, started=self.LATE),
+                self.check_run(self.BUILD, conclusion="CANCELLED", started=self.EARLY), lint]),
+            ("pending then green", [
+                self.check_run(self.BUILD, "IN_PROGRESS", None, started=self.EARLY),
+                self.check_run(self.BUILD, started=self.LATE), lint]),
+            ("status context", [
+                self.check_run(self.BUILD),
+                self.status_context(self.LINT, "FAILURE", started=self.EARLY),
+                self.status_context(self.LINT, started=self.LATE)]),
+        ):
+            with self.subTest(case=name):
+                result = self.floor_merge(rollup)
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_floor_refuses_a_check_whose_latest_run_is_not_green(self):
+        """Issue 1374: the latest run decides, so a red or pending latest run refuses
+        even after an earlier green one, and a tie or an unstamped run is never
+        superseded."""
+        lint = self.status_context(self.LINT)
+        not_green = f"{self.UNPROTECTED}, and the declared required check {self.BUILD} is not green ("
+        for name, rollup, observed in (
+            ("green then failed", [
+                self.check_run(self.BUILD, started=self.EARLY),
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.LATE), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("failed listed last", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.LATE),
+                self.check_run(self.BUILD, started=self.EARLY), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("green then pending", [
+                self.check_run(self.BUILD, started=self.EARLY),
+                self.check_run(self.BUILD, "IN_PROGRESS", None, started=self.LATE), lint],
+             "CheckRun IN_PROGRESS/none"),
+            ("same start", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.LATE),
+                self.check_run(self.BUILD, started=self.LATE), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("failed run without a start", [
+                self.check_run(self.BUILD, conclusion="FAILURE"),
+                self.check_run(self.BUILD, started=self.LATE), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("failed run with an unreadable start", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started="yesterday"),
+                self.check_run(self.BUILD, started=self.LATE), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("later run with an unreadable start", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY),
+                self.check_run(self.BUILD, started="yesterday"), lint],
+             "CheckRun COMPLETED/FAILURE"),
+        ):
+            with self.subTest(case=name):
+                self.assertEqual(
+                    not_green + observed + ")", self.refusal_line(self.floor_merge(rollup)))
 
     def test_readable_protection_governs_a_repository_with_declared_checks(self):
         """Issue 552 D2: a protection read that exits 0 runs today's predicate, and the
