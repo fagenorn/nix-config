@@ -56,13 +56,18 @@ returns `("merged", sha)` when `merged` is true, else `("open", sha)` or `("clos
 returns its comment id. It lists the issue's trusted markers (`look_marker.TRUSTED`); a live `look` marker whose
 `issue`, `pr`, `head`, `answer=approved` and `message` all equal the given ones is returned and nothing is posted,
 so a retry after a lost reply posts no second marker, and one a trusted end marker withdrew is settled too: the
-retry never undoes a withdrawal. Otherwise it reads the pull request once more (`look_head`): one that is not open
+retry never undoes a withdrawal. `pictures` are the ids of every picture on the card the owner answered
+(#1566); given, the posted marker carries `pictures=<look_marker.picture_digest(pictures)>`, so a later head
+whose re-rendered pictures have the same ids can carry the approval, and empty it posts today's marker. The
+digest is not part of an answer's identity: a marker found for this message without a `pictures` field (posted
+before the digest existed) is that answer's marker and is returned, and one found with another digest is
+`Refused(LOOK_PICTURES_DIFFER)` before any read or post, so one owner answer is never approved twice. Otherwise it reads the pull request once more (`look_head`): one that is not open
 (`LookMoved`, a `Refused` carrying `LOOK_CLOSED`) or not at `head` (`LookMoved` carrying `LOOK_MOVED`; `state` and
 `found` are what it is) is not approved, so no attempt posts a stale approval. `end_look(slug, issue, comment_id)` ends a
 look approval the console posted for a head that then moved: it lists the trusted markers and, when `comment_id` is
 one of them and still live, posts the trusted `end` marker (`reason=head-moved`) naming it, so no later head can pass the
 merge guard on that approval; an approval already ended is left alone. Then it posts `look_marker.approval_body(issue, pr, head,
-"approved", message)` and lists the trusted markers again: the new comment must be among them, else
+"approved", message, pictures=<the digest>)` and lists the trusted markers again: the new comment must be among them, else
 `Refused(LOOK_UNTRUSTED)` (GitHub took it, but not as the owner or a member, so the merge would not count it).
 
 `answer_criterion(slug, issue, index, answer, version=, note=)` (#1113) answers one review item of a held
@@ -164,6 +169,8 @@ LOOK_APPROVES = ("Choosing \"{option}\" records your approval of {head}, pull re
 LOOK_RECORDING = "Recording your approval of {head} on issue #{issue}."
 LOOK_UNTRUSTED = ("GitHub took the approval, but not as the repository's owner or a member, so the "
                   "merge would not count it. Sign gh in as the owner, then Retry.")
+LOOK_PICTURES_DIFFER = ("Nothing was recorded: this answer's approval is already on the issue for other "
+                        "pictures.")
 LOOK_INTERRUPTED = "The console stopped before it recorded the approval. Retry to record it."
 LOOK_NO_REPOSITORY = ("The console cannot tell this project's GitHub repository, so nothing was "
                       "recorded.")
@@ -311,18 +318,23 @@ def look_head(slug: str, pr: int) -> tuple[str, str | None]:
     return ("merged" if pull["merged"] else state), sha
 
 
-def record_look(slug: str, issue: int, pr: int, head: str, message: str) -> int:
+def record_look(slug: str, issue: int, pr: int, head: str, message: str,
+                pictures: Sequence[str] = ()) -> int:
     wanted = {"issue": str(issue), "pr": str(pr), "head": head, "answer": "approved",
               "message": message}
+    digest = look_marker.picture_digest(pictures) if pictures else None
     markers = fm.list_markers(slug, issue, look_marker.TRUSTED)
     for marker in markers:
         if (marker.kind == look_marker.KIND
                 and all(marker.fields.get(key) == value for key, value in wanted.items())):
+            if digest is not None and marker.fields.get("pictures", digest) != digest:
+                raise Refused(LOOK_PICTURES_DIFFER)
             return marker.comment_id
     state, found = look_head(slug, pr)
     if state != "open" or found != head:
         raise LookMoved(state, found, head)
-    posted = fm.post(slug, issue, look_marker.approval_body(issue, pr, head, "approved", message))
+    posted = fm.post(slug, issue, look_marker.approval_body(
+        issue, pr, head, "approved", message, pictures=digest))
     if not any(marker.comment_id == posted for marker in fm.list_markers(slug, issue, look_marker.TRUSTED)):
         raise Refused(LOOK_UNTRUSTED)
     return posted

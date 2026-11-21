@@ -1,6 +1,6 @@
 # ADR-console-074 — The console records a look approval itself when the owner approves a look card
 
-- **Status:** accepted; amended by ADR-console-092
+- **Status:** accepted; amended by ADR-console-092; amended in #1566
 - **Decided in:** #1260
 
 ## Context
@@ -33,9 +33,11 @@ On 17 Nov the owner approved a look card and the approval never reached the issu
 
 **D12. A stale card tells the manager.** Whenever the owner's approval finds the head gone (D3, D10), the sprint gains one `look-moved` message that names the card's round and question, the head it showed and the head now found (or that the pull request is closed or merged), and the manager is nudged, because the open card would otherwise keep an idle manager from ever being woken. The owner's panel does not list it, since the card already says why; a repeat for the same finding adds none while the first is unread.
 
+**D13. The approval names its pictures.** The marker the console posts carries `pictures=`, the digest of the ids of every picture on the card the owner answered (`look_marker.picture_digest`), so a later head whose re-rendered pictures have those ids can carry the approval (ADR-guard-010). The digest is no part of the answer's identity: a retry finds the marker of the same answer, ended or not, whether it carries no digest (posted before this change) or one, and a marker of the answer that carries another digest is refused (`LOOK_PICTURES_DIFFER`) rather than approved a second time, so one owner answer is at most one approval marker.
+
 ## Consequences
 
-- ADR-guard-010 is unchanged: the marker's format and who is trusted stay as they were, and the console posts the same marker `look-approval post` posts.
+- ADR-guard-010 is unchanged apart from the `pictures` field the marker gains (D13): who is trusted stays as it was, and the console posts the same marker `look-approval post` posts.
 - The console's `gh` must be signed in as the owner, because only an owner or member marker counts.
 - Each approval costs one pull request read and up to two comment listings.
 - The page change was held for the owner's look at 1440 and 480 px.
