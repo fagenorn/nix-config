@@ -30,8 +30,17 @@ def compact(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+class UsageError(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str):
+        raise UsageError(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="engine", description=__doc__)
+    parser = _Parser(prog="engine", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     check_parser = commands.add_parser(
         "check", help="refuse a malformed procedure by step and defect")
@@ -45,7 +54,10 @@ def _usage(message: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    try:
+        args = build_parser().parse_args(argv)
+    except UsageError as error:
+        return _usage(str(error))
     if not args.procedures.is_dir():
         return _usage(f"--procedures is not a directory: {args.procedures}")
     try:

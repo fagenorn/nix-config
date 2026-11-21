@@ -250,6 +250,16 @@ class UsageTest(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertEqual(len(err.splitlines()), 1)
 
+    def test_a_bad_argument_returns_2_with_one_stderr_line(self):
+        for argv in (["check", "--bogus"], [], ["check", "--procedures"]):
+            with self.subTest(argv=argv):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    code = engine.main(argv)
+                self.assertEqual(code, 2)
+                self.assertEqual(out.getvalue(), "")
+                self.assertEqual(len(err.getvalue().splitlines()), 1)
+
     def test_an_invalid_declarations_file_is_usage(self):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(procedure_check, "load_commands",
