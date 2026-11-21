@@ -646,7 +646,12 @@ def _row_of(event: event_log.Event) -> dict | None:
     if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
         found["note"] = LEGACY_NOTES[found["note"]]
     if isinstance(found["draft"], list) and isinstance(found["root"], str):
-        found["draft"] = contract_draft.refresh(found["root"], found["draft"])
+        refreshed = contract_draft.refresh(found["root"], found["draft"])
+        if found["result"] == "planned" and len(refreshed) != len(found["draft"]):
+            # The plan was made from a draft that held a record no longer drafted (#1449), so its id
+            # names a plan the refreshed draft would not make: it is planned again, never applied.
+            found["replan"] = True
+        found["draft"] = refreshed
         if found["result"] == "drafting":
             found["questions"] = contract_draft.questions(found["draft"])
     return found
