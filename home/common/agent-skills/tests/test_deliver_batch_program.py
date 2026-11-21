@@ -7504,6 +7504,15 @@ class AwaitingLookBatchTest(unittest.TestCase):
                                                       "holder": HOLDER, "cont": slim(awaiting(1)["cont"])})
         self.assertIsNone(result["relaunch"])
 
+    def test_a_marked_issue_waits_for_its_checks_outside_its_slot(self):
+        out = run_full(args=dict(ARGS, issues=[1, 2]), patch={"setup": {"max_parallel": 1}},
+                       children={"1": [marked_ready(1), awaiting(1)]}, turns={"1:ship": 60})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(out["max_active"], 2)
+        self.assertEqual(row(result, 1)["outcome"], "awaiting-look")
+        self.assertEqual(len(children_of(calls, 1, "ship")), 1)
+        self.assertEqual(row(result, 2)["outcome"], "landed")
+
     def test_a_marked_issue_never_rides_a_train(self):
         result, calls, _ = train_run(issues=(1, 2, 3), patch={"land-pr-2": BEHIND["land-pr-1"]}, children={"1": [planned(1), marked_ready(1), awaiting(1)]})
         self.assertEqual(row(result, 1)["outcome"], "awaiting-look")
