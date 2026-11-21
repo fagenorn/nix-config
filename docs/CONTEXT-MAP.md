@@ -104,6 +104,7 @@
 | Read-only route | Guard |
 | Receipt | Release |
 | Registration | Console |
+| Release approval | Release |
 | Release card | Console |
 | Release profile | Release |
 | Removal | Project contract |

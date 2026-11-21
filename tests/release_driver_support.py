@@ -54,7 +54,13 @@ def project(case, *, profiles=None, integration="main", default="main") -> relea
         contract={**support.base_contract(), "release": {"profiles": profiles}})
 
 
-def seed(driver, ordinal=1, **overrides) -> str:
+def approve_all(commit, version) -> bool:
+    """An `approvals` reader of a console that has approved every candidate."""
+    return True
+
+
+def seed(driver, ordinal=1, *, authority_class=release_driver.ADMITTED_CLASS,
+         **overrides) -> str:
     """Create a transaction directly, as `run` would, and return its id."""
     store = driver.store(create=True)
     inputs = release_profile.bind_candidate(driver.compiled, candidate(**overrides))
@@ -62,7 +68,7 @@ def seed(driver, ordinal=1, **overrides) -> str:
         release_driver.creation_key(PROJECT_ID, driver.profile_id, ordinal),
         inputs["subject"], concurrency_keys=inputs["concurrency_keys"],
         proof=inputs["proof"], recovery=inputs["recovery"],
-        authority_class=release_driver.AUTHORITY_CLASS).transaction_id
+        authority_class=authority_class).transaction_id
 
 
 URL = f"https://github.com/{CANONICAL['slug']}/releases/tag/{CANONICAL['tag']}"

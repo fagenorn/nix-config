@@ -86,7 +86,7 @@ class DriverLegacyTest(unittest.TestCase):
 
     def driver(self):
         project = rs.project(self)
-        return release_driver.Driver(project, registry={"github-forge": rs.StatefulForge(self.world)},
+        return release_driver.Driver(project, approvals=rs.approve_all, registry={"github-forge": rs.StatefulForge(self.world)},
                                      clock=self.clock)
 
     def test_in_flight_blocks_preview_and_run_but_not_status(self):

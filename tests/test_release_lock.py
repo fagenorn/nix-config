@@ -47,7 +47,7 @@ class LockCase(unittest.TestCase):
     def driver(self, forge=None):
         project = rs.project(self, profiles={"two-branch": support.merge_profile()},
                              integration="dev")
-        return release_driver.Driver(project, registry={"github-forge": forge or self.forge},
+        return release_driver.Driver(project, approvals=rs.approve_all, registry={"github-forge": forge or self.forge},
                                      clock=self.clock)
 
     def index(self, matches):
@@ -373,14 +373,14 @@ class SingleBranchTest(unittest.TestCase):
     def test_no_lock_call_and_no_lock_member(self):
         world = ForgeWorld(self)
         world.verification_ready()
-        driver = release_driver.Driver(rs.project(self), clock=rs.Clock(),
+        driver = release_driver.Driver(rs.project(self), approvals=rs.approve_all, clock=rs.Clock(),
                                        registry={"github-forge": rs.StatefulForge(world)})
         _, result = rs.release(driver, rs.candidate())
         self.assertEqual((result["next"], "lock" in result), ("done", False))
         self.assertNotIn("lock", driver.preview(rs.candidate()))
         self.assertFalse(any("agent-locks" in " ".join(c["argv"]) or c["argv"][:2] == ["api", "graphql"]
                              for c in world.calls()))
-        seeded = release_driver.Driver(rs.project(self), clock=rs.Clock())
+        seeded = release_driver.Driver(rs.project(self), approvals=rs.approve_all, clock=rs.Clock())
         rs.seed(seeded)
         self.assertNotIn("lock", seeded.abandon())
 

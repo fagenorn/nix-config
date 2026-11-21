@@ -54,6 +54,13 @@ it, refuses `dispose_invalid`. A driver refusal prints
 `{"error": {"code", "repair_id", "detail"}}` (`repair_id` null where none is named) and exits 3;
 a resolver refusal is untouched with exit 2, and any other failure keeps the `release`
 command's `resolver_failure` envelope (D18).
+
+`run` of a new candidate, or of a release created before the approval gate, is refused
+(`release_unapproved`, or `approval_unreadable` when the records cannot be read) unless an
+approved release card of the console records the candidate's exact commit and version
+(ADR-release-016). The command reads the host console's store at `release_card.host_store()` on
+this host, never `$HOME`. Options are never abbreviated: an abbreviation is an unrecognized
+argument and exits 2 before anything runs.
 """
 
 import argparse
@@ -61,11 +68,14 @@ import json
 import subprocess
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from agent_tools.console import release_card
 from agent_tools.release import release_adapter, release_profile, transaction_plan
-from agent_tools.release.release_driver import Driver, Project, Refusal, main_checkout, require_cwd
+from agent_tools.release.release_driver import (
+    ApprovalUnreadable, Driver, Project, Refusal, main_checkout, require_cwd)
 from agent_tools.project_contract.resolve_project import (
     ContractError, add_repo_root, emit_error, emit_json, load_contract,
     require_platform_manifest, resolve, resolves_on_path)
@@ -280,6 +290,17 @@ def _project(snapshot: dict[str, Any], root: Path) -> Project:
                    contract=load_contract(root))
 
 
+def console_approvals(store: Path) -> Callable[[str, str], bool]:
+    """An `approvals` reader over the console store at `store`, read afresh on each call."""
+    def approvals(commit: str, version: str) -> bool:
+        try:
+            cards = release_card.store_cards(store)
+        except release_card.Unreadable as error:
+            raise ApprovalUnreadable(str(error)) from error
+        return release_card.approved(cards, commit, version)
+    return approvals
+
+
 def command_transaction(args: argparse.Namespace) -> int:
     """`release transaction <verb>`: resolve, gate, then hand one verb to the driver (D18, D19)."""
     snapshot = resolve(args.repo_root, ["release"])
@@ -287,7 +308,8 @@ def command_transaction(args: argparse.Namespace) -> int:
     project = _project(snapshot, root)
     if args.action in ("run", "abandon"):
         require_cwd(root, Path.cwd())
-    driver = Driver(project, profile_id=args.profile)
+    driver = Driver(project, profile_id=args.profile,
+                    approvals=console_approvals(release_card.host_store()))
     if args.action == "status":
         return emit_json(driver.status())
     if args.action == "abandon":
@@ -309,13 +331,14 @@ def command_transaction(args: argparse.Namespace) -> int:
 
 
 def _transaction_parser(areas: Any) -> None:
-    transaction = areas.add_parser("transaction", help="drive one release through the core")
+    transaction = areas.add_parser("transaction", help="drive one release through the core",
+                                    allow_abbrev=False)
     verbs = transaction.add_subparsers(dest="action", required=True)
     for name, help_text in (("status", "print the release in flight or the last one"),
                             ("preview", "print the plan and the confirmations it needs"),
                             ("run", "drive the release as far as it can go"),
                             ("abandon", "end the release in flight")):
-        verb = verbs.add_parser(name, help=help_text)
+        verb = verbs.add_parser(name, help=help_text, allow_abbrev=False)
         verb.add_argument("--profile", help="the release profile id; optional when only one "
                                             "profile publishes")
         if name in ("preview", "run"):
@@ -335,21 +358,23 @@ def _transaction_parser(areas: Any) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="release",
+        prog="release", allow_abbrev=False,
         description="Release inspection: profiles and adapters. Adapter "
                     "invoke is reachable only through `release transaction run`, which "
                     "drives the transaction core.")
     areas = parser.add_subparsers(dest="area", required=True)
-    profile = areas.add_parser("profile", help="release profile inspection")
+    profile = areas.add_parser("profile", help="release profile inspection", allow_abbrev=False)
     actions = profile.add_subparsers(dest="action", required=True)
     inspect = actions.add_parser(
-        "inspect", help="print the ReleaseProfileInspection of one profile on stdout")
+        "inspect", help="print the ReleaseProfileInspection of one profile on stdout",
+        allow_abbrev=False)
     inspect.add_argument("profile_id", help="the release profile id")
     add_repo_root(inspect)
-    adapter = areas.add_parser("adapter", help="adapter inspection")
+    adapter = areas.add_parser("adapter", help="adapter inspection", allow_abbrev=False)
     adapter_actions = adapter.add_subparsers(dest="action", required=True)
     adapter_inspect = adapter_actions.add_parser(
-        "inspect", help="print the effect observation of one adapter operation on stdout")
+        "inspect", help="print the effect observation of one adapter operation on stdout",
+        allow_abbrev=False)
     adapter_inspect.add_argument("adapter", help="the registered adapter name")
     adapter_inspect.add_argument("operation", help="the operation to inspect")
     adapter_inspect.add_argument("--parameters", required=True,

@@ -27,6 +27,10 @@ A release profile whose publication is `none`: it declares its target, requireme
 The durable record that a transaction step took effect, kept in the transaction state. Receipts, hazard markers and later observations let recovery tell what was done.
 _Avoid_: log entry
 
+**Release approval**:
+The console's record that the owner approved one candidate, the pair of a commit and a version, as an approved release card of the last 90 days. The release run refuses a new candidate, or a release created before the gate, until one exists, and a release it created resumes without asking again (ADR-release-016).
+_Avoid_: permit, chat approval
+
 **Release profile**:
 One authored entry of the project's `release` member: the target, requirements, publication actions and checks for releasing a project one way.
 _Avoid_: release config

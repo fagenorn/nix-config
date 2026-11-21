@@ -59,6 +59,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     }),
     "release": frozenset({
         "agent_tools.claims.forge_land_lock",  # release_lock
+        "agent_tools.console.release_card",  # release
         "agent_tools.project_contract.resolve_project",  # release
     }),
     "verification": frozenset({

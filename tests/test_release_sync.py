@@ -77,7 +77,7 @@ class SyncCase(unittest.TestCase):
     def driver(self, forge=None, **project):
         project = rs.project(self, **{"profiles": {"two-branch": support.merge_profile()},
                                       "integration": "dev", **project})
-        return release_driver.Driver(project, registry={"github-forge": forge or self.forge},
+        return release_driver.Driver(project, approvals=rs.approve_all, registry={"github-forge": forge or self.forge},
                                      clock=self.clock)
 
     def argvs(self, tool, head):
@@ -278,7 +278,7 @@ class SingleBranchUnchangedTest(SyncCase):
         self.forge = rs.StatefulForge(self.world)
 
     def single(self):
-        return release_driver.Driver(rs.project(self), registry={"github-forge": self.forge},
+        return release_driver.Driver(rs.project(self), approvals=rs.approve_all, registry={"github-forge": self.forge},
                                      clock=self.clock)
 
     def test_the_documents_carry_no_sync_and_a_finished_release_still_needs_a_candidate(self):
