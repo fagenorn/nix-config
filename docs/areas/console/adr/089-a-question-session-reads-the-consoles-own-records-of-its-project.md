@@ -1,6 +1,6 @@
 # ADR-console-089 — A question session reads the console's own records of its project
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-090
 - **Decided in:** #1271
 
 ## Context
