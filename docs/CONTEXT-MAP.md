@@ -73,6 +73,7 @@
 | Live fault | Console |
 | Live-fault lane | Delivery |
 | Look approval | Delivery |
+| Look carry | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |
 | Manager | Console |

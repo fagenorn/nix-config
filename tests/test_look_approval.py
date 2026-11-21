@@ -1,6 +1,7 @@
 """Tests for `agent_tools.delivery.look_approval` (issue 1138): post, status and judge."""
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -420,6 +421,66 @@ class StatusCarryTest(unittest.TestCase):
         code, out = run(*STATUS)
         self.assertEqual((code, out["verdict"], out["kept_from"]), (0, "approved", None))
         self.assertNotIn(PULL_ARGV, self.world.argvs("gh"))
+
+
+class StatusMergeCarryTest(unittest.TestCase):
+    """Issue 1566: a carried head is judged from compares alone, the set file never read."""
+    BRANCH_ARGV = ["api", f"repos/{SLUG}/branches/main"]
+    PULL = {"number": 12, "base": {"ref": "main"}, "head": {"sha": HEAD}}
+    DIG = hashlib.sha256(("a" * 64 + "\n" + "c" * 64).encode()).hexdigest()
+    X = "7" * 40
+
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def pics(self, cid):
+        return comment(cid, lm.approval_body(7, 12, A, "approved", f"m{cid}", pictures=self.DIG))
+
+    def line(self, cid):
+        return comment(cid, lm.carry_body(7, 12, A, HEAD, self.DIG))
+
+    def served(self, base):
+        return {
+            f"compare/{base}...{A}": cmp([PAGE], commits=[(A, [FORK])]),
+            f"compare/{A}...{HEAD}": cmp([TESTF]),
+            f"compare/{base}...{HEAD}": cmp(commits=[(A, [FORK]), (HEAD, [A, self.X])]),
+        }
+
+    def seed(self, comments):
+        self.world.comment_store(SLUG, ISSUE, comments)
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": BODY})
+        self.world.respond_json("gh", PULL_ARGV, self.PULL)
+        self.world.respond_json("gh", self.BRANCH_ARGV, {"name": "main", "commit": {"sha": B}})
+        serve(self.world, SLUG, self.served(B))
+        self.world.not_found("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref={B}"])
+
+    def test_status_of_a_carried_head_is_approved(self):
+        self.seed([self.pics(5), self.line(6)])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "approved", "approved", 5, A))
+        for argv in self.world.argvs("gh"):
+            self.assertFalse(any("contents/" in part for part in argv), argv)
+
+    def test_status_without_the_carry_line_is_needed(self):
+        self.seed([self.pics(5)])
+        code, out = run(*STATUS)
+        self.assertEqual((code, out["verdict"], out["answer"], out["comment_id"], out["kept_from"]),
+                         (0, "needed", None, None, None))
+
+    def test_tick_ticks_a_carried_merged_head(self):
+        pull = {"number": 12, "merged": True, "head": {"sha": HEAD}, "base": {"ref": "main"},
+                "merge_commit_sha": MC}
+        self.world.comment_store(SLUG, ISSUE, [self.pics(5), self.line(6)])
+        self.world.respond_json("gh", ISSUE_ARGV, {"number": 7, "body": TickTest.TICK_BODY})
+        self.world.respond_json("gh", PULL_ARGV, pull)
+        self.world.respond_json("gh", TickTest.PATCH, {"number": 7})
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{MC}"],
+                                {"sha": MC, "parents": [{"sha": BT}, {"sha": HEAD}]})
+        serve(self.world, SLUG, self.served(BT))
+        self.world.not_found("gh", ["api", f"repos/{SLUG}/contents/.github/look-files.json?ref={BT}"])
+        code, out = run("tick", *POST)
+        self.assertEqual((code, out["verdict"], out["ticked"], out["kept_from"]), (0, "ticked", 1, A))
 
 
 class StatusMergedTest(unittest.TestCase):

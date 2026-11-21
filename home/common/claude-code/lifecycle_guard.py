@@ -493,7 +493,11 @@ receives it as `validate_release_merge`'s last parameter).
    after the last run refuse as step 4 does, `issue <n> needs the owner's look
    before merge`, with the `<n>` of run one. Any other output of a carry run is
    `look check failed: <child diagnostic>`. Nothing is read at a branch name after
-   B nor at the head.
+   B nor at the head. The look check also admits, through the same runs, an `approved`
+   approval carried by a trusted `look-carry` line naming the issue, the pull request,
+   the approved head, the current head and the approval's picture digest, when every
+   commit after the approved head is a two-parent merge whose second parent is no pull
+   request commit (issue 1566); that rule reads only compares, never the set file.
 Every lookup runs with the token variables scrubbed and the child timeout; a
 timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> comment lookup timed out`, a non-zero one `PR body lookup failed`,

@@ -1,6 +1,6 @@
 # ADR-guard-010 — A merge of a marked issue needs the owner's look at its head
 
-- **Status:** accepted; amended in #1211
+- **Status:** accepted; amended in #1211, #1566
 - **Decided in:** issue 1138
 
 ## Context
@@ -15,6 +15,7 @@ An issue whose body carries a look marker line is a criterion, not a label: mark
 - A look approval covers its head and every later head of the same pull request that keeps it (#1211); the latest answer for a head decides, and a later request for changes on any head withdraws it.
 - A later head keeps an approval when the approved head is its ancestor and no commit of the pull request after it changed the look file set: the path globs `.github/look-files.json` declares at the base commit the guard reads. Every such commit is checked, not only the final diff. Each touches no look file, or is a merge of the integration branch that brings into each look file exactly the other parent's change, as a clean merge does. A look file changed after the look (an edit and its revert included), a conflict resolved inside one, an edit dropped by a merge, a side branch of the pull request's own commits, a force-push or a rebase needs a new look.
 - An approval may carry one worded fix (answer `fix`), which approves no head itself and keeps the approval across exactly one later commit that changes the look files; a second needs a new look.
+- An `approved` approval that records the digest of its pictures also carries across a head whose every later commit is a merge of the integration branch (#1566): a trusted, live `look-carry` line names the issue, the pull request, the approved head, the current head and that digest, and every commit after the approved head is a two-parent merge whose second parent is no pull request commit. The picture half rests on the carry line, which only `look-approval carry` writes, and the rule reads only compares, never the set file; a head it does not carry falls back to the look file rule above, in the same runs.
 - The set is read at the base commit, never from the pull request, so a pull request cannot shrink the set it is judged by; an area or repository with no set keeps one approval per head.
 - The guard reads the base commit, the set and the compares with its own `gh` and does not judge: the look check names the reads it needs, and the guard runs it at most three more times, at most 48 reads, each read path checked against a fixed grammar. A failed, partial or unreadable read refuses as before.
 - Both merge arms run the gate, right after the mergeability check and before their first gate, so a pull request merged onto an integration base meets it before the exemption, and a release pull request meets it before its rollup predicate.
@@ -29,4 +30,5 @@ An issue whose body carries a look marker line is a criterion, not a label: mark
 - Every merge pays one pull request read (body, commits and linked issues), two reads per referenced issue and one child; a pull request that settles no issue pays the pull request read alone.
 - A pull request's issues are those its head branch names and its body or commits close, fix, resolve or refer to, and the forge links to it; an issue named nowhere on the pull request is not read.
 - A kept merge pays one base read, one set read and three compare reads, plus one compare read per later commit and up to four per merge.
+- A carried merge pays one base read and three compare reads.
 - A commit after the owner's look that changes the look files needs a new look, which is the point.

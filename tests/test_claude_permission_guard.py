@@ -1,5 +1,6 @@
 import ast
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
 import os
@@ -6564,6 +6565,91 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 result = self.run_guard(
                     self.LOOK_PINNED, repo, self.look_carry_env(comments, compares, **extra))
                 self.assert_look_refusal(result)
+
+    LOOK_DIGEST = hashlib.sha256(("a" * 64 + "\n" + "c" * 64).encode()).hexdigest()
+
+    def look_pics_comment(self, cid, head):
+        return {"id": cid,
+                "body": look_marker.approval_body(
+                    1200, 1300, head, "approved", f"m{cid}", pictures=self.LOOK_DIGEST),
+                "updated_at": "2026-11-16T10:00:00Z", "author_association": "OWNER"}
+
+    def look_carry_comment(self, cid, a, h, pictures=LOOK_DIGEST, association="OWNER"):
+        return {"id": cid, "body": look_marker.carry_body(1200, 1300, a, h, pictures),
+                "updated_at": "2026-11-16T10:00:00Z", "author_association": association}
+
+    def merges_world(self, after):
+        base, a, h = self.LOOK_BASE, self.LOOK_APPROVED, self.LOOK_HEAD
+        return {
+            f"{base}...{a}": self.look_compare([self.PAGE], commits=[(a, [self.LOOK_FORK])]),
+            f"{a}...{h}": self.look_compare([self.DOC]),
+            f"{base}...{h}": self.look_compare(commits=[(a, [self.LOOK_FORK])] + list(after)),
+        }
+
+    def test_a_carried_look_approval_admits_a_head_that_only_merged_main(self):
+        repo = self.look_repo()
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]
+        for name, after in {"one merge": [(h, [a, x])],
+                            "two merges": [(t, [a, x]), (h, [t, self.LOOK_F])]}.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env(comments, self.merges_world(after), look_files={}))
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("", result.stderr)
+
+    def test_a_line_that_does_not_carry_still_admits_a_head_the_look_files_keep(self):
+        a, h, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_T
+        compares = self.merges_world([(t, [a]), (h, [t])])
+        compares[f"{a}...{t}"] = self.look_compare([self.DOC])
+        compares[f"{t}...{h}"] = self.look_compare([self.DOC])
+        comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]
+        result = self.run_guard(
+            self.LOOK_PINNED, self.look_repo(), self.look_carry_env(comments, compares))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stderr)
+
+    def test_the_look_gate_refuses_each_shape_a_carry_does_not_cover(self):
+        repo = self.look_repo()
+        a, h, x, t = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X, self.LOOK_T
+        pics, line = self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)
+        merged = self.merges_world([(h, [a, x])])
+        diverged = self.merges_world([(h, [a, x])])
+        diverged[f"{a}...{h}"]["status"] = "diverged"
+        cases = {
+            "no carry line": ([pics], merged),
+            "a line whose digest differs": ([pics, self.look_carry_comment(
+                11, a, h, hashlib.sha256(("b" * 64).encode()).hexdigest())], merged),
+            "an approval without pictures": ([self.look_comment(10, head=a), line], merged),
+            "a line naming another head": ([pics, self.look_carry_comment(11, a, t)], merged),
+            "a line naming another approved head": ([pics, self.look_carry_comment(11, x, h)], merged),
+            "a one-parent commit": ([pics, line], self.merges_world([(h, [a])])),
+            "a pull request commit as second parent": (
+                [pics, line], self.merges_world([(t, [a]), (h, [t, a])])),
+            "a merge of an earlier pull request merge": (
+                [pics, line], self.merges_world([(t, [a, x]), (self.LOOK_F, [t, x]), (h, [self.LOOK_F, t])])),
+            "a line by a collaborator": (
+                [pics, self.look_carry_comment(11, a, h, association="COLLABORATOR")], merged),
+            "a line that was ended": ([pics, line, self.look_end_comment(12, of=11)], merged),
+            "A...H diverged": ([pics, line], diverged),
+            "a later changes answer": (
+                [pics, line, self.look_comment(12, head=x, answer="changes")], merged),
+        }
+        for name, (comments, compares) in cases.items():
+            with self.subTest(case=name):
+                result = self.run_guard(
+                    self.LOOK_PINNED, repo,
+                    self.look_carry_env(comments, compares, look_files={}))
+                self.assert_look_refusal(result)
+
+    def test_a_carried_head_still_needs_the_pinned_head(self):
+        a, h, x = self.LOOK_APPROVED, self.LOOK_HEAD, self.LOOK_X
+        comments = [self.look_pics_comment(10, a), self.look_carry_comment(11, a, h)]
+        result = self.run_guard(
+            self.LOOK_MERGE, self.look_repo(),
+            self.look_carry_env(comments, self.merges_world([(h, [a, x])]), look_files={}))
+        self.assert_look_refusal(result, self.LOOK_UNPINNED_REFUSAL)
 
     def test_a_worded_fix_admits_one_look_commit(self):
         repo = self.look_repo()
