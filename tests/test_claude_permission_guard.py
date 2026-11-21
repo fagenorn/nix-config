@@ -2696,11 +2696,13 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         merge = "gh pr merge 1484 --repo elevenyellow/nodocom --merge"
         early, late = "2026-11-20T09:00:00Z", "2026-11-20T09:30:00Z"
 
-        def run(name, conclusion, started=None, status="COMPLETED"):
+        def run(name, conclusion, started=None, status="COMPLETED", workflow=None):
             entry = {"__typename": "CheckRun", "name": name, "status": status,
                      "conclusion": conclusion}
             if started is not None:
                 entry["startedAt"] = started
+            if workflow is not None:
+                entry["workflowName"] = workflow
             return entry
 
         green = [{"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS"}]
@@ -2712,6 +2714,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
               "startedAt": early}, run("build", "SUCCESS", late),
              {"__typename": "StatusContext", "context": "deploy", "state": "SUCCESS",
               "startedAt": late}],
+            [run("build", "FAILURE", early, workflow="ci"),
+             run("build", "SUCCESS", late, workflow="ci")] + green,
         ):
             with self.subTest(admitted=rollup):
                 result = self.run_guard(
@@ -2727,6 +2731,21 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             [run("build", "FAILURE", early), run("build", "SUCCESS", "yesterday")] + green,
             [run("build", "FAILURE", early), run("build", "SUCCESS", late),
              run("lint", "FAILURE", early)] + green,
+            # A queued re-run: gh exports a run not yet started with the zero time.
+            [run("build", "SUCCESS", early),
+             run("build", None, "0001-01-01T00:00:00Z", "QUEUED")] + green,
+            [run("build", "SUCCESS", early),
+             run("build", "", "0001-01-01T00:00:00Z", "QUEUED")] + green,
+            # Two workflows publishing one check name never supersede each other.
+            [run("build", "FAILURE", early, workflow="ci"),
+             run("build", "SUCCESS", late, workflow="nightly")] + green,
+            [run("build", "SUCCESS", late, workflow="nightly"),
+             run("build", "FAILURE", early, workflow="ci")] + green,
+            # An impossible calendar date is unreadable, so it supersedes nothing.
+            [run("build", "FAILURE", early), run("build", "SUCCESS", "2026-99-01T00:00:00Z")]
+            + green,
+            [run("build", "FAILURE", early), run("build", "SUCCESS", "2026-02-30T00:00:00Z")]
+            + green,
         ):
             with self.subTest(refused=rollup):
                 result = self.run_guard(
@@ -3109,11 +3128,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     LOOKUP_FAILED = "lifecycle guard: protection lookup failed: stderr="
 
     @staticmethod
-    def check_run(name, status="COMPLETED", conclusion="SUCCESS", started=None):
+    def check_run(name, status="COMPLETED", conclusion="SUCCESS", started=None,
+                  workflow=None):
         entry = {"__typename": "CheckRun", "name": name, "status": status,
                  "conclusion": conclusion}
         if started is not None:
             entry["startedAt"] = started
+        if workflow is not None:
+            entry["workflowName"] = workflow
         return entry
 
     @staticmethod
@@ -3227,6 +3249,10 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.check_run(self.BUILD),
                 self.status_context(self.LINT, "FAILURE", started=self.EARLY),
                 self.status_context(self.LINT, started=self.LATE)]),
+            ("same workflow", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY,
+                               workflow="ci"),
+                self.check_run(self.BUILD, started=self.LATE, workflow="ci"), lint]),
         ):
             with self.subTest(case=name):
                 result = self.floor_merge(rollup)
@@ -3266,6 +3292,24 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             ("later run with an unreadable start", [
                 self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY),
                 self.check_run(self.BUILD, started="yesterday"), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("queued re-run with the zero start", [
+                self.check_run(self.BUILD, started=self.EARLY),
+                self.check_run(self.BUILD, "QUEUED", None, started="0001-01-01T00:00:00Z"),
+                lint],
+             "CheckRun QUEUED/none"),
+            ("failed run of another workflow", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY,
+                               workflow="ci"),
+                self.check_run(self.BUILD, started=self.LATE, workflow="nightly"), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("later run with an impossible date", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY),
+                self.check_run(self.BUILD, started="2026-99-01T00:00:00Z"), lint],
+             "CheckRun COMPLETED/FAILURE"),
+            ("later run with a day the month lacks", [
+                self.check_run(self.BUILD, conclusion="FAILURE", started=self.EARLY),
+                self.check_run(self.BUILD, started="2026-02-30T00:00:00Z"), lint],
              "CheckRun COMPLETED/FAILURE"),
         ):
             with self.subTest(case=name):
