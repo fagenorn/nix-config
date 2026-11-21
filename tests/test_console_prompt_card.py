@@ -203,25 +203,35 @@ class PromptCardTest(unittest.TestCase):
     def test_parsers_refuse_anything_but_the_exact_shapes(self):
         def body(**fields):
             return json.dumps(fields).encode()
-        ask = dict(sprint_id=SPRINT, secret="k", phase="ask", session_id="s-1", command="ls")
-        wait = dict(sprint_id=SPRINT, secret="k", phase="wait", session_id="s-1", prompt=4)
+        nonce, auth = "ab" * 16, "cd" * 32
+        ask = dict(sprint_id=SPRINT, phase="ask", session_id="s-1", command="ls", nonce=nonce,
+                   auth=auth)
+        wait = dict(sprint_id=SPRINT, phase="wait", session_id="s-1", prompt=4, nonce=nonce,
+                    auth=auth)
         self.assertEqual(prompt_card.parse_ask(body(**ask)),
-                         prompt_card.AskRequest(SPRINT, "k", "ask", "s-1", "ls", None, None))
+                         prompt_card.AskRequest(SPRINT, auth, "ask", "s-1", "ls", None, None, nonce))
         self.assertEqual(prompt_card.parse_ask(body(**ask, description="why")).description, "why")
         self.assertEqual(prompt_card.parse_ask(body(**wait)),
-                         prompt_card.AskRequest(SPRINT, "k", "wait", "s-1", None, None, 4))
+                         prompt_card.AskRequest(SPRINT, auth, "wait", "s-1", None, None, 4, nonce))
         self.assertEqual(prompt_card.parse_ask(body(**{**wait, "phase": "close"})).phase, "close")
         self.assertEqual(prompt_card.parse_answer(body(prompt=7, answer="refuse")), (7, "refuse"))
-        prove = dict(sprint_id=SPRINT, phase="prove", nonce="ab" * 16)
-        self.assertEqual(prompt_card.parse_ask(body(**prove)),
-                         prompt_card.AskRequest(SPRINT, "", "prove", "", None, None, None, "ab" * 16))
+        # `signed` is what `auth` covers: every member but `auth`, key-sorted and compact.
+        self.assertEqual(prompt_card.parse_ask(body(**wait)).signed,
+                         b'{"nonce":"' + nonce.encode() + b'","phase":"wait","prompt":4,'
+                         b'"session_id":"s-1","sprint_id":"' + SPRINT.encode() + b'"}')
         refused = [
-            body(**{k: v for k, v in prove.items() if k != "nonce"}),
-            body(**{**prove, "nonce": "x"}),
-            body(**{**prove, "nonce": "AB" * 16}),
-            body(**{**prove, "nonce": 3}),
-            body(**prove, secret="k"),
-            body(**prove, session_id="s-1"),
+            body(**{**ask, "phase": "prove"}),
+            body(**{k: v for k, v in ask.items() if k not in ("nonce", "auth")}),
+            body(**{k: v for k, v in ask.items() if k != "auth"}),
+            body(**{k: v for k, v in wait.items() if k != "nonce"}),
+            body(**{**ask, "nonce": "x"}),
+            body(**{**ask, "nonce": "AB" * 16}),
+            body(**{**ask, "nonce": 3}),
+            body(**{**ask, "auth": "x"}),
+            body(**{**ask, "auth": "CD" * 32}),
+            body(**{**wait, "auth": 3}),
+            body(**ask, secret="k"),
+            body(**{k: v for k, v in ask.items() if k != "auth"}, secret="k"),
             json.dumps(ask).replace('"command": "ls"', '"command": "ls", "command": "rm"').encode(),
             body(**ask, extra=1),
             body(**{**ask, "command": ""}),
@@ -244,16 +254,29 @@ class PromptCardTest(unittest.TestCase):
             with self.subTest(text), self.assertRaises(ValueError):
                 prompt_card.parse_answer(text)
 
-    def test_the_proof_is_a_keyed_digest_of_the_sprint_and_the_nonce(self):
+    def test_a_request_and_its_reply_are_each_a_keyed_digest(self):
         import hashlib
         import hmac
         nonce = "ab" * 16
-        expected = hmac.new(b"k", f"prompt-proof\0{SPRINT}\0{nonce}".encode(),
+        signed = prompt_card.signed_bytes({"b": 1, "a": "x", "auth": "dropped"})
+        self.assertEqual(signed, b'{"a":"x","b":1}')
+        expected = hmac.new(b"k", b"prompt-request\0" + signed, hashlib.sha256).hexdigest()
+        self.assertEqual(prompt_card.request_auth("k", signed), expected)
+        self.assertNotEqual(prompt_card.request_auth("j", signed), expected)
+        self.assertNotEqual(prompt_card.request_auth("k", signed + b" "), expected)
+        expected = hmac.new(b"k", f"prompt-reply\0{SPRINT}\0{nonce}\0{7}\0allowed".encode(),
                             hashlib.sha256).hexdigest()
-        self.assertEqual(prompt_card.proof("k", SPRINT, nonce), expected)
-        self.assertNotEqual(prompt_card.proof("j", SPRINT, nonce), expected)
-        self.assertNotEqual(prompt_card.proof("k", "1" * 16, nonce), expected)
-        self.assertNotEqual(prompt_card.proof("k", SPRINT, "cd" * 16), expected)
+        self.assertEqual(prompt_card.reply_mac("k", SPRINT, nonce, 7, "allowed"), expected)
+        for other in (prompt_card.reply_mac("j", SPRINT, nonce, 7, "allowed"),
+                      prompt_card.reply_mac("k", "1" * 16, nonce, 7, "allowed"),
+                      prompt_card.reply_mac("k", SPRINT, "cd" * 16, 7, "allowed"),
+                      prompt_card.reply_mac("k", SPRINT, nonce, 8, "allowed"),
+                      prompt_card.reply_mac("k", SPRINT, nonce, None, "allowed"),
+                      prompt_card.reply_mac("k", SPRINT, nonce, 7, "refused")):
+            self.assertNotEqual(other, expected)
+        empty = hmac.new(b"k", f"prompt-reply\0{SPRINT}\0{nonce}\0\0refused".encode(),
+                         hashlib.sha256).hexdigest()
+        self.assertEqual(prompt_card.reply_mac("k", SPRINT, nonce, None, "refused"), empty)
 
     def test_a_close_keeps_its_reason_in_the_fold(self):
         events = [asked(1), closed(2, 1, "ended"), asked(3), closed(4, 3, "expired")]

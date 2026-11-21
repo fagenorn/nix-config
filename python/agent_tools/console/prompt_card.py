@@ -39,21 +39,25 @@ of the manager's own description, cut to `MAX_WORDS_CHARS`, else `NO_WORDS`) and
 verbatim.
 
 Wire. `parse_ask` reads the hook's body: strict JSON (a repeated key and NaN are refused),
-`phase` `ask` with exactly `{sprint_id, secret, phase, session_id, command}` and an optional
-`description`, or `wait` and `close` with exactly `{sprint_id, secret, phase, session_id,
-prompt}`, or `prove` with exactly `{sprint_id, phase, nonce}` (`NONCE`, 32 lowercase hexadecimal
-characters), the one request that carries no secret. `parse_answer` reads the owner's `{prompt, answer}`. Any other shape is `ValueError`.
+`phase` `ask` with exactly `{sprint_id, phase, session_id, command, nonce, auth}` and an optional
+`description`, or `wait` and `close` with exactly `{sprint_id, phase, session_id, prompt, nonce,
+auth}`; `nonce` is `NONCE` (32 lowercase hexadecimal characters) and `auth` `AUTH` (64). The body
+carries no secret (see Proof). `parse_answer` reads the owner's `{prompt, answer}`. Any other shape is `ValueError`.
 `wire_state` is the state the hook is told: `ENDED` for a prompt closed with reason `ended` (the console
 closed it, so the manager is not told that nobody answered), else the prompt's own state.
 `hook_output` is the client's `PermissionRequest` decision as one JSON line.
 
-Proof (`proof`). The hook sends the sprint's secret only to a console that has proved it holds it:
-another local account may own the loopback port while the console restarts, and a hook must neither
-hand it the secret nor honour its decision. The hook asks `prove` with a fresh nonce before each
-request that carries the secret; the console answers `{"proof": proof(secret, sprint_id, nonce)}`, the
-hex HMAC-SHA256 keyed by the secret over `prompt-proof`, the sprint id and the nonce, separated by NUL,
-which only a holder of the secret computes. The hook compares it in constant time and sends nothing
-further, and prints a deny, when it differs.
+Proof (`request_auth`, `reply_mac`). The sprint's secret never travels: another local account may own the
+loopback port while the console restarts, and a hook must neither hand it the secret nor honour its
+decision, and a check made on one connection binds nothing on the next. So each request of the hook
+carries a fresh `nonce` and `auth`, the hex HMAC-SHA256 keyed by the secret over `prompt-request`, NUL and
+`signed_bytes` of the body's other members (JSON with sorted keys and compact separators), which the
+console recomputes from the secret it holds; and each 200 reply carries `mac`, the hex HMAC-SHA256 keyed by
+the secret over `prompt-reply`, the sprint id, the nonce, the prompt number (empty when null) and the state,
+separated by NUL. The hook honours a reply only when its `mac` matches for the nonce of that very request,
+compared in constant time, so a process without the secret can neither collect it nor forge a decision, and
+a decision of one request cannot be replayed to another. A replay of a captured request to the console
+returns that request's own reply, never a decision for the hook; it is not detected.
 
 Constants live here except the hold, the poll and the hook's timeout, which `manager` owns
 (`PROMPT_HOLD_SECONDS`, `PROMPT_POLL_SECONDS`, `PROMPT_TIMEOUT`): `sprints` and `sprint` import
@@ -70,7 +74,7 @@ import hmac
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console import event_log, manager
@@ -91,8 +95,9 @@ REFUSED = "refused"
 CLOSED = "closed"
 ENDED = "ended"
 CLOSE_REASONS = ("expired", ENDED)
-PHASES = ("ask", "wait", "close", "prove")
+PHASES = ("ask", "wait", "close")
 NONCE = re.compile(r"[0-9a-f]{32}")
+AUTH = re.compile(r"[0-9a-f]{64}")
 
 HOLD_SECONDS = manager.PROMPT_HOLD_SECONDS
 POLL_SECONDS = manager.PROMPT_POLL_SECONDS
@@ -145,13 +150,14 @@ class Prompt:
 @dataclass(frozen=True)
 class AskRequest:
     sprint_id: str
-    secret: str
+    auth: str
     phase: str
     session_id: str
     command: str | None
     description: str | None
     prompt: int | None
-    nonce: str | None = None
+    nonce: str
+    signed: bytes = field(default=b"", compare=False, repr=False)
 
 
 def _number(value: object) -> bool:
@@ -222,9 +228,21 @@ def wire_state(prompt: Prompt) -> str:
     return ENDED if prompt.state == CLOSED and prompt.reason == ENDED else prompt.state
 
 
-def proof(secret: str, sprint_id: str, nonce: str) -> str:
-    """The console's proof that it holds the sprint's secret, for the hook's `nonce` (see the module docstring)."""
-    return hmac.new(secret.encode(), f"prompt-proof\0{sprint_id}\0{nonce}".encode(),
+def signed_bytes(fields: Mapping[str, object]) -> bytes:
+    """The bytes a request's `auth` covers: its members but `auth`, as sorted compact JSON."""
+    return json.dumps({k: v for k, v in fields.items() if k != "auth"}, sort_keys=True,
+                      separators=(",", ":")).encode()
+
+
+def request_auth(secret: str, signed: bytes) -> str:
+    """The hook's `auth` of a request whose `signed_bytes` are given (see the module docstring)."""
+    return hmac.new(secret.encode(), b"prompt-request\0" + signed, hashlib.sha256).hexdigest()
+
+
+def reply_mac(secret: str, sprint_id: str, nonce: str, prompt: int | None, state: str) -> str:
+    """The `mac` of a reply to the request that carried `nonce` (see the module docstring)."""
+    number = "" if prompt is None else str(prompt)
+    return hmac.new(secret.encode(), f"prompt-reply\0{sprint_id}\0{nonce}\0{number}\0{state}".encode(),
                     hashlib.sha256).hexdigest()
 
 
@@ -298,14 +316,7 @@ def _decoded(body: bytes) -> dict:
 def parse_ask(body: bytes) -> AskRequest:
     value = _decoded(body)
     phase = value.get("phase")
-    if phase == "prove":
-        if set(value) != {"sprint_id", "phase", "nonce"}:
-            raise ValueError("the body must be an object of exactly nonce, phase, sprint_id")
-        nonce = value["nonce"]
-        if not _text(value["sprint_id"]) or not isinstance(nonce, str) or NONCE.fullmatch(nonce) is None:
-            raise ValueError("sprint_id must be a non-empty string and nonce 32 lowercase hexadecimal characters")
-        return AskRequest(value["sprint_id"], "", "prove", "", None, None, None, nonce)
-    keys = {"sprint_id", "secret", "phase", "session_id"}
+    keys = {"sprint_id", "phase", "session_id", "nonce", "auth"}
     if phase == "ask":
         keys |= {"command"}
         if "description" in value:
@@ -313,23 +324,29 @@ def parse_ask(body: bytes) -> AskRequest:
     elif phase in ("wait", "close"):
         keys |= {"prompt"}
     else:
-        raise ValueError("phase must be ask, wait, close or prove")
+        raise ValueError("phase must be ask, wait or close")
     if set(value) != keys:
         raise ValueError(f"the body must be an object of exactly {', '.join(sorted(keys))}")
-    if not all(_text(value[key]) for key in ("sprint_id", "secret", "session_id")):
-        raise ValueError("sprint_id, secret and session_id must be non-empty strings")
+    if not all(_text(value[key]) for key in ("sprint_id", "session_id")):
+        raise ValueError("sprint_id and session_id must be non-empty strings")
+    nonce, auth = value["nonce"], value["auth"]
+    if not isinstance(nonce, str) or NONCE.fullmatch(nonce) is None:
+        raise ValueError("nonce must be 32 lowercase hexadecimal characters")
+    if not isinstance(auth, str) or AUTH.fullmatch(auth) is None:
+        raise ValueError("auth must be 64 lowercase hexadecimal characters")
+    signed = signed_bytes(value)
     if phase == "ask":
         if not _command(value["command"]):
             raise ValueError(f"command must be 1 to {MAX_COMMAND_CHARS} characters")
         description = value.get("description")
         if "description" in value and not isinstance(description, str):
             raise ValueError("description must be a string")
-        return AskRequest(value["sprint_id"], value["secret"], phase, value["session_id"],
-                          value["command"], description, None)
+        return AskRequest(value["sprint_id"], auth, phase, value["session_id"],
+                          value["command"], description, None, nonce, signed)
     if not _number(value["prompt"]):
         raise ValueError("prompt must be a number of 1 or more")
-    return AskRequest(value["sprint_id"], value["secret"], phase, value["session_id"],
-                      None, None, value["prompt"])
+    return AskRequest(value["sprint_id"], auth, phase, value["session_id"],
+                      None, None, value["prompt"], nonce, signed)
 
 
 def parse_answer(body: bytes) -> tuple[int, str]:

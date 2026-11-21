@@ -229,7 +229,7 @@ and a `tool_input.command` of 1 to `prompt_card.MAX_COMMAND_CHARS` characters (t
 asks to run outside the sandbox (`dangerouslyDisableSandbox` other than absent, null or false) prints one deny line
 with `prompt_card.SANDBOX_TEXT` and sends nothing: Allow once would approve the whole input, the exception included,
 while the card shows only the command. It sends `POST /api/permission-prompt` with phase `ask` and, when the reply is
-`{"prompt": <n>, "state": <str>}` with a number, repeats phase `wait` every `prompt_card.POLL_SECONDS` while the
+`{"prompt": <n>, "state": <str>, "mac": <hex>}` with a number, repeats phase `wait` every `prompt_card.POLL_SECONDS` while the
 reply is `open` (a failed wait is polled again), up to `prompt_card.HOLD_SECONDS` after the ask: `allowed` prints the
 client's allow decision, `refused` its deny with `prompt_card.OWNER_REFUSED_TEXT`, `closed` its deny with
 `prompt_card.EXPIRED_TEXT` and `ended` (the console closed the prompt: the sprint was stopped or ended, or the
@@ -237,14 +237,14 @@ session ended) its deny with `prompt_card.ENDED_TEXT`. A reply counts only when 
 prompt asked: one naming another prompt is a failed request. When the hold runs out it sends phase `close` once and
 prints what that reply says, which the console decides together with the owner's answer: `allowed` allows, `refused`
 denies with the owner's refusal, `ended` with the console's closure, and `closed`, any other reply or a failed request
-denies with the expiry. Before the ask and before each `wait` and `close` the command sends phase `prove` with a
-fresh nonce and no secret, and sends the secret only when the reply is the console's proof
-(`prompt_card.proof`) that it holds the sprint's secret: whatever else listens on the loopback port (another local
-account's process while the console restarts) is sent no secret and has no decision honoured. A listener that does
-not prove it ends the hold with one deny line with `manager.REFUSAL`. Everything else prints one deny line with
+denies with the expiry. The secret is never sent: each request carries a fresh `nonce` and `auth`, the HMAC
+under the secret of its other members (`prompt_card.request_auth`), and a reply counts only when its `mac` is the
+console's HMAC under the secret for that nonce, prompt and state (`prompt_card.reply_mac`): whatever else listens on
+the loopback port (another local account's process while the console restarts) learns no secret and has no decision
+honoured. A reply whose `mac` is not that one ends the hold with one deny line with `manager.REFUSAL`. Everything else prints one deny line with
 `manager.REFUSAL` and sends nothing further: stdin that is not such an object, any other tool, a command that is missing, empty or too long, no
 session, sprint id or secret, a console that is unreachable or answers other than 200 to the ask, a reply that is
-not `{"prompt", "state"}` and a null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
+not `{"prompt", "state", "mac"}` and a null `prompt`. It prints exactly one line, always exit 0. The allow carries no rule,
 so the deny rules and the `PreToolUse` hooks keep judging the call.
 
 `sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
@@ -529,7 +529,7 @@ class SandboxRequested(HookFailure):
 
 
 class Unproven(HookFailure):
-    """Whatever answers on the console's port did not prove that it holds the sprint's secret."""
+    """Whatever answered on the console's port did not sign its reply with the sprint's secret."""
 
 
 def hook_command(text: str) -> tuple[str, str | None, str]:
@@ -612,40 +612,34 @@ def prompt_hook(text: str) -> tuple[str, str, str | None]:
     return session, command, description if isinstance(description, str) else None
 
 
-def prove_console(port: int, sprint: str, secret: str) -> None:
-    """Return when the console answering on `port` proved it holds `secret`, else `Unproven` (no secret is sent)."""
-    nonce = secrets.token_hex(16)
-    sent = {"sprint_id": sprint, "phase": "prove", "nonce": nonce}
-    text = ask(port, "POST", prompt_card.ASK_PATH, json.dumps(sent).encode())
-    try:
-        reply = json.loads(text)
-    except ValueError:
-        reply = None
-    given = reply.get("proof") if isinstance(reply, dict) else None
-    wanted = prompt_card.proof(secret, sprint, nonce)
-    if not isinstance(given, str) or not hmac.compare_digest(given.encode(), wanted.encode()):
-        raise Unproven("the listener on the console's port did not prove it holds the sprint's secret")
+def prompt_reply(text: str, secret: str, sprint: str, nonce: str) -> tuple[int | None, str]:
+    """The prompt number and state of the console's reply to the request that carried `nonce`.
 
-
-def ask_proved(port: int, sprint: str, secret: str, body: dict) -> str:
-    """The console's answer to `body`, sent only after it proved it holds `secret`."""
-    prove_console(port, sprint, secret)
-    return ask(port, "POST", prompt_card.ASK_PATH, json.dumps(body).encode())
-
-
-def prompt_reply(text: str) -> tuple[int | None, str]:
-    """The prompt number and state of the console's reply, else `HookFailure`."""
+    A reply of another shape is `HookFailure`; one whose `mac` is not the console's HMAC under `secret`
+    for this sprint, nonce, prompt and state is `Unproven`, so no decision of whatever else answered is used."""
     try:
         reply = json.loads(text)
     except ValueError as error:
         raise HookFailure(f"the console's answer is not JSON: {error}") from error
     prompt = reply.get("prompt") if isinstance(reply, dict) else None
     state = reply.get("state") if isinstance(reply, dict) else None
-    if (not isinstance(reply, dict) or set(reply) != {"prompt", "state"}
+    if (not isinstance(reply, dict) or set(reply) - {"mac"} != {"prompt", "state"}
             or not isinstance(state, str)
             or not (prompt is None or (type(prompt) is int and prompt >= 1))):
         raise HookFailure("the console's answer is not a prompt state")
+    wanted = prompt_card.reply_mac(secret, sprint, nonce, prompt, state)
+    given = reply.get("mac")
+    if not isinstance(given, str) or not hmac.compare_digest(given.encode(), wanted.encode()):
+        raise Unproven("the listener on the console's port did not sign its answer with the sprint's secret")
     return prompt, state
+
+
+def ask_signed(port: int, sprint: str, secret: str, body: dict) -> tuple[int | None, str]:
+    """The prompt number and state the console answers to `body`, sent with a fresh nonce and an `auth` and no secret."""
+    fields = {**body, "nonce": secrets.token_hex(16)}
+    sent = {**fields, "auth": prompt_card.request_auth(secret, prompt_card.signed_bytes(fields))}
+    text = ask(port, "POST", prompt_card.ASK_PATH, json.dumps(sent).encode())
+    return prompt_reply(text, secret, sprint, fields["nonce"])
 
 
 def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = None,
@@ -657,11 +651,10 @@ def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = 
     try:
         session, command, description = prompt_hook(sys.stdin.read())
         sprint, secret = resolve_sprint(args), resolve_secret(args)
-        body = {"sprint_id": sprint, "secret": secret, "phase": "ask",
-                "session_id": session, "command": command}
+        body = {"sprint_id": sprint, "phase": "ask", "session_id": session, "command": command}
         if description is not None:
             body["description"] = description
-        prompt, _ = prompt_reply(ask_proved(args.port, sprint, secret, body))
+        prompt, _ = ask_signed(args.port, sprint, secret, body)
         if prompt is None:
             raise HookFailure("the console holds no card for this prompt")
     except SandboxRequested:
@@ -674,9 +667,8 @@ def run_prompt(args: argparse.Namespace, *, clock: Callable[[], float] | None = 
     def phase(name: str) -> str:
         """The state of the prompt after one `wait` or `close` request, "failed" when it did not answer."""
         try:
-            sent = {"sprint_id": sprint, "secret": secret, "phase": name,
-                    "session_id": session, "prompt": prompt}
-            named, state = prompt_reply(ask_proved(args.port, sprint, secret, sent))
+            sent = {"sprint_id": sprint, "phase": name, "session_id": session, "prompt": prompt}
+            named, state = ask_signed(args.port, sprint, secret, sent)
         except Unproven:
             raise
         except (HookFailure, Refused):

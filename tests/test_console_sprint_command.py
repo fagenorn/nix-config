@@ -1489,33 +1489,44 @@ class PromptCommandTest(unittest.TestCase):
         return json.dumps({**document, **change})
 
     @staticmethod
+    def honest(reply, request, secret="secret", nonce=None):
+        """`reply` with the `mac` the console gives it for `request` (or for `nonce`), when it has a prompt and a state."""
+        if not isinstance(reply, dict) or not {"prompt", "state"} <= set(reply):
+            return reply
+        return {**reply, "mac": prompt_card.reply_mac(
+            secret, request["sprint_id"], nonce or request["nonce"], reply["prompt"], reply["state"])}
+
+    @staticmethod
     def state(word, prompt=7):
         return {"prompt": prompt, "state": word}
 
-    def run_prompt(self, stdin, replies, times=(0,), env=None, prover=None):
+    def run_prompt(self, stdin, replies, times=(0,), env=None, signer=None):
         """The exit code, the printed text, the requests `(path, body)` and the sleeps.
 
-        Each request is first answered by the console's proof of the sprint's secret, which `prover`
-        (a function of the proof request's body, else the honest one) may replace; the proof requests
-        are kept in `self.proofs`, the byte lengths of the others in `self.lengths`."""
+        Each request is checked to carry no secret and the `auth` of its other members under the
+        sprint's secret, then kept without its `nonce` and `auth` (the nonces are in `self.nonces`,
+        the byte lengths in `self.lengths`). Each reply that has a prompt and a state is sent with
+        the console's honest `mac` for that request's nonce, which `signer` (a function of the
+        reply and the request, returning what is sent) may replace."""
         sent, slept, out = [], [], StringIO()
         queue, ticks = list(replies), list(times)
-        self.proofs, self.lengths = [], []
+        self.nonces, self.lengths = [], []
 
-        def honest(request):
-            return {"proof": prompt_card.proof("secret", request["sprint_id"], request["nonce"])}
+        honest = self.honest
 
         def fake(port, method, path, body=None, headers=None):
             request = json.loads(body)
-            if request["phase"] == "prove":
-                self.proofs.append(request)
-                return json.dumps((prover or honest)(request))
+            self.assertNotIn("secret", request)
+            self.assertEqual(request["auth"], prompt_card.request_auth(
+                "secret", prompt_card.signed_bytes(request)))
+            self.assertRegex(request["nonce"], "^[0-9a-f]{32}$")
+            self.nonces.append(request["nonce"])
             self.lengths.append(len(body))
-            sent.append((path, request))
+            sent.append((path, {k: v for k, v in request.items() if k not in ("nonce", "auth")}))
             reply = queue.pop(0)
             if isinstance(reply, Exception):
                 raise reply
-            return json.dumps(reply)
+            return json.dumps((signer or honest)(reply, request))
 
         def clock():
             return ticks.pop(0) if len(ticks) > 1 else ticks[0]
@@ -1537,10 +1548,10 @@ class PromptCommandTest(unittest.TestCase):
         self.assertEqual((code, out), (0, prompt_card.hook_output("allow") + "\n"))
         self.assertEqual([path for path, _ in sent], [prompt_card.ASK_PATH] * 3)
         self.assertEqual(sent[0][1], {
-            "sprint_id": "a" * 16, "secret": "secret", "phase": "ask", "session_id": "s-1",
+            "sprint_id": "a" * 16, "phase": "ask", "session_id": "s-1",
             "command": "git worktree add ../w", "description": "Create it"})
         for _, body in sent[1:]:
-            self.assertEqual(body, {"sprint_id": "a" * 16, "secret": "secret", "phase": "wait",
+            self.assertEqual(body, {"sprint_id": "a" * 16, "phase": "wait",
                                     "session_id": "s-1", "prompt": 7})
         self.assertEqual(slept, [prompt_card.POLL_SECONDS])
 
@@ -1613,38 +1624,59 @@ class PromptCommandTest(unittest.TestCase):
                 code, out, sent, slept = self.run_prompt(self.hook(), [reply])
                 self.assertEqual((code, out, len(sent), slept), (0, refusal, 1, []))
 
-    def test_the_secret_goes_only_to_a_console_that_proved_it_holds_it(self):
-        # R1: another account's listener on the port must get no secret and have no decision honoured.
+    def test_a_reply_the_console_did_not_sign_decides_nothing(self):
+        # R1: another account's listener on the port gets no secret (the fake checks every request
+        # carries none) and its allow, however well shaped, is not honoured.
         refusal = prompt_card.hook_output("deny", manager.REFUSAL) + "\n"
-        for name, prover in (("a wrong proof", lambda request: {"proof": "0" * 64}),
-                             ("no proof", lambda request: {"nonsense": 1}),
-                             ("an allow", lambda request: {"prompt": 7, "state": "allowed"})):
-            with self.subTest(name):
-                code, out, sent, slept = self.run_prompt(
-                    self.hook(), [self.ASKED, self.state("allowed")], prover=prover)
-                self.assertEqual((code, out, sent, slept), (0, refusal, [], []))
-                self.assertEqual(len(self.proofs), 1)
-                self.assertNotIn("secret", self.proofs[0])
-        with self.subTest("a console that lost its proof mid-hold"):
-            proofs = []
+        honest = self.honest
 
-            def later_spoofed(request):
-                proofs.append(request)
-                return ({"proof": "0" * 64} if len(proofs) == 3
-                        else {"proof": prompt_card.proof("secret", request["sprint_id"],
-                                                         request["nonce"])})
+        def forged(request_phase, **how):
+            """A signer that signs every reply honestly except those of `request_phase`, which get `how`."""
+            def sign(reply, request):
+                if request["phase"] != request_phase:
+                    return honest(reply, request)
+                if "mac" in how:
+                    return {**reply, **how} if how["mac"] is not None else reply
+                return honest(reply, request, **how)
+            return sign
+
+        forgeries = (("a wrong mac", {"mac": "0" * 64}), ("no mac", {"mac": None}),
+                     ("a number for a mac", {"mac": 7}),
+                     ("a mac of another secret", {"secret": "other"}),
+                     ("a mac of another nonce", {"nonce": "0" * 32}))
+        for name, how in forgeries:
+            with self.subTest("the ask answered with " + name):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("allowed")], signer=forged("ask", **how))
+                self.assertEqual((code, out, len(sent), slept), (0, refusal, 1, []))
+            with self.subTest("the wait answered with " + name):
+                code, out, sent, slept = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("allowed")], signer=forged("wait", **how))
+                self.assertEqual((code, out, slept), (0, refusal, []))
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait"])
+            with self.subTest("the close answered with " + name):
+                code, out, sent, _ = self.run_prompt(
+                    self.hook(), [self.ASKED, self.state("open"), self.state("allowed")],
+                    times=[0, 0, prompt_card.HOLD_SECONDS], signer=forged("close", **how))
+                self.assertEqual((code, out), (0, refusal))
+                self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait", "close"])
+        with self.subTest("a reply the console signed for an earlier request"):
+            earlier = []
+
+            def replay(reply, request):
+                if request["phase"] == "ask":
+                    earlier.append(honest(reply, request))
+                    return earlier[0]
+                return earlier[0]
 
             code, out, sent, _ = self.run_prompt(
-                self.hook(), [self.ASKED, self.state("open"), self.state("allowed")],
-                prover=later_spoofed)
+                self.hook(), [self.state("allowed"), self.state("allowed")], signer=replay)
             self.assertEqual((code, out), (0, refusal))
             self.assertEqual([body["phase"] for _, body in sent], ["ask", "wait"])
         with self.subTest("fresh nonces"):
             self.run_prompt(self.hook(), [self.ASKED, self.state("open"), self.state("allowed")])
-            self.assertEqual(len(self.proofs), 3)
-            self.assertEqual(len({request["nonce"] for request in self.proofs}), 3)
-            for request in self.proofs:
-                self.assertEqual(set(request), {"sprint_id", "phase", "nonce"})
+            self.assertEqual(len(self.nonces), 3)
+            self.assertEqual(len(set(self.nonces)), 3)
 
     def test_a_reply_naming_another_prompt_decides_nothing(self):
         # R2: only the prompt the hook asked about may be allowed, refused or closed.
@@ -1695,7 +1727,6 @@ class PromptCommandTest(unittest.TestCase):
                 code, out, sent, _ = self.run_prompt(self.hook(tool_input={
                     "command": "./check.sh", "dangerouslyDisableSandbox": flag}), [])
                 self.assertEqual((code, out, sent), (0, refusal, []))
-                self.assertEqual(self.proofs, [])
         for flag in (False, None):
             with self.subTest(flag):
                 code, out, sent, _ = self.run_prompt(self.hook(tool_input={

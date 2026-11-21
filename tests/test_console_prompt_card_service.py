@@ -36,21 +36,35 @@ class PromptCase(PermitCase):
         data = body if isinstance(body, bytes) else json.dumps(body).encode()
         return support.post_page(svc.address, path, headers, data)
 
-    def hook(self, svc, sid, phase, session="s-1", **fields):
-        body = {"sprint_id": sid, "secret": self.secret(sid), "phase": phase,
-                "session_id": session, **fields}
+    def signed(self, sid, fields, secret=None, nonce=None):
+        """The hook's body for `fields`: a fresh nonce and the `auth` of the others, never the secret."""
+        fields = {"sprint_id": sid, **fields, "nonce": nonce or os.urandom(16).hex()}
+        key = self.secret(sid) if secret is None else secret
+        return {**fields, "auth": prompt_card.request_auth(key, prompt_card.signed_bytes(fields))}
+
+    def hook(self, svc, sid, phase, session="s-1", secret=None, **fields):
+        body = self.signed(sid, {"phase": phase, "session_id": session, **fields}, secret)
+        self.nonce = body["nonce"]
         return self.post(svc, prompt_card.ASK_PATH, body)
+
+    def reply(self, sid, text):
+        """The decoded 200 answer to the last `hook`, once its `mac` is checked and removed."""
+        decoded = json.loads(text)
+        mac = decoded.pop("mac")
+        self.assertEqual(mac, prompt_card.reply_mac(
+            self.secret(sid), sid, self.nonce, decoded["prompt"], decoded["state"]))
+        return decoded
 
     def ask(self, svc, sid, session="s-1", command=COMMAND, description=WORDS):
         status, _, text = self.hook(svc, sid, "ask", session, command=command,
                                     description=description)
         self.assertEqual(status, 200)
-        return json.loads(text)
+        return self.reply(sid, text)
 
     def phase(self, svc, sid, phase, prompt, session="s-1"):
         """The status and the decoded answer (the raw text of a refusal) of a wait or a close."""
         status, _, text = self.hook(svc, sid, phase, session, prompt=prompt)
-        return status, (json.loads(text) if status == 200 else text)
+        return status, (self.reply(sid, text) if status == 200 else text)
 
     def answer(self, svc, prompt, answer, headers=None):
         return self.post(svc, prompt_card.ANSWER_PATH, {"prompt": prompt, "answer": answer},
@@ -105,19 +119,15 @@ class PromptRouteTest(PromptCase):
     def test_a_prompt_from_another_session_or_an_inactive_sprint_is_refused_at_once(self):
         svc, sid = self.boot()
         status, _, text = self.hook(svc, sid, "ask", "s-2", command=COMMAND)
-        self.assertEqual((status, json.loads(text)), (200, {"prompt": None, "state": "refused"}))
+        self.assertEqual((status, self.reply(sid, text)), (200, {"prompt": None, "state": "refused"}))
         self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
         n = self.ask(svc, sid)["prompt"]
         self.assertEqual(self.phase(svc, sid, "wait", n, "s-2")[0], 409)
         self.assertEqual(self.phase(svc, sid, "close", n, "s-2")[0], 409)
         self.assertEqual(len(self.items(svc)), 1)
-        status, _, _ = self.post(svc, prompt_card.ASK_PATH, {
-            "sprint_id": sid, "secret": "A" * 43, "phase": "ask", "session_id": "s-1",
-            "command": COMMAND})
-        self.assertEqual(status, 403)
         self.append(svc, SPRINT_STOP_REQUESTED, {"sprint_id": sid, "goal": "g"})
         status, _, text = self.hook(svc, sid, "ask", command=COMMAND)
-        self.assertEqual((status, json.loads(text)), (200, {"prompt": None, "state": "refused"}))
+        self.assertEqual((status, self.reply(sid, text)), (200, {"prompt": None, "state": "refused"}))
         self.assertEqual(len(self.rows(event_log.PROMPT_ASKED)), 1)
 
     def test_the_answer_route_is_owner_only(self):
@@ -213,35 +223,62 @@ class PromptRouteTest(PromptCase):
         self.assertEqual(self.phase(svc, sid, "close", n), (200, {"prompt": n, "state": "closed"}))
         self.assertEqual(self.phase(svc, sid, "wait", n), (200, {"prompt": n, "state": "closed"}))
 
-    def test_the_console_proves_it_holds_the_secret_without_being_sent_it(self):
-        # R1: a hook sends the secret only to a console that proved it holds it.
+    def test_a_request_is_signed_with_the_secret_and_a_reply_is_too_and_the_secret_is_never_sent(self):
+        # R1: whatever listens on the port gets no secret and cannot sign a decision the hook honours.
         svc, sid = self.boot()
-        nonce = "ab" * 16
-        status, _, text = self.post(svc, prompt_card.ASK_PATH, {
-            "sprint_id": sid, "phase": "prove", "nonce": nonce})
+        secret = self.secret(sid)
+        body = self.signed(sid, {"phase": "ask", "session_id": "s-1", "command": COMMAND})
+        self.assertNotIn(secret, json.dumps(body))
+        status, _, text = self.post(svc, prompt_card.ASK_PATH, body)
         self.assertEqual(status, 200)
-        proof = prompt_card.proof(self.secret(sid), sid, nonce)
-        self.assertEqual(json.loads(text), {"proof": proof})
-        self.assertEqual(len(proof), 64)
-        self.assertNotIn(self.secret(sid), text.decode())
-        other = json.loads(self.post(svc, prompt_card.ASK_PATH, {
-            "sprint_id": sid, "phase": "prove", "nonce": "cd" * 16})[2])["proof"]
-        self.assertNotEqual(other, proof)
-        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
-        status, _, _ = self.post(svc, prompt_card.ASK_PATH, {
-            "sprint_id": "0" * 16, "phase": "prove", "nonce": nonce})
+        sent = json.loads(text)
+        self.assertEqual(set(sent), {"prompt", "state", "mac"})
+        self.assertEqual(sent["mac"], prompt_card.reply_mac(
+            secret, sid, body["nonce"], sent["prompt"], sent["state"]))
+        self.assertNotEqual(sent["mac"], prompt_card.reply_mac(
+            secret, sid, "cd" * 16, sent["prompt"], sent["state"]))
+        self.assertNotIn(secret, text.decode())
+        self.assertEqual(len(self.rows(event_log.PROMPT_ASKED)), 1)
+
+    def test_a_request_that_is_not_signed_by_the_secret_is_refused_and_writes_nothing(self):
+        svc, sid = self.boot()
+        n = self.ask(svc, sid)["prompt"]
+        for name, body in (
+                ("a wrong secret", self.signed(sid, {"phase": "ask", "session_id": "s-1",
+                                                     "command": COMMAND}, secret="A" * 43)),
+                ("a body changed after signing", {
+                    **self.signed(sid, {"phase": "ask", "session_id": "s-1", "command": "ls"}),
+                    "command": "rm -rf /"}),
+                ("a wait for another prompt", {
+                    **self.signed(sid, {"phase": "wait", "session_id": "s-1", "prompt": n}),
+                    "prompt": n + 1}),
+                ("a close made a wait", {
+                    **self.signed(sid, {"phase": "close", "session_id": "s-1", "prompt": n}),
+                    "phase": "wait"})):
+            with self.subTest(name):
+                self.assertEqual(self.post(svc, prompt_card.ASK_PATH, body)[0], 403)
+        self.assertEqual(len(self.rows(event_log.PROMPT_ASKED)), 1)
+        self.assertEqual(self.rows(event_log.PROMPT_CLOSED), [])
+        status, _, _ = self.post(svc, prompt_card.ASK_PATH, self.signed(
+            "0" * 16, {"phase": "ask", "session_id": "s-1", "command": COMMAND}, secret="x"))
         self.assertEqual(status, 409)
-        for body in ({"sprint_id": sid, "phase": "prove"},
-                     {"sprint_id": sid, "phase": "prove", "nonce": "x"},
-                     {"sprint_id": sid, "phase": "prove", "nonce": nonce, "secret": "s"}):
+
+    def test_a_body_that_carries_the_secret_or_has_no_signature_is_a_bad_prompt(self):
+        svc, sid = self.boot()
+        signed = self.signed(sid, {"phase": "ask", "session_id": "s-1", "command": COMMAND})
+        for body in ({**signed, "secret": self.secret(sid)},
+                     {k: v for k, v in signed.items() if k != "auth"},
+                     {k: v for k, v in signed.items() if k != "nonce"},
+                     {**signed, "phase": "prove"}):
             self.assertEqual(self.post(svc, prompt_card.ASK_PATH, body)[0], 400)
+        self.assertEqual(self.rows(event_log.PROMPT_ASKED), [])
 
     def test_a_command_of_the_longest_length_in_any_script_is_held(self):
         # R4: json escapes each astral character to twelve bytes, so the limit is on the escaped body.
         svc, sid = self.boot()
         command = "\U0001F600" * prompt_card.MAX_COMMAND_CHARS
-        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "phase": "ask",
-                           "session_id": "s-1", "command": command, "description": "d" * 4000})
+        body = json.dumps(self.signed(sid, {
+            "phase": "ask", "session_id": "s-1", "command": command, "description": "d" * 4000}))
         self.assertGreater(len(body), 65536)
         self.assertLessEqual(len(body), service.MAX_PROMPT_BYTES)
         status, _, text = self.post(svc, prompt_card.ASK_PATH, body.encode())

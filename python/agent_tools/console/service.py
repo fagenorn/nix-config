@@ -1089,10 +1089,13 @@ rest); its body is `prompt_card.parse_ask`'s, else 400
 `bad permission prompt`; a `sprints.SecretRefused` is 403, any other `sprints.Refused` 409, any other
 exception 500 `permission prompt failed`, with one stderr line `console: permission_prompt_refused
 <sprint_id> <reason>` or `console: permission_prompt_failed <Type>: <message>` (no line carries the command
-or the secret). Success is 200 `{"prompt": <int|null>, "state": <str>}`: phase `ask` calls `ask_prompt`, `wait`
-`prompt_state` and `close` `close_prompt`; phase `prove`, the one request with no secret, is 200 `{"proof": <hex>}`
-from `prove_prompt` (an unknown sprint is 409, a sprint with no secret file 403), the HMAC the hook checks before it
-sends the secret to whatever listens on the port (`prompt_card.proof`). The `state` of a prompt the console closed
+or the secret). The body carries no secret: `prompt_secret` (the ingest lock; an unknown sprint is 409, a sprint
+with no secret file or an `auth` that does not match 403) recomputes the request's `auth` from the secret it holds
+(`prompt_card.request_auth` over the body's `signed_bytes`) and returns the secret to the handler, which then calls
+the methods below with it. Success is 200 `{"prompt": <int|null>, "state": <str>, "mac": <hex>}`: phase `ask` calls
+`ask_prompt`, `wait` `prompt_state` and `close` `close_prompt`, and `mac` is `prompt_card.reply_mac` for the request's
+nonce, which the hook checks before it honours the reply, so whatever else listens on the port neither learns the secret
+nor has a decision honoured. The `state` of a prompt the console closed
 (`prompt.closed`, reason `ended`) is `ended`, not `closed` (`prompt_card.wire_state`), so the hook can say why. Each holds the ingest lock for its check, append and fold. `ask_prompt`
 checks the secret first, then answers `(None, prompt_card.REFUSED)` and appends nothing unless the sprint is
 `prompt_card.active` and `session_id` is its manager session; else it appends one `prompt.asked` row, folds it,
@@ -3289,19 +3292,20 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(400, "bad permission prompt")
         console = self.server.console
         try:
-            if request.phase == "prove":
-                reply = {"proof": console.prove_prompt(request.sprint_id, request.nonce)}
-            elif request.phase == "ask":
+            secret = console.prompt_secret(request.sprint_id, request.auth, request.signed)
+            if request.phase == "ask":
                 prompt, state = console.ask_prompt(
-                    request.sprint_id, request.secret, request.session_id, request.command,
+                    request.sprint_id, secret, request.session_id, request.command,
                     request.description)
                 reply = {"prompt": prompt, "state": state}
             elif request.phase == "wait":
                 reply = {"prompt": request.prompt, "state": console.prompt_state(
-                    request.sprint_id, request.secret, request.session_id, request.prompt)}
+                    request.sprint_id, secret, request.session_id, request.prompt)}
             else:
                 reply = {"prompt": request.prompt, "state": console.close_prompt(
-                    request.sprint_id, request.secret, request.session_id, request.prompt)}
+                    request.sprint_id, secret, request.session_id, request.prompt)}
+            reply["mac"] = prompt_card.reply_mac(
+                secret, request.sprint_id, request.nonce, reply["prompt"], reply["state"])
         except sprints.SecretRefused:
             print(f"console: permission_prompt_refused {request.sprint_id} {sprints.SECRET_REFUSED}",
                   file=sys.stderr)
@@ -5299,15 +5303,16 @@ class ConsoleService:
             self._apply([appended])
             return appended.seq, prompt_card.OPEN
 
-    def prove_prompt(self, sprint_id: str, nonce: str) -> str:
-        """The proof that this console holds the sprint's secret, for a hook's `nonce` (the secret is not sent)."""
+    def prompt_secret(self, sprint_id: str, auth: str, signed: bytes) -> str:
+        """The sprint's secret, when `auth` is the hook's HMAC under it of `signed` (the secret is never sent)."""
         with self._ingest:
             if sprint_id not in self._sprints:
                 raise sprints.Refused(sprints.NOT_OPEN)
             expected = sprints.read_secret(self._sprint_secrets, sprint_id)
-            if expected is None:
+            if expected is None or not hmac.compare_digest(
+                    prompt_card.request_auth(expected, signed).encode(), auth.encode()):
                 raise sprints.SecretRefused(sprints.SECRET_REFUSED)
-            return prompt_card.proof(expected, sprint_id, nonce)
+            return expected
 
     def prompt_state(self, sprint_id: str, secret: str, session_id: str, prompt_id: int) -> str:
         """The state of a held prompt as its hook's wait reads it; see the module docstring."""
