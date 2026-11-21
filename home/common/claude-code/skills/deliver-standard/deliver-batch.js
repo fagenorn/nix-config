@@ -2086,7 +2086,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
       // #1139: nor does a PR land as it stands unless its issue's look marker was read and found absent (fail closed): a marked issue, or one whose marker was not read, goes through its child.
       const lookPending = !(isObj(f.look) && f.look.verdict === 'unmarked')
-      if (ro.ok === true && !amendPending && !lookPending) {
+      // #1370: nor does a capped delivery: the review round cap is enforced in the child, so a cont holding round_cap goes through it, never to a landing with findings still open.
+      const capHeld = !!(CONTS[n] && isObj(CONTS[n].round_cap))
+      if (ro.ok === true && !amendPending && !lookPending && !capHeld) {
         if (!readoptUsable(ro)) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return

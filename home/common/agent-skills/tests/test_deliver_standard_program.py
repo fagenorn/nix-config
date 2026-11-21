@@ -6422,6 +6422,100 @@ class ReviewRoundCapTest(unittest.TestCase):
         self.assertIn(json.dumps(decision), prompt(calls, "fix-wave"))
 
 
+class ReviewRoundFindingsTest(unittest.TestCase):
+    """#1370: the final review's findings on the scoped rounds, the round cap and the reviewed head."""
+
+    NARROW = {"verdict": "findings", "changed_files": ["tools/grader.json"],
+              "findings": [{"severity": "important", "file": "src/lock.py", "summary": "lock race on another path", "relation": "narrowing"}]}
+
+    def test_a_wave_lost_after_the_first_leaves_no_oscillating_marker(self):
+        history = FixWaveHistoryTest()
+        cont = history.stopped()["cont"]
+        self.assertIn("oscillating", cont)
+        args = dict(ARGS, cont=cont, decisions=history.DECISION)
+        late, _ = run(args=args, replies={"fix-wave-review": self.NARROW, "fix-wave-2": None}, patch={"fix-wave": history.ONLY})
+        self.assertEqual(late["stage"], "fix-wave")
+        self.assertNotIn("oscillating", late["cont"])
+        self.assertEqual([f["summary"] for f in late["cont"]["fix_findings"]], ["lock race on another path"])
+        self.assertEqual(late["cont"]["decisions"], [history.DECISION])
+        _, calls = run(args=dict(ARGS, cont=late["cont"]))
+        self.assertIn("final-scoped", labels(calls))
+        first, _ = run(args=args, replies={"fix-wave": None})
+        self.assertEqual(first["stage"], "fix-wave")
+        self.assertIn("oscillating", first["cont"])
+
+    def test_a_fix_wave_that_starts_elsewhere_does_not_move_the_reviewed_head(self):
+        for start, moved in ((R, True), ("b" * 40, False)):
+            with self.subTest(start_head=start):
+                out = run_out(replies={"final-1": SCOPED_FIRST, "fix-wave-review": SCOPED_NEW},
+                              patch={"fix-wave": {"start_head": start, "commit": H}, "impl-1": {"commit": R}})
+                self.assertEqual(out["result"]["cont"]["reviewed"], {"head": H if moved else R})
+        # The commits between the head the review read and the wave's reported start were never re-reviewed: the next round reads them.
+        stopped, _ = run(replies={"final-1": SCOPED_FIRST, "fix-wave-review": SCOPED_NEW},
+                         patch={"fix-wave": {"start_head": "b" * 40, "commit": H}, "impl-1": {"commit": R}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"setup": {"head": "f" * 40}})
+        self.assertIn(f"{R}..{'f' * 40}", prompt(calls, "final-scoped"))
+
+    def test_a_round_without_a_known_tip_requires_the_head_its_reviewers_read(self):
+        only = dict(PLAN, branches=[dict(BR)], tasks=[dict(PLAN["tasks"][0], file="/g/task-1.md", branch="cand")])
+        _, calls = run(replies={"plan": only, "verify": None})
+        self.assertIn("head", schema_of(calls, "final-1")["required"])
+        _, calls = run(replies={"verify": None})
+        self.assertNotIn("head", schema_of(calls, "final-1")["required"])
+
+    def test_two_carried_findings_alike_but_for_the_failing_input_are_two_findings(self):
+        cont = dict(scoped_first_stop(), fix_findings=[
+            {"severity": "important", "file": "claim.py", "summary": "race in steal", "failing_input": "input-one"},
+            {"severity": "important", "file": "claim.py", "summary": "race in steal", "failing_input": "input-two"}])
+        again = {"verdict": "findings", "closed": [], "findings": [dict(cont["fix_findings"][0])]}
+        _, calls = scoped_resume(cont, replies={"final-scoped": again, "verify": None})
+        wave = prompt(calls, "fix-wave")
+        self.assertIn('"failing_input":"input-one"', wave)
+        self.assertIn('"failing_input":"input-two"', wave)
+        self.assertIn("The last 1 were left open", wave)
+        both = dict(again, findings=cont["fix_findings"])
+        _, calls = scoped_resume(cont, replies={"final-scoped": both, "verify": None})
+        self.assertIn("input-two", prompt(calls, "fix-wave"))
+        self.assertNotIn("were left open by an earlier run's fix waves", prompt(calls, "fix-wave"))
+
+    def test_an_amended_round_may_report_what_the_amended_plan_requires_and_the_head_lacks(self):
+        cont = FinalReviewedResumeTest.stopped_after_review()["cont"]
+        _, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), patch={"setup": {"head": TIP}})
+        amended = prompt(calls, "final-scoped")
+        self.assertIn("in those commits, among the findings above or in a requirement of the amended plan the head does not meet. Do not edit anything.", amended)
+        _, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": H}})
+        plain = prompt(calls, "final-scoped")
+        self.assertIn("in those commits or among the findings above. Do not edit anything.", plain)
+        self.assertNotIn("requirement of the amended plan", plain)
+
+    def test_a_stored_head_that_is_no_commit_id_reaches_no_git_command_and_skips_no_review(self):
+        legacy = {k: v for k, v in FinalReviewedResumeTest.stopped_after_review()["cont"].items() if k not in ("review_rounds", "reviewed")}
+        for bad in ("HEAD~1", "x" * 40, "d" * 40 + "; rm"):
+            with self.subTest(head=bad):
+                cont = dict(legacy, final_reviewed={"head": bad, "accepted": ["HEAD~2", "$(id)"]})
+                _, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"head": H, "since_reviewed": "merge_only"}})
+                setup = prompt(calls, "setup")
+                for needle in (bad, "HEAD~2", "$(id)", "since_reviewed"):
+                    self.assertNotIn(needle, setup)
+                self.assertIn("final-1", labels(calls))
+                self.assertNotIn("final-scoped", labels(calls))
+        good = dict(legacy, final_reviewed={"head": TIP, "accepted": ["a" * 40, "HEAD~2"]})
+        _, calls = run(args=dict(ARGS, cont=good), patch={"setup": {"head": H, "since_reviewed": "merge_only"}})
+        self.assertIn(f"passed at {TIP}", prompt(calls, "setup"))
+        self.assertIn(f"is one of {'a' * 40} or", prompt(calls, "setup"))
+        self.assertNotIn("HEAD~2", prompt(calls, "setup"))
+
+    def test_an_oscillation_decision_binds_the_scoped_reviewer_of_a_capped_cont(self):
+        history = FixWaveHistoryTest()
+        cont = dict(history.stopped()["cont"], review_rounds=3, round_cap={"rounds": 3, "findings": ["pattern too wide again"]})
+        _, calls = run(args=dict(ARGS, cont=cont, decisions=history.DECISION), patch={"setup": {"head": H}, "fix-wave": history.ONLY})
+        scoped = prompt(calls, "final-scoped")
+        self.assertIn(f"{json.dumps(history.DECISION)}", scoped)
+        self.assertIn("the decision is binding", scoped)
+        self.assertIn("Report no finding that only disputes it.", scoped)
+        self.assertEqual(prompt(calls, "fix-wave").count(json.dumps(history.DECISION)), 1)
+
+
 class FixDiffFindingTest(unittest.TestCase):
     """#950: a finding not marked narrowing, in a file the fix wave's commits changed, is admitted to the next wave like a narrowing one."""
 

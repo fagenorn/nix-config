@@ -461,7 +461,7 @@ const AMEND_SCHEMA = { type: 'object', properties: { status: { type: 'string', e
 
 // #1370: a full round whose end commit the program does not know asks its reviewers for the head they read; a scoped round's reviewer also
 // returns closed, the numbers of the carried findings the head shows closed.
-const FINDINGS_HEAD = { ...FINDINGS, properties: { ...FINDINGS.properties, head: { type: 'string' } } }
+const FINDINGS_HEAD = { ...FINDINGS, properties: { ...FINDINGS.properties, head: FULL_SHA }, required: [...FINDINGS.required, 'head'] }
 const SCOPED_FINDINGS = { ...FINDINGS, properties: { ...FINDINGS.properties, closed: { type: 'array', items: { type: 'integer' } }, head: { type: 'string' } } }
 // ---------------- Setup ----------------
 phase('Setup')
@@ -545,8 +545,9 @@ const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${p
 // Shared by the fresh setup and the incomplete-claim resume: the facts the worktree step chooses its command from.
 const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. ${REATTACH(branch, path)} Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
 // The head the final review passed at, when a resume's cont names one: the setup then reports how HEAD relates to it.
-const FR_HEAD = CONT && CONT.final_reviewed && present(CONT.final_reviewed.head) ? CONT.final_reviewed.head : null
-const FR_ACCEPTED = FR_HEAD && Array.isArray(CONT.final_reviewed.accepted) ? CONT.final_reviewed.accepted.filter(present) : []
+// #1370: both go into the setup's Git commands, so each is a commit id before it is read (a marker that fails is no marker: the review runs again).
+const FR_HEAD = CONT && CONT.final_reviewed && isCommit(CONT.final_reviewed.head) ? normSha(CONT.final_reviewed.head) : null
+const FR_ACCEPTED = FR_HEAD && Array.isArray(CONT.final_reviewed.accepted) ? CONT.final_reviewed.accepted.filter(isCommit).map(normSha) : []
 const BRANCH_READ = CONT && CONT.plan && declared(CONT.plan).length ? ` For each declared branch of the plan (${declared(CONT.plan).map(b => `${b.name} in ${b.worktree}`).join(', ')}) return branch_heads: one {name, head, current, toplevel, common_dir} each, with ${BRANCH_FACTS}; give a missing worktree no entry.` : ''
 const SINCE_REVIEWED = FR_HEAD ? ` The final review passed at ${FR_HEAD}: after git -C <worktree> fetch origin, return since_reviewed: same when HEAD is ${FR_HEAD}; merge_only when git -C <worktree> merge-base --is-ancestor ${FR_HEAD} HEAD succeeds, git -C <worktree> rev-list --no-merges ${FR_HEAD}..HEAD ^origin/<integration_branch> prints nothing (the head only gained integration-branch merges), and every merge in git -C <worktree> rev-list --merges ${FR_HEAD}..HEAD ${FR_ACCEPTED.length ? `is one of ${FR_ACCEPTED.join(', ')} or ` : ''}is a clean two-parent merge, meaning git -C <worktree> merge-tree --write-tree <merge>^1 <merge>^2 exits 0 and prints the tree id that git -C <worktree> rev-parse <merge>^{tree} gives (a conflict resolved by hand, or an octopus merge, gives a different tree; never judge this from git show --cc, which omits a hunk where the merge keeps one parent unchanged); else moved.` : ''
 // Both lanes' fresh setups renew right after the acquire (#745, #799): an already_held acquire refreshes nothing, and the gate below grades the renew
@@ -1290,7 +1291,7 @@ const branchesSame = rec => declared(plan).every(b => !!rec && own(rec.branches,
 // A ready stop's verified head, unchanged and clean, needs no second review or verify.
 let SKIP_REVIEW = !!(verified && plan && sameSha(setup.head, verified.head) && !setup.dirty && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && branchesSame(verified))
 // A passed final review, on the head it passed at (or one that only gained integration-branch merges), is not run again; verify still is.
-let SKIP_FINAL = !SKIP_REVIEW && LANE === 'standard' && !!finalReviewed && !!plan && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && !setup.dirty && (sameSha(setup.head, finalReviewed.head) || setup.since_reviewed === 'merge_only') && branchesSame(finalReviewed)
+let SKIP_FINAL = !SKIP_REVIEW && LANE === 'standard' && !!finalReviewed && isCommit(finalReviewed.head) && !!plan && plan.tasks.every(t => taskLog.some(d => d.n === t.n)) && !setup.dirty && (sameSha(setup.head, finalReviewed.head) || setup.since_reviewed === 'merge_only') && branchesSame(finalReviewed)
 if (!SKIP_REVIEW) verified = null
 if (!SKIP_REVIEW && !SKIP_FINAL) finalReviewed = null
 // The last commit the final review will cover.
@@ -1859,6 +1860,8 @@ const TWO_AXES = `Two axes: correctness (real defects with a concrete failing in
 const CAP_BINDING = osc !== null ? '' : capDecision !== null ? ` The owner decided how to settle the findings left open at the review round cap, and the decision is binding: ${JSON.stringify(capDecision)}.`
   : CAP_KEPT && amendApplied ? ' The owner amended the plan after the review round cap (plan.md, Amendments): it is binding.' : ''
 const AMENDED = ' The owner amended the plan since the last review (plan.md, Amendments): grade the head against the amended tasks and acceptance criteria, not only the commits above.'
+// #1370: an oscillating resume's decision binds the scoped reviewer too, which judges the disputed behavior again before any fix wave does; the cap's own sentence is CAP_BINDING.
+const SCOPED_BINDING = osc !== null ? (oscDecision !== null ? ` The owner decided the approach for ${osc.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${osc.file} (plan.md, Amendments): it is binding.` : '') : CAP_BINDING
 let finalFindings = []
 let closedNums = []
 if (SCOPED) {
@@ -1872,7 +1875,7 @@ if (SCOPED) {
   const open = carried.length ? ` These findings were left open by the last round, numbered from 1: ${JSON.stringify(carried.map((f, i) => ({ n: i + 1, ...f })))}. Check each against the code at the head: report again each one the head still shows open, and return closed: the numbers of those it shows closed. One you neither report nor close stays open.` : ''
   const scoped = await readReview(`Issue #${ISSUE} of ${SLUG}. Worktree: ${W} (branch ${setup.branch}, base ${setup.base_sha}, integration branch ${INT}).
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Scoped review round ${reviewRounds + 1}: review only what changed since ${O}, the commit the last review read. Fetch origin first (git -C ${W} fetch origin). ${since(W, O, N, `origin/${INT}`)} Never read the delivery's whole range: earlier rounds reviewed it.${ranges}${N === 'HEAD' ? HEAD_ASK : ''}${open}${amendApplied || reviewed.amended === true ? AMENDED : ''}${CAP_BINDING ? `${CAP_BINDING} Report no finding that only disputes it.` : ''} ${KNOW} ${TWO_AXES} ${VERIFY_OWNED} Report Important or Critical findings only, each in those commits or among the findings above. Do not edit anything.`, { label: 'final-scoped', phase: 'Final review', agentType: 'reviewer', schema: SCOPED_FINDINGS })
+Scoped review round ${reviewRounds + 1}: review only what changed since ${O}, the commit the last review read. Fetch origin first (git -C ${W} fetch origin). ${since(W, O, N, `origin/${INT}`)} Never read the delivery's whole range: earlier rounds reviewed it.${ranges}${N === 'HEAD' ? HEAD_ASK : ''}${open}${amendApplied || reviewed.amended === true ? AMENDED : ''}${SCOPED_BINDING ? `${SCOPED_BINDING} Report no finding that only disputes it.` : ''} ${KNOW} ${TWO_AXES} ${VERIFY_OWNED} Report Important or Critical findings only, each in those commits${amendApplied || reviewed.amended === true ? ', among the findings above or in a requirement of the amended plan the head does not meet' : ' or among the findings above'}. Do not edit anything.`, { label: 'final-scoped', phase: 'Final review', agentType: 'reviewer', schema: SCOPED_FINDINGS })
   if (!scoped) return stop('final-review', { details: `the scoped reviewer ${silence('final-scoped')}` })
   finalFindings = findingsOf(scoped)
   closedNums = Array.isArray(scoped.closed) ? scoped.closed.filter(Number.isInteger) : []
@@ -1940,7 +1943,14 @@ dropped = 0
 markReviewed(endOf(finals.concat(integ ? [integ] : [])))
 }
 // #924: what an earlier stop left open joins the fresh findings, a repeat (same file and summary) once. #1370: a scoped reviewer drops the ones it closed.
-const fromStop = carried.filter((c, i) => !closedNums.includes(i + 1) && !finalFindings.some(f => findingKey(f) === findingKey(c)))
+// A reported finding stands for one carried finding only: two carried ones alike in file and summary but not in failing input are two findings, and a repeat of one is not the other.
+const taken = new Set()
+const fromStop = carried.filter((c, i) => {
+  if (closedNums.includes(i + 1)) return false
+  const j = finalFindings.findIndex((f, at) => !taken.has(at) && findingKey(f) === findingKey(c))
+  if (j >= 0) taken.add(j)
+  return j < 0
+})
 if (fromStop.length) log(`final review: ${fromStop.length} finding(s) carried from the earlier fix-wave-review stop`)
 finalFindings = finalFindings.concat(fromStop)
 // #1370: a round that leaves findings open at the cap stops here, before any fix wave, unless the owner brought something new to this resume.
@@ -2012,10 +2022,9 @@ if (finalFindings.length) {
     if (fw) { oscPending = false; capPending = false; capMark = null }
     const spent = details => {
       keep(waveFindings)
-      if (fw) {
-        osc = null
-        if (carried.length) log(`fix-wave: ${carried.length} open finding(s) kept in cont after a wave that failed`)
-      }
+      // A wave after the first ran on the findings its run's own re-review raised, not on the ones the marker was kept for.
+      if (fw || k > 1) osc = null
+      if (fw && carried.length) log(`fix-wave: ${carried.length} open finding(s) kept in cont after a wave that failed`)
       return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, ...(details ? { details } : {}) })
     }
     if (!implDone(fw)) return spent()
@@ -2026,6 +2035,8 @@ if (finalFindings.length) {
       if (!sameSha(h, branchTips[b.name])) collected.push(`git -C ${b.worktree} diff ${branchTips[b.name]}..${h}`)
       branchTips[b.name] = h
     }
+    // The head the wave started from, as this run knows it: its re-review reads only start_head..commit, so it may advance the reviewed head only from there.
+    const waveBase = isCommit(tip) ? normSha(tip) : reviewed ? reviewed.head : null
     tip = fw.commit
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
@@ -2037,7 +2048,8 @@ if (finalFindings.length) {
       return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     }
     carried = []
-    markReviewed(isCommit(tip) ? tip : null)
+    if (waveBase === null || sameSha(fw.start_head, waveBase)) markReviewed(isCommit(tip) ? tip : null)
+    else log(`fix-wave-review: fix wave ${k} reports it started at ${fw.start_head}, not at ${waveBase}: the commits between were not re-reviewed, so the reviewed head stays`)
     const next = findingsOf(rv)
     if (!next.length) break
     const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))

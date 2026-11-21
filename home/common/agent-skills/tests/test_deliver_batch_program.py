@@ -998,6 +998,18 @@ class RoundCapTest(unittest.TestCase):
         self.assertEqual(failed["owner_actions"], [])
         self.assertIn("1", failed["relaunch"]["conts"])
 
+    def test_a_capped_cont_with_an_accepted_open_pr_goes_through_its_child_before_any_landing(self):
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        result, calls = run(args=dict(ARGS, conts={"1": self.stop()["cont"]}), patch=facts, children={"1": self.stop()})[:2]
+        ls = labels(calls)
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertFalse([name for name in ls if name.startswith("land-")])
+        self.assertEqual([a["reason"] for a in result["owner_actions"]], ["round-cap"])
+        self.assertNotEqual(row(result, 1)["outcome"], "landed")
+        with self.subTest("a cont with no cap marker still lands as it stands"):
+            _, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
+            self.assertNotIn("child-1", labels(calls))
+
     def test_a_marker_without_rounds_stays_an_open_row(self):
         lost = {"stage": "fix-wave", "fix_waves": 1, "reason": "fix-wave: lost", "cont": dict(reviewed(1), review_rounds=3)}
         stops = [("marker %r" % (m,), self.stop(round_cap=m)) for m in (None, {}, {"rounds": 0}, "3")]
