@@ -50,6 +50,7 @@ let
     "console" = "console.console";
     "context-map-lint" = "delivery.context_map_lint";
     "diff-scope" = "delivery.diff_scope";
+    "engine" = "delivery.engine";
     "fallback-audit" = "project_contract.fallback_audit";
     "folder-trust" = "console.folder_trust";
     "forge-claim" = "claims.forge_claim";

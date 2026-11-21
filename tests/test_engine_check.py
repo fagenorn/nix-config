@@ -1,0 +1,313 @@
+"""Contract tests for `engine check` (`agent_tools.delivery.engine`, #1508).
+
+Runs the command as `python -m agent_tools.delivery.engine check` against the
+shipped toy procedures and against one-mutation copies of them (agent-helpers
+rule 5).
+"""
+
+from __future__ import annotations
+
+import ast
+import contextlib
+import copy
+import io
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+from unittest import mock
+
+from agent_tools.delivery import engine, engine_graders, procedure_check
+from agent_tools.delivery.engine_graders import GRADERS
+from agent_tools.delivery.procedure_check import CommandDeclaration, load_commands
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PROCEDURES = REPO_ROOT / "python/agent_tools/delivery/procedures"
+DELIVERY = REPO_ROOT / "python/agent_tools/delivery"
+
+
+def compact(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def load(directory: Path, name: str) -> dict:
+    return json.loads((Path(directory) / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def save(directory: Path, name: str, doc: dict) -> None:
+    (Path(directory) / f"{name}.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+
+
+def step(doc: dict, step_id: str) -> dict:
+    return next(item for item in doc["steps"] if item["id"] == step_id)
+
+
+def broken_copy(mutate: Callable[[Path], None]) -> Path:
+    directory = Path(tempfile.mkdtemp(prefix="engine-check-"))
+    unittest.addModuleCleanup(shutil.rmtree, directory, ignore_errors=True)
+    target = directory / "procedures"
+    shutil.copytree(PROCEDURES, target)
+    mutate(target)
+    return target
+
+
+def run_check(*args: str) -> tuple[int, str, str]:
+    done = subprocess.run(
+        [sys.executable, "-m", "agent_tools.delivery.engine", "check", *args],
+        capture_output=True, text=True, timeout=60)
+    return done.returncode, done.stdout, done.stderr
+
+
+def table_rows() -> list[str]:
+    return re.findall(r'^\s+"([a-z0-9-]+)" = "[a-z_.]+";$',
+                      (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8"), re.M)
+
+
+def editing(name: str, change: Callable[[dict], None]) -> Callable[[Path], None]:
+    def mutate(directory: Path) -> None:
+        doc = load(directory, name)
+        change(doc)
+        save(directory, name, doc)
+    return mutate
+
+
+@dataclass(frozen=True)
+class Case:
+    name: str
+    mutate: Callable[[Path], None]
+    expected: list[tuple[str, str | None, str]]
+
+
+def _set(target: Callable[[dict], dict], key: str, value: object) -> Callable[[dict], None]:
+    def change(toy: dict) -> None:
+        target(toy)[key] = value
+    return change
+
+
+def _repeat_scope(toy: dict) -> None:
+    toy["steps"].append(copy.deepcopy(step(toy, "scope")))
+
+
+def _add_version(toy: dict) -> None:
+    toy["version"] = 1
+
+
+def _unknown_need(toy: dict) -> None:
+    toy["stops"]["needs-owner"]["need"] = "someday"
+
+
+def _write_broken_child(directory: Path) -> None:
+    (directory / "toy-child.json").write_text("{", encoding="utf-8")
+
+
+CASES = [
+    Case("undefined_step_field",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "timeout", 5)),
+         [("toy", "draft", "undefined_field")]),
+    Case("version_member_in_header", editing("toy", _add_version),
+         [("toy", None, "undefined_field")]),
+    Case("stage_outside_the_list",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "stage", "testing")),
+         [("toy", "draft", "unknown_stage")]),
+    Case("repeated_step_id", editing("toy", _repeat_scope),
+         [("toy", "scope", "duplicate_step")]),
+    Case("zero_max_visits",
+         editing("toy", _set(lambda toy: step(toy, "draft"), "max_visits", 0)),
+         [("toy", "draft", "invalid_field")]),
+    Case("unsupported_format", editing("toy", _set(lambda toy: toy, "format", 2)),
+         [("toy", None, "invalid_field")]),
+    Case("unknown_need", editing("toy", _unknown_need),
+         [("toy", None, "invalid_field")]),
+    Case("group_member_with_on",
+         editing("toy", _set(lambda toy: step(toy, "review-a"), "on", {"approve": "tally"})),
+         [("toy", "review-a", "invalid_field")]),
+    Case("unreadable_child", _write_broken_child,
+         [("toy-child", None, "unreadable_procedure")]),
+    Case("keep_alive_reads_a_step_result",
+         editing("toy", _set(lambda toy: toy["keep_alive"], "in", ["draft.summary"])),
+         [("toy", None, "invalid_field")]),
+]
+
+SIDE_EFFECT_SCRIPT = r"""
+import contextlib, io, json, os, socket, subprocess, sys
+from unittest import mock
+
+assert not any(m == "agent_tools" or m.startswith("agent_tools.") for m in sys.modules)
+targets = {
+    "Popen": (subprocess, "Popen"),
+    "posix_spawn": (os, "posix_spawn"),
+    "posix_spawnp": (os, "posix_spawnp"),
+    "fork": (os, "fork"),
+    "system": (os, "system"),
+    "socket": (socket, "socket"),
+}
+mocks = {}
+for name, (owner, attribute) in targets.items():
+    mocks[name] = mock.patch.object(owner, attribute, side_effect=AssertionError("side effect")).start()
+
+import agent_tools.delivery.engine as engine
+
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+    first = engine.main(["check"])
+    second = engine.main(["check", "--procedures", sys.argv[1]])
+sys.__stdout__.write(json.dumps({"called": sorted(n for n, m in mocks.items() if m.called),
+                                 "codes": [first, second]}) + "\n")
+"""
+
+
+class ToyProcedureTest(unittest.TestCase):
+    def test_engine_check_passes_the_shipped_toy(self):
+        code, out, err = run_check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out, compact({"procedures": ["toy", "toy-child"], "verdict": "ok"}))
+
+    def test_the_toy_has_all_five_kinds_a_stop_and_a_bounded_loop(self):
+        toy = load(PROCEDURES, "toy")
+        self.assertEqual({item["kind"] for item in toy["steps"]},
+                         {"command", "agent", "decide", "group", "call"})
+        self.assertTrue(toy["stops"])
+        self.assertEqual(step(toy, "draft")["on"]["drafted"], "review")
+        self.assertEqual(step(toy, "review")["on"]["pass"], "tally")
+        self.assertEqual(step(toy, "tally")["on"]["revise"], "draft")
+        for step_id in ("draft", "review", "tally"):
+            item = step(toy, step_id)
+            self.assertIs(type(item["max_visits"]), int)
+            self.assertGreaterEqual(item["max_visits"], 1)
+            self.assertIn(item["on"]["exhausted"], toy["stops"])
+
+    def test_every_stage_is_accepted(self):
+        stages = ("setup", "planning", "plan review", "building", "final review",
+                  "verifying", "awaiting look", "landing", "closing out", "done")
+        for stage in stages:
+            with self.subTest(stage=stage):
+                directory = broken_copy(
+                    editing("toy", _set(lambda toy: step(toy, "draft"), "stage", stage)))
+                code, out, _ = run_check("--procedures", str(directory))
+                self.assertEqual((code, out), (0, compact(
+                    {"procedures": ["toy", "toy-child"], "verdict": "ok"})))
+
+
+class RefusalTableTest(unittest.TestCase):
+    def test_each_case_is_refused_by_step_and_defect(self):
+        for case in CASES:
+            with self.subTest(case.name):
+                code, out, _ = run_check("--procedures", str(broken_copy(case.mutate)))
+                document = json.loads(out)
+                self.assertEqual(code, 1)
+                self.assertEqual(document["verdict"], "refused")
+                for refusal in document["refusals"]:
+                    self.assertEqual(sorted(refusal), ["defect", "detail", "procedure", "step"])
+                    self.assertIsInstance(refusal["detail"], str)
+                    self.assertTrue(refusal["detail"])
+                self.assertEqual(
+                    sorted((r["procedure"], r["step"] or "", r["defect"])
+                           for r in document["refusals"]),
+                    sorted((p, s or "", d) for p, s, d in case.expected))
+
+    def test_every_defect_has_a_table_case(self):
+        self.assertEqual({d for c in CASES for _, _, d in c.expected},
+                         set(procedure_check.DEFECTS))
+
+
+class NoSideEffectTest(unittest.TestCase):
+    def test_check_starts_no_process_and_opens_no_socket(self):
+        broken = broken_copy(editing("toy", _repeat_scope))
+        done = subprocess.run([sys.executable, "-c", SIDE_EFFECT_SCRIPT, str(broken)],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), {"called": [], "codes": [0, 1]})
+
+    def test_the_check_modules_import_no_process_or_socket_module(self):
+        for name in ("engine.py", "procedure_check.py", "engine_graders.py"):
+            tree = ast.parse((DELIVERY / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    imported = [node.module or ""]
+                else:
+                    continue
+                for module in imported:
+                    self.assertNotIn(module.split(".")[0], ("subprocess", "socket"), name)
+
+
+class UsageTest(unittest.TestCase):
+    def test_a_missing_directory_is_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = run_check("--procedures", f"{tmp}/absent")
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(len(err.splitlines()), 1)
+
+    def test_a_directory_without_procedures_is_usage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, out, err = run_check("--procedures", tmp)
+        self.assertEqual((code, out), (2, ""))
+        self.assertEqual(len(err.splitlines()), 1)
+
+    def test_an_invalid_declarations_file_is_usage(self):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(procedure_check, "load_commands",
+                               side_effect=procedure_check.DeclarationError("bad")), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = engine.main(["check"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+
+
+class DeclarationTest(unittest.TestCase):
+    def test_the_declarations_name_every_command_table_row(self):
+        self.assertIn("engine", table_rows())
+        self.assertEqual(set(load_commands()), set(table_rows()))
+
+    def test_the_toy_commands_declare_their_verdicts(self):
+        commands = load_commands()
+        self.assertEqual(commands["forge-claim"], CommandDeclaration(None, {
+            "renew": ("renewed", "not_held", "error"),
+            "status": ("free", "held_by", "stale", "error")}))
+        self.assertEqual(commands["diff-scope"].outcomes(None), ("ok", "failed"))
+        self.assertIsNone(commands["diff-scope"].outcomes("x"))
+        self.assertIsNone(commands["forge-claim"].outcomes("acquire"))
+        self.assertIsNone(commands["engine"])
+
+    def test_a_malformed_declaration_is_refused(self):
+        bad = ['{"x": {"verdicts": [], "subcommands": {"a": []}}}',
+               '{"x": {"verdicts": ["a", "a"]}}',
+               '{"x": {"subcommands": {}}}',
+               '{"x": {"argv": ["a"]}}',
+               '{"X": null}']
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, text in enumerate(bad):
+                with self.subTest(text):
+                    path = Path(tmp) / f"declarations-{index}.json"
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaises(procedure_check.DeclarationError):
+                        load_commands(path)
+
+
+class GraderTest(unittest.TestCase):
+    GRADER_CASES = [
+        ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "approve"}, "accept"),
+        ("toy-tally", {"review-a.verdict": "approve", "review-b.verdict": "revise"}, "revise"),
+    ]
+
+    def test_each_grader_case_grades_its_outcome(self):
+        for name, results, expected in self.GRADER_CASES:
+            with self.subTest(name=name, results=results):
+                self.assertEqual(GRADERS[name].grade(results), expected)
+
+    def test_every_declared_grader_outcome_is_produced(self):
+        for name in GRADERS:
+            with self.subTest(name=name):
+                self.assertEqual({e for n, _, e in self.GRADER_CASES if n == name},
+                                 set(GRADERS[name].outcomes))
+
+
+if __name__ == "__main__":
+    unittest.main()
