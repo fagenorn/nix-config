@@ -590,8 +590,8 @@ def _history_projection(document: dict,
         raise refuse("event 1 authority_class is not a non-empty string")
     rerun = first.get("rerun_denied", ())
     if "rerun_denied" in first and (
-            type(rerun) is not list or not rerun or rerun != sorted(rerun)
-            or rerun_names_violation(rerun) is not None):
+            type(rerun) is not list or not rerun or rerun_names_violation(rerun) is not None
+            or rerun != sorted(rerun)):
         raise refuse("event 1 rerun_denied is not a sorted list of distinct non-empty strings")
     state, parked, entered_terminal, sealed = "created", None, None, False
     fold = _CustodyFold(keys)

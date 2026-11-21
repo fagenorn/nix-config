@@ -653,7 +653,8 @@ class RerunDeniedTest(InvokeCase):
             with self.subTest(label=label):
                 self.assertRuleRefuses(self.transaction_id, edit(change), rule)
         malformed = "event 1 rerun_denied is not a sorted list of distinct non-empty strings"
-        for value in ([], "build", ["build", "build"], [""], ["vanished", "build"]):
+        for value in ([], "build", ["build", "build"], [""], ["vanished", "build"],
+                      ["build", 1], [None, None], ["a", {}]):
             with self.subTest(rerun_denied=value):
                 self.assertRuleRefuses(
                     self.transaction_id,
