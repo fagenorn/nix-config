@@ -982,7 +982,7 @@ class RowTest(unittest.TestCase):
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
         shown = register.view_entry(None, {**register.drafting("/x/sample-app", full), "at": "t"})
-        self.assertEqual(shown["draft_more"], "and 22 more settings at their usual values")
+        self.assertEqual(shown["draft_more"], "and 21 more settings at their usual values")
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()

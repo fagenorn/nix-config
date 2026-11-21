@@ -326,6 +326,31 @@ def schema_one(contract: dict) -> dict:
     return out
 
 
+class CoAuthorMemberTest(unittest.TestCase):
+    SCOPE = ("python/agent_tools", "home/common/agent-skills/skills", "home/common/agent-guidance",
+             "home/common/claude-code")
+
+    def test_only_the_resolver_names_the_co_author_member(self):
+        found = []
+        for scope in self.SCOPE:
+            top = REPO_ROOT / scope
+            self.assertTrue(top.is_dir(), scope)
+            for directory, names, files in os.walk(top, followlinks=False):
+                names[:] = [n for n in names if n != "__pycache__"]
+                for name in files:
+                    path = Path(directory) / name
+                    if path.is_symlink() or not path.is_file():
+                        continue
+                    if b"co_authored_by" in path.read_bytes():
+                        found.append(path.relative_to(REPO_ROOT).as_posix())
+        self.assertEqual(sorted(found), ["python/agent_tools/project_contract/resolve_project.py"])
+
+    def test_the_retired_member_is_written_false_and_is_a_schema_two_commit_member(self):
+        self.assertEqual(dict(resolve_project.RETIRED_COMMIT_MEMBERS), {"co_authored_by": False})
+        self.assertLessEqual(set(resolve_project.RETIRED_COMMIT_MEMBERS),
+                             set(resolve_project.COMMIT_MEMBERS))
+
+
 class SchemaTwoFixtureTest(unittest.TestCase):
     def test_the_fixture_is_schema_two_without_either_deploy_member(self):
         contract = source_contract()
