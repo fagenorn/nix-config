@@ -70,6 +70,7 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Live fault | Console |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |
