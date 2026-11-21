@@ -284,6 +284,25 @@ class DigestTest(unittest.TestCase):
             ("manager_restarted", "The manager of g was restarted"),
             ("manager_takeover", "A new manager took over g")])
 
+    def test_a_takeover_that_moved_the_sprint_says_it_moved_once(self):
+        sid = "a" * 16
+        first = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n"})]
+
+        def said(**members):
+            third = Event(3, at(3), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "goal": "g", "profile": "home", "session_name": "n",
+                **members})
+            return [(m.kind, m.sentence) for m in moments([*first, third], {}, {})]
+
+        self.assertEqual(said(takeover=True, moved=True),
+                         [("manager_moved", "g moved to another account")])
+        self.assertEqual(said(takeover=True, moved="yes"),
+                         [("manager_takeover", "A new manager took over g")])
+        self.assertEqual(said(moved=True), [])
+
     def test_an_idle_nudge_says_nothing_and_a_resume_after_the_quota_reset_says_one_sentence(self):
         sid = "a" * 16
         nudged = {"sprint_id": sid, "goal": "g", "session_id": "s-1"}

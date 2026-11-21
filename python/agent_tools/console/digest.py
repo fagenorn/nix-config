@@ -19,7 +19,8 @@ Event kinds read:
   exactly true) speak; a failed wake, a failed takeover, a first start and `manager.stalled` say
   nothing, and none of them is an inbox item (only a stall is, `view.py`). A wake that ran with
   `resumed` exactly true (work resumed after a quota wait, #929) says `quota_resumed` in place of
-  `manager_restarted`.
+  `manager_restarted`. A takeover start with `moved` exactly true (a listed manager moved off an
+  account that is out, #1378) says `manager_moved` in place of `manager_takeover`.
 - `manager.nudged` (`event_log.MANAGER_NUDGED`, #929): the console told an idle manager to go on. It
   speaks only when the event's project is a str, the payload `goal` is a str, `ok` is exactly true
   and `resumed` is exactly true (the nudge that ended a quota wait): `quota_resumed`. Any other
@@ -115,6 +116,7 @@ withdrawal removes the sprint).
     sprint_done      The sprint for <project_id> is done: <the closing report's first line>
     manager_restarted The manager of <title> was restarted
     manager_takeover A new manager took over <title>
+    manager_moved    <title> moved to another account
     quota_resumed    <title> resumed after the quota reset
     project_registered <project_id> was registered.
 
@@ -126,8 +128,9 @@ An answer event makes a moment only when its project is a `str`, its payload `qu
 `recommended` are `str` and `differs` is `True`; it reads no state either. `<answer>` is the option the
 owner chose or, for an answer in the owner's own words, those words.
 A restart needs the event's project (str), a payload `goal` (str) and `ok` exactly true; a takeover
-needs the event's project (str), a payload `goal` (str) and `takeover` exactly true; neither reads state,
-and neither does a `manager.nudged` or `manager.woken` quota resume.
+needs the event's project (str), a payload `goal` (str) and `takeover` exactly true, and a move needs
+what a takeover needs plus `moved` exactly true; none of them reads state, and neither does a
+`manager.nudged` or `manager.woken` quota resume.
 A sprint report is judged against the folded sprints before it
 (`moments` folds its own copy of the optional `sprints` argument with
 `sprints.sprint_states`), and the sentence's title is the sprint's.
@@ -183,6 +186,7 @@ ANSWER_DIFFERS = "answer_differs"
 SPRINT_DONE_MOMENT = "sprint_done"
 MANAGER_RESTARTED = "manager_restarted"
 MANAGER_TAKEOVER = "manager_takeover"
+MANAGER_MOVED = "manager_moved"
 QUOTA_RESUMED = "quota_resumed"
 PROJECT_REGISTERED = "project_registered"
 QUESTION_WITHDRAWN_MOMENT = "question_withdrawn"
@@ -364,6 +368,8 @@ def _manager_moment(event: Event, folded: Mapping[str, SprintState]) -> tuple[st
     if event.kind == MANAGER_WOKEN and event.payload.get("ok") is True:
         return MANAGER_RESTARTED, f"The manager of {title} was restarted"
     if event.kind == MANAGER_STARTED and event.payload.get("takeover") is True:
+        if event.payload.get("moved") is True:
+            return MANAGER_MOVED, f"{title} moved to another account"
         return MANAGER_TAKEOVER, f"A new manager took over {title}"
     return None
 

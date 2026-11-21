@@ -22,12 +22,14 @@ Three more kinds record the sprint's manager (#888), none of them kept (`event_l
 its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept either):
 
     manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "seen_after"?: <int>,
-                      "takeover"?: true, "permission"?: {"mode", "reason"}}
+                      "takeover"?: true, "moved"?: true, "permission"?: {"mode", "reason"}}
     manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
     manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
     manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
                       "back"?: <bool>, "listing_failed"?: <str>, "permission"?: {"mode", "reason"}}
     manager.stalled  {"sprint_id", "reason": <str>}
+
+The fold does not read `moved` (a listed manager moved to another account, #1378); the digest does.
 
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
 request may name and the file name of the sprint's secret.
