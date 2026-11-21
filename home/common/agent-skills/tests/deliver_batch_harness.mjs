@@ -2,7 +2,7 @@
 // Usage: node deliver_batch_harness.mjs <program.js> with a scenario JSON on stdin (one-shot), or import { makeRunner } and call makeRunner(programText)(scenario), which resolves to the exact text one-shot mode prints (program_server.mjs does, once per program); a program throw rejects it, as it escapes the one-shot run:
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
 //     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n}, "delays": {"<label>": n} }
-// A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A facts reply without `look` reads unmarked (NESTED). A reply
+// A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A facts reply without `look` reads unmarked and one without `live_fault` reads no-sprint (NESTED). A reply
 // of null is returned as null (a dead agent). Prints { result, calls, events (each agent's `call <label>` and `reply <label>`, in order), logs (each log() line), max_active, max_planning, child_events, child_returns }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
@@ -36,7 +36,7 @@ const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length)
 // Ordered: the first matching pattern wins. A default gets the label, the prompt and the scenario's acceptance (one copy per scenario, shared with a ready child's).
 const DEFAULTS = [
   [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null, guards: [] })],
-  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, native: { verdict: 'read', blocked_by: [] }, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x', look: { verdict: 'unmarked' } })],
+  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, native: { verdict: 'read', blocked_by: [] }, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x', look: { verdict: 'unmarked' }, live_fault: { verdict: 'no-sprint' } })],
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
   [/^release-/, () => ({ verdict: 'released' })],
@@ -77,7 +77,7 @@ const DEFAULTS = [
   [/^train-merge-/, (l, p) => ({ lock: { verdict: 'already_held', lock_sha: SHA }, merged: true, notes: 'merged', prs: jsonAfter(p, 'The member pull requests, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']], [/^facts-/, ['look']]]
+const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']], [/^facts-/, ['look', 'live_fault']]]
 
 const readyOf = (a, acceptance) => ({
   stage: 'ready', head: SHA, branch: `issue-${a.issue}-x`, worktree: `/r/.wt/w-issue-${a.issue}-x`,

@@ -53,6 +53,7 @@
 | Digest | Console |
 | Drafted contract | Console |
 | Excluded profile | Console |
+| Fleet preflight | Project contract |
 | Fleet registry | Project contract |
 | Folder trust | Console |
 | Goal | Console |
@@ -71,6 +72,7 @@
 | Limit sensing | Hosts |
 | Limit stop | Console |
 | Live fault | Console |
+| Live-fault lane | Delivery |
 | Look approval | Delivery |
 | Look file set | Delivery |
 | Look marker | Delivery |

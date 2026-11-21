@@ -1201,6 +1201,16 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, section)
         self.assertNotIn("The resume records the approval", section)
 
+    def test_the_contract_lets_a_live_bound_stop_name_the_ordinary_delivery_the_look_forbids(self):
+        text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+        look = text.partition("## A look before merge")[2].partition("## Questions")[0]
+        self.assertIn("never start another delivery of the issue (the one exception is the ordinary "
+                      "delivery that a live-fault delivery's stop at `live-bound` names", look)
+        fault = text.partition("## A live fault")[2].partition("## Notices")[0]
+        self.assertIn("A fix or changes answer at that delivery's look stops it at `live-bound` too: "
+                      "start the ordinary delivery its reason names, and give the head it opens a look "
+                      "card of its own", fault)
+
     def test_the_contract_requires_owner_only_on_a_go_ahead_and_leaves_a_design_choice_to_the_starter(self):
         text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
         (line,) = [part for part in text.split("- `") if part.startswith("owner_only`")]

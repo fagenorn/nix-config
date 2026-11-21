@@ -34,6 +34,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.release.release_profile",  # release_card
         "agent_tools.release.transaction_history",  # movement
         "agent_tools.release.transaction_storage",  # movement
+        "agent_tools.verification.verify_checks",  # live_fault_check
         "agent_tools.verification.verify_answer",  # answer, inbox, service
         "agent_tools.verification.verify_owner",  # view
         "agent_tools.verification.verify_wait",  # inbox
@@ -65,6 +66,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "verification": frozenset({
         "agent_tools.project_contract.resolve_project",  # verified_tree, verify_pending
         "agent_tools.project_contract.agent_platform",  # verify_checks, verify_pending
+        "agent_tools.project_contract.fleet_preflight",  # verify_checks
         "agent_tools.claims.forge_markers",  # verify_facts, verify_issues, verify_owner, verify_run
         "agent_tools.claims.forge_claim",  # verify_owner
         "agent_tools.claims.forge_owner_action",  # verify_run

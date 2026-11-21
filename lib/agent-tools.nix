@@ -51,6 +51,7 @@ let
     "context-map-lint" = "delivery.context_map_lint";
     "diff-scope" = "delivery.diff_scope";
     "fallback-audit" = "project_contract.fallback_audit";
+    "fleet-preflight" = "project_contract.fleet_preflight";
     "folder-trust" = "console.folder_trust";
     "forge-claim" = "claims.forge_claim";
     "forge-issue" = "claims.forge_issue";
@@ -62,6 +63,7 @@ let
     "owner-actions" = "claims.owner_actions";
     "plan-amend" = "delivery.plan_amend";
     "program-copies" = "delivery.program_copies";
+    "pr-green" = "verification.pr_green";
     "promotion" = "delivery.promotion";
     "release" = "release.release";
     "release-card" = "console.release_card";
