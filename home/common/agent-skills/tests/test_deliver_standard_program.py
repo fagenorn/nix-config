@@ -7714,7 +7714,7 @@ EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind,
              "hold", "close-out", "look-pr", "look-push", "look-head", "look-post", "look-read", "look-stale", "look-status", "look-verify")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
-            "fix-sync-", "look-fix")),
+            "fix-sync-", "look-fix", "fix-retest")),
     (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
            "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-", "look-fix-review")),
     # #923: a review with no diff range (a no-commit task, a fix answered with no commit) runs on reviewer.
@@ -7780,6 +7780,9 @@ SCENARIOS = (
     # #1356: an approval that answers a plan criterion reads the earlier hold before the hold.
     {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "approve", "head": SHA}),
      "patch": dict(RESUME, setup={"look": dict(MARKED, acs=["AC1"]), "head": SHA})},
+    # #1371: a resume carrying an untested commit records its tests before any push.
+    {"args": dict(ARGS, cont=dict(LOOK_CONT, untested={"stage": "look-fix", "start_head": SHA, "head": F})),
+     "patch": dict(RESUME, setup={"look": MARKED, "head": F}, verify={"head": F})},
     WS_SCENARIO,
 )
 
@@ -8133,6 +8136,27 @@ OWN_RUN = ("Before returning, run in full every test file among or covering the 
            "and no suite: the verify step runs it next; return tests: each command and its result.")
 
 
+def push_tests(text):
+    """The push_tests payload a prompt carries, or None; #1371: a test reads the payload, never the sentence around it."""
+    start = text.find('{"push_tests":')
+    if start < 0:
+        return None
+    return json.JSONDecoder().raw_decode(text, start)[0]["push_tests"]
+
+
+def program_const(name):
+    """The single-quoted string literal of the program's one `const NAME = '...'` line."""
+    found = [line for line in PROGRAM.read_text(encoding="utf-8").splitlines() if line.startswith(f"const {name} = '")]
+    if len(found) != 1:
+        raise AssertionError(f"not exactly one const {name} line: {found}")
+    return found[0][len(f"const {name} = '"):found[0].rindex("'")]
+
+
+PUSH_PAYLOAD = {"when": "committed", "scopes": ["touched", "callers", "guards"], "guards": [],
+                "on_failure": "fix-and-rerun", "report": "tests"}
+PASSED_AT_FIX = {"state": "passed", "passed": ["ci"], "head": FIX, "required": ["ci-tests"]}
+
+
 class WholeTestFileTest(unittest.TestCase):
     """#787: every implementer step after the task loop runs whole test files and reports each command and its result; #963: only a step the verify step does not follow also runs a fast suite."""
 
@@ -8188,6 +8212,140 @@ class WholeTestFileTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(FOCUSED_RUN, text)
                 self.assertNotIn(WHOLE_RUN[0], text)
+
+
+class PushBoundFixTestsTest(unittest.TestCase):
+    """#1371: a fix that leads to a push to an open pull request tests what it touched, its callers and the declared cheap guards; one that records no test command stops before the push, and a resume at its commit records the tests before any push."""
+
+    PUSH_BOUND = (
+        ("fix-ci", {"replies": {"checks-2": PASSED_AT_FIX},
+                    "patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}}),
+        ("fix-sync-1", {"replies": {"sync-review-1": FINDING, "checks-2": PASSED_AT_FIX},
+                        "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})}),
+        ("look-fix", {"args": dict(ARGS, cont=LOOK_CONT, look={"answer": "changes", "words": "make the label bold"}),
+                      "patch": dict(RESUME, **{"look-fix": {"start_head": SHA, "commit": F}, "verify": {"head": F},
+                                               "look-pr": {"head": F}})}),
+    )
+    TESTED = ["python3 -m unittest tests/test_a.py: 4 passed"]
+
+    @staticmethod
+    def flagged(kwargs):
+        patch = kwargs.get("patch", {})
+        return dict(kwargs, patch={**patch, "setup": {**patch.get("setup", {}), "verification": PreCommitFocusTest.FLAGGED}})
+
+    def test_every_push_bound_fix_prompt_carries_the_push_tests_payload(self):
+        for label, kwargs in self.PUSH_BOUND:
+            with self.subTest(label=label):
+                _, calls = run(**kwargs)
+                self.assertEqual(push_tests(prompt(calls, label)), PUSH_PAYLOAD)
+
+    def test_the_flagged_ids_are_the_declared_cheap_guards(self):
+        for label, kwargs in self.PUSH_BOUND:
+            with self.subTest(label=label):
+                _, calls = run(**self.flagged(kwargs))
+                self.assertEqual(push_tests(prompt(calls, label)), dict(PUSH_PAYLOAD, guards=PreCommitFocusTest.UNFLAGGED))
+
+    def test_only_the_push_bound_fixes_carry_it(self):
+        scenarios = (
+            ({"replies": {"review-1": BAD}}, ("impl-1", "fix-1-1")),
+            ({"replies": {"final-1": FINDING}}, ("fix-wave",)),
+            ({"replies": {"verify": VERIFY_RED}}, ("verify-fix-1",)),
+            (self.PUSH_BOUND[1][1], ("sync-1", "sync-resolve-1")),
+            ({"args": DIRECT, "replies": {"direct-review": BAD}}, ("direct-impl", "direct-fix")),
+        )
+        for kwargs, names in scenarios:
+            _, calls = run(**kwargs)
+            for label in names:
+                with self.subTest(label=label):
+                    self.assertIsNone(push_tests(prompt(calls, label)))
+
+    def refused(self, stage, start, commit, forbidden, kwargs, label, fix, record):
+        """Run kwargs with the fix reply made with this test record (None: no tests key) and assert the refusal."""
+        reply = {"status": "done", "notes": "fixed", **fix, **({} if record is None else {"tests": record})}
+        result, calls = run(**dict(kwargs, replies={**kwargs.get("replies", {}), label: reply}))
+        self.assertEqual(result["stage"], stage)
+        self.assertEqual(result["details"], program_const("UNTESTED"))
+        self.assertIn(result["details"], result["reason"])
+        self.assertEqual(result["cont"]["untested"], {"stage": stage, "start_head": start, "head": commit})
+        for name in forbidden:
+            self.assertNotIn(name, labels(calls))
+
+    def test_a_committed_fix_with_no_test_recorded_stops_before_its_review_and_the_push(self):
+        fixed = OwnRedOutsideLockTest.FIXED
+        sites = (
+            ("checks-fix", SHA, FIX, ("fix-ci-review", "land-push-2", "merge"), self.PUSH_BOUND[0][1], "fix-ci",
+             {"start_head": SHA, "commit": FIX}),
+            ("checks-fix", fixed["start_head"], fixed["commit"], ("fix-ci-review", "land-push-1", "merge"),
+             {"replies": {"checks-2": PASSED_AT_FIX}, "patch": {"pr": OwnRedOutsideLockTest.PRE_RED}}, "fix-ci", dict(fixed)),
+            ("sync-fix", MERGE, FIX, ("fix-sync-review-1", "land-push-2", "merge"), self.PUSH_BOUND[1][1], "fix-sync-1",
+             {"start_head": MERGE, "commit": FIX}),
+            ("look-fix", SHA, F, ("look-fix-review", "verify", "look-pr", "look-push", "merge"), self.PUSH_BOUND[2][1], "look-fix",
+             {"start_head": SHA, "commit": F}),
+        )
+        for stage, start, commit, forbidden, kwargs, label, fix in sites:
+            for record in ([], ["", "  "], None):
+                with self.subTest(stage=stage, label=label, record=record):
+                    self.refused(stage, start, commit, forbidden, kwargs, label, fix, record)
+
+    AT_FIX = {"setup": {"head": FIX}, "verify": {"head": FIX},
+              "pr": {"head": FIX, "lock": {"verdict": "already_held", "lock_sha": FIX},
+                     "checks": {"state": "passed", "head": FIX, "required": ["ci"], "passed": ["ci"]}}}
+
+    def test_a_resume_at_the_untested_commit_records_its_tests_before_any_push(self):
+        stopped, _ = run(replies={"checks-2": PASSED_AT_FIX, "fix-ci-review": FINDING},
+                         patch={"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertIn("cont", stopped)
+        cont = dict(stopped["cont"], untested={"stage": "checks-fix", "start_head": SHA, "head": FIX})
+
+        def resume(reply):
+            return run(args=dict(ARGS, cont=cont), patch=dict(self.AT_FIX, **{"fix-retest": reply}))
+
+        with self.subTest(case="records no test"):
+            result, calls = resume({"start_head": FIX, "commit": FIX, "tests": []})
+            self.assertEqual(result["stage"], "checks-fix")
+            self.assertEqual(result["details"], program_const("UNTESTED"))
+            self.assertEqual(result["cont"]["untested"], {"stage": "checks-fix", "start_head": SHA, "head": FIX})
+            got = labels(calls)
+            self.assertIn("fix-retest", got)
+            self.assertFalse([l for l in got if l in ("pr", "merge") or l.startswith("land-push-")], got)
+        with self.subTest(case="records its tests"):
+            result, calls = resume({"start_head": FIX, "commit": FIX, "tests": self.TESTED})
+            got = labels(calls)
+            self.assertEqual(result["stage"], "done")
+            self.assertLess(got.index("fix-retest"), got.index("pr"))
+            self.assertEqual([c["agentType"] for c in calls if c["label"] == "fix-retest"], ["implementer"])
+            text = prompt(calls, "fix-retest")
+            self.assertEqual(push_tests(text), dict(PUSH_PAYLOAD, on_failure="report"))
+            self.assertIn(f"git -C /r/.wt/w-issue-9-x diff {SHA}..{FIX}", text)
+        with self.subTest(case="the retest committed"):
+            result, calls = resume({"start_head": FIX, "commit": "e" * 40, "tests": self.TESTED})
+            self.assertEqual(result["stage"], "checks-fix")
+            self.assertNotIn("pr", labels(calls))
+
+    def test_a_fix_that_commits_nothing_needs_no_test_record(self):
+        result, calls = run(replies={"checks-2": {"state": "passed", "passed": ["ci"], "head": SHA, "required": ["ci"]}},
+                            patch={"pr": {"checks": RED}, "fix-ci": dict(ShipFixWaveTest.RERAN, tests=[])})
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "merge", "hold", "close-out"])
+        rebuttal = dict(self.PUSH_BOUND[1][1])
+        rebuttal["patch"] = dict(rebuttal["patch"], **{"fix-sync-1": {"start_head": MERGE, "commit": MERGE,
+                                                                       "notes": "the finding is wrong: a.py keeps both calls", "tests": []}})
+        result, calls = run(**rebuttal)
+        self.assertIn("fix-sync-review-1", labels(calls))
+        self.assertNotEqual(result["stage"], "sync-fix")
+
+    def test_a_red_check_fix_report_listing_its_tests_lands(self):
+        tests = ["python3 -m unittest tests/test_a.py: 4 passed", "python3 -m unittest tests/test_uses_a.py: 2 passed",
+                 "treefmt --fail-on-change (tools): passed"]
+        kwargs = self.flagged(self.PUSH_BOUND[0][1])
+        kwargs["patch"] = dict(kwargs["patch"], **{"fix-ci": {"start_head": SHA, "commit": FIX, "tests": tests}})
+        result, calls = run(**kwargs)
+        names = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(names[names.index("pr"):],
+                         ["pr", "fix-ci", "fix-ci-review", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        self.assertNotIn("fix-retest", names)
 
 
 class CodexUnavailableReasonTest(unittest.TestCase):

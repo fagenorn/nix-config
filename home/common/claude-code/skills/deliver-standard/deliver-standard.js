@@ -34,7 +34,7 @@ export const meta = {
 // #1019: every setup first puts a worktree back on its branch when its HEAD is detached at the branch tip and the tree is clean.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look_acs? (#1356: the AC ids the issue's look-marker lines had when the plan was made, kept so the plan's ids, never the issue's later checklist order, name the criterion a landing leaves out of its hold; a checklist reordered by hand while the delivery waits is a stated limit, not handled), look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, untested? (#1371: {stage, start_head, head}, the commit a push-bound fix made with no test command recorded; a resume runs fix-retest on the head being shipped before any push, and a reply that does not record a test command at that unchanged head stops at stage again), partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete?, look_acs? (#1356: the AC ids the issue's look-marker lines had when the plan was made, kept so the plan's ids, never the issue's later checklist order, name the criterion a landing leaves out of its hold; a checklist reordered by hand while the delivery waits is a stated limit, not handled), look? (#1139: {pr, head, approved?}, the pull request and head an awaiting-look stop left for the owner's look, and the head the owner's approval was recorded for, once it was; a resume of such a cont lands without a second approval, and a head other than approved stops at awaiting-look again) }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two (#1019: the second of those two revises runs in the same run, with no stop between, when the first one's re-review leaves only findings on criteria that revise changed); any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -734,6 +734,10 @@ let checksFixes = (CONT && CONT.checks_fixes) || 0
 let syncFixes = (CONT && CONT.sync_fixes) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
+// #1371: the commit a push-bound fix made with no test command recorded, carried in cont until a fix-retest step records its tests at the head being shipped.
+const UNTESTED_STAGES = ['checks-fix', 'sync-fix', 'look-fix']
+const untestedOf = u => (isEntry(u) && UNTESTED_STAGES.includes(u.stage) && present(u.head) && present(u.start_head) ? { stage: u.stage, start_head: String(u.start_head), head: String(u.head) } : null)
+let untested = untestedOf(CONT && CONT.untested)
 // #1139: the setup's look read. A marked delivery stops at awaiting-look instead of landing; a read with neither verdict stops at stage look after verify.
 const LOOK = isEntry(setup.look) ? setup.look : null
 const LOOK_READ = !!LOOK && (LOOK.verdict === 'marked' || LOOK.verdict === 'unmarked')
@@ -773,7 +777,7 @@ const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog
 let lookWhy = null
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: lookWhy ? `${lookWhy}; ${stopReason(stage, extra || {})}` : stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(untested ? { untested } : {}), ...(lookAt ? { look: lookAt } : {}), ...(plan && lookAcs.length ? { look_acs: lookAcs } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 // A look marker the setup could not read is neither marked nor unmarked: a fix answer and a merged replay stop here, before any hold.
@@ -1181,7 +1185,11 @@ const FMT = PRE_COMMIT.length
 const FOCUSED = `Run only the tests covering the files you changed, not the full suite or the declared verification (it runs once later). ${FMT}`
 // #787: whole test files after the task loop; one class missed a failing sibling test three times.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
-const FIX_TESTS = `Before returning, ${WHOLE('the files you changed')}. ${FMT}`
+// #1371: the same text in deliver-batch.js; the push_tests payload is what a test reads, the sentence around it is for the agent.
+const PUSH_TESTS = (guards, onFailure = 'fix-and-rerun') => `If you made a commit, then before pushing, run in full every test file among or covering the files you changed (never a single test class), the test files of their direct callers and checkers, and the declared cheap guards (with none declared, any fast suite the project declares), not the declared verification, as this payload lists them: ${JSON.stringify({ push_tests: { when: 'committed', scopes: ['touched', 'callers', 'guards'], guards, on_failure: onFailure, report: 'tests' } })}. touched: every test file among or covering the files you changed; callers: for each function, constant, option, command or file name the commit changed, added or removed, git grep the tree and take the test files of every file that uses or checks it; guards: each entry's argv, run with <worktree>/<its cwd> as working directory. on_failure fix-and-rerun: fix a run that fails and run it again; report: change nothing and return status blocked with the failing command in notes; either way a failing or unrun commit is never pushed. Then return tests: each command and its result, one entry per command; a commit whose report records no test command is refused`
+const tested = f => !!f && Array.isArray(f.tests) && f.tests.some(t => typeof t === 'string' && t.trim() !== '')
+const FIX_TESTS = `The program pushes this fix to the open pull request next. ${PUSH_TESTS(PRE_COMMIT)}. ${FMT}`
+const UNTESTED = 'the fix report records no test command, so its commit is not pushed'
 // #963: the fix wave and the verification fix are each followed by the verify step, so they run no suite: it ran twice per wave.
 const OWN_TESTS = `Before returning, run in full every test file among or covering the files you changed (never a single test class) and no suite: the verify step runs it next; return tests: each command and its result. ${FMT}`
 // #941: what the resolution of a conflicted sync merge tests, the same text in deliver-batch.js: the files it resolved, not everything the merge brought in.
@@ -2092,6 +2100,7 @@ if (LOOK_ANSWER && (LOOK_ANSWER.answer === 'changes' || LOOK_ANSWER.answer === '
   if (lostClaim) return lostClaim
   const lookFix = await call(`${CTX}\n${PLAN_REF} The owner looked at the pull request head and asked for changes; the owner's words are the one finding of this fix round: ${JSON.stringify(asked)}. Fix it in the worktree, with a regression test for each real defect, then commit. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'look-fix', phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(lookFix) || sameSha(lookFix.commit, lookFix.start_head)) return stop('look-fix', { fix: lookFix })
+  if (!tested(lookFix)) { untested = { stage: 'look-fix', start_head: lookFix.start_head, head: lookFix.commit }; return stop('look-fix', { fix: lookFix, details: UNTESTED }) }
   const lookReview = await readReview(`${CTX}\nRe-review only this owner finding against the fix: ${span(lookFix)}; the implementer's notes: ${lookFix.notes}. Findings: ${JSON.stringify(asked)}. Report the finding if it is still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'look-fix-review', phase: 'Verify', agentType: 'reviewer', schema: FINDINGS })
   if (!lookReview || findingsOf(lookReview).length) return stop('look-fix-review', { review: lookReview })
   VERIFY_CACHED = false
@@ -2210,6 +2219,12 @@ const probeConflict = p => !!p && typeof p === 'object' && p.conflicted === true
 let PR = null
 let expected = verify.head
 let head = expected
+// #1371: a resumed delivery whose cont carries an untested commit records its tests at the head being shipped before any push.
+if (untested) {
+  const rt = await call(`${CTX}\n${PLAN_REF} The commits in git -C ${W} diff ${untested.start_head}..${expected} are a fix committed with no test command recorded; treat them as the commit you made. The program pushes this head to the open pull request next. ${PUSH_TESTS(PRE_COMMIT, 'report')}. Commit nothing: return status done with start_head and commit both ${expected} (git -C ${W} rev-parse HEAD).\n${RULES}`, { label: 'fix-retest', phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  if (!implDone(rt) || !sameSha(rt.start_head, expected) || !sameSha(rt.commit, expected) || !tested(rt)) return stop(untested.stage, { fix: rt, details: UNTESTED })
+  untested = null
+}
 let syncs = 0
 let round = 0
 const PENDING_WAITS = 3
@@ -2305,12 +2320,14 @@ ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RU
 // With rerun (the CI fix alone, #818), done at the unchanged head is a rerun of jobs that failed for no cause in the code: { fix, ok: true, rerun: true }, with no review.
 // #1001: schema is the fix reply's (the CI fix under the lock also says whether it released the lock), and committed runs between a fix
 // that made a commit and its review (the release of the lock, when the fix step did not report it).
-const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false, schema = IMPL, committed = null }) => {
+// #1371: a committed fix with no test command recorded is refused before its review and its push, and its commit is carried in cont.
+const shipFix = async ({ stage, label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false, schema = IMPL, committed = null }) => {
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema })
   if (!implDone(fix) || !sameSha(fix.start_head, expected)) return { fix, ok: false }
   const moved = !sameSha(fix.commit, expected)
   if (!moved && rerun) return { fix, ok: true, rerun: true, moved }
   if (!moved && !(rebuttal && present(fix.notes))) return { fix, ok: false }
+  if (moved && !tested(fix)) { untested = { stage, start_head: fix.start_head, head: fix.commit }; return { fix, ok: false, details: UNTESTED } }
   if (moved && committed) await committed(fix)
   const review = await readReview(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }
@@ -2499,12 +2516,12 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
         if (syncFixes >= 1) return stop('sync-review', { pr: PR, review: sr })
         syncFixes++
         const w = await shipFix({
-          label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
+          stage: 'sync-fix', label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
           rebuttal: true,
           fixPrompt: `${CTX}\n${SYNC_FIX(W, merge.merge_commit, findingsOf(sr), after)} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
           reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved, after)}`,
         })
-        if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
+        if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix, ...(w.details ? { details: w.details } : {}) })
         if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
         if (w.moved) expected = w.fix.commit
       } else if (finalReviewed) {
@@ -2533,7 +2550,7 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
   const ciFix = (ck, failingNames, mode) => {
     const failing = JSON.stringify(failingNames)
     return shipFix({
-      label: 'fix-ci', reviewLabel: 'fix-ci-review',
+      stage: 'checks-fix', label: 'fix-ci', reviewLabel: 'fix-ci-review',
       rerun: true,
       schema: mode === 'first' ? { ...IMPL, properties: { ...IMPL.properties, lock_released: { type: 'boolean' } } } : IMPL,
       committed: mode === 'first' ? async fix => {
@@ -2611,7 +2628,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       if (checksFixes >= 1) return unheld(stop('checks', { pr: PR, failing: failingNames, checks: ck }))
       checksFixes++
       const w = await ciFix(ck, failingNames, 'unasked')
-      if (!w.ok) return unheld(stop('checks-fix', { pr: PR, checks: ck, fix: w.fix }))
+      if (!w.ok) return unheld(stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) }))
       if (w.rerun) reran = true
       else {
         if (!w.review || findingsOf(w.review).length) return unheld(stop('checks-fix-review', { pr: PR, checks: ck, review: w.review }))
@@ -2730,7 +2747,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       // #1001: no sync has changed the head under the lock, so the red check is the branch's own: its fix goes outside the lock.
       const first = lockSyncs === 0
       const w = await ciFix(ck, failingNames, first ? 'first' : 'held')
-      if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
+      if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix, ...(w.details ? { details: w.details } : {}) })
       // #818: the failed jobs were rerun at the unchanged head. The loop polls again; checksFixes still ends a second red poll at the checks stop.
       // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
       if (w.rerun) {
