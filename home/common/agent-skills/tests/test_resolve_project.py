@@ -34,7 +34,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.project_contract import resolve_project
+from agent_tools.project_contract import adopt_apply, resolve_project
 
 from ._inprocess_cli import run_module
 
@@ -1087,6 +1087,35 @@ class CommittedContractTest(ResolverTestCase):
         })
         self.assertNotIn("deploy", snapshot["bindings"])
         self.assertNotIn("deploy", snapshot["capabilities"])
+
+    def test_the_repositorys_own_contract_runs_its_commit_through_the_devenv_shell(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        self.assertEqual(snapshot["bindings"]["vcs"]["commit"], {
+            "co_authored_by": False,
+            "signed": True,
+            "environment": "commit-environment",
+        })
+        self.assertEqual(snapshot["bindings"]["commands"]["commit-environment"], {
+            "argv": ["devenv", "shell", "--"],
+            "cwd": str(REPO_ROOT),
+            "env": [],
+        })
+        self.assertNotIn("commit-environment", snapshot["bindings"]["workflow"]["verification"])
+
+    def test_adoption_apply_resolves_the_repositorys_commit_environment(self):
+        # P11: this means this repository's own live contract, not the pinned schema-2 fixture.
+        code, out, err = run("resolve", "--repo-root", str(REPO_ROOT), home=self.home)
+        self.assertEqual(code, 0, err or out)
+        snapshot = json.loads(out)
+        environment = adopt_apply.commit_environment(snapshot, REPO_ROOT)
+        self.assertEqual(environment, {
+            "id": "commit-environment",
+            "argv": ["devenv", "shell", "--"],
+            "cwd": str(REPO_ROOT.resolve()),
+        })
 
 
 def run_with_path(path_value: str, *args: str, home: Path) -> tuple[int, str, str]:

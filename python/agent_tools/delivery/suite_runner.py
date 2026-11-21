@@ -218,10 +218,13 @@ def member_environment(parent: Mapping[str, str], cache: str) -> dict[str, str]:
     `PYTHONPYCACHEPREFIX` is set to `cache`, replacing an inherited value, and
     an inherited `PYTHONDONTWRITEBYTECODE` is dropped, so a Python process run
     with the copy writes its bytecode under `cache` and reads what an earlier
-    one wrote there. `parent` is not modified, and every other variable is
+    one wrote there. An inherited `AGENT_PLATFORM_ROOT` is dropped: the suite
+    runs from source, so a member never inherits a platform package's root
+    (ADR-system-005). `parent` is not modified, and every other variable is
     copied unchanged.
     """
     environment = dict(parent)
+    environment.pop("AGENT_PLATFORM_ROOT", None)
     inherited = environment.get("GIT_CONFIG_PARAMETERS", "")
     environment["GIT_CONFIG_PARAMETERS"] = (
         f"{inherited} {SUITE_GIT_CONFIG}" if inherited else SUITE_GIT_CONFIG)
