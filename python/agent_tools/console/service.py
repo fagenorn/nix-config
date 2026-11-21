@@ -7143,9 +7143,14 @@ class ConsoleService:
             shown = any(o.name == name for o in (listed or {}).values())
             if shown:
                 self._last_listed[sprint_id] = now
-            if (shown or self._manager_listed(sprint)
-                    or self._revive_step(sprint, now) != sprints.TAKEOVER):
+            if shown or self._manager_listed(sprint):
                 self._release(sprint_id, token)
+                return None
+            if self._revive_step(sprint, now) != sprints.TAKEOVER:
+                if token.target is not None and self._quota_wait(sprint) is not None:
+                    self._cancel_move(sprint_id, token)
+                else:
+                    self._release(sprint_id, token)
                 return None
         elif not isinstance(token, _MoveReservation) and (
                 self._manager_state(sprint)[0] == sprints.STARTED

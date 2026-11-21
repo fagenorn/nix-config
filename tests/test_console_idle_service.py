@@ -537,6 +537,24 @@ class IdleQuotaTest(IdleCase):
                 self.assert_move_cancelled(svc, sid)
                 self.assert_waits_to_wake(svc, sid)
 
+    def test_a_quota_move_cancelled_with_no_other_room_is_not_decided_again_when_an_account_gains_room(self):
+        def setup(svc):
+            self.append(svc, [(capacity.READING, None, {"profile": "extra", **self.weekly(0.5)})])
+            svc.set_exclusion("extra", True)
+
+        svc, sid, dirs = self.reserved_move(
+            spare=False, setup=setup, work=None, home=None, extra=None)
+        svc.set_exclusion("home", True)
+        self.drain()
+        self.assert_move_cancelled(svc, sid)
+        svc.set_exclusion("extra", False)
+        self.poll(svc, 700)
+        self.assert_move_cancelled(svc, sid)
+        self.assertIn(sid, svc._move_cancelled)
+        self.poll(svc, 3600)
+        self.assertEqual([c.profile for c in self.launches.calls], ["work"])
+        self.assertEqual(len(self.revives()), 1)
+
     def test_a_quota_move_on_another_account_than_the_one_it_chose_starts_nothing(self):
         def reading(profile, account):
             return (capacity.READING, None,
