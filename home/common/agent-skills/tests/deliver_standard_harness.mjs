@@ -31,10 +31,11 @@ const FOLDED_SETUP = {
   renew: { verdict: 'renewed' },
 }
 const holderOf = (host, prompt) => (typeof host === 'string' && host ? { holder: `${host}/${HOLDER_ID(prompt)}` } : {})
+// #1372: a security task keeps the Codex plan review in every default run; a small plan of no security task skips it.
 const PLAN = {
   status: 'planned', plan_root: '/r/.git/worktrees/w/deliver-standard/plan.md',
   acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }],
-  tasks: [{ n: 1, title: 'one', file: 'task-1.md', risk: 'standard' }],
+  tasks: [{ n: 1, title: 'one', file: 'task-1.md', risk: 'security' }],
 }
 // A hold reply covers every non-code criterion the prompt lists, as a real hold block does.
 const openChecks = prompt => {
@@ -47,6 +48,9 @@ const DEFAULTS = [
   // #1139: a marked delivery's pull request step (no lock) and its push; the push answers the head the prompt names.
   [/^look-pr$/, { pr: 42, head: SHA, probe: { conflicted: false }, behind: false, renew: { verdict: 'renewed' } }],
   [/^look-push$/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, renew: { verdict: 'renewed' } })],
+  // #1373: the checks of the head the owner will see (green at the head the prompt names), and the verification of a head a fix or a sync moved.
+  [/^look-checks-/, prompt => ({ state: 'passed', head: (/look at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, behind: false, required: ['ci'], passed: ['ci'], renew: { verdict: 'renewed' } })],
+  [/^look-reverify$/, prompt => ({ head: (/moved to the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }] })],
   // #1139: the owner's look answers: the pull request head read, the approval post, and the fix round of a changes answer (look-fix-review falls to the review default).
   [/^look-head$/, { head: SHA, state: 'OPEN', merge: 'c0ffee' + '0'.repeat(34), renew: { verdict: 'renewed' } }],
   [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
@@ -95,7 +99,7 @@ const DEFAULTS = [
   [/^close-out$/, prompt => ({ issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok', ...(prompt.includes('look-approval tick') ? { look_tick: { verdict: 'ticked', ticked: 1 } } : {}) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push|head)$/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push|head)$/, ['renew']], [/^look-checks-/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
